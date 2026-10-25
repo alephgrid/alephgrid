@@ -1,0 +1,16 @@
+# docker compose up -d   →   http://localhost:7878/?token=change-me
+services:
+  rowfinity:
+    build: .
+    image: rowfinity:latest
+    restart: unless-stopped
+    ports:
+      - "7878:7878"
+    environment:
+      ROWFINITY_TOKEN: change-me          # shared access token; set something long and random
+      ROWFINITY_MEMORY_LIMIT: 4GB         # DuckDB memory budget; spills to disk beyond it
+      # ROWFINITY_DISABLE_SQL: "true"     # turn off the SQL console for untrusted users
+    volumes:
+      - rowfinity-data:/data
+volumes:
+  rowfinity-data:

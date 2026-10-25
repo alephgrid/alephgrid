@@ -1,0 +1,7 @@
+/target
+/rowfinity-data
+web/node_modules
+web/dist
+*.duckdb
+*.duckdb.wal
+.DS_Store
