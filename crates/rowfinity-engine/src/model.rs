@@ -111,7 +111,7 @@ impl ViewSpec {
     }
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ViewInfo {
     pub view_id: u64,
     pub spec: ViewSpec,
@@ -122,7 +122,7 @@ pub struct ViewInfo {
 }
 
 /// A block of rows, row-major, in view order.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct RowBlock {
     pub row_start: u64,
     #[ts(type = "CellValue[][]")]
@@ -137,14 +137,14 @@ pub struct CellEdit {
     pub value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct EditOutcome {
     pub table: String,
     pub cells_changed: usize,
     pub rows_appended: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 pub struct Stats {
     pub rows: u64,
     pub count: u64,
@@ -163,7 +163,7 @@ pub struct Stats {
     pub max: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QueryPreview {
     pub columns: Vec<Column>,
     #[ts(type = "CellValue[][]")]

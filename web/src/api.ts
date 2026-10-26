@@ -1,4 +1,4 @@
-import type { Imported, ServerEvent, SheetInfo, TableInfo, WorkbookListing, WorkbookMeta, Workspace } from "./types";
+import type { Imported, OpName, Params, Results, ServerEvent, SheetInfo, TableInfo, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace } from "./types";
 
 const TOKEN_KEY = "rowfinity:token";
 
@@ -52,11 +52,16 @@ export const api = {
   list: () => http<WorkbookListing[]>("GET", "/api/workbooks"),
   create: (name: string, workspace?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, workspace: workspace ?? null }),
   get: (id: string) => http<{ workbook: WorkbookMeta; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),
-  update: (id: string, patch: { name?: string; workspace?: string; starred?: boolean }) =>
+  update: (id: string, patch: WorkbookPatch) =>
     http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, patch),
   rename: (id: string, name: string) => http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, { name }),
   duplicate: (id: string) => http<WorkbookMeta>("POST", `/api/workbooks/${id}/duplicate`),
+  /** Moves the workbook to the trash. */
   remove: (id: string) => http<void>("DELETE", `/api/workbooks/${id}`),
+  trash: () => http<WorkbookListing[]>("GET", "/api/trash"),
+  restore: (id: string) => http<WorkbookMeta>("POST", `/api/trash/${id}/restore`),
+  purge: (id: string) => http<void>("DELETE", `/api/trash/${id}`),
+  emptyTrash: () => http<void>("DELETE", "/api/trash"),
   workspaces: () => http<Workspace[]>("GET", "/api/workspaces"),
   createWorkspace: (name: string) => http<Workspace>("POST", "/api/workspaces", { name }),
   renameWorkspace: (id: string, name: string) => http<Workspace>("PATCH", `/api/workspaces/${id}`, { name }),
@@ -150,12 +155,13 @@ export class Rpc {
     this.ws?.close();
   }
 
-  call<T>(op: string, params: Record<string, unknown> = {}): Promise<T> {
+  /** Send one operation; request and result types come from the generated protocol. */
+  call<O extends OpName>(op: O, ...params: {} extends Params<O> ? [Params<O>?] : [Params<O>]): Promise<Results[O]> {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("not connected"));
     const id = this.nextId++;
-    ws.send(JSON.stringify({ id, op, ...params }));
-    return new Promise<T>((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    ws.send(JSON.stringify({ id, op, ...(params[0] ?? {}) }));
+    return new Promise<Results[O]>((resolve, reject) => this.pending.set(id, { resolve, reject }));
   }
 
   private receive(data: string): void {

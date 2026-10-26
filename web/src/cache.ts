@@ -1,5 +1,5 @@
 import type { Rpc } from "./api";
-import type { CellValue, RowBlock, SheetBlock, SheetCell } from "./types";
+import type { CellValue, SheetCell } from "./types";
 
 const BLOCK = 100;
 const MAX_BLOCKS = 400;
@@ -74,7 +74,7 @@ export class RowCache {
     const gen = this.generation;
     this.inFlight.add(b);
     try {
-      const res = await this.rpc.call<RowBlock>("fetch", { view_id: this.viewId, row_start: b * BLOCK, row_count: BLOCK });
+      const res = await this.rpc.call("fetch", { view_id: this.viewId, row_start: b * BLOCK, row_count: BLOCK });
       if (gen !== this.generation) return;
       this.blocks.set(b, res.rows);
       this.stale.delete(b);
@@ -151,7 +151,7 @@ export class SheetCache {
     const gen = this.generation;
     this.inFlight.add(b);
     try {
-      const res = await this.rpc.call<SheetBlock>("sheet_fetch", {
+      const res = await this.rpc.call("sheet_fetch", {
         sheet: this.sheet, row_start: b * SHEET_BLOCK, row_count: SHEET_BLOCK, column_count: this.columns,
       });
       if (gen !== this.generation) return;

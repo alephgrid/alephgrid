@@ -238,3 +238,11 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .cell-ref { min-width: 90px; }
   .wb-title { max-width: 60vw; }
 }
+
+/* trash */
+.btn.small { height: 26px; padding: 0 10px; font-size: 12px; }
+.nav-bottom { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.trash-row { grid-template-columns: 40px minmax(0, 1fr) minmax(0, 220px) 80px 110px auto; }
+@media (max-width: 760px) { .trash-row { grid-template-columns: 0 minmax(0, 1fr) auto; } }
+.cell-center { display: flex; justify-content: center; align-items: center; }

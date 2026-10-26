@@ -14,12 +14,12 @@ use rowfinity_engine::{CellEdit, SheetInput, ViewSpec, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use ts_rs::TS;
 
 use crate::state::{Shared, WorkbookHandle};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(tag = "event", rename_all = "snake_case")]
-#[allow(clippy::enum_variant_names)]
 pub enum Event {
     /// Cell values changed; refetch visible rows of this table.
     CellsChanged { table: String, origin: u64 },
@@ -29,6 +29,8 @@ pub enum Event {
     TablesChanged { origin: u64 },
     /// Sheet cells changed. `sheet` is None when every sheet may have changed (undo/redo).
     SheetChanged { sheet: Option<u32>, origin: u64 },
+    /// The workbook was moved to the trash; the server closes the connection.
+    WorkbookDeleted { origin: u64 },
 }
 
 impl Event {
@@ -45,9 +47,10 @@ struct Envelope {
     op: Op,
 }
 
-#[derive(Debug, Deserialize)]
+/// Every request a client can send (`{"id": n, "op": "...", ...params}`).
+#[derive(Debug, Deserialize, TS)]
 #[serde(tag = "op", rename_all = "snake_case")]
-enum Op {
+pub enum Op {
     Tables,
     OpenView { spec: ViewSpec },
     UpdateView { view_id: u64, spec: ViewSpec },
@@ -63,14 +66,14 @@ enum Op {
     UpdateFormula { table: String, name: String, formula: String },
     DropColumn { table: String, name: String },
     RenameColumn { table: String, name: String, new_name: String },
-    Query { sql: String, #[serde(default = "default_limit")] limit: usize },
+    Query { sql: String, #[serde(default = "default_limit")] #[ts(optional, as = "Option<usize>")] limit: usize },
     CreateTableFromQuery { name: String, sql: String },
-    CreateDemoTable { #[serde(default = "default_demo_rows")] rows: u64 },
+    CreateDemoTable { #[serde(default = "default_demo_rows")] #[ts(optional, as = "Option<u64>")] rows: u64 },
     DropTable { table: String },
     RenameTable { table: String, new_name: String },
     // Sheets (IronCalc). Rows/columns are 0-based.
     Sheets,
-    SheetCreate { #[serde(default)] name: String },
+    SheetCreate { #[serde(default)] #[ts(optional, as = "Option<String>")] name: String },
     SheetRename { sheet: u32, name: String },
     SheetDelete { sheet: u32 },
     SheetFetch { sheet: u32, row_start: u32, row_count: u32, column_count: u32 },
@@ -198,13 +201,13 @@ fn handle(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)
             wb.with_sheets(|s| s.set(sheet, &inputs))?;
             (json!(wb.sheets().info(sheet)?), Some(Event::SheetChanged { sheet: Some(sheet), origin }))
         }
-        Op::SheetUndo => {
-            let changed = wb.with_sheets(|s| s.undo())?;
-            (json!(changed), changed.then_some(Event::SheetChanged { sheet: None, origin }))
-        }
-        Op::SheetRedo => {
-            let changed = wb.with_sheets(|s| s.redo())?;
-            (json!(changed), changed.then_some(Event::SheetChanged { sheet: None, origin }))
+        Op::SheetUndo | Op::SheetRedo => {
+            let before: Vec<String> = wb.sheets().list().into_iter().map(|s| s.name).collect();
+            let changed = wb.with_sheets(|s| if matches!(op, Op::SheetUndo) { s.undo() } else { s.redo() })?;
+            let after: Vec<String> = wb.sheets().list().into_iter().map(|s| s.name).collect();
+            // Undoing a sheet creation, rename or deletion changes the tab list too.
+            let event = if before != after { Event::TablesChanged { origin } } else { Event::SheetChanged { sheet: None, origin } };
+            (json!(changed), changed.then_some(event))
         }
         Op::SheetInsertRows { sheet, at, count } => {
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
@@ -244,25 +247,51 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     }
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (close_tx, mut close_rx) = mpsc::unbounded_channel::<()>();
 
     let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone() });
     let _ = out_tx.send(hello.to_string());
 
     let writer = tokio::spawn(async move {
-        while let Some(text) = out_rx.recv().await {
-            if sink.send(Message::Text(text.into())).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                text = out_rx.recv() => match text {
+                    Some(text) => {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                _ = close_rx.recv() => {
+                    // Flush what is queued (the deletion event), then close.
+                    while let Ok(text) = out_rx.try_recv() {
+                        let _ = sink.send(Message::Text(text.into())).await;
+                    }
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
             }
         }
     });
 
     let mut events = handle.events.subscribe();
     let event_tx = out_tx.clone();
+    // Set when the server ends the session itself (workbook deleted); the read loop stops
+    // without waiting for the client to acknowledge the close.
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let forwarder = tokio::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(ev) => {
+                    let deleted = matches!(ev, Event::WorkbookDeleted { .. });
                     if event_tx.send(serde_json::to_string(&ev).unwrap()).is_err() {
+                        break;
+                    }
+                    if deleted {
+                        let _ = close_tx.send(());
+                        let _ = stop_tx.send(true);
                         break;
                     }
                 }
@@ -273,7 +302,14 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     });
 
     let views = Arc::new(Mutex::new(HashSet::new()));
-    while let Some(Ok(msg)) = stream.next().await {
+    loop {
+        let msg = tokio::select! {
+            msg = stream.next() => match msg {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+            _ = stop_rx.changed() => break,
+        };
         let text = match msg {
             Message::Text(t) => t.to_string(),
             Message::Close(_) => break,
@@ -296,8 +332,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             let h = handle.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let ctx = Ctx { session, allow_sql, views: &views };
-                let mut wb = h.engine.lock().unwrap();
-                handle_logged(&mut wb, envelope.op, &ctx)
+                h.with_engine(|wb| handle_logged(wb, envelope.op, &ctx))
             })
             .await;
             let reply = match result {
@@ -326,13 +361,15 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     drop(out_tx);
     let _ = writer.await;
     let leftover: Vec<u64> = views.lock().unwrap().drain().collect();
-    if !leftover.is_empty() {
+    if !leftover.is_empty() && !handle.is_deleted() {
         let h = handle.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            let mut wb = h.engine.lock().unwrap();
-            for v in leftover {
-                wb.close_view(v);
-            }
+            h.with_engine(|wb| {
+                for v in leftover {
+                    wb.close_view(v);
+                }
+                Ok(())
+            })
         })
         .await;
     }

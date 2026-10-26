@@ -110,6 +110,10 @@ fn invalid_cell_in_a_batch_changes_nothing() {
     assert_eq!(cell_text(&t.wb, s, 1, 0), None);
     assert!(t.wb.with_sheets(|sh| sh.set(s, &[sheet_input(0, 20_000, "bad column")])).is_err());
     assert!(t.wb.with_sheets(|sh| sh.set(9, &[sheet_input(0, 0, "bad sheet")])).is_err());
+    // A batch rejected up front keeps the undo history of earlier edits.
+    assert!(t.wb.with_sheets(|sh| sh.undo()).unwrap());
+    assert_eq!(cell_text(&t.wb, s, 0, 0), None);
+    t.wb.with_sheets(|sh| sh.redo()).unwrap();
     t.reopen();
     assert_eq!(cell_text(&t.wb, s, 0, 0).as_deref(), Some("keep"));
 }

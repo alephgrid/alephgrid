@@ -40,7 +40,7 @@ pub struct Workbook {
 }
 
 /// What an import produced: a columnar table, or IronCalc sheets for .xlsx files.
-#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Imported {
     Table { table: TableInfo },
@@ -849,13 +849,20 @@ impl Workbook {
     }
 
     /// Run a mutation on the sheets model and persist it in the same DuckDB file. If the
-    /// mutation or the save fails, the in-memory model is reloaded from the file, so memory
-    /// never runs ahead of what is durable (undo history is lost in that case).
+    /// mutation fails part-way or the save fails, the in-memory model is reloaded from the
+    /// file, so memory never runs ahead of what is durable (undo history is lost in that
+    /// case). Requests rejected before any change keep the model and its history.
     pub fn with_sheets<T>(&mut self, f: impl FnOnce(&mut Sheets) -> Result<T>) -> Result<T> {
-        let result = f(&mut self.sheets).and_then(|out| {
-            self.save_sheets()?;
-            Ok(out)
-        });
+        let before = self.sheets.changes();
+        let result = f(&mut self.sheets);
+        let changed = self.sheets.changes() != before;
+        let result = match result {
+            // Rejected before anything changed: memory still matches disk, keep undo history.
+            Err(e) if !changed => return Err(e),
+            Err(e) => Err(e),
+            Ok(out) if !changed => return Ok(out),
+            Ok(out) => self.save_sheets().map(|_| out),
+        };
         if result.is_err() {
             match self.load_sheets() {
                 Ok(sheets) => self.sheets = sheets,

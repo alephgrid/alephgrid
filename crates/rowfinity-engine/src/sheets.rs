@@ -23,7 +23,7 @@ pub const MAX_COLUMNS: u32 = 16_384;
 /// Largest used range converted to a table in one go.
 pub const MAX_CONVERT_CELLS: u64 = 20_000_000;
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SheetInfo {
     pub index: u32,
     pub name: String,
@@ -32,7 +32,7 @@ pub struct SheetInfo {
     pub columns: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum Align {
     Left,
@@ -42,10 +42,10 @@ pub enum Align {
 
 /// One rendered cell: `[display, align, input]`. `input` is present only when it
 /// differs from `display` (formulas, formatted numbers), to keep frames small.
-#[derive(Debug, Clone, Serialize)]
-pub struct SheetCell(pub String, pub Align, #[serde(skip_serializing_if = "Option::is_none")] pub Option<String>);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SheetCell(pub String, pub Align, #[serde(default, skip_serializing_if = "Option::is_none")] pub Option<String>);
 
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct SheetBlock {
     pub row_start: u32,
     /// `rows[i][j]` is `null` for empty cells.
@@ -67,6 +67,9 @@ pub struct Sheets {
     /// user-level steps so one paste is one undo.
     undo_groups: Vec<u32>,
     redo_groups: Vec<u32>,
+    /// Bumped whenever the model is about to change (after validation), so a caller can
+    /// tell a rejected request from a failure part-way through a change.
+    changes: u64,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -82,7 +85,7 @@ impl Sheets {
             Some(b) => Some(UserModel::from_bytes(&b, LANG).map_err(|e| anyhow!("corrupt sheet data: {e}"))?),
             None => None,
         };
-        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![] })
+        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0 })
     }
 
     /// Record that the last user operation added `entries` IronCalc history entries.
@@ -102,7 +105,13 @@ impl Sheets {
     }
 
     fn model_mut(&mut self) -> Result<&mut UserModel<'static>> {
+        self.changes += 1;
         self.model.as_mut().ok_or_else(|| anyhow!("this workbook has no sheets"))
+    }
+
+    /// Number of (attempted) changes so far; see `changes` above.
+    pub fn changes(&self) -> u64 {
+        self.changes
     }
 
     fn check_index(&self, index: u32) -> Result<()> {
@@ -133,6 +142,7 @@ impl Sheets {
     pub fn create(&mut self, name: &str) -> Result<SheetInfo> {
         let name = name.trim();
         let mut entries = 0;
+        self.changes += 1;
         let index = match &mut self.model {
             None => {
                 self.model = Some(UserModel::new_empty("workbook", "en", "UTC", LANG).map_err(|e| anyhow!(e))?);
@@ -201,6 +211,7 @@ impl Sheets {
         self.check_index(index)?;
         if self.model()?.get_worksheets_properties().len() == 1 {
             // IronCalc needs at least one worksheet; drop the whole model instead.
+            self.changes += 1;
             self.model = None;
             self.undo_groups.clear();
             self.redo_groups.clear();
@@ -379,6 +390,7 @@ impl Sheets {
         let mut imported = UserModel::from_model(imported);
         imported.evaluate();
         if self.model.is_none() {
+            self.changes += 1;
             self.model = Some(imported);
             self.undo_groups.clear();
             self.redo_groups.clear();

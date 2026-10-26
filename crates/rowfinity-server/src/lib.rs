@@ -1,0 +1,7 @@
+//! Rowfinity server: HTTP API, WebSocket protocol and workbook registry. The `rowfinity`
+//! binary (`main.rs`) is a thin CLI around [`run`]; tests start the same router in-process.
+
+pub mod http;
+pub mod protocol;
+pub mod state;
+pub mod ws;

@@ -62,7 +62,7 @@ fn deleting_a_referenced_column_is_rejected_before_mutation() {
     sales(&mut t);
     let before = t.wb.columns("sales").unwrap().len();
     let err = t.wb.drop_column("sales", "cost").unwrap_err().to_string();
-    assert!(err.contains("profit"), "{err}");
+    assert!(err.contains("is used by formula column \"profit\""), "{err}");
     let err = t.wb.drop_column("sales", "profit").unwrap_err().to_string();
     assert!(err.contains("margin"), "{err}");
     assert_eq!(t.wb.columns("sales").unwrap().len(), before);

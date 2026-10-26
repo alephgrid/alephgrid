@@ -6,10 +6,12 @@ use super::*;
 use proptest::prelude::*;
 use serde_json::json;
 
+/// `(row, column, value)`: `None` clears, `Some(Err)` is text that is not an integer.
+type CellOp = (u64, usize, Option<Result<i32, String>>);
+
 #[derive(Debug, Clone)]
 enum Op {
-    /// Edit `(row, column)`; `None` clears, `Some(Err)` is an invalid integer.
-    Edit(Vec<(u64, usize, Option<Result<i32, String>>)>),
+    Edit(Vec<CellOp>),
     Insert(u64, u64),
     Delete(u64, u64),
     Reopen,
@@ -146,7 +148,10 @@ fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+    // 48 cases per change; scheduled runs raise PROPTEST_CASES.
+    #![proptest_config(ProptestConfig::with_cases(
+        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(48)
+    ))]
 
     #[test]
     fn table_matches_reference_model(ops in prop::collection::vec(op_strategy(), 1..25)) {

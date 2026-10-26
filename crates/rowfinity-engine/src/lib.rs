@@ -16,7 +16,7 @@ pub mod wire;
 mod workbook;
 
 pub use model::*;
-pub use sheets::{SheetBlock, SheetInfo, SheetInput};
+pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
 pub use workbook::{Imported, Workbook};
 
 #[cfg(test)]
