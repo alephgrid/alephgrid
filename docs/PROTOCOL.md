@@ -185,7 +185,7 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | GET | `/api/admin/sessions` | open connections with unsent bytes |
 | POST | `/api/admin/backups` | back up every workbook into `<data-dir>/.backups/backup-<ms>/` → `{path, manifest}` (see DURABILITY.md) |
 
-Opening a workbook can fail with **409** (it needs a newer storage format or a capability this
+A missing or trashed workbook answers **404**. Opening a workbook can fail with **409** (it needs a newer storage format or a capability this
 server lacks), **423** (another process holds it), or **503** (no capacity, or it could not be
 opened); the body is `{"error": message}`. Uploads larger than `--max-upload` fail with **413**
 (before the body is read when `Content-Length` says so); uploads that would exceed the

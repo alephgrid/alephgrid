@@ -144,24 +144,42 @@ Depends on phase 1.
 
 Depends on phase 1. Complete before shared hosting or expensive custom-function execution.
 
-- [ ] **3.01** Add bounded workbook job queues with cancellation, deadlines, progress and priority for interactive reads.
-- [ ] **3.02** Bound uploads, request/response bytes, pasted cells and requested row/column counts; clamp before allocation.
-- [ ] **3.03** Enforce host-wide CPU, memory and temporary-disk budgets; account for DuckDB, sheets and worker allocations.
-- [ ] **3.04** Evict idle workbook handles and expire unused materialized views.
-- [ ] **3.05** Fetch visible column ranges and use a byte-bounded cache covering both fresh and stale blocks.
-- [ ] **3.06** Separate stable record IDs from display order; preserve efficient positional access without renumbering an entire table tail.
-- [ ] **3.07** Add monotonic workbook revisions, idempotent mutation IDs and an atomic operation-history format.
-- [ ] **3.08** Add versioned storage migrations and a consistent backup/restore mechanism covering workbook data and metadata.
-- [ ] **3.09** Handle SIGTERM: stop admission, drain work, persist/checkpoint and close cleanly.
-- [ ] **3.11** Define workbook, immutable RuntimeSpec, ComputePolicy, RuntimeAllocation and ownership-assignment schemas; preserve workbook identity independently of allocation lifetime.
-- [ ] **3.12** Add a narrow internal RuntimeProvider contract: idempotent ensure/start, status/readiness, drain/stop, capability reporting and typed failures; distinguish requested, running and ready states.
-- [ ] **3.13** Implement a Local provider using the same core binary where practical; persist/reconcile allocation state after controller restart without introducing mandatory cluster services.
-- [ ] **3.14** Define lifecycle transitions and operation IDs for start, cancel, drain, stop and recover; prevent duplicate allocations and clean up failed startup resources.
-- [ ] **3.15** Define the acknowledged-edit durability contract and trust/isolation classes; document what survives process, host and storage loss before promising recovery.
-- [ ] **3.T01** Test 3.01–3.05: queue saturation, fair progress, cancellation races, slow consumers, overflow-sized fetches, wide/text-heavy cache bounds, idle eviction and host-wide resource accounting.
-- [ ] **3.T02** Test 3.06–3.09: randomized edits against a reference model, stable IDs, duplicate mutations, revision monotonicity, migration rollback limits and consistent backup/restore under activity.
-- [ ] **3.T03** Test 3.08–3.15: injected write/disk-full/permission failures, crash during persistence, SIGTERM, duplicate starts, cancel-before-ready, controller restart and failed allocation cleanup; explicitly record unsupported storage-fault simulations.
-- [ ] **3.10 — Gate:** Cancellation, overload, disk-full, crash/restart and restore tests preserve consistency and keep resource use bounded.
+- [x] **3.01** Add bounded workbook job queues with cancellation, deadlines, progress and priority for interactive reads.
+  - Test: `scheduling.rs`, `sched.rs` unit, `storage.rs::readers_are_not_blocked…`, `resilience.spec.ts` (cancel). Evidence: TEST_MATRIX 3.01.
+- [x] **3.02** Bound uploads, request/response bytes, pasted cells and requested row/column counts; clamp before allocation.
+  - Test: `scheduling.rs` limits, `sheets.rs::oversized_sheet_fetches…` (failed before fix). Evidence: TEST_MATRIX 3.02.
+- [x] **3.03** Enforce host-wide CPU, memory and temporary-disk budgets; account for DuckDB, sheets and worker allocations.
+  - Test: `runtime.rs` budget sums read back from DuckDB, `budget.rs` unit. Evidence: TEST_MATRIX 3.03. Limits are DuckDB-level (DURABILITY.md).
+- [x] **3.04** Evict idle workbook handles and expire unused materialized views.
+  - Test: `runtime.rs` idle eviction and eviction races, `storage.rs` view expiry. Evidence: TEST_MATRIX 3.04.
+- [x] **3.05** Fetch visible column ranges and use a byte-bounded cache covering both fresh and stale blocks.
+  - Test: `cache.spec.ts`, `wide.spec.ts`. Evidence: TEST_MATRIX 3.05.
+- [x] **3.06** Separate stable record IDs from display order; preserve efficient positional access without renumbering an entire table tail.
+  - Test: `props.rs` (record ids, 300 cases), `storage.rs`. Evidence: TEST_MATRIX 3.06.
+- [x] **3.07** Add monotonic workbook revisions, idempotent mutation IDs and an atomic operation-history format.
+  - Test: `storage.rs`, `scheduling.rs`, `backup.rs`. Evidence: TEST_MATRIX 3.07.
+- [x] **3.08** Add versioned storage migrations and a consistent backup/restore mechanism covering workbook data and metadata.
+  - Test: `storage.rs` v1 fixture migration, `backup.rs`. Evidence: TEST_MATRIX 3.08; no downgrade (DURABILITY.md).
+- [x] **3.09** Handle SIGTERM: stop admission, drain work, persist/checkpoint and close cleanly.
+  - Test: `shutdown.rs` (real binary). Evidence: TEST_MATRIX 3.09.
+- [x] **3.11** Define workbook, immutable RuntimeSpec, ComputePolicy, RuntimeAllocation and ownership-assignment schemas; preserve workbook identity independently of allocation lifetime.
+  - Test: `runtime.rs` spec pinning, data outliving compute. Evidence: TEST_MATRIX 3.11–3.14.
+- [x] **3.12** Add a narrow internal RuntimeProvider contract: idempotent ensure/start, status/readiness, drain/stop, capability reporting and typed failures; distinguish requested, running and ready states.
+  - Test: `runtime/mod.rs` unit, `runtime.rs`. Evidence: TEST_MATRIX 3.11–3.14.
+- [x] **3.13** Implement a Local provider using the same core binary where practical; persist/reconcile allocation state after controller restart without introducing mandatory cluster services.
+  - Test: `runtime.rs` reconciliation, `crash.rs` reconcile after SIGKILL. Evidence: TEST_MATRIX 3.11–3.14. Local, in-process provider only.
+- [x] **3.14** Define lifecycle transitions and operation IDs for start, cancel, drain, stop and recover; prevent duplicate allocations and clean up failed startup resources.
+  - Test: `runtime.rs` duplicate starts, cancel before ready, failed-start cleanup. Evidence: TEST_MATRIX 3.11–3.14.
+- [x] **3.15** Define the acknowledged-edit durability contract and trust/isolation classes; document what survives process, host and storage loss before promising recovery.
+  - Evidence: docs/DURABILITY.md (power loss and host failure untested, stated).
+- [x] **3.T01** Test 3.01–3.05: queue saturation, fair progress, cancellation races, slow consumers, overflow-sized fetches, wide/text-heavy cache bounds, idle eviction and host-wide resource accounting.
+  - Evidence: TEST_MATRIX 3.T01; pass 2026-10-26.
+- [x] **3.T02** Test 3.06–3.09: randomized edits against a reference model, stable IDs, duplicate mutations, revision monotonicity, migration rollback limits and consistent backup/restore under activity.
+  - Evidence: TEST_MATRIX 3.T02; pass 2026-10-26.
+- [x] **3.T03** Test 3.08–3.15: injected write/disk-full/permission failures, crash during persistence, SIGTERM, duplicate starts, cancel-before-ready, controller restart and failed allocation cleanup; explicitly record unsupported storage-fault simulations.
+  - Evidence: TEST_MATRIX 3.T03; real disk-full on a 64 MB filesystem; unsupported faults listed.
+- [x] **3.10 — Gate:** Cancellation, overload, disk-full, crash/restart and restore tests preserve consistency and keep resource use bounded.
+  - Evidence: TEST_MATRIX 3.10 gate run 2026-10-26 (local; CI not yet run). No multi-node failover implied.
 
 Gate 3.10 also requires the local runtime/lifecycle tasks 3.11–3.15 and their tests. It does not imply multi-node failover.
 

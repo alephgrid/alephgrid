@@ -278,6 +278,43 @@ as the work is verified. Nothing here is checked off until its tests have run an
   crash/power loss and storage loss, which of those are tested, and the trust classes (same-process,
   separate process, container, VM) with what each does and does not isolate.
 
-### 3.T01–3.T03, 3.10
-- Test packages and the gate are recorded with commands and results once the tasks above pass. Storage
-  faults that cannot be simulated here are listed explicitly.
+### Results (2026-10-26, macOS arm64, local, branch `phase-3-bounded-execution`)
+
+| Task | Tests | Result | Found and fixed / gaps |
+|---|---|---|---|
+| 3.01 | A `sched.rs` unit (5: write order, reserved reader, round-robin + aging, bounds, withdraw/interrupt); B `S/scheduling.rs` reads during a long change + targeted cancel, deadlines queued and running, saturation (31 accepted, 9 `overloaded`, one reply each, revisions in order), fairness (the light session runs second, not 21st); `E/storage.rs::readers_are_not_blocked_by_a_running_change` | pass | **Fixed:** requests were queued from spawned tasks, so pipelined edits of one connection could run out of order (saturation test, revisions `[3,2,…]`). |
+| 3.02 | A `limits.rs` unit; B `E/sheets.rs::oversized_sheet_fetches_are_clamped_before_allocation` (failed before the fix: "reserved 4294967295 rows"); `S/scheduling.rs` clamped/overflowing dimensions, 500-column slice equals full fetch, 1 MB cells stop near 8 MiB with `truncated`, `too_large` inserts, oversized message closes only that connection, upload size (Content-Length and streamed) and budget limits incl. injected disk-full write, a client that never reads is cut off | pass | **Fixed:** sheet fetch reserved `row_count` rows before clamping and kept every non-empty row at full requested width. Gap: after a slow client is cut off its peak outbox is not asserted (only that it is closed and others continue). |
+| 3.03 | A `budget.rs` unit (5); B `S/runtime.rs::open_workbooks_share_the_budget_and_never_exceed_it` (sums of `memory_limit` and `threads` read back from every DuckDB instance at 1–4 workbooks, refusal at 5 with nothing idle, eviction of an idle one to make room), `sheet_memory_comes_out_of_duckdbs_share` | pass | **Fixed:** the sheet estimate was documented but never applied. Limits are DuckDB-level, not OS-level (DURABILITY.md). |
+| 3.04 | B `S/runtime.rs` idle close and reopen (not while a session exists), eviction racing requests until ≥ 10 evictions (71 requests, 10 evictions in one run, all served correctly); `E/storage.rs` view expiry rebuilds identical rows, scratch tables dropped | pass | Views per workbook bounded at 256. |
+| 3.05 | C `W/cache.spec.ts` (no page; fake rpc + real server): only visible ± one 32-column block requested, ≤ 4 in flight, byte bound held over 60 scroll steps with refreshes, visible blocks never evicted under a 1-byte limit, truncated replies continued, cached values and record ids equal a full-width fetch of a sorted 80-column view; C `W/wide.spec.ts` 300 columns: far-right cell value correct, every fetch frame has `column_count` ≤ 32, middle columns never fetched; B `S/scheduling.rs` column slice equals full fetch | pass | **Fixed:** the cache counted refreshed blocks' bytes twice. |
+| 3.06 | D `E/props.rs` reference model with record ids, revisions and index verification (48 cases per run; 300-case run passed in 263 s), `inserts_at_one_place_rebalance_order_keys`; B `E/storage.rs` no renumbering on insert/delete in 100k rows, local rebalancing (< 200 of 5,000 keys moved), edits by record after rows move and on deleted records, tie order | pass | |
+| 3.07 | B `E/storage.rs` one revision + history entry per change, retried mutation id applied once (also after reopen), injected `history`/`commit` failures roll back data, revision and sheet memory; `S/scheduling.rs` contiguous revisions across two sessions and in events, replay across reconnect and restart; `S/backup.rs` history in restored copies | pass | History keeps the last 10,000 revisions (documented replay window). |
+| 3.08 | B `E/storage.rs` committed v1 fixture (written by the phase-2 server) migrates with an identical `.v1.bak` and every recorded value, failed migration leaves format 1, newer format refused untouched, backup during 150 changes holds one revision; `S/backup.rs` three online backups during 300 acknowledged edits (revisions e.g. 19, 67, 132) each restored to exactly the edits acknowledged up to it, damaged/manifest-less/non-empty refusals without writing, offline backup fails closed and round-trips byte-identically | pass | No downgrade; `.bak` or a backup is the only rollback (DURABILITY.md). |
+| 3.09 | F `S/shutdown.rs` (real binary): idle SIGTERM exit 0 with records `stopped`, SIGTERM during edits keeps every acknowledged edit and none half-applied, SIGTERM during a 4M-row import leaves a complete table or none (observed: none, reply 400), second signal exits 130 at once | pass | **Fixed:** a stop arriving mid-send dropped the frame being sent, so sessions could miss `workbook_closed`. |
+| 3.11–3.14 | A `runtime/mod.rs` unit (transition table exhaustive, bounded transitions, incompatibility reasons); B `S/runtime.rs` spec pinning and data outliving compute, 8 concurrent opens → one start, cancel before ready, three failed starts (corrupt file, injected stage failure, disk-full record write), incompatible capability and storage format, restart reconciliation with a foreign lock holder (423, then opens), one server per data dir; F `S/crash.rs::a_killed_servers_allocations_are_reconciled_on_restart` | pass | **Fixed:** two self-deadlocks (a lock guard kept alive by `if let`/`for` scrutinees) found by the first test runs. Local provider only; no multi-node failover. |
+| 3.15 | docs/DURABILITY.md | written | Power loss and host failure untested (stated). |
+
+### Client side of 3.01, 3.07, 3.11 (browser)
+- **Tests:** C `W/resilience.spec.ts`: a workbook whose file is corrupt shows the server's reason with "Try again", which recovers once fixed (also with the page already open); an edit across a SIGTERM restart and an edit typed while the server was down are each applied once (mutation ids, record ids), checked by export; a long SQL query shows progress and Cancel ends it with "Cancelled.". **Fixed (server):** a deletion during session setup was never reported (`workbook_deleted`), making the "deleted elsewhere" journey flaky; sessions now subscribe first. Missing workbooks answer 404.
+- **Gaps:** the client's "overloaded" retry and the bounds on kept changes (30 s, 100) have no automated test; the paste guard has no browser test (headless clipboard).
+
+### 3.T01 (3.01–3.05)
+Queue saturation, fair progress, cancellation races, slow consumers, overflow-sized fetches, wide/text-heavy cache bounds, idle eviction and host-wide accounting: `S/scheduling.rs`, `S/runtime.rs`, `sched.rs`/`budget.rs`/`limits.rs` unit tests, `W/cache.spec.ts`, `W/wide.spec.ts`. **Pass.**
+
+### 3.T02 (3.06–3.09)
+Randomized edits against a reference model with stable ids and revisions (`E/props.rs`, 300 cases), duplicate mutations (`E/storage.rs`, `S/scheduling.rs`), revision monotonicity, migration rollback limits (`E/storage.rs` fixture, failure, newer format; DURABILITY.md), consistent backup/restore under activity (`S/backup.rs`, `E/storage.rs`), SIGTERM (`S/shutdown.rs`). **Pass.**
+
+### 3.T03 (3.08–3.15)
+Injected write/disk-full/permission failures (`S/storage_faults.rs` on a real 64 MB filesystem; `arm_fault_in` points), crash during persistence (`S/crash.rs`), SIGTERM, duplicate starts, cancel-before-ready, controller restart and failed-allocation cleanup (`S/runtime.rs`, `S/crash.rs`). **Pass.** Not simulated: power loss, `fsync` failure, torn writes, media errors, network filesystems (TEST_STRATEGY, DURABILITY.md).
+
+### 3.10 Gate (2026-10-26, macOS arm64, local)
+
+| Command | Result |
+|---|---|
+| `ROWFINITY_SMALL_FS=<64 MB HFS+ image> cargo test --workspace` | engine 100; server unit 13, api 9, backup 3, crash 3, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, storage_faults 2 (disk full really hit ENOSPC) — all pass |
+| `PROPTEST_CASES=300 cargo test -p rowfinity-engine --lib props` | 4 pass (263 s) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cd web && npm run build && cd .. && cargo build -p rowfinity-server && cd web && npx playwright test` | 29 pass in each of two consecutive runs (and three runs by the client agent) |
+
+Cancellation, overload, disk-full, crash/restart and restore preserve consistency, and resource use stays bounded at the limits that are named. Not established: multi-node failover, power-loss durability, OS-level resource limits. CI has not run this branch.
+
