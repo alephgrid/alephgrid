@@ -63,6 +63,10 @@ impl From<anyhow::Error> for ApiError {
         if e.chain().any(|c| c.downcast_ref::<rowfinity_engine::limits::TooLarge>().is_some()) {
             return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, format!("{e:#}"));
         }
+        let text = format!("{e:#}");
+        if text.starts_with("workbook ") && text.contains(" not found") || text.contains("is not in the trash") {
+            return ApiError::new(StatusCode::NOT_FOUND, text);
+        }
         let problem = e.chain().find_map(|c| c.downcast_ref::<ImportProblem>()).cloned().map(Box::new);
         let message = match &problem {
             Some(p) => p.message.clone(),

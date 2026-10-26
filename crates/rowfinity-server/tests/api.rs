@@ -192,10 +192,10 @@ async fn delete_disconnects_clients_moves_to_trash_and_restores() {
     assert_eq!(trash[0]["id"], wb.as_str());
     assert!(trash[0]["deleted_at"].as_u64().unwrap() > 0);
     let (status, _) = server.get(&format!("/api/workbooks/{wb}")).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 404, "a trashed workbook is not found");
     assert!(Ws::try_connect(server.addr, &wb).await.is_err());
     let (status, _) = server.send(Method::DELETE, &format!("/api/workbooks/{wb}"), None).await;
-    assert_eq!(status, 400, "deleting twice fails cleanly");
+    assert_eq!(status, 404, "deleting twice fails cleanly: it is no longer there");
 
     // Restore brings back the data unchanged.
     let (status, meta) = server.send(Method::POST, &format!("/api/trash/{wb}/restore"), None).await;
@@ -215,7 +215,7 @@ async fn delete_disconnects_clients_moves_to_trash_and_restores() {
     assert!(!dir.path().join(".trash").join(&wb).exists());
     assert!(!dir.path().join(&wb).exists());
     let (status, _) = server.send(Method::POST, &format!("/api/trash/{wb}/restore"), None).await;
-    assert_eq!(status, 400);
+    assert_eq!(status, 404, "a purged workbook is not in the trash");
     server.stop().await;
 }
 

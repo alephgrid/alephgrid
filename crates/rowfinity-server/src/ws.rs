@@ -480,6 +480,8 @@ pub struct SessionInfo {
 
 pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>) {
     let session = state.next_session_id();
+    // Subscribe before anything else, so an event during setup (a deletion) is not missed.
+    let mut events = handle.events.subscribe();
     handle.session_started();
     let _ = handle.touch(true);
     let outbox = Arc::new(Outbox::new(state.config.outbox_pause_bytes, state.config.outbox_max_bytes));
@@ -546,8 +548,12 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     };
 
     // Events from other sessions and from the server.
+    if handle.is_closing() {
+        // Closed (deleted or stopped) before we subscribed: say so and end.
+        let ev = if handle.is_deleted() { Event::WorkbookDeleted { origin: 0 } } else { Event::WorkbookClosed { reason: "stopped".into() } };
+        let _ = handle.events.send(ev);
+    }
     let forwarder = {
-        let mut events = handle.events.subscribe();
         let outbox = outbox.clone();
         let stop_tx = stop_tx.clone();
         tokio::spawn(async move {
