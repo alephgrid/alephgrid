@@ -506,4 +506,14 @@ ones, settings, files) unchanged. **Pass.**
 
 ### 4.09 Gate (2026-10-26, Linux x86_64, local cloud container)
 
-GATE_RESULTS_PLACEHOLDER
+| Command | Result |
+|---|---|
+| `PROPTEST_CASES=96 ROWFINITY_SMALL_FS=<64 MB tmpfs> cargo test --workspace --no-fail-fast` | engine 134; server unit 13, api 9, backup 3, crash 4, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, sqlworkspace 6, storage_faults 2 — all pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cd web && npm run build` | type check + bundle pass |
+| `E2E_CHROME_PATH=/opt/pw-browsers/chromium-1243/chrome-linux64/chrome npx playwright test` (headless Chromium 1243; Google Chrome is not installed here) | 41 pass (12 in `sql.spec.ts`); also 41/41 in the run before the last server fixes |
+| Repeated: `sqlworkspace` + `scheduling` suites | 8/8 and 3/3 consecutive passes after the cancellation fixes |
+
+Joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and materialization are verified
+end to end (engine, HTTP/WebSocket and browser). Not established: CI on this branch, Google Chrome (CI's
+browser), macOS, scheduled 2000-case property runs, power loss. Organization authorization is phase 7.

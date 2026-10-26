@@ -8,7 +8,7 @@ Phase 4 (SQL workspace) is complete locally: 4.01–4.08, 4.T01, 4.T02 and the 4
 IMPLEMENTATION_CHECKLIST.md with evidence in TEST_MATRIX.md ("## Phase 4": contracts, results, baseline,
 gate commands). Phases 1–3 are unchanged except for the fixes listed there (a reader left inside a failed
 transaction, internal-table names accepted by table operations, a Views-menu loading race).
-CI has not run this branch yet; all results are from a Linux x86_64 cloud container.
+CI has not run this branch yet; all results are from a Linux x86_64 cloud container (gate: TEST_MATRIX 4.09).
 
 Not started: phase 5 and later. Phase 7 (identities, roles, sharing) is not implied by anything here.
 
@@ -41,6 +41,5 @@ Use `--workspace` for every cargo command: `-p <crate>` resolves features differ
 
 ## Temporary resources
 
-A git worktree of `bbd4c2c` and its target directory may remain in the session scratchpad (`baseline`,
-`baseline-target`); remove with `git worktree remove --force <path>`. A 64 MB tmpfs may be mounted at
-`/mnt/rfsmall`. No servers are left running.
+The baseline worktree used for comparison has been removed. A 64 MB tmpfs may be mounted at
+`/mnt/rfsmall` (disk-full tests). No servers are left running.
