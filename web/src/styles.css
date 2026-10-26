@@ -233,6 +233,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .search { width: 100%; }
 }
 .fatal { max-width: 560px; margin: 15vh auto; padding: 0 16px; }
+.workbook-failure .empty-actions { justify-content: flex-start; }
+/* Inside an open workbook the message covers the grid until the connection is back. */
+.grid-wrap > .workbook-failure { position: absolute; inset: 0; z-index: 5; max-width: none; margin: 0; padding: 12vh max(16px, calc(50% - 280px)); background: var(--bg); }
+.grid-wrap > .workbook-failure[hidden] { display: none; }
 
 @media (max-width: 720px) {
   .toolbar { flex-wrap: wrap; }

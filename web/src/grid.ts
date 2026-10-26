@@ -13,10 +13,10 @@ export interface GridModel {
   canAppend(): boolean;
   sort(): SortKey[];
   filters(): Filter[];
-  /** Cached row or undefined while loading. */
-  row(r: number): CellValue[] | undefined;
-  /** Make sure rows [first, last] are (being) loaded. */
-  ensure(first: number, last: number): void;
+  /** Cached value of a table cell, or undefined while loading. */
+  value(r: number, c: number): CellValue | undefined;
+  /** Make sure rows [first, last] of columns [c0, c1] are (being) loaded. */
+  ensure(first: number, last: number, c0: number, c1: number): void;
   /** "sheet" switches to A/B/C headers and per-cell rendering via `cell`. */
   mode?(): "table" | "sheet";
   /** Sheet mode: rendered cell, null when empty, undefined while loading. */
@@ -206,8 +206,8 @@ export class Grid {
   displayText(cell: Cell): string {
     const cols = this.model.columns();
     if (this.isSheet() && this.model.cell) return this.model.cell(cell.r, cell.c)?.text ?? "";
-    const row = this.model.row(cell.r);
-    return row && cols[cell.c] ? formatValue(row[cell.c], cols[cell.c].kind) : "";
+    const v = this.model.value(cell.r, cell.c);
+    return v !== undefined && cols[cell.c] ? formatValue(v, cols[cell.c].kind) : "";
   }
 
   /** Keep the accessible active cell and the announcement in step with the canvas. */
@@ -221,7 +221,7 @@ export class Grid {
       return;
     }
     const { r, c } = this.active;
-    const loaded = this.isSheet() && this.model.cell ? this.model.cell(r, c) !== undefined : this.model.row(r) !== undefined || r >= this.model.rowCount();
+    const loaded = this.isSheet() && this.model.cell ? this.model.cell(r, c) !== undefined : this.model.value(r, c) !== undefined || r >= this.model.rowCount();
     const text = this.displayText(this.active);
     const where = this.isSheet() ? `${this.columnLabel(c)}${r + 1}` : `${this.columnLabel(c)}, row ${r + 1}`;
     const label = `${where}: ${loaded ? text || "empty" : "loading"}`;
@@ -302,8 +302,8 @@ export class Grid {
 
   private currentText(cell: Cell): string {
     if (this.isSheet() && this.model.editText) return this.model.editText(cell.r, cell.c);
-    const row = this.model.row(cell.r);
-    return row ? rawText(row[cell.c]) : "";
+    const v = this.model.value(cell.r, cell.c);
+    return v !== undefined ? rawText(v) : "";
   }
 
   // -------------------------------------------------------------- geometry
@@ -556,8 +556,8 @@ export class Grid {
       let text: string | undefined;
       if (this.isSheet() && this.model.cell) text = this.model.cell(r, col)?.text;
       else {
-        const row = this.model.row(r);
-        if (row) text = formatValue(row[col], cols[col].kind);
+        const v = this.model.value(r, col);
+        if (v !== undefined) text = formatValue(v, cols[col].kind);
       }
       if (text) w = Math.max(w, this.ctx.measureText(text).width + 20);
     }
@@ -682,12 +682,12 @@ export class Grid {
     const display = this.displayRows();
     const first = Math.max(0, Math.floor(this.scrollY / ROW_H));
     const last = Math.min(display - 1, Math.floor((this.scrollY + this.bodyHeight()) / ROW_H));
-    if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1));
 
     let c0 = Math.max(0, this.colAt(rhw + 1));
     let c1 = this.colAt(W - 1);
     if (c1 < 0) c1 = cols.length - 1;
     if (!cols.length) { c0 = 0; c1 = -1; }
+    if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1), c0, Math.max(c0, c1));
 
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, W, H);
@@ -729,13 +729,13 @@ export class Grid {
           ctx.fillText(cell.text, tx, y + ROW_H / 2 + 1);
           continue;
         }
-        const row = this.model.row(r);
-        if (!row) {
+        const v = this.model.value(r, c);
+        if (v === undefined) {
           ctx.fillStyle = colors.placeholder;
           ctx.fillRect(x + 8, y + 9, Math.min(w - 16, 40 + ((r * 7 + c * 13) % 50)), 6);
           continue;
         }
-        const text = formatValue(row[c], col.kind);
+        const text = formatValue(v, col.kind);
         if (!text) continue;
         ctx.fillStyle = colors.text;
         if (numeric || col.kind === "bool") {

@@ -23,13 +23,16 @@ export class Server {
   port = 0;
   private proc: ChildProcess | null = null;
 
+  /** `extraArgs` are added to the command line of every start. */
+  constructor(private extraArgs: string[] = []) {}
+
   get url(): string {
     return `http://127.0.0.1:${this.port}`;
   }
 
   async start(): Promise<void> {
     if (!this.port) this.port = await freePort();
-    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000"], { stdio: "ignore" });
+    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000", ...this.extraArgs], { stdio: "ignore" });
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {
@@ -62,6 +65,40 @@ export class Server {
     return (r.status === 204 ? undefined : r.json()) as T;
   }
 
+  /** Create a workbook through the API; returns its id. */
+  async createWorkbook(name: string): Promise<string> {
+    return (await this.api<{ id: string }>("/api/workbooks", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    })).id;
+  }
+
+  /** A minimal WebSocket client for one workbook (Node's global WebSocket). */
+  async connect(workbook: string): Promise<WsClient> {
+    const ws = new WebSocket(`ws://127.0.0.1:${this.port}/ws/${workbook}`);
+    const pending = new Map<number, { ok: (v: any) => void; fail: (e: Error) => void }>();
+    let next = 1;
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(String(m.data));
+      if (msg.event) return;
+      const p = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.ok) p?.ok(msg.result);
+      else p?.fail(new Error(msg.error));
+    };
+    await new Promise<void>((ok, fail) => {
+      ws.onopen = () => ok();
+      ws.onerror = () => fail(new Error("websocket failed"));
+    });
+    return {
+      call: (op, params = {}) => new Promise((ok, fail) => {
+        const id = next++;
+        pending.set(id, { ok, fail });
+        ws.send(JSON.stringify({ id, op, ...params }));
+      }),
+      close: () => ws.close(),
+    };
+  }
+
   async exportCsv(workbook: string, spec: unknown): Promise<string> {
     const q = new URLSearchParams({ spec: JSON.stringify(spec), format: "csv" });
     const r = await fetch(`${this.url}/api/workbooks/${workbook}/export?${q}`);
@@ -69,3 +106,8 @@ export class Server {
     return r.text();
   }
 }
+
+export type WsClient = {
+  call<T = any>(op: string, params?: Record<string, unknown>): Promise<T>;
+  close(): void;
+};

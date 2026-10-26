@@ -1,3 +1,4 @@
+import type { ErrorCode } from "./protocol";
 import type {
   ImportProblem, ImportRequest, Imported, JobStatus, OpName, Params, Results, ServerEvent, SheetInfo, TableInfo, UploadCreated,
   UploadPreview, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
@@ -35,6 +36,11 @@ export class HttpError extends Error {
   }
 }
 
+/** Opening the workbook failed on the server: incompatible (409), held by another process (423), no capacity or startup failed (503). */
+export function isRuntimeFailure(e: unknown): e is HttpError {
+  return e instanceof HttpError && (e.status === 409 || e.status === 423 || e.status === 503);
+}
+
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -56,7 +62,10 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
-  config: () => http<{ version: string; auth_required: boolean; allow_sql: boolean; sheet_copy_rows?: number }>("GET", "/api/config"),
+  config: () => http<{
+    version: string; auth_required: boolean; allow_sql: boolean; sheet_copy_rows?: number;
+    max_message_bytes?: number; max_upload_bytes?: number; max_edit_cells?: number;
+  }>("GET", "/api/config"),
   list: () => http<WorkbookListing[]>("GET", "/api/workbooks"),
   create: (name: string, workspace?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, workspace: workspace ?? null }),
   get: (id: string) => http<{ workbook: WorkbookMeta; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),
@@ -118,21 +127,73 @@ export function stageUpload(
   return { done, abort: () => xhr.abort() };
 }
 
-type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };
+/** Operations that change nothing: never given a mutation id, retried when the server is busy. */
+const READS = new Set<OpName>([
+  "tables", "open_view", "update_view", "view_info", "close_view", "fetch", "stats", "query", "sheets", "sheet_fetch",
+  "saved_views", "history", "cancel",
+]);
+/** Backoff before retrying a read the server refused as "overloaded". */
+const OVERLOAD_RETRIES = [200, 400, 800];
+/** Changes kept across a dropped connection: how long, and how many. */
+const MUTATION_KEEP_MS = 30_000;
+const MUTATION_KEEP_MAX = 100;
+
+/** A failed request; `code` says why when the server knows (see `ErrorCode`). */
+export class RpcError extends Error {
+  constructor(message: string, public code?: ErrorCode) {
+    super(message);
+  }
+}
+
+/** Random id that makes a retried change apply once. */
+function mutationId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+export type CallOptions = {
+  /** Called with the request id each time the request is sent (for `cancel`). */
+  onSent?: (id: number) => void;
+  /** Progress of a long request, 0–100. */
+  onProgress?: (percentage: number) => void;
+  /** How long the server should keep working on it. */
+  timeoutMs?: number;
+};
+
+type Pending = {
+  /** The request without its id: resent as is (same mutation id) after a reconnect. */
+  frame: Record<string, unknown>;
+  mutation: boolean;
+  attempt: number;
+  opts: CallOptions;
+  resolve: (v: any) => void;
+  reject: (e: Error) => void;
+  /** When it was kept for resending (changes only). */
+  keptAt?: number;
+};
 
 /** JSON-RPC-ish client over one WebSocket per workbook, with automatic reconnect. */
 export class Rpc {
   private ws: WebSocket | null = null;
   private pending = new Map<number, Pending>();
+  /** Changes waiting for the connection to come back. */
+  private kept: Pending[] = [];
+  /** View ids of the old connection, mapped to their reopened replacements. */
+  private viewAlias = new Map<number, number>();
+  private timers = new Set<number>();
   private nextId = 1;
   private closed = false;
+  private opened = false;
   private retry = 0;
   private retryTimer = 0;
   session = 0;
   onEvent: (e: ServerEvent) => void = () => {};
   onStatus: (s: "connecting" | "open" | "closed") => void = () => {};
-  /** Called after a reconnect so views can be reopened. */
-  onReconnect: () => void = () => {};
+  /** Called after a reconnect so views can be reopened; kept changes are resent once it settles. */
+  onReconnect: () => void | Promise<void> = () => {};
+  /** Called when a (re)connect attempt fails before the socket opened. */
+  onConnectFailed: () => void = () => {};
 
   constructor(private workbookId: string) {}
 
@@ -144,22 +205,28 @@ export class Rpc {
       this.onStatus("connecting");
       const ws = new WebSocket(url);
       let opened = false;
-      ws.onopen = () => {
+      ws.onopen = async () => {
+        if (this.closed) return;
         opened = true;
-        const reconnecting = this.retry > 0;
+        const reconnecting = this.opened;
+        this.opened = true;
         this.retry = 0;
         this.onStatus("open");
         resolve();
-        if (reconnecting) this.onReconnect();
+        if (!reconnecting) return;
+        try { await this.onReconnect(); } catch { /* the screen reports its own errors */ }
+        if (this.ws === ws) this.resendKept();
       };
       ws.onmessage = (m) => !this.closed && this.receive(m.data);
       ws.onclose = () => {
-        if (this.closed) return;
+        if (this.closed || this.ws !== ws) return;
         this.ws = null;
-        for (const p of this.pending.values()) p.reject(new Error("connection lost"));
-        this.pending.clear();
+        this.dropped();
         this.onStatus("closed");
-        if (!opened && this.retry === 0) reject(new Error("could not connect to workbook"));
+        if (!opened) {
+          if (!this.opened && this.retry === 0) reject(new Error("could not connect to workbook"));
+          this.onConnectFailed();
+        }
         if (!this.closed) {
           const delay = Math.min(10_000, 500 * 2 ** this.retry++);
           this.retryTimer = window.setTimeout(() => !this.closed && this.connect().catch(() => {}), delay);
@@ -169,6 +236,13 @@ export class Rpc {
     });
   }
 
+  /** Try to reconnect now instead of waiting for the next retry. */
+  reconnectNow(): void {
+    if (this.closed || this.ws) return;
+    clearTimeout(this.retryTimer);
+    this.connect().catch(() => {});
+  }
+
   /**
    * Close for good: no reconnects, no more events, and replies still in flight are
    * dropped (their promises never settle, so no callback runs after the screen is gone).
@@ -176,38 +250,139 @@ export class Rpc {
   close(): void {
     this.closed = true;
     clearTimeout(this.retryTimer);
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.clear();
     this.pending.clear();
+    this.kept = [];
     this.onEvent = () => {};
     this.onStatus = () => {};
     this.onReconnect = () => {};
-    this.ws?.close();
+    this.onConnectFailed = () => {};
+    const ws = this.ws;
     this.ws = null;
+    ws?.close();
   }
 
   get isClosed(): boolean {
     return this.closed;
   }
 
+  /** Changes waiting to be resent after a reconnect (for tests and status). */
+  get keptCount(): number {
+    return this.kept.length;
+  }
+
+  /** After a reconnect: a change sent for view `from` goes to the reopened view `to`. */
+  aliasView(from: number, to: number): void {
+    if (from !== to) this.viewAlias.set(from, to);
+  }
+
   /** Send one operation; request and result types come from the generated protocol. */
   call<O extends OpName>(op: O, ...params: {} extends Params<O> ? [Params<O>?] : [Params<O>]): Promise<Results[O]> {
-    const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error("not connected"));
+    return this.request(op, (params[0] ?? {}) as Params<O>, {});
+  }
+
+  /** `call` with options: the request id (to cancel it), progress, a server-side timeout. */
+  request<O extends OpName>(op: O, params: Params<O>, opts: CallOptions): Promise<Results[O]> {
+    const mutation = !READS.has(op);
+    const frame: Record<string, unknown> = { op, ...params };
+    if (mutation) frame.mutation_id = mutationId();
+    if (opts.timeoutMs) frame.timeout_ms = opts.timeoutMs;
+    return new Promise<Results[O]>((resolve, reject) => {
+      const p: Pending = { frame, mutation, attempt: 0, opts, resolve, reject };
+      if (this.ws?.readyState === WebSocket.OPEN) this.send(p);
+      else if (mutation && this.opened && !this.closed) this.keep(p);
+      else reject(new RpcError("not connected", "unavailable"));
+    });
+  }
+
+  /** Ask the server to stop request `id` (it then fails with code "cancelled"). */
+  cancel(id: number): Promise<boolean> {
+    return this.call("cancel", { request: id });
+  }
+
+  private send(p: Pending): void {
     const id = this.nextId++;
-    ws.send(JSON.stringify({ id, op, ...(params[0] ?? {}) }));
-    return new Promise<Results[O]>((resolve, reject) => this.pending.set(id, { resolve, reject }));
+    const frame: Record<string, unknown> = { ...p.frame, id };
+    if (p.mutation && typeof frame.view_id === "number") {
+      // Follow reopen after reopen (bounded, in case of a cycle).
+      for (let i = 0; i < 16 && this.viewAlias.has(frame.view_id as number); i++) frame.view_id = this.viewAlias.get(frame.view_id as number);
+    }
+    this.pending.set(id, p);
+    this.ws!.send(JSON.stringify(frame));
+    p.opts.onSent?.(id);
+  }
+
+  /** Keep a change for resending once the connection is back (bounded in time and count). */
+  private keep(p: Pending): void {
+    p.keptAt ??= Date.now();
+    this.kept.push(p);
+    while (this.kept.length > MUTATION_KEEP_MAX) {
+      this.kept.shift()!.reject(new RpcError("connection lost: too many unsaved changes", "unavailable"));
+    }
+    const t = window.setTimeout(() => {
+      this.timers.delete(t);
+      const i = this.kept.indexOf(p);
+      if (i >= 0) {
+        this.kept.splice(i, 1);
+        p.reject(new RpcError("connection lost: the change could not be saved", "unavailable"));
+      }
+    }, Math.max(0, p.keptAt + MUTATION_KEEP_MS - Date.now()));
+    this.timers.add(t);
+  }
+
+  /** The socket closed: keep unacknowledged changes, fail reads. */
+  private dropped(): void {
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of pending) {
+      if (p.mutation) this.keep(p);
+      else p.reject(new RpcError("connection lost", "unavailable"));
+    }
+  }
+
+  private resendKept(): void {
+    const kept = this.kept;
+    this.kept = [];
+    for (const p of kept) {
+      if (this.ws?.readyState === WebSocket.OPEN) this.send(p);
+      else this.keep(p);
+    }
   }
 
   private receive(data: string): void {
     const msg = JSON.parse(data);
     if (msg.event) {
       if (msg.event === "hello") this.session = msg.session;
+      if (msg.event === "progress") {
+        for (const [id, p] of this.pending) if (id === msg.request) p.opts.onProgress?.(msg.percentage);
+      }
       this.onEvent(msg as ServerEvent);
       return;
     }
     const p = this.pending.get(msg.id);
     if (!p) return;
     this.pending.delete(msg.id);
-    if (msg.ok) p.resolve(msg.result);
-    else p.reject(new Error(msg.error));
+    if (msg.ok) {
+      p.resolve(msg.result);
+      return;
+    }
+    // A busy server: try a read again shortly.
+    if (msg.code === "overloaded" && !p.mutation && p.attempt < OVERLOAD_RETRIES.length) {
+      const t = window.setTimeout(() => {
+        this.timers.delete(t);
+        if (this.ws?.readyState === WebSocket.OPEN) this.send(p);
+        else p.reject(new RpcError("connection lost", "unavailable"));
+      }, OVERLOAD_RETRIES[p.attempt++]);
+      this.timers.add(t);
+      return;
+    }
+    // The workbook is closing or restarting: a change may not have run, so send it again
+    // after the reconnect (its mutation id keeps it from applying twice).
+    if (msg.code === "unavailable" && p.mutation && this.opened && !this.closed) {
+      this.keep(p);
+      return;
+    }
+    p.reject(new RpcError(msg.error, msg.code));
   }
 }

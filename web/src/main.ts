@@ -1,5 +1,5 @@
 import "./styles.css";
-import { api, HttpError, initToken, setToken } from "./api";
+import { api, HttpError, initToken, isRuntimeFailure, setToken } from "./api";
 import { importFile } from "./importer";
 import { formatCount } from "./format";
 import type { WorkbookListing, Workspace } from "./types";
@@ -32,6 +32,16 @@ async function route(): Promise<void> {
         setToken(v.token.trim());
         return route();
       }
+    }
+    if (isRuntimeFailure(e)) {
+      // The server could not open the workbook (incompatible, held elsewhere, out of
+      // capacity): say so, with the server's reason, and let the user retry.
+      app.replaceChildren(el("div", { class: "fatal workbook-failure", role: "alert" },
+        el("h2", {}, "This workbook can't be opened right now"), el("p", {}, e.message),
+        el("div", { class: "empty-actions" },
+          el("button", { class: "btn btn-primary", onclick: () => route() }, "Try again"),
+          el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks"))));
+      return;
     }
     app.replaceChildren(el("div", { class: "fatal" }, el("h2", {}, "Something went wrong"), el("p", {}, (e as Error).message),
       el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks")));
