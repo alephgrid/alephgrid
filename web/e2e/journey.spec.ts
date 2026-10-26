@@ -81,6 +81,9 @@ test("table journey: import, edit, reject bad input, filter, export, restart, re
   await expect(page.locator(".status-dot.status-open")).toBeVisible({ timeout: 30_000 });
   await page.reload();
   await expect(page.getByRole("tab", { name: /people/ })).toBeVisible();
+  // The tab shows before the table finishes opening, and opening puts the cursor on the
+  // first cell; wait for that so the moves below are not undone.
+  await expect.poll(() => activeCell(page)).toEqual({ ref: "id · 1", value: "1" });
   await goTo(page, 1, 1);
   await expect.poll(() => activeCell(page)).toEqual({ ref: "name · 2", value: "Linus T." });
   expect(await server.exportCsv(wb, { table: "people" })).toBe("id,name,amount\n1,Ada,10.5\n2,Linus T.,-3.0\n3,東京,0.0\n4,,\n");
