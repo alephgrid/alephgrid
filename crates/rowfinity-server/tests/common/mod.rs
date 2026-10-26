@@ -30,6 +30,7 @@ impl TestServer {
     pub async fn start_with(data_dir: &Path, configure: impl FnOnce(&mut Config)) -> TestServer {
         let mut config = Config {
             data_dir: data_dir.to_path_buf(),
+            sheet_copy_rows: rowfinity_server::ws::SHEET_COPY_ROWS,
             token: None,
             allow_sql: true,
             memory_limit: Some("1GB".into()),

@@ -85,8 +85,14 @@ pub enum Op {
     SheetInsertColumns { sheet: u32, at: u32, count: u32 },
     SheetDeleteColumns { sheet: u32, at: u32, count: u32 },
     CreateSheetFromQuery { name: String, sql: String },
+    /// Copy the first rows of a table view (its sort and filters) into a new sheet.
+    TableToSheet { view_id: u64, name: String },
     SheetToTable { sheet: u32, name: String },
 }
+
+/// Default for the most rows copied from a table or query into a sheet (sheets keep every
+/// cell in memory). Set with `--sheet-copy-rows`.
+pub const SHEET_COPY_ROWS: usize = 100_000;
 
 fn default_limit() -> usize {
     500
@@ -99,6 +105,7 @@ fn default_demo_rows() -> u64 {
 struct Ctx<'a> {
     session: u64,
     allow_sql: bool,
+    sheet_copy_rows: usize,
     views: &'a Mutex<HashSet<u64>>,
 }
 
@@ -229,7 +236,10 @@ fn handle(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)
             if !ctx.allow_sql {
                 bail!("SQL is disabled on this server");
             }
-            (json!(wb.create_sheet_from_query(&name, &sql, 100_000)?), Some(Event::TablesChanged { origin }))
+            (json!(wb.create_sheet_from_query(&name, &sql, ctx.sheet_copy_rows)?), Some(Event::TablesChanged { origin }))
+        }
+        Op::TableToSheet { view_id, name } => {
+            (json!(wb.sheet_from_view(view_id, &name, ctx.sheet_copy_rows)?), Some(Event::TablesChanged { origin }))
         }
         Op::SheetToTable { sheet, name } => {
             (json!(wb.sheet_to_table(sheet, &name)?), Some(Event::TablesChanged { origin }))
@@ -327,11 +337,12 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         let out_tx = out_tx.clone();
         let views = views.clone();
         let allow_sql = state.config.allow_sql;
+        let sheet_copy_rows = state.config.sheet_copy_rows;
         tokio::spawn(async move {
             let id = envelope.id;
             let h = handle.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let ctx = Ctx { session, allow_sql, views: &views };
+                let ctx = Ctx { session, allow_sql, sheet_copy_rows, views: &views };
                 h.with_engine(|wb| handle_logged(wb, envelope.op, &ctx))
             })
             .await;

@@ -1,10 +1,11 @@
 import { api, Rpc } from "./api";
 import { importFile } from "./importer";
+
 import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { Grid, type Cell, type Range } from "./grid";
 import type {
-  CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
+  CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 
@@ -101,6 +102,8 @@ export class WorkbookScreen {
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
   private allowSql = true;
+  /** Rows copied into a sheet at most (from /api/config). */
+  private sheetCopyRows = 100_000;
 
   private titleEl = el("button", { class: "wb-title", title: "Rename workbook" });
   private statusDot = el("span", { class: "status-dot", title: "Connecting…" });
@@ -110,6 +113,8 @@ export class WorkbookScreen {
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
   private statsEl = el("div", { class: "stats" });
   private rowsEl = el("div", { class: "row-count" });
+  /** Says whether the open item is a Table or a Sheet, and what that means. */
+  private kindEl = el("span", { class: "kind-badge", hidden: true });
   private gridWrap = el("div", { class: "grid-wrap" });
   private busyEl = el("div", { class: "busy", hidden: true });
   private fileInput!: HTMLInputElement;
@@ -181,7 +186,9 @@ export class WorkbookScreen {
 
   async start(): Promise<void> {
     try {
-      this.allowSql = (await api.config()).allow_sql;
+      const config = await api.config();
+      this.allowSql = config.allow_sql;
+      this.sheetCopyRows = config.sheet_copy_rows ?? this.sheetCopyRows;
     } catch { /* keep default */ }
     await this.rpc.connect();
     await this.loadItems();
@@ -271,6 +278,7 @@ export class WorkbookScreen {
         this.tabsEl,
         el("div", { class: "spacer" }),
         this.statsEl,
+        this.kindEl,
         this.rowsEl,
       ),
     );
@@ -286,6 +294,51 @@ export class WorkbookScreen {
     return root;
   }
 
+  private setKind(kind: "table" | "sheet"): void {
+    this.kindEl.hidden = false;
+    this.kindEl.className = `kind-badge kind-${kind}`;
+    this.kindEl.textContent = kind === "table" ? "Table" : "Sheet";
+    this.kindEl.title = kind === "table"
+      ? "Table: typed columns of any size. Sort, filter, formula columns and SQL run on the server, so millions of rows stay fast."
+      : `Sheet: free-form cells with Excel formulas, kept in memory. Best for thousands of rows; copying a table or query brings in at most ${formatCount(this.sheetCopyRows)} rows.`;
+  }
+
+  /** Tell the user how much of the data reached the sheet. */
+  private reportCopy(copy: SheetCopy, what: string): void {
+    const n = formatCount(copy.rows_copied);
+    if (!copy.truncated) {
+      toast(`Copied ${n} rows of ${what} into sheet ${copy.sheet.name}`, "success");
+    } else {
+      const of = copy.total_rows != null ? ` of ${formatCount(copy.total_rows)}` : "";
+      toast(`Copied the first ${n}${of} rows of ${what} into sheet ${copy.sheet.name}. Sheets take at most ${formatCount(copy.row_limit)} rows of this width; keep working with the full data in its table.`, "info", 10_000);
+    }
+  }
+
+  private async copyTableToSheet(t: TableInfo): Promise<void> {
+    const current = this.active?.kind === "table" && this.active.name === t.name && this.view;
+    const filtered = current && (this.spec.sort.length || this.spec.filters.length);
+    const v = await formDialog(`Copy ${t.name} to a sheet`, [
+      { name: "name", label: "Sheet name", value: t.name,
+        hint: `Copies the first ${formatCount(Math.min(t.row_count, this.sheetCopyRows))} of ${formatCount(t.row_count)} rows${filtered ? " in the current sort and filter" : ""}. The sheet is a separate copy: later table edits do not change it.` },
+    ], "Copy to sheet");
+    if (!v) return;
+    try {
+      let viewId = current ? this.view!.view_id : 0;
+      let temporary = false;
+      if (!current) {
+        viewId = (await this.rpc.call("open_view", { spec: { table: t.name, sort: [], filters: [] } })).view_id;
+        temporary = true;
+      }
+      const copy = await this.rpc.call("table_to_sheet", { view_id: viewId, name: v.name });
+      if (temporary) this.rpc.call("close_view", { view_id: viewId }).catch(() => {});
+      await this.loadItems();
+      await this.openSheet(copy.sheet.index);
+      this.reportCopy(copy, t.name);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
   private updateToolbar(): void {
     const sheet = this.isSheet();
     for (const b of this.tableButtons) b.hidden = sheet || !this.active;
@@ -298,6 +351,7 @@ export class WorkbookScreen {
     this.view = null;
     this.grid.setColumns([]);
     this.rowsEl.textContent = "";
+    this.kindEl.hidden = true;
     this.renderTabs();
     this.renderChips();
     this.updateToolbar();
@@ -411,6 +465,7 @@ export class WorkbookScreen {
       this.grid.setColumns(this.sheetCols.map((c) => saved[c.name] ?? SHEET_COL_WIDTH));
     }
     this.rowsEl.textContent = info.rows ? `Used ${columnLetter(Math.max(0, info.columns - 1))}${info.rows}` : "Empty sheet";
+    this.setKind("sheet");
     this.grid.invalidate();
   }
 
@@ -441,6 +496,7 @@ export class WorkbookScreen {
     const saved = this.loadWidths();
     this.grid.setColumns(info.columns.map((c) => saved[c.name] ?? defaultWidth(c)));
     this.rowsEl.textContent = `${formatCount(info.row_count)} rows`;
+    this.setKind("table");
     this.renderChips();
     this.grid.invalidate();
     this.onSelection(this.grid.selection(), this.grid.active);
@@ -830,6 +886,7 @@ export class WorkbookScreen {
         } catch (e) { toast((e as Error).message, "error"); }
       } },
       { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [] }, "csv") },
+      { label: "Copy to a sheet…", action: () => this.copyTableToSheet(t) },
       "sep",
       { label: "Delete table", danger: true, action: async () => {
         if (!(await confirmDialog(`Delete “${t.name}”?`, `${formatCount(t.row_count)} rows will be permanently removed from this workbook.`))) return;
@@ -1070,7 +1127,10 @@ export class WorkbookScreen {
     };
     const save = async (target: "table" | "sheet") => {
       const v = await formDialog(target === "table" ? "Save result as a table" : "Open result in a new sheet",
-        [{ name: "name", label: target === "table" ? "Table name" : "Sheet name", value: target === "table" ? "query_result" : "Query result" }],
+        [{ name: "name", label: target === "table" ? "Table name" : "Sheet name", value: target === "table" ? "query_result" : "Query result",
+          hint: target === "table"
+            ? "Keeps every row of the result as a new table (a snapshot: it does not change when the source does)."
+            : `Copies at most the first ${formatCount(this.sheetCopyRows)} rows (fewer for very wide results). Use “Save as table” to keep all of them.` }],
         target === "table" ? "Create table" : "Create sheet");
       if (!v) return;
       try {
@@ -1081,11 +1141,11 @@ export class WorkbookScreen {
           await this.openTable(info.name);
           toast(`Created ${info.name} (${formatCount(info.row_count)} rows)`, "success");
         } else {
-          const info = await this.rpc.call("create_sheet_from_query", { name: v.name, sql: editor.value });
+          const copy = await this.rpc.call("create_sheet_from_query", { name: v.name, sql: editor.value });
           panel.close();
           await this.loadItems();
-          await this.openSheet(info.index);
-          toast(`Created sheet ${info.name}`, "success");
+          await this.openSheet(copy.sheet.index);
+          this.reportCopy(copy, "the query result");
         }
       } catch (e) {
         toast((e as Error).message, "error");
@@ -1102,7 +1162,7 @@ export class WorkbookScreen {
           status,
           el("div", { class: "spacer" }),
           el("button", { class: "btn", onclick: () => panel.close() }, "Close"),
-          el("button", { class: "btn", onclick: () => save("sheet"), title: "Up to 100,000 rows" }, "Open in sheet"),
+          el("button", { class: "btn", onclick: () => save("sheet"), title: `Up to ${formatCount(this.sheetCopyRows)} rows` }, "Open in sheet"),
           el("button", { class: "btn", onclick: () => save("table") }, "Save as table"),
           el("button", { class: "btn btn-primary", onclick: run, title: "⌘/Ctrl + Enter" }, "Run"),
         ),

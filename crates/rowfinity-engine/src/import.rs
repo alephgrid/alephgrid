@@ -79,13 +79,17 @@ pub struct FilePreview {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ImportProblem {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub line: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub value: Option<String>,
     /// A type that would accept the failing value (always Text for conversion errors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub suggested_type: Option<String>,
 }

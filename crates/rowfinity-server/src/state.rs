@@ -151,6 +151,8 @@ impl WorkbookHandle {
 
 pub struct Config {
     pub data_dir: PathBuf,
+    /// Most rows copied from a table or query into a sheet.
+    pub sheet_copy_rows: usize,
     pub token: Option<String>,
     pub allow_sql: bool,
     pub memory_limit: Option<String>,

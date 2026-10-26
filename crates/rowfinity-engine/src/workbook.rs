@@ -40,6 +40,20 @@ pub struct Workbook {
     sheets: Sheets,
 }
 
+/// Result of copying table data into a sheet, which holds far fewer rows than a table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+pub struct SheetCopy {
+    pub sheet: SheetInfo,
+    pub rows_copied: u64,
+    /// Rows in the source, when known without running the query to the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_rows: Option<u64>,
+    /// True when rows were left out because of `row_limit`.
+    pub truncated: bool,
+    pub row_limit: u64,
+}
+
 /// What an upload would produce, shown before importing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -967,13 +981,45 @@ impl Workbook {
         Ok(())
     }
 
-    /// Run a query and drop its first `max_rows` rows (with a header row) into a new sheet.
+    /// Largest number of data rows copied into a sheet with `columns` columns: at most
+    /// `max_rows`, and within the cell budget of one sheet edit.
+    pub fn sheet_copy_limit(columns: usize, max_rows: usize) -> usize {
+        let budget = crate::sheets::MAX_BULK_CELLS / columns.max(1);
+        max_rows.min(budget.saturating_sub(1)).max(1)
+    }
+
+    /// Run a query and copy its first rows (with a header row) into a new sheet. See
+    /// [`Workbook::sheet_copy_limit`]; the result says whether rows were left out.
     ///
     /// Sheets use Excel semantics (IEEE doubles, 15 significant digits). Numbers that a
     /// double cannot hold exactly, such as integers beyond 2^53 or long decimals, are
     /// written as text so their digits are kept; text values always stay text.
-    pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetInfo> {
-        let preview = self.preview_query(sql, max_rows)?;
+    pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetCopy> {
+        let select = self.expand_query(sql)?;
+        let columns = self.describe(&select)?.iter().filter(|c| c.name != ID).count();
+        let limit = Self::sheet_copy_limit(columns, max_rows);
+        let preview = self.run_preview(&select, limit)?;
+        self.write_sheet(name, preview, None, limit)
+    }
+
+    /// Copy the first rows of a table view (respecting its sort and filters) into a new sheet.
+    pub fn sheet_from_view(&mut self, id: u64, name: &str, max_rows: usize) -> Result<SheetCopy> {
+        let v = self.view(id)?;
+        let total = v.row_count;
+        let limit = Self::sheet_copy_limit(v.columns.len(), max_rows);
+        let base = self.base_select(&v.spec.table)?;
+        let select = match &v.permutation {
+            None => format!("SELECT * EXCLUDE ({ID}) FROM ({base}) WHERE {ID} < {limit} ORDER BY {ID}"),
+            Some(perm) => format!(
+                "SELECT b.* EXCLUDE ({ID}) FROM ({base}) b JOIN {} p USING ({ID}) WHERE p._rf_pos < {limit} ORDER BY p._rf_pos",
+                ident(perm)
+            ),
+        };
+        let preview = self.run_preview(&select, limit)?;
+        self.write_sheet(name, preview, Some(total), limit)
+    }
+
+    fn write_sheet(&mut self, name: &str, preview: QueryPreview, total: Option<u64>, limit: usize) -> Result<SheetCopy> {
         let mut inputs: Vec<(SheetInput, bool)> = preview
             .columns
             .iter()
@@ -993,11 +1039,14 @@ impl Workbook {
                 inputs.push((SheetInput { row: r as u32 + 1, column: c as u32, value }, text));
             }
         }
-        self.with_sheets(|s| {
+        let rows_copied = preview.rows.len() as u64;
+        let truncated = preview.truncated || total.is_some_and(|t| t > rows_copied);
+        let sheet = self.with_sheets(|s| {
             let sheet = s.create(name)?;
             s.set_values(sheet.index, &inputs)?;
             s.info(sheet.index)
-        })
+        })?;
+        Ok(SheetCopy { sheet, rows_copied, total_rows: total, truncated, row_limit: limit as u64 })
     }
 
     /// Turn a sheet's used range into a columnar table (first row = header), reading every

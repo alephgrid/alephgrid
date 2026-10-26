@@ -56,7 +56,7 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 export const api = {
-  config: () => http<{ version: string; auth_required: boolean; allow_sql: boolean }>("GET", "/api/config"),
+  config: () => http<{ version: string; auth_required: boolean; allow_sql: boolean; sheet_copy_rows?: number }>("GET", "/api/config"),
   list: () => http<WorkbookListing[]>("GET", "/api/workbooks"),
   create: (name: string, workspace?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, workspace: workspace ?? null }),
   get: (id: string) => http<{ workbook: WorkbookMeta; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),

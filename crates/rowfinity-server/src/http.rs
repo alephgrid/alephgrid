@@ -152,6 +152,7 @@ async fn config(State(state): State<Shared>) -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "auth_required": state.config.token.is_some(),
         "allow_sql": state.config.allow_sql,
+        "sheet_copy_rows": state.config.sheet_copy_rows,
     }))
 }
 

@@ -29,7 +29,7 @@ export class Server {
 
   async start(): Promise<void> {
     if (!this.port) this.port = await freePort();
-    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2"], { stdio: "ignore" });
+    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000"], { stdio: "ignore" });
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {

@@ -192,8 +192,37 @@ fn structural_edits_are_single_undo_steps() {
 fn query_to_sheet_is_bounded_and_keeps_text_exact() {
     let mut t = TempWb::new();
     t.wb.create_table_from_query("t", "SELECT i, '=1+1' AS f, 9007199254740993::BIGINT AS big FROM range(30) r(i)").unwrap();
-    let info = t.wb.create_sheet_from_query("Q", "SELECT * FROM t ORDER BY i", 10).unwrap();
+    let info = t.wb.create_sheet_from_query("Q", "SELECT * FROM t ORDER BY i", 10).unwrap().sheet;
     assert_eq!((info.rows, info.columns), (11, 3), "header + 10 rows");
     assert_eq!(cell_text(&t.wb, info.index, 1, 1).as_deref(), Some("=1+1"), "formula-looking text stays text");
     assert_eq!(cell_text(&t.wb, info.index, 1, 2).as_deref(), Some("9007199254740993"), "beyond 2^53 stays exact text");
+}
+
+#[test]
+fn copies_into_sheets_are_bounded_and_say_so() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("t", "SELECT i, i * 2 AS d, 'r' || i AS s FROM range(250) r(i)").unwrap();
+    // Query → sheet within the limit, then over it.
+    let all = t.wb.create_sheet_from_query("All", "SELECT * FROM t ORDER BY i", 1000).unwrap();
+    assert_eq!((all.rows_copied, all.truncated, all.total_rows), (250, false, None));
+    let some = t.wb.create_sheet_from_query("Some", "SELECT * FROM t ORDER BY i", 100).unwrap();
+    assert_eq!((some.rows_copied, some.truncated, some.row_limit), (100, true, 100));
+    assert_eq!((some.sheet.rows, some.sheet.columns), (101, 3), "header + 100 rows");
+    // The cell budget caps wide results below the row limit.
+    assert_eq!(Workbook::sheet_copy_limit(3, 100_000), 100_000);
+    assert_eq!(Workbook::sheet_copy_limit(100, 100_000), 9_999);
+    assert_eq!(Workbook::sheet_copy_limit(2_000_000, 100_000), 1);
+    // View → sheet follows the view's sort and filter, and reports the view's size.
+    let mut s = spec("t");
+    s.sort.push(SortKey { column: "i".into(), desc: true });
+    s.filters.push(Filter { column: "i".into(), op: FilterOp::Gte, value: json!("200") });
+    let v = t.wb.open_view(s).unwrap().view_id;
+    let copy = t.wb.sheet_from_view(v, "Top", 10).unwrap();
+    assert_eq!((copy.rows_copied, copy.total_rows, copy.truncated), (10, Some(50), true));
+    assert_eq!(cell_text(&t.wb, copy.sheet.index, 1, 0).as_deref(), Some("249"));
+    assert_eq!(cell_text(&t.wb, copy.sheet.index, 10, 2).as_deref(), Some("r240"));
+    let id = t.wb.open_view(spec("t")).unwrap().view_id;
+    let whole = t.wb.sheet_from_view(id, "Whole", 1000).unwrap();
+    assert_eq!((whole.rows_copied, whole.total_rows, whole.truncated), (250, Some(250), false));
+    assert_eq!(cell_text(&t.wb, whole.sheet.index, 250, 0).as_deref(), Some("249"));
 }

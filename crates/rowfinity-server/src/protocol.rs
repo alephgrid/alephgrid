@@ -4,7 +4,7 @@
 
 use rowfinity_engine::{
     Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
-    Kind, PreviewColumn, QueryPreview, RowBlock, SheetBlock, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
+    Kind, PreviewColumn, QueryPreview, RowBlock, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
     UploadPreview, ViewInfo, ViewSpec,
 };
 use ts_rs::{Config, TS};
@@ -78,7 +78,8 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_delete_rows", "null"),
     ("sheet_insert_columns", "null"),
     ("sheet_delete_columns", "null"),
-    ("create_sheet_from_query", "SheetInfo"),
+    ("create_sheet_from_query", "SheetCopy"),
+    ("table_to_sheet", "SheetCopy"),
     ("sheet_to_table", "TableInfo"),
 ];
 
@@ -94,7 +95,7 @@ pub fn bindings() -> String {
     decls!(
         &cfg, out,
         Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, ViewInfo, RowBlock, CellEdit, EditOutcome,
-        Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, Imported,
+        Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
         Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
     );

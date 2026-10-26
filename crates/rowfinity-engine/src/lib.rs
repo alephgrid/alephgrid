@@ -19,7 +19,7 @@ mod workbook;
 pub use model::*;
 pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
 pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
-pub use workbook::{Imported, UploadPreview, Workbook};
+pub use workbook::{Imported, SheetCopy, UploadPreview, Workbook};
 
 /// DuckDB handles the server uses for progress and cancellation.
 pub mod duckdb_handles {
