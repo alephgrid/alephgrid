@@ -23,6 +23,9 @@
 ## Storage
 
 * One directory per workbook: `workbook.json` (name, created) and `data.duckdb`.
+  Deleted workbooks move to `.trash/<id>/` in one rename and stay restorable until
+  purged. `.uploads/` and `.exports/` hold per-request scratch directories, cleared at
+  startup.
 * A user table is an ordinary DuckDB table plus a hidden `_rf_id BIGINT`. The
   engine keeps `_rf_id` **dense** (0…n-1) and in insertion order: inserts and
   deletes renumber. So `_rf_id` *is* the row position of the unsorted table, and
@@ -32,6 +35,14 @@
   DuckDB expression layered onto the table's projection, so it is computed only for
   the rows being read (the visible window, an aggregate or an export). DuckDB's
   lateral column aliases let formulas reference earlier formula columns.
+* Formulas are parsed with DuckDB's own parser (`json_serialize_sql`): a formula must
+  be one scalar expression without subqueries. The parse tree gives the location of
+  every column reference, so renaming a column rewrites dependent formulas at exactly
+  those spans, and deleting a column that formulas use is refused. Both run in one
+  transaction with a re-validation of the table's projection.
+* Every mutation is a single DuckDB transaction and validates its input first (edits,
+  appends, renames, sheet → table). Ad-hoc SQL sees formula columns through CTEs that
+  shadow each table; a user's own `WITH` list is extended, not replaced.
 
 ## Sheets (IronCalc)
 
@@ -41,12 +52,19 @@ cross-sheet references work. The model is serialized into the `_rf_sheets` BLOB 
 the same DuckDB file, so a workbook is still one file you can copy or back up.
 
 * Edits go through `UserModel::set_user_input`, with evaluation paused for bulk
-  edits and resumed once. Undo/redo use IronCalc's history (in memory, per workbook).
+  edits and resumed once. Every coordinate is validated before the first change. If
+  a change fails part-way or the blob cannot be saved, the model is reloaded from the
+  file, so memory never runs ahead of what is durable.
+* Undo/redo use IronCalc's history, grouped so that one user operation (a paste, an
+  import) is one step. The history is in memory, shared by everyone in the workbook,
+  and lost on restart or after a reload.
 * `sheet_fetch` walks only the cells that exist in each row (`cells_in_row`) and
   returns `[display, align, input?]`, so the client never re-implements number
   formatting or formula evaluation.
-* Bridges: `create_sheet_from_query` writes a SQL result into a new sheet;
-  `sheet_to_table` writes a sheet's used range to CSV and lets DuckDB sniff the types.
+* Bridges: `create_sheet_from_query` writes a bounded SQL result into a new sheet,
+  keeping text as text and numbers that a double cannot hold as text.
+  `sheet_to_table` reads every used row and infers each column's type from the cell
+  values (numbers, dates, booleans, otherwise displayed text).
 * `.xlsx` import and export use the `ironcalc` crate's reader and writer. Importing
   into an empty workbook adopts the model with its styles; otherwise cell inputs
   are copied into new sheets.
@@ -82,9 +100,20 @@ A view is `(table, sort keys, filters)`.
 ## Wire protocol
 
 JSON over one WebSocket per workbook; see [PROTOCOL.md](PROTOCOL.md). Rows are
-sent row-major, already converted to JSON-friendly types (ints, doubles, bools,
-ISO strings). The client formats them. Measured: 6.9 bytes per cell on the demo
-table, uncompressed; frames aren't compressed yet.
+sent row-major. Values are exact: integers beyond ±(2^53 − 1) and decimals travel as
+strings, everything else as JSON numbers, booleans or ISO text (`wire.rs`). The
+client formats them. The TypeScript types are generated from the Rust ones
+(`protocol.rs` → `web/src/protocol.ts`), and a test fails when they drift. Measured:
+6.9 bytes per cell on the demo table, uncompressed; frames aren't compressed yet.
+
+## Workbook lifecycle
+
+A `WorkbookHandle` owns the open DuckDB connection behind a mutex. Deleting a workbook
+marks the handle deleted (new operations fail with "this workbook was deleted"), takes
+the mutex (so the running operation finishes first), checkpoints, drops the connection
+and renames the directory into the trash. While that happens the id is in a "closing"
+set, so nothing can reopen the file. Connected clients get `workbook_deleted` and
+the server ends their sessions without waiting for them.
 
 ## Client
 
@@ -98,7 +127,7 @@ table, uncompressed; frames aren't compressed yet.
 * Edits are optimistic: the cached cell updates at once and is reconciled after the
   server confirms.
 
-## Concurrency (v0.1)
+## Concurrency (v0.2)
 
 Each workbook has one DuckDB connection behind a mutex, and operations run on the
 blocking pool. DuckDB parallelizes each query internally, so a single sort uses
@@ -106,11 +135,13 @@ every core. Fetches from different users of one workbook queue behind each other
 The planned fix is a pool of read connections, with permutations stored in
 per-session schemas instead of TEMP tables.
 
-## Security model (v0.1)
+## Security model (v0.2)
 
 * By default it binds to `127.0.0.1`: only you can reach it.
 * `--token` (or `ROWFINITY_TOKEN`) enables a shared bearer token for the API and
   WebSocket.
+* Formula columns are restricted to single expressions, but they and the SQL console
+  still run DuckDB functions; `--disable-sql` hides only the console.
 * The SQL console runs arbitrary DuckDB SQL. DuckDB can read local files and URLs,
   so on a shared server either trust your users or run with `--disable-sql`, inside
   a container whose filesystem holds only the data volume.
