@@ -29,11 +29,11 @@ export class Server {
 
   async start(): Promise<void> {
     if (!this.port) this.port = await freePort();
-    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2"], { stdio: "ignore" });
+    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000"], { stdio: "ignore" });
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {
-        const r = await fetch(`${this.url}/api/config`);
+        const r = await fetch(`${this.url}/api/config`, { signal: AbortSignal.timeout(2_000) });
         if (r.ok) return;
       } catch { /* not up yet */ }
       if (Date.now() > deadline) throw new Error(`server did not start (${BIN})`);

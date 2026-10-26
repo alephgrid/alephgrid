@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::faults;
 use crate::formula;
+use crate::import::{self, ColumnType, FilePreview, PreviewColumn};
 use crate::model::*;
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
 use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
@@ -39,12 +40,35 @@ pub struct Workbook {
     sheets: Sheets,
 }
 
+/// Result of copying table data into a sheet, which holds far fewer rows than a table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+pub struct SheetCopy {
+    pub sheet: SheetInfo,
+    pub rows_copied: u64,
+    /// Rows in the source, when known without running the query to the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_rows: Option<u64>,
+    /// True when rows were left out because of `row_limit`.
+    pub truncated: bool,
+    pub row_limit: u64,
+}
+
+/// What an upload would produce, shown before importing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum UploadPreview {
+    Table { preview: FilePreview },
+    Sheets { sheets: Vec<SheetInfo>, warnings: Vec<String> },
+}
+
 /// What an import produced: a columnar table, or IronCalc sheets for .xlsx files.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Imported {
     Table { table: TableInfo },
-    Sheets { sheets: Vec<SheetInfo> },
+    /// `warnings` lists what an .xlsx file contained that sheets do not carry over.
+    Sheets { sheets: Vec<SheetInfo>, warnings: Vec<String> },
 }
 
 impl Workbook {
@@ -63,10 +87,15 @@ impl Workbook {
             "CREATE TABLE IF NOT EXISTS _rf_columns (
                 table_name VARCHAR, name VARCHAR, formula VARCHAR, position INTEGER
              );
-             CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);",
+             CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);
+             CREATE TABLE IF NOT EXISTS _rf_views (
+                id VARCHAR PRIMARY KEY, name VARCHAR, table_name VARCHAR, spec VARCHAR, widths VARCHAR, updated_at BIGINT
+             );",
         )?;
         // Show TIMESTAMPTZ values in UTC so results do not depend on the server's zone.
         let _ = conn.execute_batch("SET TimeZone = 'UTC';");
+        // Lets long statements (imports, sorts) report progress to the UI.
+        conn.set_query_progress_tracking(true)?;
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         let sheets = Sheets::from_bytes(bytes)?;
         Ok(Workbook { conn, views: HashMap::new(), next_view: 1, sheets })
@@ -133,26 +162,82 @@ impl Workbook {
 
     /// Import a CSV/TSV/Parquet/JSON(L)/XLSX file as a new table.
     pub fn import_file(&mut self, path: &Path, table_name: Option<&str>) -> Result<TableInfo> {
-        let file = path.to_string_lossy();
-        let lower = file.to_ascii_lowercase();
-        let stripped = lower.trim_end_matches(".gz").trim_end_matches(".zst");
-        let reader = if stripped.ends_with(".parquet") {
-            format!("read_parquet({})", lit(&file))
-        } else if stripped.ends_with(".json") || stripped.ends_with(".jsonl") || stripped.ends_with(".ndjson") {
-            format!("read_json_auto({})", lit(&file))
-        } else if stripped.ends_with(".xlsx") {
+        self.import_file_with(path, table_name, &[])
+    }
+
+    /// Import a CSV/TSV/Parquet/JSON(L) file as a new table, with optional per-column
+    /// types. Failures become [`import::ImportProblem`]s that say what to change.
+    pub fn import_file_with(&mut self, path: &Path, table_name: Option<&str>, types: &[ColumnType]) -> Result<TableInfo> {
+        if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
             bail!("use import_any for .xlsx files (they become sheets)");
-        } else {
-            format!("read_csv_auto({}, sample_size = 100000)", lit(&file))
-        };
-        let stem = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "table".into());
-        let stem = stem.split('.').next().unwrap_or("table").to_string();
-        let name = self.unique_table_name(table_name.unwrap_or(&stem))?;
-        self.create_table_from_select(&name, &format!("SELECT * FROM {reader}"))?;
+        }
+        self.check_type_overrides(path, types)?;
+        let select = import::reader_select(path, types)?;
+        let name = self.unique_table_name(table_name.filter(|n| !n.trim().is_empty()).unwrap_or(&import::suggested_name(path)))?;
+        faults::check("import")?;
+        self.create_table_from_select(&name, &select).map_err(import::import_error)?;
         self.table_info(&name)
+    }
+
+    /// Detected columns and the first rows of a file, as they would be imported.
+    pub fn preview_file(&self, path: &Path, types: &[ColumnType]) -> Result<FilePreview> {
+        let detected = self.describe(&import::reader_select(path, &[])?).map_err(import::import_error)?;
+        self.check_type_overrides(path, types)?;
+        let select = import::reader_select(path, types)?;
+        let rows = self.run_preview(&select, import::PREVIEW_ROWS).map_err(import::import_error)?;
+        let columns = rows
+            .columns
+            .iter()
+            .map(|c| {
+                let i = detected.iter().position(|d| d.name == c.name);
+                PreviewColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type.clone(),
+                    kind: c.kind,
+                    detected: i.map(|i| detected[i].sql_type.clone()).unwrap_or_else(|| c.sql_type.clone()),
+                }
+            })
+            .collect();
+        Ok(FilePreview {
+            format: import::format_label(path).to_string(),
+            suggested_name: import::suggested_name(path),
+            columns,
+            rows: rows.rows,
+            type_choices: import::TYPE_CHOICES.iter().map(|t| t.to_string()).collect(),
+        })
+    }
+
+    fn check_type_overrides(&self, path: &Path, types: &[ColumnType]) -> Result<()> {
+        if types.is_empty() {
+            return Ok(());
+        }
+        let detected = self.describe(&import::reader_select(path, &[])?).map_err(import::import_error)?;
+        for t in types {
+            if !detected.iter().any(|c| c.name == t.name) {
+                bail!("the file has no column {:?}", t.name);
+            }
+        }
+        Ok(())
+    }
+
+    /// Preview any supported upload: a table preview, or the sheets an .xlsx would add.
+    pub fn preview_any(&self, path: &Path, types: &[ColumnType]) -> Result<UploadPreview> {
+        if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
+            let (sheets, warnings) = Sheets::preview_xlsx(path)?;
+            Ok(UploadPreview::Sheets { sheets, warnings })
+        } else {
+            Ok(UploadPreview::Table { preview: self.preview_file(path, types)? })
+        }
+    }
+
+    /// Handle for reading the progress of the statement running on this workbook.
+    pub fn progress_handle(&self) -> duckdb::progress::ProgressHandle {
+        self.conn.progress_handle()
+    }
+
+    /// Handle that interrupts the statement running on this workbook.
+    pub fn interrupt_handle(&self) -> std::sync::Arc<duckdb::InterruptHandle> {
+        self.conn.interrupt_handle()
     }
 
     /// Materialize any SELECT as a new table (e.g. a group-by or a join).
@@ -196,6 +281,7 @@ impl Workbook {
     }
 
     pub fn drop_table(&mut self, table: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM _rf_views WHERE table_name = ?", duckdb::params![table])?;
         self.views.retain(|_, v| v.spec.table != table);
         self.conn.execute_batch(&format!(
             "DROP TABLE {}; DELETE FROM _rf_columns WHERE table_name = {};",
@@ -217,6 +303,10 @@ impl Workbook {
         for v in self.views.values_mut().filter(|v| v.spec.table == table) {
             v.spec.table = new_name.clone();
         }
+        self.rewrite_saved_views(table, |spec, _| {
+            spec.table = new_name.clone();
+            Ok(())
+        })?;
         Ok(new_name)
     }
 
@@ -340,8 +430,23 @@ impl Workbook {
                 users.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>().join(", "),
                 if users.len() == 1 { "it" } else { "them" });
         }
+        let in_views: Vec<String> = self
+            .saved_views(Some(table))?
+            .into_iter()
+            .filter(|v| v.spec.sort.iter().any(|k| k.column == name) || v.spec.filters.iter().any(|f| f.column == name))
+            .map(|v| format!("{:?}", v.name))
+            .collect();
+        if !in_views.is_empty() {
+            bail!("{name:?} sorts or filters the saved view{} {}; change or delete {} first",
+                if in_views.len() == 1 { "" } else { "s" }, in_views.join(", "), if in_views.len() == 1 { "it" } else { "them" });
+        }
         let is_formula = self.formulas(table)?.iter().any(|(n, _)| n == name);
         self.transaction(|wb| {
+            wb.rewrite_saved_views(table, |spec, widths| {
+                spec.hidden.retain(|h| h != name);
+                widths.remove(name);
+                Ok(())
+            })?;
             if is_formula {
                 wb.conn.execute("DELETE FROM _rf_columns WHERE table_name = ? AND name = ?", duckdb::params![table, name])?;
             } else {
@@ -393,10 +498,48 @@ impl Workbook {
                     duckdb::params![updated, table, fname],
                 )?;
             }
+            wb.rewrite_saved_views(table, |spec, widths| {
+                for k in &mut spec.sort {
+                    if k.column == name {
+                        k.column = new_name.to_string();
+                    }
+                }
+                for f in &mut spec.filters {
+                    if f.column == name {
+                        f.column = new_name.to_string();
+                    }
+                }
+                for h in &mut spec.hidden {
+                    if h == name {
+                        *h = new_name.to_string();
+                    }
+                }
+                if let Some(w) = widths.remove(name) {
+                    widths.insert(new_name.to_string(), w);
+                }
+                Ok(())
+            })?;
             faults::check("rename_column")?;
             wb.describe(&wb.base_select(table)?).map_err(|e| anyhow!("rename would break a formula: {e}"))?;
             Ok(())
         })?;
+        for v in self.views.values_mut().filter(|v| v.spec.table == table) {
+            for k in &mut v.spec.sort {
+                if k.column == name {
+                    k.column = new_name.to_string();
+                }
+            }
+            for f in &mut v.spec.filters {
+                if f.column == name {
+                    f.column = new_name.to_string();
+                }
+            }
+            for h in &mut v.spec.hidden {
+                if h == name {
+                    *h = new_name.to_string();
+                }
+            }
+        }
         self.refresh_views_for(table)
     }
 
@@ -427,6 +570,106 @@ impl Workbook {
                 Err(e)
             }
         }
+    }
+
+    // ----------------------------------------------------------- saved views
+
+    /// Saved views, of one table or of all tables, by name.
+    pub fn saved_views(&self, table: Option<&str>) -> Result<Vec<SavedView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, spec, widths, updated_at FROM _rf_views WHERE ? IS NULL OR table_name = ? ORDER BY lower(name)",
+        )?;
+        let rows = stmt.query_map(duckdb::params![table, table], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, spec, widths, updated_at) = row?;
+            out.push(SavedView {
+                id,
+                name,
+                spec: serde_json::from_str(&spec)?,
+                widths: serde_json::from_str(&widths)?,
+                updated_at: updated_at as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Create a saved view, or update the one with `id`. The spec must open (columns exist)
+    /// and names are unique per table.
+    pub fn save_view(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        spec: ViewSpec,
+        widths: std::collections::BTreeMap<String, f64>,
+    ) -> Result<SavedView> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a view needs a name");
+        }
+        // Validate by building it once.
+        let probe = self.open_view(spec.clone())?;
+        self.close_view(probe.view_id);
+        let clash = self
+            .saved_views(Some(&spec.table))?
+            .into_iter()
+            .any(|v| v.name.to_lowercase() == name.to_lowercase() && Some(v.id.as_str()) != id);
+        if clash {
+            bail!("a view named {name:?} already exists for this table");
+        }
+        let id = match id {
+            Some(id) => {
+                if !self.saved_views(None)?.iter().any(|v| v.id == id) {
+                    bail!("unknown saved view {id}");
+                }
+                id.to_string()
+            }
+            None => format!("v{:x}{:04x}", now_secs(), self.saved_views(None)?.len()),
+        };
+        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: now_secs() };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO _rf_views VALUES (?, ?, ?, ?, ?, ?)",
+            duckdb::params![
+                view.id,
+                view.name,
+                view.spec.table,
+                serde_json::to_string(&view.spec)?,
+                serde_json::to_string(&view.widths)?,
+                view.updated_at as i64
+            ],
+        )?;
+        Ok(view)
+    }
+
+    pub fn rename_saved_view(&mut self, id: &str, name: &str) -> Result<SavedView> {
+        let v = self.saved_views(None)?.into_iter().find(|v| v.id == id).ok_or_else(|| anyhow!("unknown saved view {id}"))?;
+        self.save_view(Some(id), name, v.spec, v.widths)
+    }
+
+    pub fn delete_saved_view(&mut self, id: &str) -> Result<()> {
+        let n = self.conn.execute("DELETE FROM _rf_views WHERE id = ?", duckdb::params![id])?;
+        if n == 0 {
+            bail!("unknown saved view {id}");
+        }
+        Ok(())
+    }
+
+    /// Apply `f` to every saved view of `table` (inside the caller's transaction, if any).
+    fn rewrite_saved_views(
+        &self,
+        table: &str,
+        mut f: impl FnMut(&mut ViewSpec, &mut std::collections::BTreeMap<String, f64>) -> Result<()>,
+    ) -> Result<()> {
+        for mut v in self.saved_views(Some(table))? {
+            f(&mut v.spec, &mut v.widths)?;
+            self.conn.execute(
+                "UPDATE _rf_views SET table_name = ?, spec = ?, widths = ? WHERE id = ?",
+                duckdb::params![v.spec.table, serde_json::to_string(&v.spec)?, serde_json::to_string(&v.widths)?, v.id],
+            )?;
+        }
+        Ok(())
     }
 
     // ----------------------------------------------------------------- views
@@ -475,8 +718,17 @@ impl Workbook {
     }
 
     fn build_view(&mut self, id: u64, spec: ViewSpec) -> Result<View> {
-        let columns = self.columns(&spec.table)?;
-        let by_name: HashMap<&str, &Column> = columns.iter().map(|c| (c.name.as_str(), c)).collect();
+        let all = self.columns(&spec.table)?;
+        for h in &spec.hidden {
+            if !all.iter().any(|c| &c.name == h) {
+                bail!("unknown column {h:?}");
+            }
+        }
+        if all.iter().all(|c| spec.hidden.contains(&c.name)) && !all.is_empty() {
+            bail!("a view must show at least one column");
+        }
+        let columns: Vec<Column> = all.iter().filter(|c| !spec.hidden.contains(&c.name)).cloned().collect();
+        let by_name: HashMap<&str, &Column> = all.iter().map(|c| (c.name.as_str(), c)).collect();
         let total = self.count_rows(&spec.table)?;
         let dense = {
             let max: Option<i64> = self.conn.query_row(
@@ -521,9 +773,15 @@ impl Workbook {
     }
 
     /// Rebuild every view on `table` (after its rows were renumbered or its schema changed).
+    /// References to columns that no longer exist are dropped from open views; clients
+    /// learn the new spec from `view_info` after the `table_changed` event.
     fn refresh_views_for(&mut self, table: &str) -> Result<()> {
+        let names: Vec<String> = self.columns(table)?.into_iter().map(|c| c.name).collect();
         for id in self.views_on(table) {
-            let spec = self.view(id)?.spec.clone();
+            let mut spec = self.view(id)?.spec.clone();
+            spec.hidden.retain(|h| names.contains(h));
+            spec.sort.retain(|k| names.contains(&k.column));
+            spec.filters.retain(|f| names.contains(&f.column));
             let v = self.build_view(id, spec)?;
             self.views.insert(id, v);
         }
@@ -836,11 +1094,15 @@ impl Workbook {
 
     /// Import any supported file; `.xlsx` becomes IronCalc sheets, the rest a table.
     pub fn import_any(&mut self, path: &Path, table_name: Option<&str>) -> Result<Imported> {
+        self.import_any_with(path, table_name, &[])
+    }
+
+    pub fn import_any_with(&mut self, path: &Path, table_name: Option<&str>, types: &[ColumnType]) -> Result<Imported> {
         if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
-            let sheets = self.with_sheets(|s| s.import_xlsx(path))?;
-            Ok(Imported::Sheets { sheets })
+            let (sheets, warnings) = self.with_sheets(|s| s.import_xlsx(path))?;
+            Ok(Imported::Sheets { sheets, warnings })
         } else {
-            Ok(Imported::Table { table: self.import_file(path, table_name)? })
+            Ok(Imported::Table { table: self.import_file_with(path, table_name, types)? })
         }
     }
 
@@ -895,13 +1157,38 @@ impl Workbook {
         Ok(())
     }
 
-    /// Run a query and drop its first `max_rows` rows (with a header row) into a new sheet.
+    /// Largest number of data rows copied into a sheet with `columns` columns: at most
+    /// `max_rows`, and within the cell budget of one sheet edit.
+    pub fn sheet_copy_limit(columns: usize, max_rows: usize) -> usize {
+        let budget = crate::sheets::MAX_BULK_CELLS / columns.max(1);
+        max_rows.min(budget.saturating_sub(1)).max(1)
+    }
+
+    /// Run a query and copy its first rows (with a header row) into a new sheet. See
+    /// [`Workbook::sheet_copy_limit`]; the result says whether rows were left out.
     ///
     /// Sheets use Excel semantics (IEEE doubles, 15 significant digits). Numbers that a
     /// double cannot hold exactly, such as integers beyond 2^53 or long decimals, are
     /// written as text so their digits are kept; text values always stay text.
-    pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetInfo> {
-        let preview = self.preview_query(sql, max_rows)?;
+    pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetCopy> {
+        let select = self.expand_query(sql)?;
+        let columns = self.describe(&select)?.iter().filter(|c| c.name != ID).count();
+        let limit = Self::sheet_copy_limit(columns, max_rows);
+        let preview = self.run_preview(&select, limit)?;
+        self.write_sheet(name, preview, None, limit)
+    }
+
+    /// Copy the first rows of a table view (respecting its sort and filters) into a new sheet.
+    pub fn sheet_from_view(&mut self, id: u64, name: &str, max_rows: usize) -> Result<SheetCopy> {
+        let v = self.view(id)?;
+        let total = v.row_count;
+        let limit = Self::sheet_copy_limit(v.columns.len(), max_rows);
+        let select = self.view_select(id, Some(limit))?;
+        let preview = self.run_preview(&select, limit)?;
+        self.write_sheet(name, preview, Some(total), limit)
+    }
+
+    fn write_sheet(&mut self, name: &str, preview: QueryPreview, total: Option<u64>, limit: usize) -> Result<SheetCopy> {
         let mut inputs: Vec<(SheetInput, bool)> = preview
             .columns
             .iter()
@@ -921,11 +1208,14 @@ impl Workbook {
                 inputs.push((SheetInput { row: r as u32 + 1, column: c as u32, value }, text));
             }
         }
-        self.with_sheets(|s| {
+        let rows_copied = preview.rows.len() as u64;
+        let truncated = preview.truncated || total.is_some_and(|t| t > rows_copied);
+        let sheet = self.with_sheets(|s| {
             let sheet = s.create(name)?;
             s.set_values(sheet.index, &inputs)?;
             s.info(sheet.index)
-        })
+        })?;
+        Ok(SheetCopy { sheet, rows_copied, total_rows: total, truncated, row_limit: limit as u64 })
     }
 
     /// Turn a sheet's used range into a columnar table (first row = header), reading every
@@ -1020,7 +1310,12 @@ impl Workbook {
     /// Run a read-only query and return the first `limit` rows.
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {
         let select = self.expand_query(sql)?;
-        let described = self.describe(&select)?;
+        self.run_preview(&select, limit)
+    }
+
+    /// First `limit` rows of a SELECT, in wire form, with truncation reported.
+    fn run_preview(&self, select: &str, limit: usize) -> Result<QueryPreview> {
+        let described = self.describe(select)?;
         // Address result columns by position, so duplicate or odd names still work.
         let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
         let keep: Vec<usize> = (0..described.len()).filter(|&i| described[i].name != ID).collect();
@@ -1050,16 +1345,35 @@ impl Workbook {
 
     /// Write a view (respecting its sort and filters) to a file.
     pub fn export_view(&self, id: u64, path: &Path, format: ExportFormat) -> Result<()> {
+        let select = self.view_select(id, None)?;
+        self.copy_to(&select, path, format)
+    }
+
+    /// The view's visible columns, in view order, optionally only the first `limit` rows.
+    fn view_select(&self, id: u64, limit: Option<usize>) -> Result<String> {
         let v = self.view(id)?;
         let base = self.base_select(&v.spec.table)?;
-        let select = match &v.permutation {
-            None => format!("SELECT * EXCLUDE ({ID}) FROM ({base}) ORDER BY {ID}"),
-            Some(perm) => format!(
-                "SELECT b.* EXCLUDE ({ID}) FROM ({base}) b JOIN {} p USING ({ID}) ORDER BY p._rf_pos",
-                ident(perm)
-            ),
-        };
-        self.copy_to(&select, path, format)
+        let cols: Vec<String> = v.columns.iter().map(|c| format!("b.{}", ident(&c.name))).collect();
+        let cols = cols.join(", ");
+        Ok(match &v.permutation {
+            None => {
+                let limit = limit.map(|l| format!("WHERE b.{ID} < {l}")).unwrap_or_default();
+                format!("SELECT {cols} FROM ({base}) b {limit} ORDER BY b.{ID}")
+            }
+            Some(perm) => {
+                let limit = limit.map(|l| format!("WHERE p._rf_pos < {l}")).unwrap_or_default();
+                format!("SELECT {cols} FROM ({base}) b JOIN {} p USING ({ID}) {limit} ORDER BY p._rf_pos", ident(perm))
+            }
+        })
+    }
+
+    /// Materialize a view's current rows as a new table (a snapshot: later changes to the
+    /// source do not reach it).
+    pub fn table_from_view(&mut self, id: u64, name: &str) -> Result<TableInfo> {
+        let select = self.view_select(id, None)?;
+        let name = self.unique_table_name(name)?;
+        self.create_table_from_select(&name, &select)?;
+        self.table_info(&name)
     }
 
     pub fn export_table(&self, table: &str, path: &Path, format: ExportFormat) -> Result<()> {
@@ -1128,4 +1442,8 @@ fn fits_double(text: &str) -> bool {
 
 fn tracing_like_warn(msg: &str) {
     eprintln!("rowfinity-engine: {msg}");
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

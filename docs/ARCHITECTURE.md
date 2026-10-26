@@ -82,6 +82,18 @@ JSON file, without opening the database. The server refreshes the summary when a
 workbook is opened or its structure changes. Duplicate checkpoints the DuckDB file
 while holding the workbook lock, then copies it.
 
+## Imports
+
+Uploads are staged first: the file streams into its own `.uploads/<id>/` directory and
+the engine returns a preview (detected columns and the first 20 rows) without creating
+anything. Type overrides are applied in DuckDB's CSV reader (so text such as `007` stays
+exact) or as casts for Parquet/JSON, from an allow-list of types. The import runs with
+a client-chosen job id: the server reports DuckDB's progress for it and can interrupt
+it, and only that job. Reader errors become structured problems (line, column, value,
+suggested type), so the UI can offer the fix and retry the same upload. `.xlsx` files
+preview the sheets they would add and what will not come across (charts, pivots, macros,
+links, comments, unsupported functions).
+
 ## Views
 
 A view is `(table, sort keys, filters)`.
@@ -95,7 +107,14 @@ A view is `(table, sort keys, filters)`.
   the vectors that contain those ids. Edits change ids' values, never membership,
   so a view stays valid until its spec changes (same as filter views in Sheets).
 * Row inserts or deletes and schema changes rebuild every view on that table. The
-  server broadcasts `table_changed` so other clients refresh.
+  server broadcasts `table_changed` so other clients refresh. A rename rewrites open
+  views' column references; references to dropped columns are removed.
+* **Saved views** (`_rf_views`) store a spec (sort, filters, hidden columns) and column
+  widths per table. They are live: opening one re-applies the spec to current data.
+  Renames rewrite them; a column a saved view sorts or filters by cannot be dropped.
+  A snapshot is a separate, explicit action that copies the view's rows into a new table.
+* Copies into sheets are bounded (`--sheet-copy-rows`, and one edit's cell budget) and
+  report what was left out.
 
 ## Wire protocol
 

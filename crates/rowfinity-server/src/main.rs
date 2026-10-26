@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long, env = "ROWFINITY_DISABLE_SQL")]
     disable_sql: bool,
 
+    /// Most rows copied from a table or query into a sheet.
+    #[arg(long, env = "ROWFINITY_SHEET_COPY_ROWS", default_value_t = rowfinity_server::ws::SHEET_COPY_ROWS)]
+    sheet_copy_rows: usize,
+
     /// Serve the web UI from this directory instead of the embedded build.
     #[arg(long, env = "ROWFINITY_WEB_DIR")]
     web_dir: Option<PathBuf>,
@@ -65,6 +69,7 @@ async fn main() -> Result<()> {
 
     let state = AppState::new(Config {
         data_dir: cli.data_dir.clone(),
+        sheet_copy_rows: cli.sheet_copy_rows.max(1),
         token: cli.token.clone(),
         allow_sql: !cli.disable_sql,
         memory_limit: cli.memory_limit.clone(),

@@ -38,14 +38,41 @@ export type MenuItem =
 
 let openMenu: HTMLElement | null = null;
 
+let menuOpener: HTMLElement | null = null;
+let menuCleanup: (() => void) | null = null;
+
 export function closeMenu(): void {
-  openMenu?.remove();
+  menuCleanup?.();
+  menuCleanup = null;
+  if (!openMenu) return;
+  const hadFocus = openMenu.contains(document.activeElement);
+  openMenu.remove();
   openMenu = null;
+  // Return focus to whatever opened the menu, as keyboard users expect.
+  if (hadFocus && menuOpener?.isConnected) menuOpener.focus();
+  menuOpener = null;
 }
 
 export function showMenu(items: MenuItem[], x: number, y: number): void {
   closeMenu();
+  menuOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const menu = el("div", { class: "menu", role: "menu" });
+  menu.addEventListener("keydown", (e) => {
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item:not(:disabled)")];
+    const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const next = e.key === "ArrowDown" ? (i + 1) % buttons.length : (i - 1 + buttons.length) % buttons.length;
+      buttons[next]?.focus();
+    } else if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      buttons[e.key === "Home" ? 0 : buttons.length - 1]?.focus();
+    } else if (e.key === "Tab" || e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu();
+    }
+  });
   for (const item of items) {
     if (item === "sep") {
       menu.append(el("div", { class: "menu-sep" }));
@@ -70,18 +97,19 @@ export function showMenu(items: MenuItem[], x: number, y: number): void {
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
   openMenu = menu;
-  setTimeout(() => {
-    const close = (e: Event) => {
-      if (!menu.contains(e.target as Node)) {
-        closeMenu();
-        document.removeEventListener("mousedown", close, true);
-        document.removeEventListener("keydown", esc, true);
-      }
-    };
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && close(e);
-    document.addEventListener("mousedown", close, true);
+  menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")?.focus({ preventScroll: true });
+  // Outside clicks and Escape close the menu; the listeners go away with it however it closes.
+  const outside = (e: Event) => !menu.contains(e.target as Node) && closeMenu();
+  const esc = (e: KeyboardEvent) => e.key === "Escape" && closeMenu();
+  const timer = setTimeout(() => {
+    document.addEventListener("mousedown", outside, true);
     document.addEventListener("keydown", esc, true);
   });
+  menuCleanup = () => {
+    clearTimeout(timer);
+    document.removeEventListener("mousedown", outside, true);
+    document.removeEventListener("keydown", esc, true);
+  };
 }
 
 export interface Field {
@@ -93,6 +121,45 @@ export interface Field {
   options?: { value: string; label: string }[];
   hint?: string;
   mono?: boolean;
+}
+
+let modalSeq = 0;
+
+/**
+ * Show `dialog` as a modal: labelled by its heading, focus kept inside while open and
+ * returned to the opener afterwards, Escape and outside clicks call `onCancel`.
+ */
+export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dialog" | "alertdialog" = "dialog"): { close: () => void } {
+  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  dialog.setAttribute("role", role);
+  dialog.setAttribute("aria-modal", "true");
+  const heading = dialog.querySelector("h2");
+  if (heading) {
+    heading.id ||= `dialog-title-${++modalSeq}`;
+    dialog.setAttribute("aria-labelledby", heading.id);
+  }
+  const backdrop = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === backdrop && onCancel() }, dialog);
+  backdrop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onCancel();
+    } else if (e.key === "Tab") {
+      const focusable = [...dialog.querySelectorAll<HTMLElement>("button, input, select, textarea, a[href], [tabindex]:not([tabindex='-1'])")]
+        .filter((x) => !(x as HTMLButtonElement).disabled && x.offsetParent !== null);
+      if (!focusable.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  document.body.append(backdrop);
+  return {
+    close: () => {
+      backdrop.remove();
+      if (opener?.isConnected) opener.focus({ preventScroll: true });
+    },
+  };
 }
 
 /** Modal form. Resolves with field values, or null when cancelled. */
@@ -128,9 +195,7 @@ export function formDialog(
         el("button", { type: "submit", class: "btn btn-primary" }, submitLabel),
       ),
     );
-    const backdrop = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === backdrop && finish(null) }, form);
-    backdrop.addEventListener("keydown", (e) => e.key === "Escape" && finish(null));
-    document.body.append(backdrop);
+    const modal = openModal(form, () => finish(null));
     (inputs.values().next().value as HTMLElement | undefined)?.focus();
 
     function values(): Record<string, string> {
@@ -149,7 +214,7 @@ export function formDialog(
       finish(v);
     }
     function finish(v: Record<string, string> | null) {
-      backdrop.remove();
+      modal.close();
       resolve(v);
     }
   });
@@ -157,10 +222,10 @@ export function formDialog(
 
 export function confirmDialog(title: string, message: string, confirmLabel = "Delete"): Promise<boolean> {
   return new Promise((resolve) => {
-    const done = (v: boolean) => { backdrop.remove(); resolve(v); };
+    const done = (v: boolean) => { modal.close(); resolve(v); };
     const ok = el("button", { class: "btn btn-danger", onclick: () => done(true) }, confirmLabel);
-    const backdrop = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === backdrop && done(false) },
-      el("div", { class: "dialog", role: "alertdialog" },
+    const modal = openModal(
+      el("div", { class: "dialog" },
         el("h2", {}, title),
         el("p", {}, message),
         el("div", { class: "dialog-actions" },
@@ -168,9 +233,9 @@ export function confirmDialog(title: string, message: string, confirmLabel = "De
           ok,
         ),
       ),
+      () => done(false),
+      "alertdialog",
     );
-    backdrop.addEventListener("keydown", (e) => e.key === "Escape" && done(false));
-    document.body.append(backdrop);
     ok.focus();
   });
 }

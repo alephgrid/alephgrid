@@ -73,7 +73,7 @@ fn materialized_results_keep_formula_values() {
     let info = t.wb.create_table_from_query("snap", "WITH s AS (SELECT id, double_amount FROM orders) SELECT * FROM s").unwrap();
     assert_eq!(info.row_count, 10);
     assert_eq!(scalar(&t.wb, "SELECT sum(double_amount) FROM snap"), json!(TOTAL));
-    let sheet = t.wb.create_sheet_from_query("S", "WITH s AS (SELECT sum(double_amount) AS total FROM orders) SELECT total FROM s", 10).unwrap();
+    let sheet = t.wb.create_sheet_from_query("S", "WITH s AS (SELECT sum(double_amount) AS total FROM orders) SELECT total FROM s", 10).unwrap().sheet;
     assert_eq!(cell_text(&t.wb, sheet.index, 1, 0).as_deref(), Some("900"));
 }
 

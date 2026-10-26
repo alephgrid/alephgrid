@@ -27,6 +27,11 @@ use ts_rs::TS;
 
 use crate::ws::Event;
 
+/// DuckDB handle types, re-exported by the engine's dependency.
+pub mod duckdb_handles {
+    pub use rowfinity_engine::duckdb_handles::{InterruptHandle, ProgressHandle};
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 pub struct Summary {
     pub tables: usize,
@@ -72,6 +77,12 @@ pub struct Workspace {
 
 pub struct WorkbookHandle {
     pub meta: Mutex<WorkbookMeta>,
+    /// Read the progress of, or interrupt, the statement running now; usable without
+    /// the engine lock (which that statement holds).
+    pub progress: duckdb_handles::ProgressHandle,
+    pub interrupt: std::sync::Arc<duckdb_handles::InterruptHandle>,
+    /// Client-chosen id of the long job running now (an import), for progress and cancel.
+    pub job: Mutex<Option<String>>,
     /// `None` once the workbook has been deleted and its database closed.
     engine: Mutex<Option<Workbook>>,
     deleted: AtomicBool,
@@ -140,14 +151,30 @@ impl WorkbookHandle {
 
 pub struct Config {
     pub data_dir: PathBuf,
+    /// Most rows copied from a table or query into a sheet.
+    pub sheet_copy_rows: usize,
     pub token: Option<String>,
     pub allow_sql: bool,
     pub memory_limit: Option<String>,
     pub threads: Option<usize>,
 }
 
+/// A file uploaded for preview, waiting for "Import" or "Cancel".
+#[derive(Debug, Clone)]
+pub struct Upload {
+    pub workbook: String,
+    pub path: PathBuf,
+    pub dir: PathBuf,
+    pub size_bytes: u64,
+    pub touched: std::time::Instant,
+}
+
+/// Unclaimed uploads are removed after this long.
+pub const UPLOAD_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 pub struct AppState {
     pub config: Config,
+    pub uploads: Mutex<HashMap<String, Upload>>,
     open: Mutex<HashMap<String, Arc<WorkbookHandle>>>,
     /// Workbooks being deleted: their database may still be open, so they cannot be reopened.
     closing: Mutex<HashSet<String>>,
@@ -201,6 +228,7 @@ impl AppState {
         Ok(Arc::new(AppState {
             config,
             open: Mutex::new(HashMap::new()),
+            uploads: Mutex::new(HashMap::new()),
             closing: Mutex::new(HashSet::new()),
             workspaces: Mutex::new(()),
             next_session: AtomicU64::new(1),
@@ -217,6 +245,39 @@ impl AppState {
 
     fn trash_dir(&self) -> PathBuf {
         self.config.data_dir.join(".trash")
+    }
+
+    /// Register a staged upload; also drops uploads nobody claimed within [`UPLOAD_TTL`].
+    pub fn add_upload(&self, upload: Upload) -> String {
+        let id = new_id();
+        let mut uploads = self.uploads.lock().unwrap();
+        uploads.retain(|_, u| {
+            let keep = u.touched.elapsed() < UPLOAD_TTL;
+            if !keep {
+                let _ = std::fs::remove_dir_all(&u.dir);
+            }
+            keep
+        });
+        uploads.insert(id.clone(), upload);
+        id
+    }
+
+    /// A staged upload of `workbook`, marked as used now.
+    pub fn upload(&self, workbook: &str, id: &str) -> Result<Upload> {
+        let mut uploads = self.uploads.lock().unwrap();
+        match uploads.get_mut(id) {
+            Some(u) if u.workbook == workbook && u.path.exists() => {
+                u.touched = std::time::Instant::now();
+                Ok(u.clone())
+            }
+            _ => bail!("this upload has expired or was already imported; choose the file again"),
+        }
+    }
+
+    pub fn remove_upload(&self, id: &str) {
+        if let Some(u) = self.uploads.lock().unwrap().remove(id) {
+            let _ = std::fs::remove_dir_all(u.dir);
+        }
     }
 
     /// A fresh private directory under `.uploads` or `.exports` for one request.
@@ -294,6 +355,9 @@ impl AppState {
         engine.configure(&settings)?;
         let (events, _) = broadcast::channel(256);
         let handle = Arc::new(WorkbookHandle {
+            progress: engine.progress_handle(),
+            interrupt: engine.interrupt_handle(),
+            job: Mutex::new(None),
             meta: Mutex::new(meta),
             engine: Mutex::new(Some(engine)),
             deleted: AtomicBool::new(false),
@@ -508,10 +572,7 @@ impl AppState {
     }
 
     fn save_workspaces(&self, list: &[Workspace]) -> Result<()> {
-        let tmp = self.workspaces_path().with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
-        std::fs::rename(tmp, self.workspaces_path())?;
-        Ok(())
+        write_atomic(&self.workspaces_path(), &serde_json::to_vec_pretty(list)?)
     }
 
     fn check_workspace(&self, id: Option<String>) -> Result<Option<String>> {
@@ -575,9 +636,18 @@ pub struct WorkbookPatch {
     pub starred: Option<bool>,
 }
 
-fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
-    let tmp = dir.join("workbook.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
-    std::fs::rename(tmp, dir.join("workbook.json"))?;
+/// Replace `path` atomically. Every write uses its own temporary file, so concurrent
+/// writers (a delete and a summary refresh, say) cannot take each other's file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", new_id()));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
+}
+
+fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
+    write_atomic(&dir.join("workbook.json"), &serde_json::to_vec_pretty(meta)?)
 }

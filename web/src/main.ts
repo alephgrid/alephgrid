@@ -1,5 +1,6 @@
 import "./styles.css";
-import { api, HttpError, initToken, setToken, uploadFile } from "./api";
+import { api, HttpError, initToken, setToken } from "./api";
+import { importFile } from "./importer";
 import { formatCount } from "./format";
 import type { WorkbookListing, Workspace } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
@@ -436,25 +437,21 @@ async function emptyTrash(): Promise<void> {
 
 async function openFile(file: File): Promise<void> {
   const wb = await api.create(file.name.replace(/\.[^.]+$/, ""), targetWorkspace());
-  const banner = el("div", { class: "upload-banner", role: "status" }, `Uploading ${file.name}…`);
-  document.body.append(banner);
-  const started = performance.now();
+  let result = null;
   try {
-    const result = await uploadFile(wb.id, file, (f) => {
-      banner.textContent = f < 1 ? `Uploading ${file.name} · ${Math.round(f * 100)}%` : `Importing ${file.name}…`;
-    });
-    const secs = ((performance.now() - started) / 1000).toFixed(1);
-    toast(result.kind === "table"
-      ? `${formatCount(result.table.row_count)} rows imported in ${secs}s`
-      : `${result.sheets.length} sheet(s) imported in ${secs}s`, "success");
-    navigate(`/w/${wb.id}`);
+    result = await importFile(wb.id, file);
   } catch (e) {
     toast((e as Error).message, "error");
+  }
+  if (!result) {
     // The workbook was created only for this file: remove it without a trash entry.
     await api.remove(wb.id).then(() => api.purge(wb.id)).catch(() => {});
-  } finally {
-    banner.remove();
+    return;
   }
+  toast(result.kind === "table"
+    ? `${formatCount(result.table.row_count)} rows imported`
+    : `${result.sheets.length} sheet(s) imported`, "success");
+  navigate(`/w/${wb.id}`);
 }
 
 async function createDemo(rows: number): Promise<void> {
