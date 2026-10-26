@@ -510,14 +510,17 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             loop {
                 while let Some(text) = outbox.pop() {
                     let len = text.len();
-                    let send = sink.send(Message::Text(text.into()));
+                    // A stop arriving mid-send must not drop this frame (it may be the
+                    // closing notice): keep sending it, now with a deadline.
+                    let mut send = std::pin::pin!(sink.send(Message::Text(text.into())));
                     let sent = match give_up {
-                        Some(t) => tokio::time::timeout_at(t, send).await.ok(),
+                        Some(t) => tokio::time::timeout_at(t, &mut send).await.ok(),
                         None => tokio::select! {
-                            r = send => Some(r),
+                            r = &mut send => Some(r),
                             _ = stop.changed() => {
-                                give_up = Some(tokio::time::Instant::now() + Duration::from_secs(2));
-                                None
+                                let t = tokio::time::Instant::now() + Duration::from_secs(2);
+                                give_up = Some(t);
+                                tokio::time::timeout_at(t, &mut send).await.ok()
                             }
                         },
                     };

@@ -161,6 +161,7 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/workbooks/{id}/runtime", get(runtime_status_handler).post(runtime_action))
         .route("/api/admin/resources", get(resources))
         .route("/api/admin/sessions", get(sessions))
+        .route("/api/admin/backups", post(create_backup))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
@@ -306,6 +307,18 @@ async fn runtime_action(
     })
     .await?;
     Ok(Json(status))
+}
+
+/// Back up every workbook into `<data-dir>/.backups/<time>/`, each from one snapshot while
+/// work continues. The path is chosen by the server, never by the client.
+async fn create_backup(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+    let out = blocking(move || {
+        let dest = state.config.data_dir.join(".backups").join(format!("backup-{}", rowfinity_engine::storage::now_ms()));
+        let manifest = crate::backup::backup_online(&state, &dest)?;
+        Ok(json!({ "path": dest, "manifest": manifest }))
+    })
+    .await?;
+    Ok(Json(out))
 }
 
 /// Open connections with their unsent bytes (to see slow clients).

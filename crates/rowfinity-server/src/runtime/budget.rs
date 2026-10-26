@@ -65,6 +65,8 @@ pub struct AllocationUsage {
     /// Settings read back from the workbook's DuckDB instance.
     pub duckdb_memory_limit: String,
     pub duckdb_threads: String,
+    /// Jobs waiting or running.
+    pub jobs: u64,
 }
 
 impl Ledger {

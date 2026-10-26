@@ -608,7 +608,13 @@ impl Controller {
             .iter()
             .map(|(k, h)| {
                 let (mem, threads) = h.limits().unwrap_or_default();
-                AllocationUsage { workbook: k.clone(), reservation: reservations.get(k).copied().unwrap_or_default(), duckdb_memory_limit: mem, duckdb_threads: threads }
+                AllocationUsage {
+                    workbook: k.clone(),
+                    reservation: reservations.get(k).copied().unwrap_or_default(),
+                    duckdb_memory_limit: mem,
+                    duckdb_threads: threads,
+                    jobs: h.sched.load() as u64,
+                }
             })
             .collect();
         ResourceUsage {

@@ -91,6 +91,15 @@ struct Cli {
     #[arg(long, env = "ROWFINITY_SHEET_COPY_ROWS", default_value_t = rowfinity_server::ws::SHEET_COPY_ROWS)]
     sheet_copy_rows: usize,
 
+    /// Back up every workbook in --data-dir into this new directory, then exit. Refuses
+    /// while a server uses the data directory (use POST /api/admin/backups then).
+    #[arg(long, value_name = "DIR")]
+    backup_to: Option<PathBuf>,
+
+    /// Restore the backup in this directory into --data-dir (which must be empty), then exit.
+    #[arg(long, value_name = "DIR", conflicts_with = "backup_to")]
+    restore_from: Option<PathBuf>,
+
     /// Serve the web UI from this directory instead of the embedded build.
     #[arg(long, env = "ROWFINITY_WEB_DIR")]
     web_dir: Option<PathBuf>,
@@ -102,6 +111,17 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "rowfinity=info,tower_http=warn".into()))
         .init();
     let cli = Cli::parse();
+
+    if let Some(dest) = &cli.backup_to {
+        let m = rowfinity_server::backup::backup_offline(&cli.data_dir, dest)?;
+        println!("backed up {} workbook(s) to {}", m.workbooks.len(), dest.display());
+        return Ok(());
+    }
+    if let Some(src) = &cli.restore_from {
+        let m = rowfinity_server::backup::restore(src, &cli.data_dir)?;
+        println!("restored {} workbook(s) into {}", m.workbooks.len(), cli.data_dir.display());
+        return Ok(());
+    }
 
     if cli.host != "127.0.0.1" && cli.host != "localhost" && cli.token.is_none() {
         tracing::warn!("serving on {} without --token: anyone who can reach this port can read and edit your data", cli.host);

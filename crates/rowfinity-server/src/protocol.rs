@@ -9,6 +9,7 @@ use rowfinity_engine::{
 };
 use ts_rs::{Config, TS};
 
+use crate::backup::{BackupEntry, BackupManifest};
 use crate::http::{ImportRequest, JobStatus, RuntimeAction, RuntimeRequest, UploadCreated};
 use crate::runtime::budget::{AllocationUsage, HostBudget, ResourceUsage};
 use crate::runtime::controller::RuntimeStatus;
@@ -118,7 +119,7 @@ pub fn bindings() -> String {
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
         Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,
-        HostBudget, AllocationUsage, ResourceUsage,
+        HostBudget, AllocationUsage, ResourceUsage, BackupEntry, BackupManifest,
     );
     out.push_str("\n/** Result type of each operation. */\nexport interface Results {\n");
     for (op, ty) in RESULTS {

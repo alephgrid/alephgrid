@@ -296,9 +296,21 @@ export type AllocationUsage = { workbook: string, reservation: Reservation,
 /**
  * Settings read back from the workbook's DuckDB instance.
  */
-duckdb_memory_limit: string, duckdb_threads: string, };
+duckdb_memory_limit: string, duckdb_threads: string, 
+/**
+ * Jobs waiting or running.
+ */
+jobs: number, };
 
 export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationUsage>, reserved: Reservation, upload_bytes: number, upload_budget: number, };
+
+export type BackupEntry = { id: string, name: string, 
+/**
+ * Revision the copy holds.
+ */
+revision: number, storage_format: number, bytes: number, sha256: string, };
+
+export type BackupManifest = { format: number, created_at_ms: number, server_version: string, workbooks: Array<BackupEntry>, };
 
 /** Result type of each operation. */
 export interface Results {
