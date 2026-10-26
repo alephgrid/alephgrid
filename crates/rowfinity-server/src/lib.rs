@@ -4,5 +4,6 @@
 pub mod http;
 pub mod protocol;
 pub mod runtime;
+pub mod sched;
 pub mod state;
 pub mod ws;

@@ -226,10 +226,14 @@ impl Sheets {
         self.check_index(index)?;
         let m = self.model()?;
         let ws = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?;
-        let columns = column_count.min(16_384);
-        let mut rows = Vec::with_capacity(row_count as usize);
-        for r in row_start..row_start.saturating_add(row_count.min(5_000)) {
-            let mut out: Vec<Option<SheetCell>> = vec![None; columns as usize];
+        // Clamp before allocating: rows by the fetch limits for this width, the range at
+        // the grid's edge.
+        let columns = column_count.min(MAX_COLUMNS);
+        let row_count = crate::limits::fetch_rows(row_count as u64, columns as usize) as u32;
+        let end = row_start.saturating_add(row_count).min(MAX_ROWS);
+        let mut rows = Vec::with_capacity(end.saturating_sub(row_start) as usize);
+        for r in row_start..end {
+            let mut out: Vec<Option<SheetCell>> = Vec::new();
             let mut any = false;
             for (c, _) in ws.sheet_data.cells_in_row(r as i32 + 1) {
                 let ci = (c - 1) as u32;
@@ -248,6 +252,10 @@ impl Sheets {
                     _ => Align::Left,
                 };
                 let input = (input != display).then_some(input);
+                // Rows are only as wide as their last cell; the client pads.
+                if out.len() <= ci as usize {
+                    out.resize(ci as usize + 1, None);
+                }
                 out[ci as usize] = Some(SheetCell(display, align, input));
                 any = true;
             }
@@ -265,7 +273,7 @@ impl Sheets {
             return Ok(());
         }
         if inputs.len() > MAX_BULK_CELLS {
-            bail!("too many cells in one edit (max {MAX_BULK_CELLS})");
+            bail!(crate::limits::TooLarge(format!("too many cells in one edit (max {MAX_BULK_CELLS})")));
         }
         for i in inputs {
             if i.row >= MAX_ROWS || i.column >= MAX_COLUMNS {

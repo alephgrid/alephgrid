@@ -32,6 +32,7 @@ use tokio::sync::broadcast;
 use ts_rs::TS;
 
 use crate::runtime::budget::HostBudget;
+use crate::sched::{Class, JobError, Key, Lane, Scheduler};
 use crate::runtime::controller::{operation_id, Controller, StageHook, StopReason};
 use crate::runtime::{ComputePolicy, IsolationClass, OwnershipAssignment, ProviderKind, Reservation};
 use crate::ws::Event;
@@ -115,6 +116,9 @@ pub struct WorkbookHandle {
     pub progress: duckdb_handles::ProgressHandle,
     pub interrupt: Arc<duckdb_handles::InterruptHandle>,
     reader_interrupts: Vec<Arc<duckdb_handles::InterruptHandle>>,
+    reader_progress: Vec<duckdb_handles::ProgressHandle>,
+    /// Orders and bounds the work on this workbook (see `sched.rs`).
+    pub sched: Arc<Scheduler>,
     /// Client-chosen id of the long job running now (an import), for progress and cancel.
     pub job: Mutex<Option<String>>,
     engine: Mutex<Option<Workbook>>,
@@ -156,11 +160,14 @@ impl WorkbookHandle {
         let readers: Vec<Reader> = (0..readers).map(|_| engine.reader()).collect::<Result<_>>()?;
         let control = engine.reader()?;
         let (events, _) = broadcast::channel(256);
+        let reader_interrupts: Vec<_> = readers.iter().map(|r| r.interrupt_handle()).collect();
         Ok(WorkbookHandle {
             id: meta.id.clone(),
             progress: engine.progress_handle(),
             interrupt: engine.interrupt_handle(),
-            reader_interrupts: readers.iter().map(|r| r.interrupt_handle()).collect(),
+            sched: Scheduler::new(engine.interrupt_handle(), reader_interrupts.clone(), crate::sched::Limits::default()),
+            reader_interrupts,
+            reader_progress: readers.iter().map(|r| r.progress_handle()).collect(),
             job: Mutex::new(None),
             meta: Mutex::new(meta),
             engine: Mutex::new(Some(engine)),
@@ -228,6 +235,114 @@ impl WorkbookHandle {
         }
     }
 
+    /// Run `f` on reader `slot` (granted by the scheduler).
+    pub fn with_reader_slot<T>(&self, slot: usize, f: impl FnOnce(&Reader) -> Result<T>) -> Result<T> {
+        let _active = self.enter()?;
+        let guard = self.readers[slot.min(self.readers.len() - 1)].lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(r) => f(r),
+            None => bail!(self.closed_message()),
+        }
+    }
+
+    /// Progress of the statement running on a slot.
+    pub fn progress_of(&self, lane: Lane, slot: usize) -> rowfinity_engine::duckdb_handles::QueryProgress {
+        match lane {
+            Lane::Write => self.progress.query_progress(),
+            Lane::Read => self.reader_progress[slot.min(self.reader_progress.len() - 1)].query_progress(),
+        }
+    }
+
+    /// Run a job through the scheduler: wait for a slot (until `deadline`, or `cancel`),
+    /// run `work` on that slot's connection on the blocking pool, interrupt it if the
+    /// deadline passes or it is cancelled while running. The slot stays taken until the
+    /// work has really finished, even if the caller stops waiting. `progress` is called
+    /// about twice a second while a job that reports progress runs.
+    pub async fn run<T: Send + 'static>(
+        self: &Arc<Self>,
+        job: Job,
+        cancel: Option<tokio::sync::watch::Receiver<bool>>,
+        progress: Option<Box<dyn Fn(f64) + Send>>,
+        work: Work<T>,
+    ) -> Result<T> {
+        let ticket = self.enqueue(&job, work.lane())?;
+        self.run_queued(ticket, job, cancel, progress, work).await
+    }
+
+    /// Join the queue now (so requests of one connection keep their order); run later with
+    /// [`WorkbookHandle::run_queued`].
+    pub fn enqueue(&self, job: &Job, lane: Lane) -> Result<crate::sched::Ticket> {
+        self.check_open()?;
+        Ok(self.sched.submit(job.key, lane, job.class)?)
+    }
+
+    pub async fn run_queued<T: Send + 'static>(
+        self: &Arc<Self>,
+        mut ticket: crate::sched::Ticket,
+        job: Job,
+        mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
+        progress: Option<Box<dyn Fn(f64) + Send>>,
+        work: Work<T>,
+    ) -> Result<T> {
+        let cancelled = |c: &mut Option<tokio::sync::watch::Receiver<bool>>| {
+            let mut c = c.clone();
+            async move {
+                match c.as_mut() {
+                    Some(rx) => {
+                        while !*rx.borrow() {
+                            if rx.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }
+        };
+        let slot = tokio::select! {
+            slot = ticket.granted() => slot,
+            _ = tokio::time::sleep_until(job.deadline.into()) => bail!(JobError::DeadlineExceeded),
+            _ = cancelled(&mut cancel) => bail!(JobError::Cancelled),
+        };
+        let lane = work.lane();
+        let h = self.clone();
+        let mut task = tokio::task::spawn_blocking(move || {
+            // Holding the ticket here frees the slot only after the work is done.
+            let _ticket = ticket;
+            match work {
+                Work::Write(f) => h.with_engine(f),
+                Work::Read(f) => h.with_reader_slot(slot, f),
+            }
+        });
+        let mut stopped: Option<JobError> = None;
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        tick.tick().await;
+        let result = loop {
+            tokio::select! {
+                r = &mut task => break r,
+                _ = tokio::time::sleep_until(job.deadline.into()), if stopped.is_none() => {
+                    stopped = Some(JobError::DeadlineExceeded);
+                    self.sched.interrupt(job.key);
+                }
+                _ = cancelled(&mut cancel), if stopped.is_none() => {
+                    stopped = Some(JobError::Cancelled);
+                    self.sched.interrupt(job.key);
+                }
+                _ = tick.tick(), if progress.is_some() => {
+                    if let Some(p) = self.progress_of(lane, slot).percentage() {
+                        (progress.as_ref().unwrap())(p);
+                    }
+                }
+            }
+        };
+        let result = result.map_err(|e| anyhow!("internal error: {e}"))?;
+        match (result, stopped) {
+            // Interrupted: report why. A job that finished anyway keeps its result.
+            (Err(e), Some(why)) if format!("{e:#}").contains("INTERRUPT") => Err(anyhow::Error::new(why)),
+            (r, _) => r,
+        }
+    }
+
     fn with_control<T>(&self, f: impl FnOnce(&Reader) -> Result<T>) -> Result<T> {
         let guard = self.control.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
@@ -244,9 +359,9 @@ impl WorkbookHandle {
         self.closed.lock().unwrap().is_some()
     }
 
-    /// No operation running and no job (used with the controller's reference count).
+    /// No operation running or waiting and no job (used with the controller's reference count).
     pub fn is_quiet(&self) -> bool {
-        self.active.load(Ordering::SeqCst) == 0 && self.job.lock().unwrap().is_none()
+        self.active.load(Ordering::SeqCst) == 0 && self.job.lock().unwrap().is_none() && self.sched.load() == 0
     }
 
     pub fn active(&self) -> usize {
@@ -364,6 +479,32 @@ impl WorkbookHandle {
     }
 }
 
+/// Which scheduler queue a job joins and when it must be done.
+#[derive(Debug, Clone, Copy)]
+pub struct Job {
+    pub key: Key,
+    pub class: Class,
+    pub deadline: std::time::Instant,
+}
+
+pub type WriteFn<T> = Box<dyn FnOnce(&mut Workbook) -> Result<T> + Send>;
+pub type ReadFn<T> = Box<dyn FnOnce(&Reader) -> Result<T> + Send>;
+
+/// The work of a job, on the writer or on a reader.
+pub enum Work<T> {
+    Write(WriteFn<T>),
+    Read(ReadFn<T>),
+}
+
+impl<T> Work<T> {
+    pub fn lane(&self) -> Lane {
+        match self {
+            Work::Write(_) => Lane::Write,
+            Work::Read(_) => Lane::Read,
+        }
+    }
+}
+
 pub struct Config {
     pub data_dir: PathBuf,
     /// Most rows copied from a table or query into a sheet.
@@ -387,6 +528,18 @@ pub struct Config {
     pub shutdown_grace: Duration,
     /// Called at each allocation start stage (tests use it to delay or fail starts).
     pub stage_hook: Option<StageHook>,
+    /// Largest WebSocket message a client may send.
+    pub max_message_bytes: usize,
+    /// Largest file upload.
+    pub max_upload_bytes: u64,
+    /// Default and longest time an interactive request may take (waiting included).
+    pub request_timeout: Duration,
+    /// Default and longest time a bulk job (import, query, sort, copy) may take.
+    pub job_timeout: Duration,
+    /// A session's unsent replies and events beyond this pause reading its requests.
+    pub outbox_pause_bytes: usize,
+    /// A session whose unsent data passes this is closed (the client is not reading).
+    pub outbox_max_bytes: usize,
 }
 
 impl Config {
@@ -404,6 +557,12 @@ impl Config {
             view_ttl: Duration::from_secs(900),
             shutdown_grace: Duration::from_secs(30),
             stage_hook: None,
+            max_message_bytes: 16 << 20,
+            max_upload_bytes: 100 << 30,
+            request_timeout: Duration::from_secs(30),
+            job_timeout: Duration::from_secs(3600),
+            outbox_pause_bytes: 16 << 20,
+            outbox_max_bytes: 64 << 20,
         }
     }
 }
@@ -430,6 +589,8 @@ pub struct AppState {
     /// Exclusive lock on the data directory: one server per data directory.
     _dir_lock: File,
     pub shutting_down: AtomicBool,
+    /// Open WebSocket sessions (for `/api/admin/sessions`).
+    pub sessions: Mutex<HashMap<u64, crate::ws::SessionInfo>>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -550,6 +711,7 @@ impl AppState {
             next_session: AtomicU64::new(1),
             _dir_lock: dir_lock,
             shutting_down: AtomicBool::new(false),
+            sessions: Mutex::new(HashMap::new()),
         }))
     }
 

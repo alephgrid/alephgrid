@@ -3,6 +3,11 @@
 
 use serde_json::Value;
 
+/// A request exceeded a size limit; the message names the limit.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct TooLarge(pub String);
+
 /// Most rows in one fetch.
 pub const MAX_FETCH_ROWS: u64 = 5_000;
 /// Most cells (rows × columns) in one fetch; wide views get fewer rows.

@@ -343,6 +343,59 @@ pub trait RuntimeProvider: Send + Sync {
     fn reconcile(&self, record: &RuntimeAllocation, workbook_dir: &Path) -> Result<bool>;
 }
 
+// --------------------------------------------------------- control store
+
+/// Write `bytes` to `path` through a temporary file, synced, then renamed.
+pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{n}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        crate::state::fault_at("write_durably", path)?;
+        let mut f = std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+        if let Some(dir) = path.parent() {
+            rowfinity_engine::storage::sync_dir(dir);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Store a spec under its id. A spec file is never rewritten: an existing file must hold
+/// exactly this spec.
+pub fn store_spec(control: &Path, spec: &RuntimeSpec) -> Result<String> {
+    let id = spec.id();
+    let dir = control.join("specs");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.json"));
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let stored: RuntimeSpec = serde_json::from_slice(&bytes).context("unreadable runtime spec")?;
+            if &stored != spec || stored.id() != id {
+                bail!("runtime spec {id} on disk does not match its id");
+            }
+        }
+        Err(_) => write_durably(&path, &serde_json::to_vec_pretty(spec)?)?,
+    }
+    Ok(id)
+}
+
+pub fn load_spec(control: &Path, id: &str) -> Result<RuntimeSpec> {
+    let path = control.join("specs").join(format!("{id}.json"));
+    let spec: RuntimeSpec = serde_json::from_slice(&std::fs::read(&path).with_context(|| format!("runtime spec {id} is missing"))?)?;
+    if spec.id() != id {
+        bail!("runtime spec {id} on disk does not match its id");
+    }
+    Ok(spec)
+}
+
 #[cfg(test)]
 mod tests {
     use super::AllocationState::*;
@@ -410,55 +463,3 @@ mod tests {
     }
 }
 
-// --------------------------------------------------------- control store
-
-/// Write `bytes` to `path` through a temporary file, synced, then renamed.
-pub fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = path.with_extension(format!("{}.{n}.tmp", std::process::id()));
-    let result = (|| -> Result<()> {
-        crate::state::fault_at("write_durably", path)?;
-        let mut f = std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-        if let Some(dir) = path.parent() {
-            rowfinity_engine::storage::sync_dir(dir);
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
-/// Store a spec under its id. A spec file is never rewritten: an existing file must hold
-/// exactly this spec.
-pub fn store_spec(control: &Path, spec: &RuntimeSpec) -> Result<String> {
-    let id = spec.id();
-    let dir = control.join("specs");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{id}.json"));
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            let stored: RuntimeSpec = serde_json::from_slice(&bytes).context("unreadable runtime spec")?;
-            if &stored != spec || stored.id() != id {
-                bail!("runtime spec {id} on disk does not match its id");
-            }
-        }
-        Err(_) => write_durably(&path, &serde_json::to_vec_pretty(spec)?)?,
-    }
-    Ok(id)
-}
-
-pub fn load_spec(control: &Path, id: &str) -> Result<RuntimeSpec> {
-    let path = control.join("specs").join(format!("{id}.json"));
-    let spec: RuntimeSpec = serde_json::from_slice(&std::fs::read(&path).with_context(|| format!("runtime spec {id} is missing"))?)?;
-    if spec.id() != id {
-        bail!("runtime spec {id} on disk does not match its id");
-    }
-    Ok(spec)
-}

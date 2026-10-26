@@ -226,3 +226,25 @@ fn copies_into_sheets_are_bounded_and_say_so() {
     assert_eq!((whole.rows_copied, whole.total_rows, whole.truncated), (250, Some(250), false));
     assert_eq!(cell_text(&t.wb, whole.sheet.index, 250, 0).as_deref(), Some("249"));
 }
+
+/// 3.02: requested dimensions are clamped before anything is allocated. Before the fix,
+/// `row_count = u32::MAX` reserved room for 4 billion rows (about 100 GB of address space,
+/// an abort where the OS does not overcommit), and every non-empty row was materialized
+/// at the requested width: 300 rows × 16,384 columns kept 4.9 million cells.
+#[test]
+fn oversized_sheet_fetches_are_clamped_before_allocation() {
+    let mut t = TempWb::new();
+    t.wb.with_sheets(|s| s.create("S")).unwrap();
+    let inputs: Vec<SheetInput> = (0..300).map(|r| sheet_input(r, 0, &r.to_string())).chain([sheet_input(3, 2, "x")]).collect();
+    t.wb.with_sheets(|s| s.set(0, &inputs)).unwrap();
+    let b = t.wb.sheets().fetch(0, 0, u32::MAX, u32::MAX).unwrap();
+    assert!(b.rows.capacity() <= crate::limits::MAX_FETCH_ROWS as usize, "reserved {} rows", b.rows.capacity());
+    let cells: usize = b.rows.iter().map(|r| r.len()).sum();
+    assert!(cells as u64 <= crate::limits::MAX_FETCH_CELLS, "{cells} cells");
+    assert_eq!(b.rows[0][0].as_ref().map(|c| c.0.as_str()), Some("0"));
+    let b = t.wb.sheets().fetch(0, u32::MAX - 1, u32::MAX, 3).unwrap();
+    assert!(b.rows.len() <= 1, "start + count saturates at the grid edge");
+    let b = t.wb.sheets().fetch(0, 0, 10, 3).unwrap();
+    assert_eq!(b.rows.len(), 10);
+    assert_eq!(b.rows[3][2].as_ref().map(|c| c.0.as_str()), Some("x"));
+}

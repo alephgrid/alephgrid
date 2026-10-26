@@ -142,6 +142,9 @@ pub struct Ws {
     pub session: u64,
     /// Events received while waiting for replies.
     pub events: Vec<Value>,
+    /// Replies received while waiting for another one.
+    pub replies: std::collections::HashMap<u64, Value>,
+    pub hello: Value,
 }
 
 impl Ws {
@@ -151,10 +154,11 @@ impl Ws {
 
     pub async fn try_connect(addr: SocketAddr, workbook: &str) -> Result<Ws, String> {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/{workbook}")).await.map_err(|e| e.to_string())?;
-        let mut ws = Ws { stream, next_id: 1, session: 0, events: vec![] };
+        let mut ws = Ws { stream, next_id: 1, session: 0, events: vec![], replies: Default::default(), hello: Value::Null };
         let hello = ws.next_message().await.ok_or("closed before hello")?;
         assert_eq!(hello["event"], "hello");
         ws.session = hello["session"].as_u64().unwrap();
+        ws.hello = hello;
         Ok(ws)
     }
 
@@ -185,7 +189,48 @@ impl Ws {
             if msg["id"].as_u64() == Some(id) {
                 return if msg["ok"] == true { Ok(msg["result"].clone()) } else { Err(msg["error"].as_str().unwrap_or("").to_string()) };
             }
+            if let Some(other) = msg["id"].as_u64() {
+                self.replies.insert(other, msg);
+            }
         }
+    }
+
+    /// Send a request frame (`params` may include `mutation_id`, `timeout_ms`) and return
+    /// its id without waiting.
+    pub async fn send(&mut self, op: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut frame = params.as_object().cloned().unwrap_or_default();
+        frame.insert("id".into(), id.into());
+        frame.insert("op".into(), op.into());
+        self.stream.send(Message::Text(Value::Object(frame).to_string().into())).await.unwrap();
+        id
+    }
+
+    /// The whole reply frame for request `id`, waiting for it (None if the connection closed).
+    pub async fn reply(&mut self, id: u64) -> Option<Value> {
+        if let Some(r) = self.replies.remove(&id) {
+            return Some(r);
+        }
+        loop {
+            let msg = self.next_message().await?;
+            if msg.get("event").is_some() {
+                self.events.push(msg);
+                continue;
+            }
+            match msg["id"].as_u64() {
+                Some(i) if i == id => return Some(msg),
+                Some(i) => {
+                    self.replies.insert(i, msg);
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Ids of replies received so far, in arrival order is not kept; use `reply` per id.
+    pub fn buffered(&self) -> usize {
+        self.replies.len()
     }
 
     /// Send a frame without waiting for its reply.

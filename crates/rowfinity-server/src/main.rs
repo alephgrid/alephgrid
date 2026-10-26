@@ -63,6 +63,22 @@ struct Cli {
     #[arg(long, env = "ROWFINITY_VIEW_TTL", default_value_t = 900)]
     view_ttl: u64,
 
+    /// Largest file upload, e.g. "100GB".
+    #[arg(long, env = "ROWFINITY_MAX_UPLOAD", value_parser = parse_size, default_value = "100GiB")]
+    max_upload: u64,
+
+    /// Largest WebSocket message a client may send (edits, pastes).
+    #[arg(long, env = "ROWFINITY_MAX_MESSAGE", value_parser = parse_size, default_value = "16MiB")]
+    max_message: u64,
+
+    /// Seconds an interactive request (fetch, edit) may take, waiting included.
+    #[arg(long, env = "ROWFINITY_REQUEST_TIMEOUT", default_value_t = 30)]
+    request_timeout: u64,
+
+    /// Seconds a bulk job (import, query, sort, copy, export) may take.
+    #[arg(long, env = "ROWFINITY_JOB_TIMEOUT", default_value_t = 3600)]
+    job_timeout: u64,
+
     /// Seconds running work may take to finish on shutdown before it is interrupted.
     #[arg(long, env = "ROWFINITY_SHUTDOWN_GRACE", default_value_t = 30)]
     shutdown_grace: u64,
@@ -102,6 +118,10 @@ async fn main() -> Result<()> {
     config.idle_timeout = Duration::from_secs(cli.idle_timeout);
     config.view_ttl = Duration::from_secs(cli.view_ttl);
     config.shutdown_grace = Duration::from_secs(cli.shutdown_grace);
+    config.max_upload_bytes = cli.max_upload;
+    config.max_message_bytes = cli.max_message as usize;
+    config.request_timeout = Duration::from_secs(cli.request_timeout.max(1));
+    config.job_timeout = Duration::from_secs(cli.job_timeout.max(1));
     let state = AppState::new(config)?;
     let janitor = rowfinity_server::state::start_janitor(&state);
 
@@ -135,7 +155,9 @@ async fn main() -> Result<()> {
     println!("\n  Rowfinity is running → http://{shown_host}:{}/{open_path}{token}\n  Data: {}\n", cli.port, cli.data_dir.display());
 
     let stopping = state.clone();
-    axum::serve(listener, app)
+    let (begun_tx, begun_rx) = tokio::sync::oneshot::channel::<()>();
+    let grace = Duration::from_secs(cli.shutdown_grace) + Duration::from_secs(10);
+    let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
             // Stop admitting work and drain every workbook now: open WebSocket sessions end
@@ -148,8 +170,16 @@ async fn main() -> Result<()> {
                 tracing::warn!("second signal: exiting without waiting for running work (committed changes are safe)");
                 std::process::exit(130);
             });
-        })
-        .await?;
+            let _ = begun_tx.send(());
+        });
+    // Connections that never close (a client holding its socket) must not keep the
+    // process alive: once shutdown began, wait at most the grace period plus 10 s.
+    tokio::select! {
+        r = serve => r?,
+        _ = async { let _ = begun_rx.await; tokio::time::sleep(grace).await } => {
+            tracing::warn!("connections still open after the grace period; stopping anyway");
+        }
+    }
     janitor.abort();
     let s = state.clone();
     tokio::task::spawn_blocking(move || s.checkpoint_all()).await?;

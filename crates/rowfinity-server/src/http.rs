@@ -9,16 +9,18 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
-use futures_util::TryStreamExt;
+use futures_util::StreamExt;
 use rowfinity_engine::{ColumnType, ExportFormat, ImportProblem, UploadPreview, ViewSpec};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::io::ReaderStream;
 
 use crate::runtime::{FailureKind, RuntimeFailure};
+use crate::sched::Class;
+use crate::state::Work;
 use crate::state::{Shared, WorkbookPatch};
 use crate::ws;
 
@@ -49,6 +51,17 @@ impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         if let Some(f) = e.chain().find_map(|c| c.downcast_ref::<RuntimeFailure>()) {
             return ApiError(runtime_status(f.kind), f.message.clone(), None);
+        }
+        if let Some(j) = e.chain().find_map(|c| c.downcast_ref::<crate::sched::JobError>()) {
+            let status = match j {
+                crate::sched::JobError::Overloaded(_) => StatusCode::SERVICE_UNAVAILABLE,
+                crate::sched::JobError::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
+                crate::sched::JobError::Cancelled => StatusCode::CONFLICT,
+            };
+            return ApiError::new(status, j.to_string());
+        }
+        if e.chain().any(|c| c.downcast_ref::<rowfinity_engine::limits::TooLarge>().is_some()) {
+            return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, format!("{e:#}"));
         }
         let problem = e.chain().find_map(|c| c.downcast_ref::<ImportProblem>()).cloned().map(Box::new);
         let message = match &problem {
@@ -147,6 +160,7 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/workbooks/{id}/jobs/{job}", get(job_status).delete(cancel_job))
         .route("/api/workbooks/{id}/runtime", get(runtime_status_handler).post(runtime_action))
         .route("/api/admin/resources", get(resources))
+        .route("/api/admin/sessions", get(sessions))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
@@ -189,6 +203,9 @@ async fn config(State(state): State<Shared>) -> Json<serde_json::Value> {
         "auth_required": state.config.token.is_some(),
         "allow_sql": state.config.allow_sql,
         "sheet_copy_rows": state.config.sheet_copy_rows,
+        "max_message_bytes": state.config.max_message_bytes,
+        "max_upload_bytes": state.config.max_upload_bytes,
+        "max_edit_cells": rowfinity_engine::limits::MAX_EDIT_CELLS,
     }))
 }
 
@@ -291,6 +308,18 @@ async fn runtime_action(
     Ok(Json(status))
 }
 
+/// Open connections with their unsent bytes (to see slow clients).
+async fn sessions(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+    let list: Vec<serde_json::Value> = state
+        .sessions
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, s)| json!({ "session": id, "workbook": s.workbook, "outbox_bytes": s.outbox.bytes(), "peak_outbox_bytes": s.outbox.peak() }))
+        .collect();
+    Ok(Json(list))
+}
+
 async fn resources(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
     Ok(Json(blocking(move || Ok(state.controller.usage())).await?))
 }
@@ -337,24 +366,39 @@ async fn import_file(
     State(state): State<Shared>,
     Path(id): Path<String>,
     Query(q): Query<ImportQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
-    let (scratch, path, _) = receive(&state, &file_name, body).await?;
-
-    let h2 = h.clone();
+    let (scratch, path, size) = receive(&state, &file_name, &headers, body).await?;
     let import_path = path.clone();
-    let result = blocking(move || {
-        let imported = h2.with_engine(|wb| wb.import_any(&import_path, q.table.as_deref()))?;
-        h2.refresh_summary()?;
-        Ok(imported)
-    })
-    .await;
+    let result = h
+        .run(
+            http_job(Class::Bulk, &state),
+            None,
+            None,
+            Work::Write(Box::new(move |wb| {
+                let imported = wb.import_any(&import_path, q.table.as_deref())?;
+                Ok((imported, wb.revision()?))
+            })),
+        )
+        .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
-    let imported = result?;
-    let _ = h.events.send(ws::Event::TablesChanged { origin: 0 });
+    state.controller.release_upload(size);
+    let (imported, revision) = result?;
+    let h2 = h.clone();
+    let _ = blocking(move || h2.refresh_summary()).await;
+    let _ = h.events.send(ws::Event::TablesChanged { origin: 0, revision });
     Ok(Json(imported))
+}
+
+/// A scheduler job for an HTTP request (session 0, a request number of its own).
+fn http_job(class: Class, state: &Shared) -> crate::state::Job {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(1);
+    let timeout = if class == Class::Bulk { state.config.job_timeout } else { state.config.request_timeout };
+    crate::state::Job { key: (0, N.fetch_add(1, Ordering::Relaxed)), class, deadline: std::time::Instant::now() + timeout }
 }
 
 fn upload_name(filename: &str) -> ApiResult<String> {
@@ -367,27 +411,59 @@ fn upload_name(filename: &str) -> ApiResult<String> {
 
 /// Stream a request body into its own scratch directory. Same-name uploads cannot
 /// collide, the file keeps its name (DuckDB picks the reader from it), and a broken
-/// upload leaves nothing behind.
-async fn receive(state: &Shared, file_name: &str, body: Body) -> ApiResult<(PathBuf, PathBuf, u64)> {
+/// upload leaves nothing behind. The size is checked against `--max-upload-bytes` before
+/// reading (from `Content-Length`) and while streaming, and every byte is reserved from
+/// the temporary-disk budget as it arrives. On success the caller owns the reservation.
+async fn receive(state: &Shared, file_name: &str, headers: &HeaderMap, body: Body) -> ApiResult<(PathBuf, PathBuf, u64)> {
+    let max = state.config.max_upload_bytes;
+    let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    if let Some(n) = declared.filter(|&n| n > max) {
+        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_big(n, max)));
+    }
     let scratch = state.scratch_dir(".uploads")?;
     let path = scratch.join(file_name);
+    let mut reserved = 0u64;
     let received = async {
-        let mut file = tokio::fs::File::create(&path).await?;
-        let stream = body.into_data_stream().map_err(std::io::Error::other);
-        let mut reader = StreamReader::new(stream);
-        let n = tokio::io::copy(&mut reader, &mut file).await?;
-        file.flush().await?;
-        file.sync_all().await?;
-        Ok::<u64, std::io::Error>(n)
+        let mut file = tokio::fs::File::create(&path).await.map_err(io_error)?;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")))?;
+            let len = chunk.len() as u64;
+            if reserved + len > max {
+                return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_big(reserved + len, max)));
+            }
+            if let Err(left) = state.controller.reserve_upload(len) {
+                return Err(ApiError::new(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    format!("the server's space for uploads is full ({} MiB left); try again later or ask the administrator to raise --temp-budget", left >> 20),
+                ));
+            }
+            reserved += len;
+            crate::state::fault_at("upload_write", &path).map_err(|e| ApiError::new(StatusCode::INSUFFICIENT_STORAGE, format!("{e:#}")))?;
+            file.write_all(&chunk).await.map_err(io_error)?;
+        }
+        file.flush().await.map_err(io_error)?;
+        file.sync_all().await.map_err(io_error)?;
+        Ok::<(), ApiError>(())
     }
     .await;
     match received {
-        Ok(n) => Ok((scratch, path, n)),
+        Ok(()) => Ok((scratch, path, reserved)),
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&scratch).await;
-            Err(ApiError::new(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")))
+            state.controller.release_upload(reserved);
+            Err(e)
         }
     }
+}
+
+fn too_big(n: u64, max: u64) -> String {
+    format!("the file is too large ({} MiB; the limit is {} MiB)", n.div_ceil(1 << 20), max >> 20)
+}
+
+fn io_error(e: std::io::Error) -> ApiError {
+    let status = if e.raw_os_error() == Some(28) { StatusCode::INSUFFICIENT_STORAGE } else { StatusCode::BAD_REQUEST };
+    ApiError::new(status, format!("upload interrupted: {e}"))
 }
 
 #[derive(Deserialize)]
@@ -400,13 +476,14 @@ async fn stage_upload(
     State(state): State<Shared>,
     Path(id): Path<String>,
     Query(q): Query<UploadQuery>,
+    headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
-    let (dir, path, size_bytes) = receive(&state, &file_name, body).await?;
+    let (dir, path, size_bytes) = receive(&state, &file_name, &headers, body).await?;
     let p = path.clone();
-    let preview = blocking(move || h.with_engine(|wb| wb.preview_any(&p, &[]))).await;
+    let preview = h.run(http_job(Class::Bulk, &state), None, None, Work::Write(Box::new(move |wb| wb.preview_any(&p, &[])))).await;
     match preview {
         Ok(preview) => {
             let upload_id = state.add_upload(crate::state::Upload {
@@ -420,7 +497,8 @@ async fn stage_upload(
         }
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&dir).await;
-            Err(e)
+            state.controller.release_upload(size_bytes);
+            Err(e.into())
         }
     }
 }
@@ -432,7 +510,8 @@ async fn preview_upload(
 ) -> ApiResult<impl IntoResponse> {
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
-    Ok(Json(blocking(move || h.with_engine(|wb| wb.preview_any(&u.path, &req.types))).await?))
+    let work = Work::Write(Box::new(move |wb: &mut rowfinity_engine::Workbook| wb.preview_any(&u.path, &req.types)));
+    Ok(Json(h.run(http_job(Class::Bulk, &state), None, None, work).await?))
 }
 
 /// Import a staged upload. On failure the upload is kept, so the user can change column
@@ -446,20 +525,17 @@ async fn import_upload(
     let u = state.upload(&id, &upload)?;
     let h2 = h.clone();
     let job = req.job.clone();
-    let result = blocking(move || {
-        h2.with_engine(|wb| {
-            *h2.job.lock().unwrap() = job;
-            let out = wb.import_any_with(&u.path, req.table.as_deref(), &req.types);
-            *h2.job.lock().unwrap() = None;
-            out
-        })
-    })
-    .await;
-    let imported = result?;
+    let work = Work::Write(Box::new(move |wb: &mut rowfinity_engine::Workbook| {
+        *h2.job.lock().unwrap() = job;
+        let out = wb.import_any_with(&u.path, req.table.as_deref(), &req.types).and_then(|i| Ok((i, wb.revision()?)));
+        *h2.job.lock().unwrap() = None;
+        out
+    }));
+    let (imported, revision) = h.run(http_job(Class::Bulk, &state), None, None, work).await?;
     state.remove_upload(&upload);
     let h3 = h.clone();
     let _ = blocking(move || h3.refresh_summary()).await;
-    let _ = h.events.send(ws::Event::TablesChanged { origin: 0 });
+    let _ = h.events.send(ws::Event::TablesChanged { origin: 0, revision });
     Ok(Json(imported))
 }
 
@@ -515,15 +591,20 @@ async fn export(
     let path = scratch.join("export");
     let p = path.clone();
     let format = q.format;
-    let written = blocking(move || {
-        h.with_engine(|wb| {
-            let view = wb.open_view(spec)?;
-            let out = wb.export_view(view.view_id, &p, format);
-            wb.close_view(view.view_id);
-            out
-        })
-    })
-    .await;
+    let written = h
+        .run(
+            http_job(Class::Bulk, &state),
+            None,
+            None,
+            Work::Read(Box::new(move |r: &rowfinity_engine::Reader| {
+                let view = r.open_view(spec)?;
+                let out = r.export_view(view.view_id, &p, format);
+                r.close_view(view.view_id);
+                out
+            })),
+        )
+        .await
+        .map_err(ApiError::from);
     let opened = match written {
         Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
         Err(e) => Err(e),
@@ -546,7 +627,10 @@ async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> Api
     let scratch = state.scratch_dir(".exports")?;
     let path = scratch.join("sheets.xlsx");
     let p = path.clone();
-    let written = blocking(move || h.with_engine(|wb| wb.sheets().export_xlsx(&p))).await;
+    let written = h
+        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &rowfinity_engine::Reader| r.sheets().export_xlsx(&p))))
+        .await
+        .map_err(ApiError::from);
     let opened = match written {
         Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
         Err(e) => Err(e),
@@ -571,7 +655,7 @@ async fn websocket(
 ) -> ApiResult<Response> {
     let handle = open(&state, &id).await?;
     Ok(upgrade
-        .max_message_size(64 << 20)
+        .max_message_size(state.config.max_message_bytes)
         .on_upgrade(move |socket| ws::serve_socket(socket, state, handle)))
 }
 

@@ -325,6 +325,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SheetCopy" => conforms::<rowfinity_engine::SheetCopy>(op, v),
         "SavedView" => conforms::<rowfinity_engine::SavedView>(op, v),
         "SavedView[]" => conforms::<Vec<rowfinity_engine::SavedView>>(op, v),
+        "HistoryEntry[]" => conforms::<Vec<rowfinity_engine::HistoryEntry>>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
@@ -390,6 +391,8 @@ async fn every_operation_replies_with_its_declared_type() {
         run("rename_saved_view", json!({ "saved": "PLACEHOLDER", "name": "Top two" })),
         run("delete_saved_view", json!({ "saved": "PLACEHOLDER" })),
         run("close_view", json!({ "view_id": 1 })),
+        run("history", json!({ "after": 0, "limit": 5 })),
+        run("cancel", json!({ "request": 1 })),
     ];
     let mut saved_id = String::new();
     for (op, mut params) in script {

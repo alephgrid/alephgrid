@@ -866,7 +866,7 @@ impl Workbook {
     /// cells in one batch keep the last value; an empty batch changes nothing.
     pub fn edit(&mut self, id: u64, edits: &[CellEdit]) -> Result<EditOutcome> {
         if edits.len() > limits::MAX_EDIT_CELLS {
-            bail!("too many cells in one edit ({}; the limit is {})", edits.len(), limits::MAX_EDIT_CELLS);
+            bail!(limits::TooLarge(format!("too many cells in one edit ({}; the limit is {})", edits.len(), limits::MAX_EDIT_CELLS)));
         }
         self.mutating("edit", Some(id), |wb| wb.edit_in_txn(id, edits))
     }
@@ -917,7 +917,7 @@ impl Workbook {
                 }
                 let n = r + 1 - m.row_count;
                 if n > limits::MAX_INSERT_ROWS {
-                    bail!("that edit would add {n} rows; the limit is {}", limits::MAX_INSERT_ROWS);
+                    bail!(limits::TooLarge(format!("that edit would add {n} rows; the limit is {}", limits::MAX_INSERT_ROWS)));
                 }
                 n
             }
@@ -1050,7 +1050,7 @@ impl Workbook {
     /// unsorted, unfiltered views. No other row's id or data changes.
     pub fn insert_rows(&mut self, id: u64, at: u64, count: u64) -> Result<String> {
         if count > limits::MAX_INSERT_ROWS {
-            bail!("cannot insert {count} rows at once; the limit is {}", limits::MAX_INSERT_ROWS);
+            bail!(limits::TooLarge(format!("cannot insert {count} rows at once; the limit is {}", limits::MAX_INSERT_ROWS)));
         }
         self.mutating("insert_rows", Some(id), |wb| wb.insert_in_txn(id, at, count))
     }
