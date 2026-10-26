@@ -11,13 +11,15 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
-use duckdb::types::ValueRef;
 use duckdb::Connection;
 use serde_json::Value;
 
+use crate::faults;
+use crate::formula;
 use crate::model::*;
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
 use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
+use crate::wire::{self, Codec};
 
 const ID: &str = "_rf_id";
 const MAX_FETCH: u64 = 5_000;
@@ -38,7 +40,7 @@ pub struct Workbook {
 }
 
 /// What an import produced: a columnar table, or IronCalc sheets for .xlsx files.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Imported {
     Table { table: TableInfo },
@@ -63,6 +65,8 @@ impl Workbook {
              );
              CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);",
         )?;
+        // Show TIMESTAMPTZ values in UTC so results do not depend on the server's zone.
+        let _ = conn.execute_batch("SET TimeZone = 'UTC';");
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         let sheets = Sheets::from_bytes(bytes)?;
         Ok(Workbook { conn, views: HashMap::new(), next_view: 1, sheets })
@@ -239,7 +243,8 @@ impl Workbook {
 
     /// `SELECT _rf_id, <data columns>, <formula columns> FROM table`.
     fn base_select(&self, table: &str) -> Result<String> {
-        let mut select = format!("SELECT * FROM {}", ident(table));
+        // Qualified, so a CTE that shadows the table (see `expand_query`) can read it.
+        let mut select = format!("SELECT * FROM main.{}", ident(table));
         for (name, formula) in self.formulas(table)? {
             select = format!("SELECT *, ({}) AS {} FROM ({select})", formula_to_sql(&formula), ident(&name));
         }
@@ -269,7 +274,7 @@ impl Workbook {
     }
 
     pub fn add_column(&mut self, table: &str, name: &str, sql_type: &str) -> Result<()> {
-        self.ensure_new_column(table, name)?;
+        self.ensure_new_column(table, name, None)?;
         let ty = sql_type.trim();
         if ty.is_empty() || !ty.chars().all(|c| c.is_ascii_alphanumeric() || " (),".contains(c)) {
             bail!("invalid column type {sql_type:?}");
@@ -280,7 +285,8 @@ impl Workbook {
 
     /// Add a formula column. The formula is a DuckDB expression; `[Col]` refers to a column.
     pub fn add_formula_column(&mut self, table: &str, name: &str, formula: &str) -> Result<()> {
-        self.ensure_new_column(table, name)?;
+        self.ensure_new_column(table, name, None)?;
+        formula::analyze(&self.conn, formula)?;
         let probe = format!(
             "SELECT ({}) AS {} FROM ({}) LIMIT 1",
             formula_to_sql(formula),
@@ -289,68 +295,138 @@ impl Workbook {
         );
         self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
         self.conn.execute(
-            "INSERT INTO _rf_columns VALUES (?, ?, ?, (SELECT count(*) FROM _rf_columns WHERE table_name = ?))",
+            "INSERT INTO _rf_columns VALUES (?, ?, ?, (SELECT coalesce(max(position) + 1, 0) FROM _rf_columns WHERE table_name = ?))",
             duckdb::params![table, name, formula, table],
         )?;
         self.refresh_views_for(table)
     }
 
     pub fn update_formula(&mut self, table: &str, name: &str, formula: &str) -> Result<()> {
-        let old: String = self.conn.query_row(
-            "SELECT formula FROM _rf_columns WHERE table_name = ? AND name = ?",
-            duckdb::params![table, name],
-            |r| r.get(0),
-        )?;
-        self.conn
-            .execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![formula, table, name])?;
-        if let Err(e) = self.describe(&self.base_select(table)?) {
-            self.conn
-                .execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![old, table, name])?;
-            bail!("formula error: {e}");
+        if !self.formulas(table)?.iter().any(|(n, _)| n == name) {
+            bail!("{name:?} is not a formula column");
         }
+        formula::analyze(&self.conn, formula)?;
+        self.transaction(|wb| {
+            wb.conn.execute(
+                "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
+                duckdb::params![formula, table, name],
+            )?;
+            wb.describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
+            Ok(())
+        })?;
         self.refresh_views_for(table)
     }
 
+    /// Formula columns of `table`, other than `column` itself, that reference `column`.
+    fn dependents(&self, table: &str, column: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for (name, f) in self.formulas(table)? {
+            if !formula::same_name(&name, column) && formula::references(&self.conn, &f, column)? {
+                out.push(name);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete a column. Fails, without changing anything, while formula columns use it.
     pub fn drop_column(&mut self, table: &str, name: &str) -> Result<()> {
-        let is_formula = self.formulas(table)?.iter().any(|(n, _)| n == name);
-        if is_formula {
-            self.conn.execute(
-                "DELETE FROM _rf_columns WHERE table_name = ? AND name = ?",
-                duckdb::params![table, name],
-            )?;
-        } else {
-            self.conn.execute_batch(&format!("ALTER TABLE {} DROP COLUMN {};", ident(table), ident(name)))?;
+        if !self.columns(table)?.iter().any(|c| c.name == name) {
+            bail!("unknown column {name:?}");
         }
+        let users = self.dependents(table, name)?;
+        if !users.is_empty() {
+            bail!("{name:?} is used by formula column{} {}; change or delete {} first",
+                if users.len() == 1 { "" } else { "s" },
+                users.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>().join(", "),
+                if users.len() == 1 { "it" } else { "them" });
+        }
+        let is_formula = self.formulas(table)?.iter().any(|(n, _)| n == name);
+        self.transaction(|wb| {
+            if is_formula {
+                wb.conn.execute("DELETE FROM _rf_columns WHERE table_name = ? AND name = ?", duckdb::params![table, name])?;
+            } else {
+                wb.conn.execute_batch(&format!("ALTER TABLE {} DROP COLUMN {};", ident(table), ident(name)))?;
+            }
+            faults::check("drop_column")?;
+            wb.describe(&wb.base_select(table)?)?;
+            Ok(())
+        })?;
         self.refresh_views_for(table)
     }
 
+    /// Rename a column and rewrite every formula that refers to it, atomically.
     pub fn rename_column(&mut self, table: &str, name: &str, new_name: &str) -> Result<()> {
-        self.ensure_new_column(table, new_name)?;
-        let is_formula = self.formulas(table)?.iter().any(|(n, _)| n == name);
-        if is_formula {
-            self.conn.execute(
-                "UPDATE _rf_columns SET name = ? WHERE table_name = ? AND name = ?",
-                duckdb::params![new_name, table, name],
-            )?;
-        } else {
-            self.conn.execute_batch(&format!(
-                "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                ident(table),
-                ident(name),
-                ident(new_name)
-            ))?;
+        let new_name = new_name.trim();
+        if !self.columns(table)?.iter().any(|c| c.name == name) {
+            bail!("unknown column {name:?}");
         }
+        self.ensure_new_column(table, new_name, Some(name))?;
+        if name == new_name {
+            return Ok(());
+        }
+        let formulas = self.formulas(table)?;
+        let is_formula = formulas.iter().any(|(n, _)| n == name);
+        let mut rewritten = Vec::new();
+        for (fname, f) in &formulas {
+            if let Some(updated) = formula::rename_reference(&self.conn, f, name, new_name)? {
+                rewritten.push((fname.clone(), updated));
+            }
+        }
+        self.transaction(|wb| {
+            if is_formula {
+                wb.conn.execute(
+                    "UPDATE _rf_columns SET name = ? WHERE table_name = ? AND name = ?",
+                    duckdb::params![new_name, table, name],
+                )?;
+            } else {
+                wb.conn.execute_batch(&format!(
+                    "ALTER TABLE {} RENAME COLUMN {} TO {};",
+                    ident(table),
+                    ident(name),
+                    ident(new_name)
+                ))?;
+            }
+            for (fname, updated) in &rewritten {
+                let fname = if fname == name { new_name } else { fname.as_str() };
+                wb.conn.execute(
+                    "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
+                    duckdb::params![updated, table, fname],
+                )?;
+            }
+            faults::check("rename_column")?;
+            wb.describe(&wb.base_select(table)?).map_err(|e| anyhow!("rename would break a formula: {e}"))?;
+            Ok(())
+        })?;
         self.refresh_views_for(table)
     }
 
-    fn ensure_new_column(&self, table: &str, name: &str) -> Result<()> {
-        if name.trim().is_empty() || name == ID {
+    fn ensure_new_column(&self, table: &str, name: &str, renaming: Option<&str>) -> Result<()> {
+        if name.trim().is_empty() || name.eq_ignore_ascii_case(ID) {
             bail!("invalid column name");
         }
-        if self.columns(table)?.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
+        let clash = self
+            .columns(table)?
+            .iter()
+            .any(|c| formula::same_name(&c.name, name) && Some(c.name.as_str()) != renaming);
+        if clash {
             bail!("column {name:?} already exists");
         }
         Ok(())
+    }
+
+    /// Run `f` in a database transaction; roll back on any error.
+    fn transaction<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN TRANSACTION;")?;
+        match f(self) {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT;")?;
+                Ok(v)
+            }
+            Err(e) => {
+                self.conn.execute_batch("ROLLBACK;")?;
+                Err(e)
+            }
+        }
     }
 
     // ----------------------------------------------------------------- views
@@ -487,8 +563,8 @@ impl Workbook {
             return Ok(RowBlock { row_start, rows: vec![] });
         }
         let ids = self.ids_for_range(v, row_start, end)?;
-        let projection: Vec<String> =
-            v.columns.iter().map(|c| c.kind.wire_projection(&ident(&c.name))).collect();
+        let projection: Vec<String> = v.columns.iter().map(|c| wire::projection(c, &ident(&c.name))).collect();
+        let codecs: Vec<Codec> = v.columns.iter().map(|c| wire::codec(&c.sql_type)).collect();
         let condition = match &v.permutation {
             None => format!("{ID} >= {row_start} AND {ID} < {end}"),
             Some(_) => format!(
@@ -507,8 +583,8 @@ impl Workbook {
         while let Some(row) = rows.next()? {
             let rid: i64 = row.get(0)?;
             let mut values = Vec::with_capacity(v.columns.len());
-            for i in 0..v.columns.len() {
-                values.push(to_json(row.get_ref(i + 1)?));
+            for (i, codec) in codecs.iter().enumerate() {
+                values.push(wire::decode(*codec, row.get_ref(i + 1)?));
             }
             by_id.insert(rid, values);
         }
@@ -521,9 +597,15 @@ impl Workbook {
 
     // ----------------------------------------------------------------- edits
 
+    /// Apply cell edits as one transaction. Typing below the last row appends rows (in the
+    /// same transaction). Every value is validated before anything changes; repeated
+    /// cells in one batch keep the last value; an empty batch changes nothing.
     pub fn edit(&mut self, id: u64, edits: &[CellEdit]) -> Result<EditOutcome> {
         let v = self.view(id)?;
         let table = v.spec.table.clone();
+        if edits.is_empty() {
+            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0 });
+        }
         let by_name: HashMap<String, Column> = v.columns.iter().map(|c| (c.name.clone(), c.clone())).collect();
         for e in edits {
             let col = by_name.get(&e.column).ok_or_else(|| anyhow!("unknown column {:?}", e.column))?;
@@ -531,32 +613,70 @@ impl Workbook {
                 bail!("{:?} is a formula column; edit its formula instead", col.name);
             }
         }
-
-        // Map view positions to row ids, appending rows when typing below the end.
-        let mut appended = 0;
-        let max_row = edits.iter().map(|e| e.row).max().unwrap_or(0);
-        if max_row >= v.row_count {
+        // Last write wins for repeated cells; keep first-seen order otherwise.
+        let mut cells: Vec<(u64, &str, Option<&str>)> = Vec::new();
+        let mut seen: HashMap<(u64, &str), usize> = HashMap::new();
+        for e in edits {
+            let value = e.value.as_deref().filter(|s| !s.is_empty());
+            match seen.get(&(e.row, e.column.as_str())) {
+                Some(&i) => cells[i].2 = value,
+                None => {
+                    seen.insert((e.row, e.column.as_str()), cells.len());
+                    cells.push((e.row, e.column.as_str(), value));
+                }
+            }
+        }
+        let max_row = cells.iter().map(|c| c.0).max().unwrap_or(0);
+        let appended = if max_row >= v.row_count {
             if v.permutation.is_some() {
                 bail!("clear sorting and filters to add rows");
             }
-            appended = max_row + 1 - v.row_count;
-            self.conn.execute_batch(&format!(
-                "INSERT INTO {} ({ID}) SELECT i FROM range({}, {}) t(i);",
-                ident(&table),
-                v.row_count,
-                max_row + 1
-            ))?;
+            max_row + 1 - v.row_count
+        } else {
+            0
+        };
+
+        // Validate every value before touching the table.
+        let mut by_column: HashMap<&str, Vec<(u64, Option<&str>)>> = HashMap::new();
+        for (row, column, value) in &cells {
+            by_column.entry(column).or_default().push((*row, *value));
         }
-        let v = self.view(id)?;
+        for (column, values) in &by_column {
+            let col = &by_name[*column];
+            for value in values.iter().filter_map(|(_, v)| *v) {
+                wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;
+            }
+            let texts: Vec<String> = values.iter().filter_map(|(_, v)| v.map(lit)).collect();
+            if texts.is_empty() {
+                continue;
+            }
+            let bad: Option<String> = self
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT val FROM (VALUES ({})) v(val) WHERE TRY_CAST(val AS {}) IS NULL LIMIT 1",
+                        texts.join("),("),
+                        col.sql_type
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(bad) = bad {
+                bail!("{bad:?} is not a valid {} for column {:?}", col.sql_type, col.name);
+            }
+        }
+
+        // View positions -> record ids.
         let mut pos_to_id: HashMap<u64, i64> = HashMap::new();
         match &v.permutation {
             None => {
-                for e in edits {
-                    pos_to_id.insert(e.row, e.row as i64);
+                for (row, _, _) in &cells {
+                    pos_to_id.insert(*row, *row as i64);
                 }
             }
             Some(perm) => {
-                let positions: Vec<String> = edits.iter().map(|e| e.row.to_string()).collect();
+                let positions: Vec<String> = cells.iter().map(|c| c.0.to_string()).collect();
                 let pairs: Vec<(i64, i64)> = self
                     .conn
                     .prepare(&format!(
@@ -571,56 +691,42 @@ impl Workbook {
                 }
             }
         }
-
-        let mut by_column: HashMap<&str, Vec<(i64, Option<&str>)>> = HashMap::new();
-        for e in edits {
-            let rid = *pos_to_id.get(&e.row).ok_or_else(|| anyhow!("row {} is outside the view", e.row))?;
-            let value = e.value.as_deref().filter(|s| !s.is_empty());
-            by_column.entry(e.column.as_str()).or_default().push((rid, value));
+        let row_count = v.row_count;
+        let mut updates: Vec<(String, String)> = Vec::new();
+        for (column, values) in &by_column {
+            let col = &by_name[*column];
+            let mut rows = Vec::with_capacity(values.len());
+            for (row, val) in values {
+                let rid = *pos_to_id.get(row).ok_or_else(|| anyhow!("row {row} is outside the view"))?;
+                rows.push(format!("({rid}, {})", val.map(lit).unwrap_or_else(|| "NULL::VARCHAR".into())));
+            }
+            updates.push((col.name.clone(), format!(
+                "UPDATE {t} SET {c} = CAST(v.val AS {ty}) FROM (VALUES {}) v(id, val) WHERE {t}.{ID} = v.id;",
+                rows.join(","),
+                t = ident(&table),
+                c = ident(&col.name),
+                ty = col.sql_type,
+            )));
         }
-
-        self.conn.execute_batch("BEGIN TRANSACTION;")?;
-        let result = (|| -> Result<()> {
-            for (column, values) in &by_column {
-                let col = &by_name[*column];
-                let rows: Vec<String> = values
-                    .iter()
-                    .map(|(rid, val)| format!("({rid}, {})", val.map(lit).unwrap_or_else(|| "NULL::VARCHAR".into())))
-                    .collect();
-                let values_sql = format!("(VALUES {}) v(id, val)", rows.join(","));
-                let ty = &col.sql_type;
-                let bad: Option<String> = self
-                    .conn
-                    .query_row(
-                        &format!(
-                            "SELECT val FROM {values_sql} WHERE val IS NOT NULL AND TRY_CAST(val AS {ty}) IS NULL LIMIT 1"
-                        ),
-                        [],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(bad) = bad {
-                    bail!("{bad:?} is not a valid {ty} for column {:?}", col.name);
-                }
-                self.conn.execute_batch(&format!(
-                    "UPDATE {t} SET {c} = TRY_CAST(v.val AS {ty}) FROM {values_sql} WHERE {t}.{ID} = v.id;",
-                    t = ident(&table),
-                    c = ident(column),
+        let cells_changed = cells.len();
+        self.transaction(|wb| {
+            if appended > 0 {
+                wb.conn.execute_batch(&format!(
+                    "INSERT INTO {} ({ID}) SELECT i FROM range({row_count}, {}) t(i);",
+                    ident(&table),
+                    max_row + 1
                 ))?;
             }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => self.conn.execute_batch("COMMIT;")?,
-            Err(e) => {
-                self.conn.execute_batch("ROLLBACK;")?;
-                return Err(e);
+            for (_, sql) in &updates {
+                faults::check("edit")?;
+                wb.conn.execute_batch(sql)?;
             }
-        }
+            Ok(())
+        })?;
         if appended > 0 {
             self.refresh_views_for(&table)?;
         }
-        Ok(EditOutcome { table, cells_changed: edits.len(), rows_appended: appended })
+        Ok(EditOutcome { table, cells_changed, rows_appended: appended })
     }
 
     /// Insert empty rows before view position `at`. Only on unsorted, unfiltered views.
@@ -693,29 +799,36 @@ impl Workbook {
         };
         let c = ident(column);
         let base = self.base_select(&v.spec.table)?;
-        let sql = if col.kind.is_numeric() {
-            format!(
-                "SELECT count(*), count({c}), sum({c})::DOUBLE, avg({c})::DOUBLE, min({c})::DOUBLE, max({c})::DOUBLE
-                 FROM ({base}) WHERE {condition}"
-            )
-        } else {
-            format!(
-                "SELECT count(*), count({c}), NULL::DOUBLE, NULL::DOUBLE, min({c})::VARCHAR, max({c})::VARCHAR
-                 FROM ({base}) WHERE {condition}"
-            )
+        let codec = wire::codec(&col.sql_type);
+        // Sums of integers and decimals stay exact (HUGEINT / DECIMAL(38,s)); doubles stay doubles.
+        let (sum, sum_codec) = match (col.kind, codec) {
+            (Kind::Int, _) => (format!("sum({c})::VARCHAR"), Codec::IntText),
+            (Kind::Number, Codec::ExactText) => (format!("sum({c})::VARCHAR"), Codec::ExactText),
+            (Kind::Number, _) => (format!("sum({c})::DOUBLE"), Codec::Native),
+            _ => ("NULL::VARCHAR".to_string(), Codec::Native),
         };
+        let numeric = col.kind.is_numeric();
+        let (min, max) = if numeric {
+            (wire::projection(col, &format!("min({c})")), wire::projection(col, &format!("max({c})")))
+        } else {
+            (format!("min({c})::VARCHAR"), format!("max({c})::VARCHAR"))
+        };
+        let avg = if numeric { format!("avg({c})::DOUBLE") } else { "NULL::DOUBLE".to_string() };
+        let sql = format!("SELECT count(*), count({c}), {sum}, {avg}, {min}, {max} FROM ({base}) WHERE {condition}");
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
         let row = rows.next()?.ok_or_else(|| anyhow!("no stats row"))?;
         let rows_n: i64 = row.get(0)?;
         let count: i64 = row.get(1)?;
+        let mm_codec = if numeric { codec } else { Codec::Native };
+        let present = |v: Value| Some(v).filter(|v| !v.is_null());
         Ok(Stats {
             rows: rows_n as u64,
             count: count as u64,
-            sum: row.get(2)?,
+            sum: present(wire::decode(sum_codec, row.get_ref(2)?)),
             avg: row.get(3)?,
-            min: Some(to_json(row.get_ref(4)?)).filter(|v| !v.is_null()),
-            max: Some(to_json(row.get_ref(5)?)).filter(|v| !v.is_null()),
+            min: present(wire::decode(mm_codec, row.get_ref(4)?)),
+            max: present(wire::decode(mm_codec, row.get_ref(5)?)),
         })
     }
 
@@ -735,118 +848,191 @@ impl Workbook {
         &self.sheets
     }
 
-    /// Run a mutation on the sheets model and persist it in the same DuckDB file.
+    /// Run a mutation on the sheets model and persist it in the same DuckDB file. If the
+    /// mutation or the save fails, the in-memory model is reloaded from the file, so memory
+    /// never runs ahead of what is durable (undo history is lost in that case).
     pub fn with_sheets<T>(&mut self, f: impl FnOnce(&mut Sheets) -> Result<T>) -> Result<T> {
-        let out = f(&mut self.sheets)?;
-        self.save_sheets()?;
-        Ok(out)
+        let result = f(&mut self.sheets).and_then(|out| {
+            self.save_sheets()?;
+            Ok(out)
+        });
+        if result.is_err() {
+            match self.load_sheets() {
+                Ok(sheets) => self.sheets = sheets,
+                Err(e) => tracing_like_warn(&format!("could not reload sheets after a failed change: {e:#}")),
+            }
+        }
+        result
+    }
+
+    fn load_sheets(&self) -> Result<Sheets> {
+        let bytes: Option<Vec<u8>> = self.conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
+        Sheets::from_bytes(bytes)
     }
 
     fn save_sheets(&self) -> Result<()> {
         self.conn.execute_batch("BEGIN TRANSACTION; DELETE FROM _rf_sheets;")?;
         let result = match self.sheets.to_bytes() {
-            Some(bytes) => self.conn.execute("INSERT INTO _rf_sheets VALUES (?)", duckdb::params![bytes]).map(|_| ()),
+            Some(bytes) => faults::check("save_sheets").and_then(|_| {
+                self.conn.execute("INSERT INTO _rf_sheets VALUES (?)", duckdb::params![bytes]).map(|_| ()).map_err(Into::into)
+            }),
             None => Ok(()),
         };
         match result {
             Ok(()) => self.conn.execute_batch("COMMIT;")?,
             Err(e) => {
                 self.conn.execute_batch("ROLLBACK;")?;
-                return Err(e.into());
+                return Err(e);
             }
         }
         Ok(())
     }
 
-    /// Run a query and drop its result (with a header row) into a new sheet.
+    /// Run a query and drop its first `max_rows` rows (with a header row) into a new sheet.
+    ///
+    /// Sheets use Excel semantics (IEEE doubles, 15 significant digits). Numbers that a
+    /// double cannot hold exactly, such as integers beyond 2^53 or long decimals, are
+    /// written as text so their digits are kept; text values always stay text.
     pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetInfo> {
         let preview = self.preview_query(sql, max_rows)?;
-        let mut inputs: Vec<SheetInput> = preview
+        let mut inputs: Vec<(SheetInput, bool)> = preview
             .columns
             .iter()
             .enumerate()
-            .map(|(c, col)| SheetInput { row: 0, column: c as u32, value: col.name.clone() })
+            .map(|(c, col)| (SheetInput { row: 0, column: c as u32, value: col.name.clone() }, true))
             .collect();
         for (r, row) in preview.rows.iter().enumerate() {
             for (c, v) in row.iter().enumerate() {
-                let value = match v {
+                let numeric = preview.columns[c].kind.is_numeric();
+                let (value, text) = match v {
                     Value::Null => continue,
-                    Value::String(s) if s.starts_with('=') => format!("'{s}"),
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
+                    Value::String(s) if numeric && fits_double(s) => (s.clone(), false),
+                    Value::String(s) => (s.clone(), true),
+                    Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }.to_string(), false),
+                    other => (other.to_string(), false),
                 };
-                inputs.push(SheetInput { row: r as u32 + 1, column: c as u32, value });
+                inputs.push((SheetInput { row: r as u32 + 1, column: c as u32, value }, text));
             }
         }
         self.with_sheets(|s| {
             let sheet = s.create(name)?;
-            s.set(sheet.index, &inputs)?;
+            s.set_values(sheet.index, &inputs)?;
             s.info(sheet.index)
         })
     }
 
-    /// Turn a sheet's used range into a columnar table (first row = header).
+    /// Turn a sheet's used range into a columnar table (first row = header), reading every
+    /// row and keeping cell types (see [`Sheets::typed_columns`]).
     pub fn sheet_to_table(&mut self, index: u32, name: &str) -> Result<TableInfo> {
-        let values = self.sheets.used_values(index)?;
-        if values.len() < 2 {
-            bail!("the sheet needs a header row and at least one data row");
-        }
-        let path = std::env::temp_dir().join(format!("rowfinity-sheet-{}-{index}.csv", std::process::id()));
-        let mut csv = String::new();
-        for row in &values {
-            let line: Vec<String> = row
-                .iter()
-                .map(|v| if v.contains([',', '"', '\n', '\r']) { format!("\"{}\"", v.replace('"', "\"\"")) } else { v.clone() })
-                .collect();
-            csv.push_str(&line.join(","));
-            csv.push('\n');
-        }
-        std::fs::write(&path, csv)?;
+        let columns = self.sheets.typed_columns(index)?;
         let table = self.unique_table_name(name)?;
-        let result = self.create_table_from_select(
-            &table,
-            &format!("SELECT * FROM read_csv({}, header = true, auto_detect = true)", lit(&path.to_string_lossy())),
-        );
-        let _ = std::fs::remove_file(&path);
-        result?;
+        let rows = columns.first().map(|c| c.values.len()).unwrap_or(0);
+        let stage = format!("_rf_stage_{}", std::process::id());
+        let stage_cols: Vec<String> = (0..columns.len()).map(|i| format!("c{i} VARCHAR")).collect();
+        let casts: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("CAST(c{i} AS {}) AS {}", c.sql_type, ident(&c.name)))
+            .collect();
+        self.transaction(|wb| {
+            wb.conn.execute_batch(&format!(
+                "CREATE OR REPLACE TEMP TABLE {} ({ID} BIGINT, {});",
+                ident(&stage),
+                stage_cols.join(", ")
+            ))?;
+            {
+                let mut appender = wb.conn.appender(&stage)?;
+                for r in 0..rows {
+                    let mut row: Vec<duckdb::types::Value> = vec![duckdb::types::Value::BigInt(r as i64)];
+                    for c in &columns {
+                        row.push(match &c.values[r] {
+                            Some(v) => duckdb::types::Value::Text(v.clone()),
+                            None => duckdb::types::Value::Null,
+                        });
+                    }
+                    appender.append_row(duckdb::appender_params_from_iter(row))?;
+                }
+                appender.flush()?;
+            }
+            faults::check("sheet_to_table")?;
+            wb.conn.execute_batch(&format!(
+                "CREATE TABLE {} AS SELECT {ID}, {} FROM {} ORDER BY {ID}; DROP TABLE {};",
+                ident(&table),
+                casts.join(", "),
+                ident(&stage),
+                ident(&stage)
+            ))?;
+            Ok(())
+        })?;
         self.table_info(&table)
     }
 
     // ---------------------------------------------------------- SQL & export
 
-    /// Expose formula columns to ad-hoc SQL by shadowing each table with a CTE.
+    /// Expose formula columns to ad-hoc SQL by shadowing each table with a CTE. When the
+    /// query has its own `WITH` list, the shadows are prepended to it, and a user CTE with
+    /// the same name as a table takes precedence.
     fn expand_query(&self, sql: &str) -> Result<String> {
-        let sql = sql.trim().trim_end_matches(';');
+        let sql = sql.trim().trim_end_matches(';').trim_end();
         let mut ctes = Vec::new();
         for t in self.list_tables()? {
             if !self.formulas(&t.name)?.is_empty() {
-                ctes.push(format!("{} AS ({})", ident(&t.name), self.base_select(&t.name)?));
+                ctes.push((t.name.clone(), format!("{} AS ({})", ident(&t.name), self.base_select(&t.name)?)));
             }
         }
-        if ctes.is_empty() || sql.to_ascii_lowercase().starts_with("with") {
-            Ok(sql.to_string())
-        } else {
-            Ok(format!("WITH {} {sql}", ctes.join(", ")))
+        if ctes.is_empty() {
+            return Ok(sql.to_string());
         }
+        match crate::sql::leading_with(sql) {
+            None => Ok(format!("WITH {} {sql}", ctes.into_iter().map(|(_, c)| c).collect::<Vec<_>>().join(", "))),
+            Some(after_with) => {
+                let user = self.cte_names(sql);
+                let ours: Vec<String> = ctes
+                    .into_iter()
+                    .filter(|(name, _)| !user.iter().any(|u| formula::same_name(u, name)))
+                    .map(|(_, c)| c)
+                    .collect();
+                if ours.is_empty() {
+                    return Ok(sql.to_string());
+                }
+                Ok(format!("{} {}, {}", &sql[..after_with], ours.join(", "), sql[after_with..].trim_start()))
+            }
+        }
+    }
+
+    /// Names of the top-level CTEs of a query, from DuckDB's parser (empty if it cannot parse).
+    fn cte_names(&self, sql: &str) -> Vec<String> {
+        let json: Option<String> = self.conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0)).ok();
+        let tree: Value = json.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or(Value::Null);
+        tree["statements"][0]["node"]["cte_map"]["map"]
+            .as_array()
+            .map(|m| m.iter().filter_map(|e| e["key"].as_str().map(String::from)).collect())
+            .unwrap_or_default()
     }
 
     /// Run a read-only query and return the first `limit` rows.
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {
         let select = self.expand_query(sql)?;
-        let mut columns = self.describe(&select)?;
-        let hide_id = columns.iter().position(|c| c.name == ID);
-        if let Some(i) = hide_id {
-            columns.remove(i);
-        }
-        let projection: Vec<String> = columns.iter().map(|c| c.kind.wire_projection(&ident(&c.name))).collect();
-        let sql = format!("SELECT {} FROM ({select}) LIMIT {}", projection.join(", "), limit + 1);
+        let described = self.describe(&select)?;
+        // Address result columns by position, so duplicate or odd names still work.
+        let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
+        let keep: Vec<usize> = (0..described.len()).filter(|&i| described[i].name != ID).collect();
+        let columns: Vec<Column> = keep.iter().map(|&i| described[i].clone()).collect();
+        let projection: Vec<String> = keep.iter().map(|&i| wire::projection(&described[i], &aliases[i])).collect();
+        let codecs: Vec<Codec> = columns.iter().map(|c| wire::codec(&c.sql_type)).collect();
+        let sql = format!(
+            "SELECT {} FROM ({select}) AS _q({}) LIMIT {}",
+            if projection.is_empty() { "NULL".to_string() } else { projection.join(", ") },
+            aliases.join(", "),
+            limit + 1
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let mut values = Vec::with_capacity(columns.len());
-            for i in 0..columns.len() {
-                values.push(to_json(row.get_ref(i)?));
+            for (i, codec) in codecs.iter().enumerate() {
+                values.push(wire::decode(*codec, row.get_ref(i)?));
             }
             out.push(values);
         }
@@ -925,25 +1111,14 @@ fn filter_sql(col: &Column, f: &Filter) -> Result<String> {
     })
 }
 
-fn to_json(v: ValueRef<'_>) -> Value {
-    match v {
-        ValueRef::Null => Value::Null,
-        ValueRef::Boolean(b) => Value::Bool(b),
-        ValueRef::TinyInt(i) => i.into(),
-        ValueRef::SmallInt(i) => i.into(),
-        ValueRef::Int(i) => i.into(),
-        ValueRef::BigInt(i) => i.into(),
-        ValueRef::UTinyInt(i) => i.into(),
-        ValueRef::USmallInt(i) => i.into(),
-        ValueRef::UInt(i) => i.into(),
-        ValueRef::UBigInt(i) => i.into(),
-        ValueRef::Float(f) => float(f as f64),
-        ValueRef::Double(f) => float(f),
-        ValueRef::Text(bytes) => Value::String(String::from_utf8_lossy(bytes).into_owned()),
-        other => Value::String(format!("{other:?}")),
-    }
+/// Can this exact decimal text become a spreadsheet number without losing digits?
+/// Spreadsheets keep 15 significant digits.
+fn fits_double(text: &str) -> bool {
+    let digits: String = text.trim_start_matches(['+', '-']).chars().filter(|c| *c != '.').collect();
+    let significant = digits.trim_start_matches('0').trim_end_matches('0');
+    text.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c)) && significant.len() <= 15
 }
 
-fn float(f: f64) -> Value {
-    serde_json::Number::from_f64(f).map(Value::Number).unwrap_or_else(|| Value::String(f.to_string()))
+fn tracing_like_warn(msg: &str) {
+    eprintln!("rowfinity-engine: {msg}");
 }
