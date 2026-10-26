@@ -22,6 +22,7 @@ the Rust types and are the precise definition of every request, event and result
 { "event": "table_changed",  "table": "flights", "origin": 3 }  // rows inserted/deleted, columns changed
 { "event": "tables_changed", "origin": 3 }   // tables or sheets added/removed/renamed
 { "event": "sheet_changed",  "sheet": 0, "origin": 3 }  // sheet: null after undo/redo
+{ "event": "views_changed", "table": "flights", "origin": 3 }  // saved views of a table changed
 { "event": "workbook_deleted", "origin": 0 }  // moved to the trash; the server then closes the socket
 ```
 
@@ -34,7 +35,7 @@ Requests can be pipelined; replies may arrive out of order and are matched by `i
 | op | params | result |
 |----|--------|--------|
 | `tables` | – | `TableInfo[]` |
-| `open_view` | `spec: {table, sort: [{column, desc}], filters: [{column, op, value}]}` | `ViewInfo` |
+| `open_view` | `spec: {table, sort: [{column, desc}], filters: [{column, op, value}], hidden: [column]}` | `ViewInfo`; hidden columns are left out of fetch, export and copies |
 | `update_view` | `view_id, spec` | `ViewInfo` |
 | `view_info` | `view_id` | `ViewInfo` |
 | `close_view` | `view_id` | `null` |
@@ -60,7 +61,12 @@ Requests can be pipelined; replies may arrive out of order and are matched by `i
 | `sheet_set` | `sheet, inputs: [{row, column, value}]` (`""` clears; `=` starts a formula) | `SheetInfo`. All-or-nothing; one batch is one undo step |
 | `sheet_undo` / `sheet_redo` | – | `bool` (whether anything changed). History is shared by everyone in the workbook and kept in memory only |
 | `sheet_insert_rows` / `sheet_delete_rows` / `sheet_insert_columns` / `sheet_delete_columns` | `sheet, at, count` | `null` |
-| `create_sheet_from_query` | `name, sql` (≤ 100,000 rows) | `SheetInfo` |
+| `create_sheet_from_query` | `name, sql` | `SheetCopy {sheet, rows_copied, total_rows?, truncated, row_limit}`. At most `--sheet-copy-rows` (default 100,000) rows, fewer for wide results |
+| `table_to_sheet` | `view_id, name` | `SheetCopy`; copies the view's first rows in its sort and filter |
+| `table_from_view` | `view_id, name` | `TableInfo`; a snapshot table of the view's current rows |
+| `saved_views` | `table?` | `SavedView[]` (`{id, name, spec, widths, updated_at}`) |
+| `save_view` | `saved?, name, spec, widths?` | `SavedView`; creates, or updates the view with id `saved`. Names are unique per table |
+| `rename_saved_view` / `delete_saved_view` | `saved[, name]` | `SavedView` / `null` |
 | `sheet_to_table` | `sheet, name` | `TableInfo`. Reads every used row; column types come from the cells |
 
 Filter `op`: `eq neq gt gte lt lte contains not_contains starts_with is_empty not_empty`.
@@ -102,7 +108,7 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/config` | `{version, auth_required, allow_sql}` (no auth) |
+| GET | `/api/config` | `{version, auth_required, allow_sql, sheet_copy_rows}` (no auth) |
 | GET/POST | `/api/workbooks` | list (with `size_bytes`, `summary`, `starred`, `workspace`, `opened_at`), or create `{name, workspace?}` |
 | GET/PATCH/DELETE | `/api/workbooks/{id}` | info with tables and sheets; patch `{name?, workspace?, starred?}` (`workspace: ""` = unfiled); delete moves it to the trash |
 | GET/DELETE | `/api/trash` | list trashed workbooks (with `deleted_at`), or empty the trash permanently |
@@ -113,6 +119,11 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | GET/POST | `/api/workspaces` | list, or create `{name}` |
 | PATCH/DELETE | `/api/workspaces/{id}` | rename `{name}`; delete keeps its workbooks (they become unfiled) |
 | POST | `/api/workbooks/{id}/import?filename=x.parquet[&table=name]` | raw body, streamed to a private scratch directory (no size limit yet); returns `{kind: "table", table}` or `{kind: "sheets", sheets}` for .xlsx. A failed or interrupted upload leaves no file and no table |
-| GET | `/api/workbooks/{id}/export?spec=<json ViewSpec>&format=csv\|parquet\|json` | honours sort and filters |
+| GET | `/api/workbooks/{id}/export?spec=<json ViewSpec>&format=csv\|parquet\|json` | honours sort, filters and hidden columns |
+| POST | `/api/workbooks/{id}/uploads?filename=x.csv` | raw body; stages the file and returns `UploadCreated {upload_id, filename, size_bytes, preview}`. Nothing is imported yet. Unclaimed uploads expire after an hour |
+| POST | `/api/workbooks/{id}/uploads/{upload}/preview` | `ImportRequest {types?}` → `UploadPreview` with the given column types |
+| POST | `/api/workbooks/{id}/uploads/{upload}/import` | `ImportRequest {table?, types?, job?}` → `Imported`. On failure the upload is kept for a retry, and the error body carries `problem {message, line?, column?, value?, suggested_type?}` |
+| DELETE | `/api/workbooks/{id}/uploads/{upload}` | discard a staged upload |
+| GET/DELETE | `/api/workbooks/{id}/jobs/{job}` | progress `{running, percentage?, rows_processed, total_rows}` of a running import, or cancel it (only that job; 409 if it is not running) |
 
 Auth: `Authorization: Bearer <token>` or `?token=<token>`.

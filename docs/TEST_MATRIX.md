@@ -4,7 +4,7 @@ Maps checklist task IDs ([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.
 results. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
 `E` = `crates/rowfinity-engine/src/tests/`, `S` = `crates/rowfinity-server/tests/`, `W` = `web/e2e/`.
 
-**Latest verification (2026-10-26, macOS arm64, local; CI has not run yet because nothing is pushed):**
+**Phase 1 verification (2026-10-26, macOS arm64, local).** CI on PR #1 has since run `cargo test --workspace` on Linux: all tests passed; the run then failed only because clippy was missing from the pinned toolchain (fixed in `ec28345`).
 
 | Command | Result |
 |---|---|
@@ -87,3 +87,50 @@ Not executed: scheduled 2000-case run (`scheduled.yml`), any CI run, Linux/Windo
 - **Tests:** B/E `S/journey.rs::table_journey_survives_restart_exactly` (a model maintained independently in the test; failed edits in between; formula column; filtered + sorted export; byte-identical export before and after restart) and `sheet_journey_survives_restart_and_xlsx_roundtrip`. F `S/crash.rs::acknowledged_changes_survive_sigkill` (an unacknowledged 2-cell edit is all-or-nothing) and `kill_during_a_large_write_leaves_the_old_or_new_state`. C `W/journey.spec.ts` (the same journey through the UI with a SIGTERM restart, plus the sheet journey with SIGKILL).
 - **Result:** pass.
 - **Gaps:** no two-user variant yet (needs revisions, 7.08). Crash tests cover process kill, not power loss. `kill_during_a_large_write…` cannot prove the kill landed mid-write on every run; it checks the invariant either way.
+
+## Phase 2
+
+**Latest verification (2026-10-26, macOS arm64, local, branch `phase-2-local-spreadsheet`):** `cargo test --workspace` engine 81 passed; server api 9, crash 2, imports 5, journey 2, protocol 4 passed; clippy clean; `npx playwright test` 20 passed in two consecutive runs; `cargo test -p rowfinity-server --test api` 6 consecutive runs passed. CI has not run on this branch.
+
+### 2.01 Sheet tabs, rendering, editing, change events
+- **Behavior:** sheets open as tabs, render IronCalc's display values (errors included), edit in the grid and formula bar, and other people's edits appear without reloading.
+- **Tests:** C `W/sheets.spec.ts` "blank sheet in a new workbook…": `#DIV/0!` and recalculated values read back from the grid's accessible active cell; a second browser page sees both directions of edits live. B `S/api.rs` contract test covers every sheet op.
+- **Fix found:** Enter in the cell editor bubbled to the grid and reopened the editor below (`W/journey.spec.ts` "typing a value and pressing Enter…", fails without the fix).
+
+### 2.02 Blank sheet in a new workbook
+- **Tests:** C `W/sheets.spec.ts` (empty-state "New blank sheet", typing, formulas) and the 2.10 gate (menu path).
+
+### 2.03 XLSX import/export with compatibility notes
+- **Behavior:** before import, the dialog lists sheets and what will not come across (charts, pivots, drawings, macros, external links, connections, comments, slicers, #NAME? cells with example function names). Export says it contains sheets only.
+- **Tests:** B `E/xlsx.rs` (round trip compared cell by cell with the source model, two generations; copy-mode import; injected package parts; unknown functions; corrupt files). C `W/import.spec.ts` "xlsx import lists sheets and compatibility notes…".
+- **Fix found:** importing next to a same-named sheet renamed the copy but left its formulas pointing at the old sheet (silently wrong values).
+- **Gaps:** notes are based on package parts; files from real Excel with those features were not available, so parts are injected into an IronCalc-written file.
+
+### 2.04 Undo/redo with recalculation and reopen
+- **Tests:** C `W/sheets.spec.ts` "undo and redo recalculate…" (⌘Z, ⇧⌘Z, toolbar button, reload). B `E/sheets.rs` grouped undo and recalculation tests.
+- **Gap:** history is in memory and shared by all editors of a workbook (documented).
+
+### 2.05 Import preview, type overrides, progress, actionable errors
+- **Behavior:** staged upload → preview (detected types, first rows) → per-column types → import with DuckDB progress and Stop → errors with line/column/value and a one-click fix that retries the same upload. Unclaimed uploads expire after an hour.
+- **Invariants:** a preview creates nothing; failed or cancelled imports create no table; uploads are private to their workbook; only the named job is interrupted.
+- **Tests:** A `import.rs` (error explanation, type allow-list). B `E/import.rs` (preview, overrides for CSV/Parquet/JSON, late bad value beyond the 100k sample, invalid overrides, xlsx preview, progress reported during a 2M-row import). B `S/imports.rs` (staging, retry after a problem, workbook isolation, cancel, progress + interrupt of a 6M-row import, expiry). C `W/import.spec.ts` (preview → override → import; error → fix button; cancel at preview; Stop during a 4M-row import and retry).
+
+### 2.06 Tables vs Sheets; bounded conversions with visible limits
+- **Behavior:** a Table/Sheet badge explains each kind; copying a query or a table view into a sheet is capped by `--sheet-copy-rows` (default 100,000) and by the cell budget, and the result reports rows copied, source size and truncation.
+- **Tests:** B `E/sheets.rs::copies_into_sheets_are_bounded_and_say_so`; contract test for `table_to_sheet`; C `W/kinds.spec.ts`. Measured: 100,000 rows × 5 columns copy in 0.31 s (release) / 1.9 s (debug).
+- **Fix found:** optional fields were serialized as `null` where the TypeScript types promise `undefined` (crashed a toast); guarded by `S/protocol.rs::optional_fields_are_omitted_not_null`.
+
+### 2.07 Named views (live) and snapshots
+- **Behavior:** saved views per table (sort, filters, hidden columns, widths) in the workbook file; live; snapshot = explicit copy into a new table.
+- **Invariants:** saved and open views stay valid across column/table renames; a column a saved view sorts or filters by cannot be dropped; dropping a table removes its views.
+- **Tests:** B `E/views.rs` (persist + live after edits, unique names, invalid specs, hidden columns in fetch/export/copies, snapshot independence and order, schema changes on saved and open views). Contract test for all view ops; `S/protocol.rs::no_op_parameter_is_named_id`. C `W/views.spec.ts` (filter + hide, save, reload, re-apply, snapshot export).
+- **Fixes found:** open views kept stale column names after rename/drop and failed after commit; concurrent metadata writes shared one temporary file (a delete could fail); an op parameter named `id` collided with the request id.
+
+### 2.08 Grid disposal
+- **Tests:** C `W/disposal.spec.ts` counts window/document/media-query listeners, ResizeObservers and open WebSockets across six open/leave cycles with menus. The pre-fix code leaked 18 listeners and 6 observers.
+
+### 2.09 Accessible grid, keyboard navigation, visible focus
+- **Tests:** C `W/a11y.spec.ts`: axe (no serious/critical violations on home, workbook, dialog, sheet; it caught badge contrast), ARIA grid with active cell and announcements, visible focus ring, Tab leaving the grid, keyboard menus and tabs. **Gap:** no screen-reader testing with real assistive technology.
+
+### 2.10 Gate
+- **Tests:** C `W/sheets.spec.ts` "gate: a new user creates, imports, edits and reopens a table and a sheet with the UI alone" (new workbook → import dialog → table edit with append → blank sheet with formulas → home and back → server restart → values intact), plus the phase-1 journeys.

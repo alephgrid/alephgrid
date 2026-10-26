@@ -66,16 +66,42 @@ Complete before releasing an alpha that users rely on for their data.
 
 Depends on phase 1.
 
-- [ ] **2.01** Connect existing IronCalc APIs to sheet tabs, rendering, editing and sheet change events.
-- [ ] **2.02** Support creating and editing a blank sheet from a new workbook.
-- [ ] **2.03** Complete XLSX import/export UI with explicit compatibility warnings and roundtrip verification.
-- [ ] **2.04** Expose existing sheet undo/redo and verify formula recalculation after undo, redo and reopening.
-- [ ] **2.05** Add import preview, type overrides, progress and actionable error messages.
-- [ ] **2.06** Clearly distinguish large Tables from free-form Sheets; bound table/query-to-sheet conversion and display its limits.
-- [ ] **2.07** Persist named views with sort, filter and column presentation settings; label live versus snapshot behavior.
-- [ ] **2.08** Add grid disposal for window listeners, observers, timers and pending requests.
-- [ ] **2.09** Provide accessible active-cell/viewport semantics, keyboard navigation and visible focus.
-- [ ] **2.10 — Gate:** A new user can create, import, edit, save and reopen both tables and sheets using the UI alone.
+- [x] **2.01** Connect existing IronCalc APIs to sheet tabs, rendering, editing and sheet change events.
+  - [x] Test (C): `sheets.spec.ts` rendering, errors, live updates between two pages.
+  - [x] Test (C): Enter-key regression in `journey.spec.ts`.
+  - Evidence: TEST_MATRIX 2.01; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.02** Support creating and editing a blank sheet from a new workbook.
+  - [x] Test (C): empty-state and menu paths in `sheets.spec.ts`.
+  - Evidence: TEST_MATRIX 2.02; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.03** Complete XLSX import/export UI with explicit compatibility warnings and roundtrip verification.
+  - [x] Test (B): `xlsx.rs` round trip, notes, copy-mode references.
+  - [x] Test (C): xlsx notes in `import.spec.ts`.
+  - Evidence: TEST_MATRIX 2.03; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.04** Expose existing sheet undo/redo and verify formula recalculation after undo, redo and reopening.
+  - [x] Test (C): keyboard/toolbar undo-redo and reload in `sheets.spec.ts`.
+  - [x] Test (B): grouped undo in `tests/sheets.rs`.
+  - Evidence: TEST_MATRIX 2.04; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.05** Add import preview, type overrides, progress and actionable error messages.
+  - [x] Test (B): `tests/import.rs`, `imports.rs` (staging, retry, cancel, progress, expiry).
+  - [x] Test (C): `import.spec.ts` preview, override, fix, stop.
+  - Evidence: TEST_MATRIX 2.05; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.06** Clearly distinguish large Tables from free-form Sheets; bound table/query-to-sheet conversion and display its limits.
+  - [x] Test (B): bounded copies; contract for `table_to_sheet`.
+  - [x] Test (C): `kinds.spec.ts`.
+  - Evidence: TEST_MATRIX 2.06; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.07** Persist named views with sort, filter and column presentation settings; label live versus snapshot behavior.
+  - [x] Test (B): `tests/views.rs` live views, hidden columns, snapshots, schema changes.
+  - [x] Test (C): `views.spec.ts`.
+  - Evidence: TEST_MATRIX 2.07; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.08** Add grid disposal for window listeners, observers, timers and pending requests.
+  - [x] Test (C): `disposal.spec.ts` leak counters (old code leaked 18 listeners, 6 observers).
+  - Evidence: TEST_MATRIX 2.08; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.09** Provide accessible active-cell/viewport semantics, keyboard navigation and visible focus.
+  - [x] Test (C): `a11y.spec.ts` axe, ARIA grid, focus, keyboard.
+  - Evidence: TEST_MATRIX 2.09; passing 2026-10-26 on `phase-2-local-spreadsheet`.
+- [x] **2.10 — Gate:** A new user can create, import, edit, save and reopen both tables and sheets using the UI alone.
+  - [x] Test (C): gate journey in `sheets.spec.ts`.
+  - Evidence: TEST_MATRIX 2.10; passing 2026-10-26 on `phase-2-local-spreadsheet`.
 
 ## 3. Establish bounded execution and storage foundations
 
@@ -231,3 +257,4 @@ Add one row when starting work, encountering a blocker or completing a task. Kee
 |---|---|---|---|
 | 2026-10-26 | Planning | Checklist created | Consolidated the assessment and SQL/custom-function requirements; implementation completion has not been reassessed. |
 | 2026-10-26 | 1.01–1.11 | Complete | Engine, server, generated protocol, trash UI and browser journeys. Commands and results in TEST_MATRIX.md; new tests failed on `ff3e736` as expected. |
+| 2026-10-26 | 2.01–2.10 | Complete | Import preview/overrides/progress/cancel, xlsx notes, bounded sheet copies, saved live views and snapshots, grid disposal, accessibility. Nine defects found by the new tests and fixed; see TEST_MATRIX.md. |
