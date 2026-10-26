@@ -181,7 +181,10 @@ fn xlsx_roundtrip_and_bridges() {
     wb.sheets().export_xlsx(&xlsx).unwrap();
     let mut other = Workbook::open_in_memory().unwrap();
     match other.import_any(&xlsx, None).unwrap() {
-        Imported::Sheets { sheets } => assert_eq!(sheets[0].name, "By carrier"),
+        Imported::Sheets { sheets, warnings } => {
+            assert_eq!(sheets[0].name, "By carrier");
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
         _ => panic!("xlsx should import as sheets"),
     }
     let total = other.sheets().fetch(0, 9, 1, 2).unwrap();

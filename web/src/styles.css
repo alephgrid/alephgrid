@@ -250,3 +250,18 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .cell-center { display: flex; justify-content: center; align-items: center; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* import dialog */
+.import-body p { margin: 0 0 10px; }
+.import-preview { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; }
+.import-preview th { vertical-align: top; text-align: left; position: sticky; top: 0; background: var(--panel); }
+.import-preview select { margin-top: 4px; max-width: 160px; font: inherit; font-weight: 400; }
+.import-col { font-weight: 600; }
+.import-sheets { margin: 6px 0 12px; padding-left: 18px; }
+.import-fixes { display: flex; gap: 8px; margin: 6px 0; }
+.import-fixes:empty { display: none; }
+.import-progress { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+.import-progress progress { flex: 1; }
+.notice { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; background: var(--panel); }
+.notice ul { margin: 6px 0 0; padding-left: 18px; }
+dialog progress, .dialog progress { width: 100%; }

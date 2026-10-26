@@ -3,11 +3,13 @@
 //! (regenerate with `UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`).
 
 use rowfinity_engine::{
-    Align, CellEdit, Column, EditOutcome, ExportFormat, Filter, FilterOp, Imported, Kind, QueryPreview, RowBlock,
-    SheetBlock, SheetInfo, SheetInput, SortKey, Stats, TableInfo, ViewInfo, ViewSpec,
+    Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
+    Kind, PreviewColumn, QueryPreview, RowBlock, SheetBlock, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
+    UploadPreview, ViewInfo, ViewSpec,
 };
 use ts_rs::{Config, TS};
 
+use crate::http::{ImportRequest, JobStatus, UploadCreated};
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace};
 use crate::ws::{Event, Op};
 
@@ -94,6 +96,7 @@ pub fn bindings() -> String {
         Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, Imported,
         Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
+        ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
     );
     out.push_str("\n/** Result type of each operation. */\nexport interface Results {\n");
     for (op, ty) in RESULTS {

@@ -1917,6 +1917,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ts-rs",
+ "zip",
 ]
 
 [[package]]

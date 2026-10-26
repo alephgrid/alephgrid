@@ -1,4 +1,7 @@
-import type { Imported, OpName, Params, Results, ServerEvent, SheetInfo, TableInfo, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace } from "./types";
+import type {
+  ImportProblem, ImportRequest, Imported, JobStatus, OpName, Params, Results, ServerEvent, SheetInfo, TableInfo, UploadCreated,
+  UploadPreview, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
+} from "./types";
 
 const TOKEN_KEY = "rowfinity:token";
 
@@ -27,7 +30,7 @@ function authHeaders(): Record<string, string> {
 }
 
 export class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public problem?: ImportProblem) {
     super(message);
   }
 }
@@ -40,8 +43,13 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
   });
   if (!res.ok) {
     let msg = res.statusText;
-    try { msg = (await res.json()).error ?? msg; } catch { /* not json */ }
-    throw new HttpError(res.status, msg);
+    let problem: ImportProblem | undefined;
+    try {
+      const body = await res.json();
+      msg = body.error ?? msg;
+      problem = body.problem;
+    } catch { /* not json */ }
+    throw new HttpError(res.status, msg, problem);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -66,6 +74,13 @@ export const api = {
   createWorkspace: (name: string) => http<Workspace>("POST", "/api/workspaces", { name }),
   renameWorkspace: (id: string, name: string) => http<Workspace>("PATCH", `/api/workspaces/${id}`, { name }),
   removeWorkspace: (id: string) => http<void>("DELETE", `/api/workspaces/${id}`),
+  previewUpload: (id: string, upload: string, req: ImportRequest) =>
+    http<UploadPreview>("POST", `/api/workbooks/${id}/uploads/${upload}/preview`, req),
+  importUpload: (id: string, upload: string, req: ImportRequest) =>
+    http<Imported>("POST", `/api/workbooks/${id}/uploads/${upload}/import`, req),
+  cancelUpload: (id: string, upload: string) => http<void>("DELETE", `/api/workbooks/${id}/uploads/${upload}`),
+  jobStatus: (id: string, job: string) => http<JobStatus>("GET", `/api/workbooks/${id}/jobs/${job}`),
+  cancelJob: (id: string, job: string) => http<void>("DELETE", `/api/workbooks/${id}/jobs/${job}`),
   xlsxUrl(id: string): string {
     const t = token();
     return `/api/workbooks/${id}/export.xlsx${t ? `?token=${encodeURIComponent(t)}` : ""}`;
@@ -78,15 +93,15 @@ export const api = {
   },
 };
 
-/** Upload a file with progress; the server streams it to disk and imports it with DuckDB. */
-export function uploadFile(
+/** Stage a file for preview (nothing is imported yet). `abort()` stops the upload. */
+export function stageUpload(
   workbookId: string,
   file: File,
   onProgress: (fraction: number) => void,
-): Promise<Imported> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", `/api/workbooks/${workbookId}/import?filename=${encodeURIComponent(file.name)}`);
+): { done: Promise<UploadCreated>; abort: () => void } {
+  const xhr = new XMLHttpRequest();
+  const done = new Promise<UploadCreated>((resolve, reject) => {
+    xhr.open("POST", `/api/workbooks/${workbookId}/uploads?filename=${encodeURIComponent(file.name)}`);
     const t = token();
     if (t) xhr.setRequestHeader("Authorization", `Bearer ${t}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
@@ -94,11 +109,13 @@ export function uploadFile(
       let body: any = null;
       try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
       if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-      else reject(new Error(body?.error ?? `upload failed (${xhr.status})`));
+      else reject(new HttpError(xhr.status, body?.error ?? `upload failed (${xhr.status})`, body?.problem));
     };
     xhr.onerror = () => reject(new Error("upload failed: network error"));
+    xhr.onabort = () => reject(new DOMException("upload cancelled", "AbortError"));
     xhr.send(file);
   });
+  return { done, abort: () => xhr.abort() };
 }
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };

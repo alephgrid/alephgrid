@@ -381,25 +381,48 @@ impl Sheets {
 
     /// Import every sheet of an .xlsx file. Into an empty workbook the IronCalc model
     /// is adopted as-is (styles kept); otherwise cell inputs are copied into new sheets.
-    pub fn import_xlsx(&mut self, path: &std::path::Path) -> Result<Vec<SheetInfo>> {
+    /// Returns the new sheets and plain-language notes about what did not come across.
+    pub fn import_xlsx(&mut self, path: &std::path::Path) -> Result<(Vec<SheetInfo>, Vec<String>)> {
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "import".into());
         let bytes = std::fs::read(path)?;
+        let mut warnings = xlsx_part_warnings(&bytes);
         let workbook = ironcalc::import::load_from_xlsx_bytes(&bytes, &name, "en", "UTC")
             .map_err(|e| anyhow!("could not read xlsx: {e}"))?;
         let imported = ironcalc::base::Model::from_workbook(workbook, LANG).map_err(|e| anyhow!(e))?;
         let mut imported = UserModel::from_model(imported);
         imported.evaluate();
+        warnings.extend(unsupported_function_warning(&imported));
         if self.model.is_none() {
             self.changes += 1;
             self.model = Some(imported);
             self.undo_groups.clear();
             self.redo_groups.clear();
-            return Ok(self.list());
+            return Ok((self.list(), warnings));
+        }
+        let groups_before = self.undo_groups.len();
+        // Give clashing sheets unique names inside the imported model first: IronCalc
+        // rewrites references on rename, so formulas keep pointing at the copied sheet.
+        let props = imported.get_worksheets_properties();
+        let mut taken: Vec<String> = self.list().into_iter().map(|s| s.name.to_lowercase()).collect();
+        for (i, p) in props.iter().enumerate() {
+            let mut name = p.name.clone();
+            let mut n = 2;
+            while taken.contains(&name.to_lowercase()) {
+                name = format!("{} {n}", p.name);
+                n += 1;
+            }
+            taken.push(name.to_lowercase());
+            if name != p.name {
+                imported.rename_sheet(i as u32, &name).map_err(|e| anyhow!(e))?;
+            }
+        }
+        // Create every sheet before writing cells, so cross-sheet references resolve.
+        let mut targets = Vec::new();
+        for p in imported.get_worksheets_properties() {
+            targets.push(self.create(&p.name)?.index);
         }
         let mut created = Vec::new();
-        let groups_before = self.undo_groups.len();
-        for (i, props) in imported.get_worksheets_properties().into_iter().enumerate() {
-            let sheet = self.create(&props.name)?;
+        for (i, target) in targets.into_iter().enumerate() {
             let ws = imported.get_model().workbook.worksheet(i as u32).map_err(|e| anyhow!(e))?;
             let mut inputs = Vec::new();
             for (row, col, _) in ws.sheet_data.cells() {
@@ -409,13 +432,20 @@ impl Sheets {
                     }
                 }
             }
-            self.set(sheet.index, &inputs)?;
-            created.push(self.info(sheet.index)?);
+            self.set(target, &inputs)?;
+            created.push(self.info(target)?);
         }
         // The whole import is one undo step.
         let total: u32 = self.undo_groups.drain(groups_before..).sum();
         self.record(total);
-        Ok(created)
+        warnings.push("Cell values and formulas were copied into new sheets; formatting is kept only when importing into a workbook without sheets.".into());
+        Ok((created, warnings))
+    }
+
+    /// The sheets an .xlsx file would add, and its compatibility notes, without importing.
+    pub fn preview_xlsx(path: &std::path::Path) -> Result<(Vec<SheetInfo>, Vec<String>)> {
+        let mut scratch = Sheets::from_bytes(None)?;
+        scratch.import_xlsx(path)
     }
 
     pub fn export_xlsx(&self, path: &std::path::Path) -> Result<()> {
@@ -513,6 +543,85 @@ impl Sheets {
         }
         Ok(out)
     }
+}
+
+/// Parts of an .xlsx package that sheets do not carry over, by package path prefix.
+const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
+    ("xl/charts/", "Charts are not shown and are left out when you export."),
+    ("xl/pivotTables/", "Pivot tables were imported as their last calculated values; they no longer refresh."),
+    ("xl/drawings/", "Pictures, shapes and drawings are not shown and are left out when you export."),
+    ("xl/vbaProject.bin", "Macros (VBA) were ignored; Rowfinity never runs them."),
+    ("xl/externalLinks/", "Links to other workbooks were not followed; their cells keep the last saved values."),
+    ("xl/connections.xml", "Data connections and queries were ignored."),
+    ("xl/comments", "Comments and notes were not imported."),
+    ("xl/threadedComments/", "Threaded comments were not imported."),
+    ("xl/slicers/", "Slicers were not imported."),
+];
+
+fn xlsx_part_warnings(bytes: &[u8]) -> Vec<String> {
+    let Ok(archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return vec![] };
+    let names: Vec<String> = archive.file_names().filter_map(|n| n.ok().map(|n| n.into_owned())).collect();
+    UNSUPPORTED_PARTS
+        .iter()
+        .filter(|(prefix, _)| names.iter().any(|n| n.starts_with(prefix)))
+        .map(|(_, msg)| msg.to_string())
+        .collect()
+}
+
+/// Cells that evaluate to #NAME? usually call a function the engine does not have.
+fn unsupported_function_warning(m: &UserModel<'static>) -> Option<String> {
+    let mut count = 0usize;
+    let mut names: Vec<String> = Vec::new();
+    for (index, _) in m.get_worksheets_properties().iter().enumerate() {
+        let Ok(ws) = m.get_model().workbook.worksheet(index as u32) else { continue };
+        for (row, col, _) in ws.sheet_data.cells() {
+            let index = index as u32;
+            if !matches!(m.get_cell_type(index, row, col), Ok(CellType::ErrorValue)) {
+                continue;
+            }
+            if m.get_formatted_cell_value(index, row, col).ok().as_deref() != Some("#NAME?") {
+                continue;
+            }
+            count += 1;
+            // For the message only: the identifiers called in the formula text.
+            let formula = m.get_cell_content(index, row, col).unwrap_or_default();
+            for name in called_names(&formula) {
+                if !names.contains(&name) && names.len() < 5 {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    (count > 0).then(|| {
+        let list = if names.is_empty() { String::new() } else { format!(" (for example {})", names.join(", ")) };
+        format!("{count} cell{} show #NAME? because they use functions or names Rowfinity does not support yet{list}.", if count == 1 { "" } else { "s" })
+    })
+}
+
+/// Upper-cased identifiers directly followed by `(` outside string literals.
+fn called_names(formula: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut in_string = false;
+    for c in formula.chars() {
+        if c == '"' {
+            in_string = !in_string;
+            word.clear();
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' || c == '.' {
+            word.push(c);
+        } else {
+            if c == '(' && !word.is_empty() && !word.chars().next().unwrap().is_ascii_digit() {
+                out.push(word.to_uppercase());
+            }
+            word.clear();
+        }
+    }
+    out
 }
 
 fn format_general(n: f64) -> String {

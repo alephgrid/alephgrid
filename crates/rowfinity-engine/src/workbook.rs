@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::faults;
 use crate::formula;
+use crate::import::{self, ColumnType, FilePreview, PreviewColumn};
 use crate::model::*;
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
 use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
@@ -39,12 +40,21 @@ pub struct Workbook {
     sheets: Sheets,
 }
 
+/// What an upload would produce, shown before importing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum UploadPreview {
+    Table { preview: FilePreview },
+    Sheets { sheets: Vec<SheetInfo>, warnings: Vec<String> },
+}
+
 /// What an import produced: a columnar table, or IronCalc sheets for .xlsx files.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Imported {
     Table { table: TableInfo },
-    Sheets { sheets: Vec<SheetInfo> },
+    /// `warnings` lists what an .xlsx file contained that sheets do not carry over.
+    Sheets { sheets: Vec<SheetInfo>, warnings: Vec<String> },
 }
 
 impl Workbook {
@@ -67,6 +77,8 @@ impl Workbook {
         )?;
         // Show TIMESTAMPTZ values in UTC so results do not depend on the server's zone.
         let _ = conn.execute_batch("SET TimeZone = 'UTC';");
+        // Lets long statements (imports, sorts) report progress to the UI.
+        conn.set_query_progress_tracking(true)?;
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         let sheets = Sheets::from_bytes(bytes)?;
         Ok(Workbook { conn, views: HashMap::new(), next_view: 1, sheets })
@@ -133,26 +145,82 @@ impl Workbook {
 
     /// Import a CSV/TSV/Parquet/JSON(L)/XLSX file as a new table.
     pub fn import_file(&mut self, path: &Path, table_name: Option<&str>) -> Result<TableInfo> {
-        let file = path.to_string_lossy();
-        let lower = file.to_ascii_lowercase();
-        let stripped = lower.trim_end_matches(".gz").trim_end_matches(".zst");
-        let reader = if stripped.ends_with(".parquet") {
-            format!("read_parquet({})", lit(&file))
-        } else if stripped.ends_with(".json") || stripped.ends_with(".jsonl") || stripped.ends_with(".ndjson") {
-            format!("read_json_auto({})", lit(&file))
-        } else if stripped.ends_with(".xlsx") {
+        self.import_file_with(path, table_name, &[])
+    }
+
+    /// Import a CSV/TSV/Parquet/JSON(L) file as a new table, with optional per-column
+    /// types. Failures become [`import::ImportProblem`]s that say what to change.
+    pub fn import_file_with(&mut self, path: &Path, table_name: Option<&str>, types: &[ColumnType]) -> Result<TableInfo> {
+        if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
             bail!("use import_any for .xlsx files (they become sheets)");
-        } else {
-            format!("read_csv_auto({}, sample_size = 100000)", lit(&file))
-        };
-        let stem = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "table".into());
-        let stem = stem.split('.').next().unwrap_or("table").to_string();
-        let name = self.unique_table_name(table_name.unwrap_or(&stem))?;
-        self.create_table_from_select(&name, &format!("SELECT * FROM {reader}"))?;
+        }
+        self.check_type_overrides(path, types)?;
+        let select = import::reader_select(path, types)?;
+        let name = self.unique_table_name(table_name.filter(|n| !n.trim().is_empty()).unwrap_or(&import::suggested_name(path)))?;
+        faults::check("import")?;
+        self.create_table_from_select(&name, &select).map_err(import::import_error)?;
         self.table_info(&name)
+    }
+
+    /// Detected columns and the first rows of a file, as they would be imported.
+    pub fn preview_file(&self, path: &Path, types: &[ColumnType]) -> Result<FilePreview> {
+        let detected = self.describe(&import::reader_select(path, &[])?).map_err(import::import_error)?;
+        self.check_type_overrides(path, types)?;
+        let select = import::reader_select(path, types)?;
+        let rows = self.run_preview(&select, import::PREVIEW_ROWS).map_err(import::import_error)?;
+        let columns = rows
+            .columns
+            .iter()
+            .map(|c| {
+                let i = detected.iter().position(|d| d.name == c.name);
+                PreviewColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type.clone(),
+                    kind: c.kind,
+                    detected: i.map(|i| detected[i].sql_type.clone()).unwrap_or_else(|| c.sql_type.clone()),
+                }
+            })
+            .collect();
+        Ok(FilePreview {
+            format: import::format_label(path).to_string(),
+            suggested_name: import::suggested_name(path),
+            columns,
+            rows: rows.rows,
+            type_choices: import::TYPE_CHOICES.iter().map(|t| t.to_string()).collect(),
+        })
+    }
+
+    fn check_type_overrides(&self, path: &Path, types: &[ColumnType]) -> Result<()> {
+        if types.is_empty() {
+            return Ok(());
+        }
+        let detected = self.describe(&import::reader_select(path, &[])?).map_err(import::import_error)?;
+        for t in types {
+            if !detected.iter().any(|c| c.name == t.name) {
+                bail!("the file has no column {:?}", t.name);
+            }
+        }
+        Ok(())
+    }
+
+    /// Preview any supported upload: a table preview, or the sheets an .xlsx would add.
+    pub fn preview_any(&self, path: &Path, types: &[ColumnType]) -> Result<UploadPreview> {
+        if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
+            let (sheets, warnings) = Sheets::preview_xlsx(path)?;
+            Ok(UploadPreview::Sheets { sheets, warnings })
+        } else {
+            Ok(UploadPreview::Table { preview: self.preview_file(path, types)? })
+        }
+    }
+
+    /// Handle for reading the progress of the statement running on this workbook.
+    pub fn progress_handle(&self) -> duckdb::progress::ProgressHandle {
+        self.conn.progress_handle()
+    }
+
+    /// Handle that interrupts the statement running on this workbook.
+    pub fn interrupt_handle(&self) -> std::sync::Arc<duckdb::InterruptHandle> {
+        self.conn.interrupt_handle()
     }
 
     /// Materialize any SELECT as a new table (e.g. a group-by or a join).
@@ -836,11 +904,15 @@ impl Workbook {
 
     /// Import any supported file; `.xlsx` becomes IronCalc sheets, the rest a table.
     pub fn import_any(&mut self, path: &Path, table_name: Option<&str>) -> Result<Imported> {
+        self.import_any_with(path, table_name, &[])
+    }
+
+    pub fn import_any_with(&mut self, path: &Path, table_name: Option<&str>, types: &[ColumnType]) -> Result<Imported> {
         if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
-            let sheets = self.with_sheets(|s| s.import_xlsx(path))?;
-            Ok(Imported::Sheets { sheets })
+            let (sheets, warnings) = self.with_sheets(|s| s.import_xlsx(path))?;
+            Ok(Imported::Sheets { sheets, warnings })
         } else {
-            Ok(Imported::Table { table: self.import_file(path, table_name)? })
+            Ok(Imported::Table { table: self.import_file_with(path, table_name, types)? })
         }
     }
 
@@ -1020,7 +1092,12 @@ impl Workbook {
     /// Run a read-only query and return the first `limit` rows.
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {
         let select = self.expand_query(sql)?;
-        let described = self.describe(&select)?;
+        self.run_preview(&select, limit)
+    }
+
+    /// First `limit` rows of a SELECT, in wire form, with truncation reported.
+    fn run_preview(&self, select: &str, limit: usize) -> Result<QueryPreview> {
+        let described = self.describe(select)?;
         // Address result columns by position, so duplicate or odd names still work.
         let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
         let keep: Vec<usize> = (0..described.len()).filter(|&i| described[i].name != ID).collect();

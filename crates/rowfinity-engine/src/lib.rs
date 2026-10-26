@@ -9,6 +9,7 @@
 
 pub mod faults;
 mod formula;
+pub mod import;
 pub mod model;
 pub mod sheets;
 pub mod sql;
@@ -17,7 +18,14 @@ mod workbook;
 
 pub use model::*;
 pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
-pub use workbook::{Imported, Workbook};
+pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
+pub use workbook::{Imported, UploadPreview, Workbook};
+
+/// DuckDB handles the server uses for progress and cancellation.
+pub mod duckdb_handles {
+    pub use duckdb::progress::{ProgressHandle, QueryProgress};
+    pub use duckdb::InterruptHandle;
+}
 
 #[cfg(test)]
 mod tests;

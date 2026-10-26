@@ -42,6 +42,7 @@ test("table journey: import, edit, reject bad input, filter, export, restart, re
 
   // Import through the file picker.
   await page.locator('input[type="file"]').setInputFiles({ name: "people.csv", mimeType: "text/csv", buffer: Buffer.from(CSV) });
+  await page.getByRole("dialog", { name: "Import people.csv" }).getByRole("button", { name: "Import table" }).click();
   await expect(page.getByRole("tab", { name: /people/ })).toBeVisible();
   await expect(page.locator(".toast-success")).toContainText("3 rows imported");
   const wb = workbookId(page);
@@ -83,6 +84,30 @@ test("table journey: import, edit, reject bad input, filter, export, restart, re
   await goTo(page, 1, 1);
   await expect.poll(() => activeCell(page)).toEqual({ ref: "name · 2", value: "Linus T." });
   expect(await server.exportCsv(wb, { table: "people" })).toBe("id,name,amount\n1,Ada,10.5\n2,Linus T.,-3.0\n3,東京,0.0\n4,,\n");
+});
+
+test("typing a value and pressing Enter moves down without reopening the editor", async ({ page }) => {
+  const wb = await server.api<{ id: string }>("/api/workbooks", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Enter" }),
+  });
+  await page.goto(`${server.url}/w/${wb.id}`);
+  await page.getByRole("button", { name: "New table or sheet" }).click();
+  await page.getByRole("menuitem", { name: /New sheet/ }).click();
+  await expect(page.getByRole("grid", { name: /Sheet/ })).toBeVisible();
+  await page.locator(".grid-host").focus();
+  // Type straight down a column, like a spreadsheet user does.
+  for (const v of ["1", "2", "=A1+A2"]) {
+    await page.keyboard.type(v);
+    await page.keyboard.press("Enter");
+  }
+  await expect(page.locator(".grid-editor")).toBeHidden();
+  await expect(page.locator(".grid-host")).toBeFocused();
+  await expect(page.locator(".cell-ref")).toHaveText("A4");
+  await page.keyboard.press("ArrowUp");
+  await expect(page.locator(".formula-input")).toHaveValue("=A1+A2");
+  await page.keyboard.press("Shift+ArrowUp");
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect(page.locator(".stats")).toContainText("Sum 6");
 });
 
 test("sheet journey: formulas, undo, crash, reopen", async ({ page }) => {

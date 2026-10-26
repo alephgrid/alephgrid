@@ -1,4 +1,5 @@
-import { api, Rpc, uploadFile } from "./api";
+import { api, Rpc } from "./api";
+import { importFile } from "./importer";
 import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { Grid, type Cell, type Range } from "./grid";
@@ -1125,21 +1126,18 @@ export class WorkbookScreen {
   private async importFiles(files: File[]): Promise<void> {
     let last: Imported | null = null;
     for (const file of files) {
-      const started = performance.now();
-      this.busy(`Uploading ${file.name}…`);
       try {
-        last = await uploadFile(this.meta.id, file, (f) => {
-          this.busy(f < 1 ? `Uploading ${file.name} · ${Math.round(f * 100)}%` : `Importing ${file.name}…`);
-        });
-        const secs = ((performance.now() - started) / 1000).toFixed(1);
-        toast(last.kind === "table"
-          ? `Imported ${file.name}: ${formatCount(last.table.row_count)} rows in ${secs}s`
-          : `Imported ${file.name}: ${last.sheets.length} sheet${last.sheets.length === 1 ? "" : "s"} in ${secs}s`, "success");
+        const result = await importFile(this.meta.id, file);
+        if (!result) continue;
+        last = result;
+        toast(result.kind === "table"
+          ? `Imported ${file.name}: ${formatCount(result.table.row_count)} rows`
+          : `Imported ${file.name}: ${result.sheets.length} sheet${result.sheets.length === 1 ? "" : "s"}`, "success");
       } catch (e) {
         toast(`${file.name}: ${(e as Error).message}`, "error");
       }
     }
-    this.busy(null);
+    if (this.disposed) return;
     await this.loadItems();
     if (last?.kind === "table") await this.openTable(last.table.name);
     else if (last?.kind === "sheets" && last.sheets.length) await this.openSheet(last.sheets[0].index);

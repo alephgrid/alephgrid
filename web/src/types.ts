@@ -1,6 +1,7 @@
 // Wire types come from the generated protocol.ts; only client-side unions live here.
 export type {
-  Align, CellEdit, CellValue, Column, EditOutcome, Filter, FilterOp, Imported, Kind, Op, OpName, Params,
+  Align, CellEdit, CellValue, Column, ColumnType, EditOutcome, FilePreview, Filter, FilterOp, ImportProblem, ImportRequest,
+  Imported, JobStatus, Kind, Op, OpName, Params, PreviewColumn, UploadCreated, UploadPreview,
   QueryPreview, Results, RowBlock, SheetBlock, SheetCell, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
   ViewInfo, ViewSpec, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
 } from "./protocol";

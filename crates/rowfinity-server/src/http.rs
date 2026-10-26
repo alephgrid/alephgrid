@@ -10,9 +10,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures_util::TryStreamExt;
-use rowfinity_engine::{ExportFormat, ViewSpec};
+use rowfinity_engine::{ColumnType, ExportFormat, ImportProblem, UploadPreview, ViewSpec};
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -24,18 +25,67 @@ use crate::ws;
 #[folder = "../../web/dist"]
 struct Assets;
 
-pub struct ApiError(StatusCode, String);
+/// An error reply: `{"error": message}`, plus `problem` when an import can say what to fix.
+pub struct ApiError(StatusCode, String, Option<Box<ImportProblem>>);
+
+impl ApiError {
+    fn new(status: StatusCode, message: impl Into<String>) -> ApiError {
+        ApiError(status, message.into(), None)
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        let mut body = json!({ "error": self.1 });
+        if let Some(p) = self.2 {
+            body["problem"] = json!(p);
+        }
+        (self.0, Json(body)).into_response()
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError(StatusCode::BAD_REQUEST, format!("{e:#}"))
+        let problem = e.chain().find_map(|c| c.downcast_ref::<ImportProblem>()).cloned().map(Box::new);
+        let message = match &problem {
+            Some(p) => p.message.clone(),
+            None if format!("{e:#}").contains("INTERRUPT") => "Cancelled.".to_string(),
+            None => format!("{e:#}"),
+        };
+        ApiError(StatusCode::BAD_REQUEST, message, problem)
     }
+}
+
+/// Reply to a staged upload: its id and what importing it would produce.
+#[derive(Serialize, TS)]
+pub struct UploadCreated {
+    pub upload_id: String,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub preview: UploadPreview,
+}
+
+/// Body of a preview or import request for a staged upload.
+#[derive(Deserialize, TS)]
+#[ts(optional_fields)]
+pub struct ImportRequest {
+    /// Table name (tables only); defaults to the file name.
+    pub table: Option<String>,
+    #[serde(default)]
+    pub types: Vec<ColumnType>,
+    /// Client-chosen id for `GET/DELETE /api/workbooks/{id}/jobs/{job}` while it runs.
+    pub job: Option<String>,
+}
+
+/// Progress of a running job.
+#[derive(Serialize, TS)]
+pub struct JobStatus {
+    pub running: bool,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentage: Option<f64>,
+    pub rows_processed: u64,
+    pub total_rows: u64,
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -56,6 +106,11 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
             post(import_file).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/workbooks/{id}/export", get(export))
+        .route("/api/workbooks/{id}/uploads", post(stage_upload).layer(DefaultBodyLimit::disable()))
+        .route("/api/workbooks/{id}/uploads/{upload}", axum::routing::delete(cancel_upload))
+        .route("/api/workbooks/{id}/uploads/{upload}/preview", post(preview_upload))
+        .route("/api/workbooks/{id}/uploads/{upload}/import", post(import_upload))
+        .route("/api/workbooks/{id}/jobs/{job}", get(job_status).delete(cancel_job))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
@@ -88,7 +143,7 @@ async fn require_token(State(state): State<Shared>, req: Request, next: Next) ->
     if bearer.as_deref() == Some(expected.as_str()) || query.as_deref() == Some(expected.as_str()) {
         next.run(req).await
     } else {
-        ApiError(StatusCode::UNAUTHORIZED, "missing or wrong access token".into()).into_response()
+        ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong access token").into_response()
     }
 }
 
@@ -200,28 +255,8 @@ async fn import_file(
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
     let h = state.get(&id)?;
-    let file_name = std::path::Path::new(&q.filename)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .filter(|s| !s.starts_with('.'))
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "invalid filename".into()))?;
-    // Each upload gets its own directory: same-name uploads cannot collide, and the
-    // file keeps its name (DuckDB picks the reader and the table name from it).
-    let scratch = state.scratch_dir(".uploads")?;
-    let path = scratch.join(&file_name);
-    let received = async {
-        let mut file = tokio::fs::File::create(&path).await?;
-        let stream = body.into_data_stream().map_err(std::io::Error::other);
-        let mut reader = StreamReader::new(stream);
-        tokio::io::copy(&mut reader, &mut file).await?;
-        file.flush().await?;
-        file.sync_all().await
-    }
-    .await;
-    if let Err(e) = received {
-        let _ = tokio::fs::remove_dir_all(&scratch).await;
-        return Err(ApiError(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")));
-    }
+    let file_name = upload_name(&q.filename)?;
+    let (scratch, path, _) = receive(&state, &file_name, body).await?;
 
     let h2 = h.clone();
     let import_path = path.clone();
@@ -235,6 +270,140 @@ async fn import_file(
     let imported = result?;
     let _ = h.events.send(ws::Event::TablesChanged { origin: 0 });
     Ok(Json(imported))
+}
+
+fn upload_name(filename: &str) -> ApiResult<String> {
+    std::path::Path::new(filename)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.starts_with('.'))
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid filename"))
+}
+
+/// Stream a request body into its own scratch directory. Same-name uploads cannot
+/// collide, the file keeps its name (DuckDB picks the reader from it), and a broken
+/// upload leaves nothing behind.
+async fn receive(state: &Shared, file_name: &str, body: Body) -> ApiResult<(PathBuf, PathBuf, u64)> {
+    let scratch = state.scratch_dir(".uploads")?;
+    let path = scratch.join(file_name);
+    let received = async {
+        let mut file = tokio::fs::File::create(&path).await?;
+        let stream = body.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
+        let n = tokio::io::copy(&mut reader, &mut file).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok::<u64, std::io::Error>(n)
+    }
+    .await;
+    match received {
+        Ok(n) => Ok((scratch, path, n)),
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&scratch).await;
+            Err(ApiError::new(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    filename: String,
+}
+
+/// Stage a file and preview it; nothing is imported until `/import`.
+async fn stage_upload(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<UploadQuery>,
+    body: Body,
+) -> ApiResult<impl IntoResponse> {
+    let h = state.get(&id)?;
+    let file_name = upload_name(&q.filename)?;
+    let (dir, path, size_bytes) = receive(&state, &file_name, body).await?;
+    let p = path.clone();
+    let preview = blocking(move || h.with_engine(|wb| wb.preview_any(&p, &[]))).await;
+    match preview {
+        Ok(preview) => {
+            let upload_id = state.add_upload(crate::state::Upload {
+                workbook: id,
+                path,
+                dir,
+                size_bytes,
+                touched: std::time::Instant::now(),
+            });
+            Ok(Json(UploadCreated { upload_id, filename: file_name, size_bytes, preview }))
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            Err(e)
+        }
+    }
+}
+
+async fn preview_upload(
+    State(state): State<Shared>,
+    Path((id, upload)): Path<(String, String)>,
+    Json(req): Json<ImportRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let h = state.get(&id)?;
+    let u = state.upload(&id, &upload)?;
+    Ok(Json(blocking(move || h.with_engine(|wb| wb.preview_any(&u.path, &req.types))).await?))
+}
+
+/// Import a staged upload. On failure the upload is kept, so the user can change column
+/// types and try again without uploading the file again.
+async fn import_upload(
+    State(state): State<Shared>,
+    Path((id, upload)): Path<(String, String)>,
+    Json(req): Json<ImportRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let h = state.get(&id)?;
+    let u = state.upload(&id, &upload)?;
+    let h2 = h.clone();
+    let job = req.job.clone();
+    let result = blocking(move || {
+        h2.with_engine(|wb| {
+            *h2.job.lock().unwrap() = job;
+            let out = wb.import_any_with(&u.path, req.table.as_deref(), &req.types);
+            *h2.job.lock().unwrap() = None;
+            out
+        })
+    })
+    .await;
+    let imported = result?;
+    state.remove_upload(&upload);
+    let h3 = h.clone();
+    let _ = blocking(move || h3.refresh_summary()).await;
+    let _ = h.events.send(ws::Event::TablesChanged { origin: 0 });
+    Ok(Json(imported))
+}
+
+async fn cancel_upload(State(state): State<Shared>, Path((id, upload)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    state.upload(&id, &upload)?;
+    state.remove_upload(&upload);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn job_status(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    let h = state.get(&id)?;
+    let running = h.job.lock().unwrap().as_deref() == Some(job.as_str());
+    let p = h.progress.query_progress();
+    Ok(Json(if running {
+        JobStatus { running, percentage: p.percentage(), rows_processed: p.rows_processed(), total_rows: p.total_rows_to_process() }
+    } else {
+        JobStatus { running, percentage: None, rows_processed: 0, total_rows: 0 }
+    }))
+}
+
+/// Cancel a running job. Only the named job is interrupted, never someone else's work.
+async fn cancel_job(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    let h = state.get(&id)?;
+    let current = h.job.lock().unwrap();
+    if current.as_deref() != Some(job.as_str()) {
+        return Err(ApiError::new(StatusCode::CONFLICT, "that job is not running"));
+    }
+    h.interrupt.interrupt();
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[derive(Deserialize)]
@@ -254,7 +423,7 @@ async fn export(
     Path(id): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> ApiResult<Response> {
-    let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
     let h = state.get(&id)?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
     let scratch = state.scratch_dir(".exports")?;
@@ -360,6 +529,6 @@ pub fn attachment(name: &str) -> axum::http::HeaderValue {
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(ApiError::from)
 }

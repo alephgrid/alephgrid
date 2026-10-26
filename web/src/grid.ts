@@ -637,9 +637,12 @@ export class Grid {
   }
 
   private onEditorKey(e: KeyboardEvent): void {
-    if (e.key === "Enter") { e.preventDefault(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
-    else if (e.key === "Tab") { e.preventDefault(); this.commitEditor(0, e.shiftKey ? -1 : 1); }
-    else if (e.key === "Escape") { e.preventDefault(); this.cancelEditor(); }
+    // Keys the editor handles must not bubble to the grid, which would treat the same
+    // Enter as "start editing the next cell".
+    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
+    else if (e.key === "Tab") { e.preventDefault(); e.stopPropagation(); this.commitEditor(0, e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.cancelEditor(); }
+    else e.stopPropagation();
   }
 
   private cancelEditor(): void {
