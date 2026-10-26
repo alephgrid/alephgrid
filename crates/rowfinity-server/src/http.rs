@@ -46,6 +46,9 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/workbooks/{id}", get(get_workbook).patch(update_workbook).delete(delete_workbook))
         .route("/api/workbooks/{id}/duplicate", post(duplicate_workbook))
         .route("/api/workbooks/{id}/export.xlsx", get(export_xlsx))
+        .route("/api/trash", get(list_trash).delete(empty_trash))
+        .route("/api/trash/{id}", axum::routing::delete(purge_workbook))
+        .route("/api/trash/{id}/restore", post(restore_workbook))
         .route("/api/workspaces", get(list_workspaces).post(create_workspace))
         .route("/api/workspaces/{id}", patch(rename_workspace).delete(delete_workspace))
         .route(
@@ -148,11 +151,7 @@ async fn delete_workspace(State(state): State<Shared>, Path(id): Path<String>) -
 async fn get_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
     let h = state.get(&id)?;
     let meta = h.meta.lock().unwrap().clone();
-    let (tables, sheets) = blocking(move || {
-        let wb = h.engine.lock().unwrap();
-        Ok((wb.list_tables()?, wb.sheets().list()))
-    })
-    .await?;
+    let (tables, sheets) = blocking(move || h.with_engine(|wb| Ok((wb.list_tables()?, wb.sheets().list())))).await?;
     Ok(Json(json!({ "workbook": meta, "tables": tables, "sheets": sheets })))
 }
 
@@ -165,7 +164,25 @@ async fn update_workbook(
 }
 
 async fn delete_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    state.delete(&id)?;
+    blocking(move || state.delete(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_trash(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.trash()?))
+}
+
+async fn restore_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(blocking(move || state.restore(&id)).await?))
+}
+
+async fn purge_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    blocking(move || state.purge(Some(&id))).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn empty_trash(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+    blocking(move || state.purge(None)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -188,25 +205,33 @@ async fn import_file(
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.starts_with('.'))
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "invalid filename".into()))?;
-    let uploads = h.dir.join("uploads");
-    tokio::fs::create_dir_all(&uploads).await.map_err(anyhow::Error::from)?;
-    let path = uploads.join(&file_name);
-    let mut file = tokio::fs::File::create(&path).await.map_err(anyhow::Error::from)?;
-    let stream = body.into_data_stream().map_err(std::io::Error::other);
-    let mut reader = StreamReader::new(stream);
-    tokio::io::copy(&mut reader, &mut file).await.map_err(anyhow::Error::from)?;
-    file.flush().await.map_err(anyhow::Error::from)?;
-    drop(file);
+    // Each upload gets its own directory: same-name uploads cannot collide, and the
+    // file keeps its name (DuckDB picks the reader and the table name from it).
+    let scratch = state.scratch_dir(".uploads")?;
+    let path = scratch.join(&file_name);
+    let received = async {
+        let mut file = tokio::fs::File::create(&path).await?;
+        let stream = body.into_data_stream().map_err(std::io::Error::other);
+        let mut reader = StreamReader::new(stream);
+        tokio::io::copy(&mut reader, &mut file).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }
+    .await;
+    if let Err(e) = received {
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("upload interrupted: {e}")));
+    }
 
     let h2 = h.clone();
     let import_path = path.clone();
     let result = blocking(move || {
-        let imported = h2.engine.lock().unwrap().import_any(&import_path, q.table.as_deref())?;
+        let imported = h2.with_engine(|wb| wb.import_any(&import_path, q.table.as_deref()))?;
         h2.refresh_summary()?;
         Ok(imported)
     })
     .await;
-    let _ = tokio::fs::remove_file(&path).await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
     let imported = result?;
     let _ = h.events.send(ws::Event::TablesChanged { origin: 0 });
     Ok(Json(imported))
@@ -231,53 +256,57 @@ async fn export(
 ) -> ApiResult<Response> {
     let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     let h = state.get(&id)?;
-    let exports = h.dir.join("exports");
-    std::fs::create_dir_all(&exports).map_err(anyhow::Error::from)?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
-    let path = exports.join(format!("{}-{}", std::process::id(), file_name));
+    let scratch = state.scratch_dir(".exports")?;
+    let path = scratch.join("export");
     let p = path.clone();
     let format = q.format;
-    blocking(move || {
-        let mut wb = h.engine.lock().unwrap();
-        let view = wb.open_view(spec)?;
-        let out = wb.export_view(view.view_id, &p, format);
-        wb.close_view(view.view_id);
-        out
+    let written = blocking(move || {
+        h.with_engine(|wb| {
+            let view = wb.open_view(spec)?;
+            let out = wb.export_view(view.view_id, &p, format);
+            wb.close_view(view.view_id);
+            out
+        })
     })
-    .await?;
-    let file = tokio::fs::File::open(&path).await.map_err(anyhow::Error::from)?;
-    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    .await;
+    let opened = match written {
+        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
+        Err(e) => Err(e),
+    };
     // The open handle keeps the bytes readable after unlinking.
-    let _ = tokio::fs::remove_file(&path).await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let file = opened?;
+    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", file_name.replace('"', "")).parse().unwrap(),
-    );
+    headers.insert(header::CONTENT_DISPOSITION, attachment(&file_name));
     Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
 }
 
 /// Download all sheets of a workbook as one .xlsx file.
 async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
     let h = state.get(&id)?;
-    let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\'], "");
-    let exports = h.dir.join("exports");
-    std::fs::create_dir_all(&exports).map_err(anyhow::Error::from)?;
-    let path = exports.join(format!("{}-sheets.xlsx", std::process::id()));
+    let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
+    let scratch = state.scratch_dir(".exports")?;
+    let path = scratch.join("sheets.xlsx");
     let p = path.clone();
-    blocking(move || h.engine.lock().unwrap().sheets().export_xlsx(&p)).await?;
-    let file = tokio::fs::File::open(&path).await.map_err(anyhow::Error::from)?;
+    let written = blocking(move || h.with_engine(|wb| wb.sheets().export_xlsx(&p))).await;
+    let opened = match written {
+        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let file = opened?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
-    let _ = tokio::fs::remove_file(&path).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".parse().unwrap(),
     );
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}.xlsx\"").parse().unwrap());
+    headers.insert(header::CONTENT_DISPOSITION, attachment(&format!("{name}.xlsx")));
     Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
 }
 
@@ -311,6 +340,21 @@ async fn static_asset(uri: axum::http::Uri) -> Response {
     let cache = if path.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
     ([(header::CONTENT_TYPE, mime.as_ref().to_string()), (header::CACHE_CONTROL, cache.to_string())], file.data)
         .into_response()
+}
+
+/// `Content-Disposition: attachment` for any file name: an ASCII fallback plus the exact
+/// UTF-8 name (RFC 6266 / 5987), so non-ASCII names never break the header.
+pub fn attachment(name: &str) -> axum::http::HeaderValue {
+    let ascii: String = name
+        .chars()
+        .map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' })
+        .collect();
+    let encoded: String = name
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("attachment"))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {

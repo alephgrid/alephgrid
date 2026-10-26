@@ -5,3 +5,5 @@ web/dist
 *.duckdb
 *.duckdb.wal
 .DS_Store
+web/test-results
+web/playwright-report

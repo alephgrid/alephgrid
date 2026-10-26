@@ -13,18 +13,27 @@ cargo run -p rowfinity-server -- --demo-rows 1000000   # server on :7878
 ## Before opening a PR
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-(cd web && npm run build)
+cargo test --workspace                          # unit, integration, property, crash, protocol drift
+cargo clippy --workspace --all-targets -- -D warnings
+(cd web && npm run build)                       # type check + bundle
+cargo build -p rowfinity-server && (cd web && npm run e2e)   # browser journeys (needs Google Chrome)
 ```
+
+If you change a type that crosses the wire, regenerate the TypeScript bindings:
+`UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`.
+
+Every behavior change needs tests proportional to what can go wrong; see
+[docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md) and record them in
+[docs/TEST_MATRIX.md](docs/TEST_MATRIX.md). Bug fixes start with a test that fails.
 
 ## Where things live
 
 - **Engine** (`crates/rowfinity-engine`): all data logic. It is a plain library with
   no async code and no HTTP, so it can be embedded in a desktop app or a Python
-  binding. Add a test in `src/tests.rs` for any behaviour change.
+  binding. Engine tests live in `src/tests/` (`faults::fail_next` injects failures).
 - **Server** (`crates/rowfinity-server`): transport only. New operations go in the
-  `Op` enum in `src/ws.rs` and in `docs/PROTOCOL.md`.
+  `Op` enum in `src/ws.rs`, their result type in `protocol::RESULTS`, and
+  `docs/PROTOCOL.md`. Integration tests in `tests/` run the real router in-process.
 - **Web** (`web/src`): `grid.ts` (drawing and input), `cache.ts` (row fetching),
   `workbook.ts` (screen), `ui.ts` (menus and dialogs).
 

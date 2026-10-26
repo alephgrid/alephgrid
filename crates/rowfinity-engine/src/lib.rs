@@ -7,13 +7,16 @@
 //! * Formula columns are lazily evaluated DuckDB expressions.
 //! * Free-form Excel-style sheets run on IronCalc and live in the same file.
 
+pub mod faults;
+mod formula;
 pub mod model;
 pub mod sheets;
 pub mod sql;
+pub mod wire;
 mod workbook;
 
 pub use model::*;
-pub use sheets::{SheetBlock, SheetInfo, SheetInput};
+pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
 pub use workbook::{Imported, Workbook};
 
 #[cfg(test)]

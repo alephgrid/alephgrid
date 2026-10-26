@@ -553,13 +553,14 @@ export class Grid {
     const value = this.editor.value;
     const before = this.currentText(cell);
     this.focus();
-    if (value !== before) {
-      const ok = await this.handlers.commitEdits([{ r: cell.r, c: cell.c, value: value === "" ? null : value }]);
-      if (!ok) return;
-    }
+    // Move first: keys pressed while the server confirms must not be overridden by a late
+    // jump. A rejected value is reported by the handler and its cell is refreshed.
     if (dr || dc) {
-      const next = { r: cell.r + dr, c: cell.c + dc };
+      const next = { r: Math.max(0, cell.r + dr), c: Math.max(0, cell.c + dc) };
       this.select(next, next);
+    }
+    if (value !== before) {
+      await this.handlers.commitEdits([{ r: cell.r, c: cell.c, value: value === "" ? null : value }]);
     }
   }
 

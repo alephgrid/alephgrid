@@ -48,7 +48,7 @@ async function showWorkbook(id: string): Promise<void> {
 
 // ------------------------------------------------------------------ home
 
-/** "all" | "starred" | "recent" | "unfiled" | a workspace id */
+/** "all" | "starred" | "recent" | "unfiled" | "trash" | a workspace id */
 type Scope = string;
 type SortKey = "recent" | "name" | "created" | "size";
 
@@ -59,6 +59,7 @@ const home = {
   version: "",
   workbooks: [] as WorkbookListing[],
   workspaces: [] as Workspace[],
+  trash: [] as WorkbookListing[],
 };
 
 function homeUrl(): string {
@@ -114,6 +115,7 @@ function scopeTitle(scope: Scope): string {
     case "starred": return "Starred";
     case "recent": return "Recent";
     case "unfiled": return "Not in a workspace";
+    case "trash": return "Trash";
     default: return home.workspaces.find((w) => w.id === scope)?.name ?? "Workspace";
   }
 }
@@ -141,18 +143,19 @@ function visibleWorkbooks(): WorkbookListing[] {
 async function showHome(): Promise<void> {
   document.title = "Rowfinity";
   home.scope = new URLSearchParams(location.search).get("in") ?? "all";
-  const [workbooks, workspaces, config] = await Promise.all([api.list(), api.workspaces(), api.config()]);
+  const [workbooks, workspaces, config, trash] = await Promise.all([api.list(), api.workspaces(), api.config(), api.trash()]);
   home.workbooks = workbooks;
   home.workspaces = workspaces;
+  home.trash = trash;
   home.version = config.version;
-  if (!["all", "starred", "recent", "unfiled"].includes(home.scope) && !workspaces.some((w) => w.id === home.scope)) {
+  if (!["all", "starred", "recent", "unfiled", "trash"].includes(home.scope) && !workspaces.some((w) => w.id === home.scope)) {
     home.scope = "all";
   }
   renderHome();
 }
 
 async function reloadHome(): Promise<void> {
-  [home.workbooks, home.workspaces] = await Promise.all([api.list(), api.workspaces()]);
+  [home.workbooks, home.workspaces, home.trash] = await Promise.all([api.list(), api.workspaces(), api.trash()]);
   renderHome();
 }
 
@@ -163,7 +166,7 @@ function renderHome(): void {
       if (f) openFile(f);
     } });
 
-  const count = (scope: Scope) => home.workbooks.filter((w) => inScope(w, scope)).length;
+  const count = (scope: Scope) => scope === "trash" ? home.trash.length : home.workbooks.filter((w) => inScope(w, scope)).length;
   const navItem = (scope: Scope, label: string, icon: string) =>
     el("button", {
       class: `nav-item${home.scope === scope ? " active" : ""}`,
@@ -196,13 +199,41 @@ function renderHome(): void {
         ? navItem("unfiled", "Not in a workspace", "○")
         : el("p", { class: "nav-empty" }, "Group workbooks by team or project."),
     ),
+    el("nav", { class: "nav nav-bottom", "aria-label": "Trash" }, navItem("trash", "Trash", "🗑")),
     el("div", { class: "sidebar-foot muted" }, `v${home.version} · data stays on this server`),
   );
 
   const wsName = (id?: string | null) => home.workspaces.find((w) => w.id === id)?.name;
   const list = el("div", { class: "wb-table", role: "table", "aria-label": "Workbooks" });
 
+  function renderTrash(): void {
+    const q = home.query.trim().toLowerCase();
+    const items = home.trash.filter((w) => !q || w.name.toLowerCase().includes(q));
+    if (!items.length) {
+      list.replaceChildren(el("div", { class: "wb-empty" }, q ? `No deleted workbooks match “${home.query}”.`
+        : "The trash is empty. Deleted workbooks stay here until you delete them forever."));
+      return;
+    }
+    list.replaceChildren(
+      el("div", { class: "wb-row wb-head trash-row", role: "row" },
+        el("span", { role: "columnheader" }), el("span", { role: "columnheader" }, "Name"),
+        el("span", { role: "columnheader", class: "hide-sm" }, "Contents"), el("span", { role: "columnheader", class: "hide-sm num" }, "Size"),
+        el("span", { role: "columnheader", class: "hide-xs" }, "Deleted"), el("span", { role: "columnheader" })),
+      ...items.map((w) => el("div", { class: "wb-row trash-row", role: "row", "data-trash-id": w.id },
+        el("span", { role: "cell" }),
+        el("span", { role: "cell", class: "wb-name" }, el("strong", {}, w.name)),
+        el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
+        el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
+        el("span", { role: "cell", class: "muted hide-xs" }, relativeTime(w.deleted_at)),
+        el("span", { role: "cell", class: "row-actions" },
+          el("button", { class: "btn small", onclick: () => restoreWorkbook(w) }, "Restore"),
+          el("button", { class: "btn small btn-danger", onclick: () => purgeWorkbook(w) }, "Delete forever")),
+      )),
+    );
+  }
+
   function renderList(): void {
+    if (home.scope === "trash") return renderTrash();
     const items = visibleWorkbooks();
     if (!items.length) {
       list.replaceChildren(el("div", { class: "wb-empty" },
@@ -220,17 +251,19 @@ function renderHome(): void {
       ...items.map((w) => {
         const workspace = showWorkspace ? wsName(w.workspace) : undefined;
         return el("div", { class: "wb-row", role: "row" },
-          el("button", { class: `star${w.starred ? " on" : ""}`, role: "cell", title: w.starred ? "Unstar" : "Star",
-            "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
-            onclick: () => toggleStar(w) }, w.starred ? "★" : "☆"),
+          el("span", { role: "cell", class: "cell-center" },
+            el("button", { class: `star${w.starred ? " on" : ""}`, title: w.starred ? "Unstar" : "Star",
+              "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
+              onclick: () => toggleStar(w) }, w.starred ? "★" : "☆")),
           el("a", { role: "cell", class: "wb-name", href: `/w/${w.id}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
             el("strong", {}, w.name),
             workspace ? el("span", { class: "badge" }, workspace) : null),
           el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
           el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
           el("span", { role: "cell", class: "muted hide-xs", title: w.opened_at ? new Date(w.opened_at * 1000).toLocaleString() : "" }, relativeTime(w.opened_at)),
-          el("button", { class: "icon-btn", role: "cell", title: "More", "aria-label": `${w.name} options`,
-            onclick: (e: MouseEvent) => workbookMenu(w, e.clientX, e.clientY) }, "⋯"),
+          el("span", { role: "cell", class: "cell-center" },
+            el("button", { class: "icon-btn", title: "More", "aria-label": `${w.name} options`,
+              onclick: (e: MouseEvent) => workbookMenu(w, e.clientX, e.clientY) }, "⋯")),
         );
       }),
     );
@@ -262,8 +295,10 @@ function renderHome(): void {
       el("div", { class: "spacer" }),
       search,
       sort,
-      el("button", { class: "btn", onclick: () => fileInput.click() }, "Open file"),
-      el("button", { class: "btn btn-primary", onclick: newWorkbook }, "New workbook"),
+      ...(home.scope === "trash"
+        ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, onclick: emptyTrash }, "Empty trash")]
+        : [el("button", { class: "btn", onclick: () => fileInput.click() }, "Open file"),
+          el("button", { class: "btn btn-primary", onclick: newWorkbook }, "New workbook")]),
       fileInput,
     ),
     list,
@@ -370,12 +405,33 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
     { label: w.starred ? "Unstar" : "Star", action: () => toggleStar(w) },
     "sep",
     { label: "Delete", danger: true, action: async () => {
-      if (!(await confirmDialog(`Delete “${w.name}”?`, `All tables and sheets in this workbook (${formatBytes(w.size_bytes)}) will be permanently deleted from disk.`))) return;
-      await api.remove(w.id);
+      if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash."))) return;
+      try { await api.remove(w.id); } catch (e) { toast((e as Error).message, "error"); }
       await reloadHome();
     } },
   ];
   showMenu(items, x, y);
+}
+
+async function restoreWorkbook(w: WorkbookListing): Promise<void> {
+  try {
+    await api.restore(w.id);
+    toast(`Restored “${w.name}”`, "success");
+  } catch (e) { toast((e as Error).message, "error"); }
+  await reloadHome();
+}
+
+async function purgeWorkbook(w: WorkbookListing): Promise<void> {
+  if (!(await confirmDialog(`Delete “${w.name}” forever?`, `Its tables and sheets (${formatBytes(w.size_bytes)}) are permanently removed from disk. This cannot be undone.`))) return;
+  try { await api.purge(w.id); } catch (e) { toast((e as Error).message, "error"); }
+  await reloadHome();
+}
+
+async function emptyTrash(): Promise<void> {
+  const n = home.trash.length;
+  if (!(await confirmDialog("Empty the trash?", `${n} workbook${n === 1 ? " is" : "s are"} permanently removed from disk. This cannot be undone.`))) return;
+  try { await api.emptyTrash(); } catch (e) { toast((e as Error).message, "error"); }
+  await reloadHome();
 }
 
 async function openFile(file: File): Promise<void> {
@@ -394,7 +450,8 @@ async function openFile(file: File): Promise<void> {
     navigate(`/w/${wb.id}`);
   } catch (e) {
     toast((e as Error).message, "error");
-    await api.remove(wb.id).catch(() => {});
+    // The workbook was created only for this file: remove it without a trash entry.
+    await api.remove(wb.id).then(() => api.purge(wb.id)).catch(() => {});
   } finally {
     banner.remove();
   }

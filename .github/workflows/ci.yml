@@ -1,5 +1,8 @@
 name: CI
 
+# Per-change tier (docs/TEST_STRATEGY.md): build, type check, lint, engine unit/property
+# tests, server integration + crash tests, protocol drift check, browser journeys.
+
 on:
   push:
     branches: [main]
@@ -13,8 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      - run: npm ci
         working-directory: web
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       - run: npm run build
         working-directory: web
       - uses: actions/upload-artifact@v4
@@ -32,5 +37,44 @@ jobs:
           name: web-dist
           path: web/dist
       - uses: Swatinem/rust-cache@v2
+      # Includes tests/protocol.rs, which fails when web/src/protocol.ts is stale.
       - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+        env:
+          PROPTEST_CASES: "96"
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build -p rowfinity-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rowfinity-debug
+          path: target/debug/rowfinity
+
+  e2e:
+    needs: rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: rowfinity-debug
+          path: target/debug
+      # Debug builds serve the UI from web/dist on disk.
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - run: chmod +x target/debug/rowfinity
+      - run: npm ci
+        working-directory: web
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      # GitHub's Ubuntu images ship Google Chrome; the tests use it directly.
+      - run: npx playwright test
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: web/test-results

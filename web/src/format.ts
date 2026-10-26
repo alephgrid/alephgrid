@@ -16,9 +16,26 @@ export function formatValue(v: CellValue, kind: Kind): string {
   return v;
 }
 
-export function formatStat(v: number | undefined | null): string {
-  if (v === null || v === undefined || Number.isNaN(v)) return "–";
-  return grouped.format(v);
+/**
+ * Summary numbers with digit grouping. Exact values arrive as strings (big integers,
+ * decimals); they are grouped textually so no digit is lost to a double conversion.
+ */
+export function formatStat(v: CellValue | undefined): string {
+  if (v === null || v === undefined || v === "" || (typeof v === "number" && Number.isNaN(v))) return "–";
+  if (typeof v === "number") return grouped.format(v);
+  if (typeof v === "boolean") return v ? "TRUE" : "FALSE";
+  const m = /^(-?)(\d+)(\.\d+)?$/.exec(v);
+  if (!m) return v;
+  const sep = groupSeparator();
+  return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, sep) + (m[3] ? decimalSeparator() + m[3].slice(1) : "");
+}
+
+function groupSeparator(): string {
+  return new Intl.NumberFormat().formatToParts(1000).find((p) => p.type === "group")?.value ?? ",";
+}
+
+function decimalSeparator(): string {
+  return new Intl.NumberFormat().formatToParts(1.5).find((p) => p.type === "decimal")?.value ?? ".";
 }
 
 export function isNumericKind(kind: Kind): boolean {

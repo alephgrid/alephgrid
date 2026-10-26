@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 65a7dfddb2d8f599a89ac9c338709c8643697b091280f7ac3e375cc85c2d1475 # shrinks to ops = [Edit([(10, 0, Some(Err("a"))), (10, 0, Some(Ok(0)))])]

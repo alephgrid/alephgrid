@@ -1,9 +1,5 @@
 //! `rowfinity` — run the big-data spreadsheet on your laptop or your own server.
 
-mod http;
-mod state;
-mod ws;
-
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -11,7 +7,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::state::{AppState, Config};
+use rowfinity_server::http;
+use rowfinity_server::state::{AppState, Config};
 
 #[derive(Parser, Debug)]
 #[command(name = "rowfinity", version, about = "Open-source spreadsheet for billion-row data. Runs locally or self-hosted.")]
@@ -81,7 +78,7 @@ async fn main() -> Result<()> {
         for file in &cli.files {
             let path = file.canonicalize().with_context(|| format!("cannot open {}", file.display()))?;
             let started = std::time::Instant::now();
-            let imported = h.engine.lock().unwrap().import_any(&path, None)?;
+            let imported = h.with_engine(|wb| wb.import_any(&path, None))?;
             tracing::info!("imported {} in {:.1?}: {}", file.display(), started.elapsed(), serde_json::to_string(&imported)?);
         }
         h.refresh_summary()?;
@@ -90,7 +87,7 @@ async fn main() -> Result<()> {
     if let Some(rows) = cli.demo_rows {
         let h = state.create("Demo: US flights", None)?;
         let started = std::time::Instant::now();
-        let info = h.engine.lock().unwrap().create_demo_table(rows)?;
+        let info = h.with_engine(|wb| wb.create_demo_table(rows))?;
         tracing::info!("generated {} demo rows in {:.1?}", info.row_count, started.elapsed());
         h.refresh_summary()?;
         open_path = format!("w/{}", h.meta.lock().unwrap().id);
@@ -104,10 +101,31 @@ async fn main() -> Result<()> {
     println!("\n  Rowfinity is running → http://{shown_host}:{}/{open_path}{token}\n  Data: {}\n", cli.port, cli.data_dir.display());
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
     state.checkpoint_all();
     Ok(())
+}
+
+/// Ctrl-C, or SIGTERM from `docker stop` / systemd.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+    tracing::info!("shutting down");
 }

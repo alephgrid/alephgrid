@@ -105,7 +105,7 @@ fn stats_and_query() {
     let v = wb.open_view(spec(&t)).unwrap();
     let s = wb.stats(v.view_id, "distance_mi", 0, 1_000).unwrap();
     assert_eq!(s.count, 1_000);
-    assert!(s.sum.unwrap() > 0.0);
+    assert!(s.sum.unwrap().as_i64().unwrap() > 0);
     let p = wb.preview_query(&format!("SELECT carrier, count(*) n FROM {t} GROUP BY 1 ORDER BY 2 DESC"), 3).unwrap();
     assert_eq!(p.rows.len(), 3);
     assert!(p.truncated);

@@ -3,8 +3,7 @@ import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { Grid, type Cell, type Range } from "./grid";
 import type {
-  CellValue, Column, EditOutcome, Filter, FilterOp, Imported, QueryPreview, ServerEvent, SheetBlock, SheetInfo,
-  Stats, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
+  CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
 
@@ -124,6 +123,8 @@ export class WorkbookScreen {
     const onLoaded = () => {
       this.grid.invalidate();
       if (document.activeElement !== this.formulaInput) this.refreshFormulaValue();
+      // Sheet stats are computed from cached cells; recompute once fresh values arrive.
+      if (this.isSheet()) this.sheetSelectionStats(this.grid.selection());
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
@@ -290,8 +291,8 @@ export class WorkbookScreen {
 
   private async loadItems(): Promise<void> {
     [this.tables, this.sheets] = await Promise.all([
-      this.rpc.call<TableInfo[]>("tables"),
-      this.rpc.call<SheetInfo[]>("sheets"),
+      this.rpc.call("tables"),
+      this.rpc.call("sheets"),
     ]);
     this.renderTabs();
   }
@@ -332,7 +333,7 @@ export class WorkbookScreen {
     this.updateToolbar();
     this.busy("Opening…");
     try {
-      const info = await this.rpc.call<ViewInfo>("open_view", { spec: this.spec });
+      const info = await this.rpc.call("open_view", { spec: this.spec });
       this.applyView(info, true);
       this.grid.scrollToTop();
       this.grid.select({ r: 0, c: 0 });
@@ -378,7 +379,7 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     const index = this.active.index;
     try {
-      this.sheets = await this.rpc.call<SheetInfo[]>("sheets");
+      this.sheets = await this.rpc.call("sheets");
       const info = this.sheets.find((s) => s.index === index);
       if (!info) return;
       this.applySheetInfo(info, false);
@@ -410,7 +411,7 @@ export class WorkbookScreen {
     try {
       await this.loadItems();
       if (this.active?.kind === "table") {
-        const info = await this.rpc.call<ViewInfo>("open_view", { spec: this.spec });
+        const info = await this.rpc.call("open_view", { spec: this.spec });
         this.applyView(info, true);
       } else if (this.active?.kind === "sheet") {
         await this.refreshSheet();
@@ -425,7 +426,7 @@ export class WorkbookScreen {
     this.busy(spec.sort.length ? "Sorting…" : "Filtering…");
     const started = performance.now();
     try {
-      const info = await this.rpc.call<ViewInfo>("update_view", { view_id: this.view.view_id, spec });
+      const info = await this.rpc.call("update_view", { view_id: this.view.view_id, spec });
       this.applyView(info, true);
       this.grid.scrollToTop();
       this.grid.select({ r: 0, c: this.grid.active.c });
@@ -490,12 +491,12 @@ export class WorkbookScreen {
     const seq = ++this.statsSeq;
     this.statsTimer = window.setTimeout(async () => {
       try {
-        const s = await this.rpc.call<Stats>("stats", { view_id: this.view!.view_id, column: col.name, start: range.r0, end: range.r1 + 1 });
+        const s = await this.rpc.call("stats", { view_id: this.view!.view_id, column: col.name, start: range.r0, end: range.r1 + 1 });
         if (seq !== this.statsSeq) return;
         const parts = [`Count ${formatCount(s.count)}`];
         if (isNumericKind(col.kind) && s.count) {
           parts.unshift(`Sum ${formatStat(s.sum)}`, `Avg ${formatStat(s.avg)}`);
-          parts.push(`Min ${formatStat(s.min as number)}`, `Max ${formatStat(s.max as number)}`);
+          parts.push(`Min ${formatStat(s.min)}`, `Max ${formatStat(s.max)}`);
         }
         this.statsEl.textContent = `${col.name}: ${parts.join("  ·  ")}`;
       } catch { /* selection moved on */ }
@@ -548,12 +549,12 @@ export class WorkbookScreen {
     }
     this.grid.invalidate();
     try {
-      const out = await this.rpc.call<EditOutcome>("edit", {
+      const out = await this.rpc.call("edit", {
         view_id: this.view.view_id,
         edits: edits.map((e) => ({ row: e.r, column: cols[e.c].name, value: e.value })),
       });
       if (out.rows_appended > 0) {
-        this.view = await this.rpc.call<ViewInfo>("view_info", { view_id: this.view.view_id });
+        this.view = await this.rpc.call("view_info", { view_id: this.view.view_id });
         this.rowsEl.textContent = `${formatCount(this.view.row_count)} rows`;
       }
       this.cache.refresh();
@@ -571,7 +572,7 @@ export class WorkbookScreen {
     for (const e of edits) this.sheetCache.patch(e.r, e.c, e.value ?? "");
     this.grid.invalidate();
     try {
-      const info = await this.rpc.call<SheetInfo>("sheet_set", {
+      const info = await this.rpc.call("sheet_set", {
         sheet, inputs: edits.map((e) => ({ row: e.r, column: e.c, value: e.value ?? "" })),
       });
       this.sheets = this.sheets.map((s) => (s.index === info.index ? info : s));
@@ -593,7 +594,7 @@ export class WorkbookScreen {
       return;
     }
     try {
-      const changed = await this.rpc.call<boolean>(redo ? "sheet_redo" : "sheet_undo");
+      const changed = await this.rpc.call(redo ? "sheet_redo" : "sheet_undo");
       if (!changed) toast(redo ? "Nothing to redo" : "Nothing to undo");
       await this.refreshSheet();
     } catch (e) {
@@ -629,7 +630,7 @@ export class WorkbookScreen {
     for (let start = range.r0; start <= range.r1; start += FETCH_LIMIT) {
       const count = Math.min(FETCH_LIMIT, range.r1 - start + 1);
       if (this.active?.kind === "sheet") {
-        const block = await this.rpc.call<SheetBlock>("sheet_fetch", {
+        const block = await this.rpc.call("sheet_fetch", {
           sheet: this.active.index, row_start: start, row_count: count, column_count: range.c1 + 1,
         });
         for (let i = 0; i < count; i++) {
@@ -637,7 +638,7 @@ export class WorkbookScreen {
           out.push(Array.from({ length: range.c1 + 1 }, (_, c) => row[c]?.[0] ?? null));
         }
       } else {
-        const block = await this.rpc.call<{ rows: CellValue[][] }>("fetch", { view_id: this.view!.view_id, row_start: start, row_count: count });
+        const block = await this.rpc.call("fetch", { view_id: this.view!.view_id, row_start: start, row_count: count });
         out.push(...block.rows);
       }
     }
@@ -679,7 +680,10 @@ export class WorkbookScreen {
 
   // ------------------------------------------------------------------ menus
 
-  private async sheetOp(op: string, params: Record<string, unknown>): Promise<void> {
+  private async sheetOp(
+    op: "sheet_insert_rows" | "sheet_delete_rows" | "sheet_insert_columns" | "sheet_delete_columns",
+    params: { at: number; count: number },
+  ): Promise<void> {
     if (this.active?.kind !== "sheet") return;
     try {
       await this.rpc.call(op, { sheet: this.active.index, ...params });
@@ -757,9 +761,10 @@ export class WorkbookScreen {
     if (!this.view) return;
     const count = Math.max(1, Math.min(sel.r1, this.view.row_count - 1) - sel.r0 + 1);
     const identity = this.view.can_append;
-    const run = async (op: string, params: Record<string, unknown>) => {
+    const run = async (op: "insert_rows" | "delete_rows", params: { at: number; count: number } | { start: number; count: number }) => {
       try {
-        await this.rpc.call(op, { view_id: this.view!.view_id, ...params });
+        if (op === "insert_rows" && "at" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params });
+        else if (op === "delete_rows" && "start" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params });
       } catch (e) {
         toast((e as Error).message, "error");
       }
@@ -780,7 +785,7 @@ export class WorkbookScreen {
         const v = await formDialog("Rename table", [{ name: "name", label: "Name", value: t.name }], "Rename");
         if (!v) return;
         try {
-          const name = await this.rpc.call<string>("rename_table", { table: t.name, new_name: v.name });
+          const name = await this.rpc.call("rename_table", { table: t.name, new_name: v.name });
           await this.loadItems();
           if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
         } catch (e) { toast((e as Error).message, "error"); }
@@ -809,7 +814,7 @@ export class WorkbookScreen {
       } },
       { label: "Convert to table", hint: "first row = header", action: async () => {
         try {
-          const info = await this.rpc.call<TableInfo>("sheet_to_table", { sheet: s.index, name: s.name });
+          const info = await this.rpc.call("sheet_to_table", { sheet: s.index, name: s.name });
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created table ${info.name} (${formatCount(info.row_count)} rows)`, "success");
@@ -876,7 +881,7 @@ export class WorkbookScreen {
 
   private async createSheet(): Promise<void> {
     try {
-      const info = await this.rpc.call<SheetInfo>("sheet_create", { name: `Sheet ${this.sheets.length + 1}` });
+      const info = await this.rpc.call("sheet_create", { name: `Sheet ${this.sheets.length + 1}` });
       await this.loadItems();
       await this.openSheet(info.index);
       this.grid.focus();
@@ -967,14 +972,14 @@ export class WorkbookScreen {
     if (!this.view) return;
     this.busy("Summarizing…");
     try {
-      const s = await this.rpc.call<Stats>("stats", { view_id: this.view.view_id, column: col.name, start: 0, end: this.view.row_count });
+      const s = await this.rpc.call("stats", { view_id: this.view.view_id, column: col.name, start: 0, end: this.view.row_count });
       const rows: [string, string][] = [
         ["Rows", formatCount(s.rows)],
         ["Non-empty", formatCount(s.count)],
         ["Empty", formatCount(s.rows - s.count)],
       ];
       if (isNumericKind(col.kind)) {
-        rows.push(["Sum", formatStat(s.sum)], ["Average", formatStat(s.avg)], ["Min", formatStat(s.min as number)], ["Max", formatStat(s.max as number)]);
+        rows.push(["Sum", formatStat(s.sum)], ["Average", formatStat(s.avg)], ["Min", formatStat(s.min)], ["Max", formatStat(s.max)]);
       } else {
         rows.push(["Min", String(s.min ?? "–")], ["Max", String(s.max ?? "–")]);
       }
@@ -1009,7 +1014,7 @@ export class WorkbookScreen {
       status.textContent = "Running…";
       const started = performance.now();
       try {
-        const p = await this.rpc.call<QueryPreview>("query", { sql: editor.value, limit: 500 });
+        const p = await this.rpc.call("query", { sql: editor.value, limit: 500 });
         status.textContent = `${p.rows.length}${p.truncated ? "+" : ""} rows · ${Math.round(performance.now() - started)} ms`;
         results.replaceChildren(el("table", { class: "result-table" },
           el("thead", {}, el("tr", {}, ...p.columns.map((c) => el("th", {}, c.name)))),
@@ -1028,13 +1033,13 @@ export class WorkbookScreen {
       if (!v) return;
       try {
         if (target === "table") {
-          const info = await this.rpc.call<TableInfo>("create_table_from_query", { name: v.name, sql: editor.value });
+          const info = await this.rpc.call("create_table_from_query", { name: v.name, sql: editor.value });
           panel.remove();
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created ${info.name} (${formatCount(info.row_count)} rows)`, "success");
         } else {
-          const info = await this.rpc.call<SheetInfo>("create_sheet_from_query", { name: v.name, sql: editor.value });
+          const info = await this.rpc.call("create_sheet_from_query", { name: v.name, sql: editor.value });
           panel.remove();
           await this.loadItems();
           await this.openSheet(info.index);
@@ -1103,7 +1108,7 @@ export class WorkbookScreen {
     this.busy(`Generating ${formatCount(rows)} rows…`);
     const started = performance.now();
     try {
-      const info = await this.rpc.call<TableInfo>("create_demo_table", { rows });
+      const info = await this.rpc.call("create_demo_table", { rows });
       await this.loadItems();
       await this.openTable(info.name);
       toast(`Generated ${formatCount(rows)} rows in ${((performance.now() - started) / 1000).toFixed(1)}s`, "success");
@@ -1128,7 +1133,7 @@ export class WorkbookScreen {
       case "table_changed":
         if (a?.kind === "table" && e.table === a.name && this.view) {
           try {
-            const info = await this.rpc.call<ViewInfo>("view_info", { view_id: this.view.view_id });
+            const info = await this.rpc.call("view_info", { view_id: this.view.view_id });
             this.applyView(info, false);
           } catch { await this.reopen(); }
         }
@@ -1138,6 +1143,11 @@ export class WorkbookScreen {
         if (a?.kind === "sheet" && e.origin !== this.rpc.session && (e.sheet === null || e.sheet === a.index)) {
           await this.refreshSheet();
         }
+        break;
+      case "workbook_deleted":
+        this.rpc.close();
+        toast(`“${this.meta.name}” was moved to the trash. Restore it from Trash on the home screen.`, "error");
+        this.goHome();
         break;
       case "tables_changed": {
         await this.loadItems();

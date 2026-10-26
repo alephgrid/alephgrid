@@ -4,11 +4,18 @@
 //! <data-dir>/workspaces.json          [{id, name, created_at}]
 //! <data-dir>/<workbook-id>/workbook.json
 //! <data-dir>/<workbook-id>/data.duckdb  tables, formula metadata and IronCalc sheets
+//! <data-dir>/.trash/<workbook-id>/       deleted workbooks (same layout + deleted_at), restorable
+//! <data-dir>/.uploads/<random>/<file>    uploads in progress; removed after import or failure
+//! <data-dir>/.exports/<random>/<file>    exports being streamed; removed once opened
 //! ```
+//!
+//! Deleting a workbook first marks its handle deleted (new operations fail), then waits
+//! for the operation in progress, closes the database, and moves the directory to the
+//! trash with one rename. Nothing is permanently removed until the trash is purged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,17 +23,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use rowfinity_engine::Workbook;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use ts_rs::TS;
 
 use crate::ws::Event;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 pub struct Summary {
     pub tables: usize,
     pub sheets: usize,
     pub rows: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct WorkbookMeta {
     pub id: String,
     pub name: String,
@@ -41,17 +49,21 @@ pub struct WorkbookMeta {
     pub updated_at: u64,
     #[serde(default)]
     pub summary: Summary,
+    /// Set while the workbook is in the trash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub deleted_at: Option<u64>,
 }
 
 /// What the workbook list shows: metadata plus size on disk.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 pub struct WorkbookListing {
     #[serde(flatten)]
     pub meta: WorkbookMeta,
     pub size_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
@@ -60,23 +72,52 @@ pub struct Workspace {
 
 pub struct WorkbookHandle {
     pub meta: Mutex<WorkbookMeta>,
-    pub engine: Mutex<Workbook>,
+    /// `None` once the workbook has been deleted and its database closed.
+    engine: Mutex<Option<Workbook>>,
+    deleted: AtomicBool,
     pub events: broadcast::Sender<Event>,
     pub dir: PathBuf,
 }
 
 impl WorkbookHandle {
+    /// Run `f` with exclusive access to the workbook engine. Fails once the workbook
+    /// has been deleted, including for operations that were waiting for the lock.
+    pub fn with_engine<T>(&self, f: impl FnOnce(&mut Workbook) -> Result<T>) -> Result<T> {
+        if self.is_deleted() {
+            bail!("this workbook was deleted");
+        }
+        let mut guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(wb) => f(wb),
+            None => bail!("this workbook was deleted"),
+        }
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::SeqCst)
+    }
+
+    /// Reject new work, wait for the operation in progress, then close the database.
+    fn close(&self) {
+        self.deleted.store(true, Ordering::SeqCst);
+        let mut guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(wb) = guard.take() {
+            if let Err(e) = wb.checkpoint() {
+                tracing::warn!("checkpoint before close failed: {e:#}");
+            }
+        }
+    }
+
     /// Recompute counts shown on the home screen and bump `updated_at`.
     pub fn refresh_summary(&self) -> Result<()> {
-        let summary = {
-            let wb = self.engine.lock().unwrap();
+        let summary = self.with_engine(|wb| {
             let tables = wb.list_tables()?;
-            Summary {
+            Ok(Summary {
                 tables: tables.len(),
                 sheets: wb.sheets().list().len(),
                 rows: tables.iter().map(|t| t.row_count).sum(),
-            }
-        };
+            })
+        })?;
         let mut meta = self.meta.lock().unwrap();
         meta.summary = summary;
         meta.updated_at = now();
@@ -84,6 +125,9 @@ impl WorkbookHandle {
     }
 
     pub fn touch(&self, opened: bool) -> Result<()> {
+        if self.is_deleted() {
+            return Ok(());
+        }
         let mut meta = self.meta.lock().unwrap();
         if opened {
             meta.opened_at = now();
@@ -105,6 +149,8 @@ pub struct Config {
 pub struct AppState {
     pub config: Config,
     open: Mutex<HashMap<String, Arc<WorkbookHandle>>>,
+    /// Workbooks being deleted: their database may still be open, so they cannot be reopened.
+    closing: Mutex<HashSet<String>>,
     workspaces: Mutex<()>,
     next_session: AtomicU64,
 }
@@ -145,9 +191,17 @@ impl AppState {
     pub fn new(config: Config) -> Result<Shared> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating data dir {}", config.data_dir.display()))?;
+        // Leftovers of uploads/exports interrupted by a crash; never user data.
+        for scratch in [".uploads", ".exports"] {
+            let dir = config.data_dir.join(scratch);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).with_context(|| format!("cleaning {}", dir.display()))?;
+            }
+        }
         Ok(Arc::new(AppState {
             config,
             open: Mutex::new(HashMap::new()),
+            closing: Mutex::new(HashSet::new()),
             workspaces: Mutex::new(()),
             next_session: AtomicU64::new(1),
         }))
@@ -161,6 +215,17 @@ impl AppState {
         self.config.data_dir.join(id)
     }
 
+    fn trash_dir(&self) -> PathBuf {
+        self.config.data_dir.join(".trash")
+    }
+
+    /// A fresh private directory under `.uploads` or `.exports` for one request.
+    pub fn scratch_dir(&self, kind: &str) -> Result<PathBuf> {
+        let dir = self.config.data_dir.join(kind).join(new_id());
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
     // ------------------------------------------------------------- workbooks
 
     pub fn list(&self) -> Result<Vec<WorkbookListing>> {
@@ -168,6 +233,9 @@ impl AppState {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&self.config.data_dir)? {
             let dir = entry?.path();
+            if dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(dir.join("workbook.json")) else { continue };
             let Ok(mut meta) = serde_json::from_slice::<WorkbookMeta>(&bytes) else { continue };
             if let Some(h) = open.get(&meta.id) {
@@ -194,6 +262,7 @@ impl AppState {
             opened_at: t,
             updated_at: t,
             summary: Summary::default(),
+            deleted_at: None,
         };
         write_meta(&dir, &meta)?;
         self.get(&id)
@@ -206,6 +275,9 @@ impl AppState {
         let mut open = self.open.lock().unwrap();
         if let Some(h) = open.get(id) {
             return Ok(h.clone());
+        }
+        if self.closing.lock().unwrap().contains(id) {
+            bail!("workbook {id} is being deleted");
         }
         let dir = self.workbook_dir(id);
         let meta: WorkbookMeta = serde_json::from_slice(
@@ -221,7 +293,13 @@ impl AppState {
         }
         engine.configure(&settings)?;
         let (events, _) = broadcast::channel(256);
-        let handle = Arc::new(WorkbookHandle { meta: Mutex::new(meta), engine: Mutex::new(engine), events, dir });
+        let handle = Arc::new(WorkbookHandle {
+            meta: Mutex::new(meta),
+            engine: Mutex::new(Some(engine)),
+            deleted: AtomicBool::new(false),
+            events,
+            dir,
+        });
         open.insert(id.to_string(), handle.clone());
         Ok(handle)
     }
@@ -277,11 +355,15 @@ impl AppState {
         let new = new_id();
         let dir = self.workbook_dir(&new);
         std::fs::create_dir_all(&dir)?;
-        {
-            // Hold the engine lock so nothing writes while the file is copied.
-            let wb = src.engine.lock().unwrap();
+        // Hold the engine lock so nothing writes while the file is copied.
+        let copied = src.with_engine(|wb| {
             wb.checkpoint()?;
             std::fs::copy(src.dir.join("data.duckdb"), dir.join("data.duckdb"))?;
+            Ok(())
+        });
+        if let Err(e) = copied {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
         }
         let t = now();
         let meta = WorkbookMeta {
@@ -291,20 +373,113 @@ impl AppState {
             opened_at: t,
             updated_at: t,
             starred: false,
+            deleted_at: None,
             ..src_meta
         };
         write_meta(&dir, &meta)?;
         Ok(meta)
     }
 
+    /// Move a workbook to the trash. Connected clients receive `workbook_deleted`.
     pub fn delete(&self, id: &str) -> Result<()> {
         if !valid_id(id) {
             bail!("invalid workbook id");
         }
-        self.open.lock().unwrap().remove(id);
         let dir = self.workbook_dir(id);
-        if dir.join("workbook.json").exists() {
-            std::fs::remove_dir_all(dir)?;
+        let handle = {
+            let mut open = self.open.lock().unwrap();
+            if !dir.join("workbook.json").exists() {
+                bail!("workbook {id} not found");
+            }
+            let mut closing = self.closing.lock().unwrap();
+            if !closing.insert(id.to_string()) {
+                bail!("workbook {id} is already being deleted");
+            }
+            open.remove(id)
+        };
+        let result = self.move_to_trash(id, &dir, handle.as_deref());
+        self.closing.lock().unwrap().remove(id);
+        result?;
+        if let Some(h) = handle {
+            let _ = h.events.send(Event::WorkbookDeleted { origin: 0 });
+        }
+        Ok(())
+    }
+
+    fn move_to_trash(&self, id: &str, dir: &Path, handle: Option<&WorkbookHandle>) -> Result<()> {
+        if let Some(h) = handle {
+            h.close();
+        }
+        let trash = self.trash_dir();
+        std::fs::create_dir_all(&trash)?;
+        let target = trash.join(id);
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        let mut meta: WorkbookMeta = serde_json::from_slice(&std::fs::read(dir.join("workbook.json"))?)?;
+        meta.deleted_at = Some(now());
+        write_meta(dir, &meta)?;
+        std::fs::rename(dir, &target).with_context(|| format!("moving workbook {id} to the trash"))?;
+        Ok(())
+    }
+
+    pub fn trash(&self) -> Result<Vec<WorkbookListing>> {
+        let mut out = Vec::new();
+        let Ok(entries) = std::fs::read_dir(self.trash_dir()) else { return Ok(out) };
+        for entry in entries {
+            let dir = entry?.path();
+            let Ok(bytes) = std::fs::read(dir.join("workbook.json")) else { continue };
+            let Ok(meta) = serde_json::from_slice::<WorkbookMeta>(&bytes) else { continue };
+            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta });
+        }
+        out.sort_by_key(|w| std::cmp::Reverse(w.meta.deleted_at));
+        Ok(out)
+    }
+
+    /// Move a workbook back out of the trash.
+    pub fn restore(&self, id: &str) -> Result<WorkbookMeta> {
+        if !valid_id(id) {
+            bail!("invalid workbook id");
+        }
+        let _open = self.open.lock().unwrap();
+        let from = self.trash_dir().join(id);
+        let to = self.workbook_dir(id);
+        if !from.join("workbook.json").exists() {
+            bail!("workbook {id} is not in the trash");
+        }
+        if to.exists() {
+            bail!("a workbook with id {id} already exists");
+        }
+        let mut meta: WorkbookMeta = serde_json::from_slice(&std::fs::read(from.join("workbook.json"))?)?;
+        if let Some(ws) = &meta.workspace {
+            if !self.workspaces()?.iter().any(|w| &w.id == ws) {
+                meta.workspace = None;
+            }
+        }
+        meta.deleted_at = None;
+        write_meta(&from, &meta)?;
+        std::fs::rename(&from, &to)?;
+        Ok(meta)
+    }
+
+    /// Permanently remove one trashed workbook, or the whole trash with `None`.
+    pub fn purge(&self, id: Option<&str>) -> Result<()> {
+        match id {
+            Some(id) => {
+                if !valid_id(id) {
+                    bail!("invalid workbook id");
+                }
+                let dir = self.trash_dir().join(id);
+                if !dir.exists() {
+                    bail!("workbook {id} is not in the trash");
+                }
+                std::fs::remove_dir_all(dir)?;
+            }
+            None => {
+                if self.trash_dir().exists() {
+                    std::fs::remove_dir_all(self.trash_dir())?;
+                }
+            }
         }
         Ok(())
     }
@@ -312,7 +487,7 @@ impl AppState {
     /// Flush every open workbook to disk (called on shutdown).
     pub fn checkpoint_all(&self) {
         for h in self.open.lock().unwrap().values() {
-            if let Err(e) = h.engine.lock().unwrap().checkpoint() {
+            if let Err(e) = h.with_engine(|wb| wb.checkpoint()) {
                 tracing::warn!("checkpoint failed: {e:#}");
             }
         }
@@ -391,7 +566,8 @@ impl AppState {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(optional_fields)]
 pub struct WorkbookPatch {
     pub name: Option<String>,
     /// Workspace id; an empty string moves the workbook out of any workspace.
