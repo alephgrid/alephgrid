@@ -5,7 +5,7 @@ import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { Grid, type Cell, type Range } from "./grid";
 import type {
-  CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
+  CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 
@@ -98,7 +98,10 @@ export class WorkbookScreen {
   private sheets: SheetInfo[] = [];
   private active: Active | null = null;
   private view: ViewInfo | null = null;
-  private spec: ViewSpec = { table: "", sort: [], filters: [] };
+  private spec: ViewSpec = { table: "", sort: [], filters: [], hidden: [] };
+  /** Saved views of the open table, and the one applied (if any). */
+  private savedViews: SavedView[] = [];
+  private currentSaved: SavedView | null = null;
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
   private allowSql = true;
@@ -249,6 +252,7 @@ export class WorkbookScreen {
         (e.target as HTMLInputElement).value = "";
       } });
     this.tableButtons = [
+      el("button", { class: "btn", onclick: (e: MouseEvent) => this.viewsMenu(e) }, "Views ▾"),
       el("button", { class: "btn", onclick: () => this.addColumnDialog() }, "Add column"),
       el("button", { class: "btn", onclick: () => this.filterDialog(this.grid.active.c) }, "Filter"),
     ];
@@ -314,6 +318,98 @@ export class WorkbookScreen {
     }
   }
 
+  private savedViewModified(): boolean {
+    const v = this.currentSaved;
+    if (!v) return false;
+    const norm = (s: ViewSpec) => JSON.stringify({ sort: s.sort, filters: s.filters, hidden: [...s.hidden].sort() });
+    return norm(v.spec) !== norm(this.spec);
+  }
+
+  private async loadSavedViews(): Promise<void> {
+    if (this.active?.kind !== "table") return;
+    try {
+      this.savedViews = await this.rpc.call("saved_views", { table: this.active.name });
+    } catch { this.savedViews = []; }
+    if (this.currentSaved) this.currentSaved = this.savedViews.find((v) => v.id === this.currentSaved!.id) ?? null;
+    this.renderChips();
+  }
+
+  private currentWidths(): Record<string, number> {
+    const widths = this.grid.columnWidths();
+    const out: Record<string, number> = {};
+    this.view?.columns.forEach((c, i) => (out[c.name] = widths[i]));
+    return out;
+  }
+
+  private async applySaved(v: SavedView): Promise<void> {
+    this.storeWidths({ ...this.loadWidths(), ...v.widths });
+    this.currentSaved = v;
+    await this.setSpec(v.spec);
+  }
+
+  private viewsMenu(e: MouseEvent): void {
+    if (this.active?.kind !== "table") return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const current = this.currentSaved;
+    const items: MenuItem[] = [
+      { label: "Live views always show the table's current data", disabled: true, action: () => {} },
+      ...this.savedViews.map((v): MenuItem => ({ label: `${v.id === current?.id ? "✓ " : ""}${v.name}`, action: () => this.applySaved(v) })),
+      ...(this.savedViews.length ? [] : [{ label: "No saved views yet", disabled: true, action: () => {} } as MenuItem]),
+      "sep",
+      { label: "Save view as…", action: () => this.saveViewAs() },
+    ];
+    if (current) {
+      items.push(
+        { label: `Update “${current.name}”`, disabled: !this.savedViewModified(), action: () => this.saveView(current.id, current.name) },
+        { label: `Rename “${current.name}”…`, action: async () => {
+          const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
+          if (!v) return;
+          try { this.currentSaved = await this.rpc.call("rename_saved_view", { saved: current.id, name: v.name }); await this.loadSavedViews(); }
+          catch (err) { toast((err as Error).message, "error"); }
+        } },
+        { label: `Delete “${current.name}”`, danger: true, action: async () => {
+          if (!(await confirmDialog(`Delete the view “${current.name}”?`, "Only the saved view goes; the table and its data stay."))) return;
+          await this.rpc.call("delete_saved_view", { saved: current.id }).catch((err) => toast((err as Error).message, "error"));
+          this.currentSaved = null;
+          await this.loadSavedViews();
+        } },
+      );
+    }
+    items.push("sep", { label: "Save rows as a new table (snapshot)…", action: () => this.snapshotView() });
+    showMenu(items, r.left, r.bottom + 4);
+  }
+
+  private async saveViewAs(): Promise<void> {
+    const v = await formDialog("Save view", [{ name: "name", label: "View name", placeholder: "e.g. Late flights by fare",
+      hint: "Saves the sort, filters, hidden columns and column widths. The view is live: it always shows current data." }], "Save view");
+    if (v) await this.saveView(undefined, v.name);
+  }
+
+  private async saveView(id: string | undefined, name: string): Promise<void> {
+    try {
+      this.currentSaved = await this.rpc.call("save_view", { saved: id, name, spec: this.spec, widths: this.currentWidths() });
+      await this.loadSavedViews();
+      toast(`Saved view “${this.currentSaved.name}”`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  private async snapshotView(): Promise<void> {
+    if (!this.view || this.active?.kind !== "table") return;
+    const v = await formDialog("Save rows as a new table", [{ name: "name", label: "Table name", value: `${this.active.name}_snapshot`,
+      hint: `Copies the ${formatCount(this.view.row_count)} rows of this view, in this order, into a new table. It is a snapshot: later changes to ${this.active.name} do not reach it.` }], "Create table");
+    if (!v) return;
+    try {
+      const info = await this.rpc.call("table_from_view", { view_id: this.view.view_id, name: v.name });
+      await this.loadItems();
+      await this.openTable(info.name);
+      toast(`Created ${info.name} (${formatCount(info.row_count)} rows, snapshot)`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
   private async copyTableToSheet(t: TableInfo): Promise<void> {
     const current = this.active?.kind === "table" && this.active.name === t.name && this.view;
     const filtered = current && (this.spec.sort.length || this.spec.filters.length);
@@ -326,7 +422,7 @@ export class WorkbookScreen {
       let viewId = current ? this.view!.view_id : 0;
       let temporary = false;
       if (!current) {
-        viewId = (await this.rpc.call("open_view", { spec: { table: t.name, sort: [], filters: [] } })).view_id;
+        viewId = (await this.rpc.call("open_view", { spec: { table: t.name, sort: [], filters: [], hidden: [] } })).view_id;
         temporary = true;
       }
       const copy = await this.rpc.call("table_to_sheet", { view_id: viewId, name: v.name });
@@ -421,8 +517,11 @@ export class WorkbookScreen {
     this.closeTableView();
     this.active = { kind: "table", name };
     this.grid.setLabel(`Table ${name}`);
-    this.spec = { table: name, sort: [], filters: [] };
+    this.spec = { table: name, sort: [], filters: [], hidden: [] };
+    this.currentSaved = null;
+    this.savedViews = [];
     this.updateToolbar();
+    this.loadSavedViews();
     this.busy("Opening…");
     try {
       const info = await this.rpc.call("open_view", { spec: this.spec });
@@ -545,6 +644,14 @@ export class WorkbookScreen {
         el("span", { class: "chip chip-filter" }, describeFilter(f),
           el("button", { "aria-label": "Remove filter", onclick: () => this.setSpec({ ...this.spec, filters: this.spec.filters.filter((_, j) => j !== i) }) }, "×")),
       ));
+      if (this.spec.hidden.length) {
+        chips.push(el("span", { class: "chip" }, `${this.spec.hidden.length} hidden column${this.spec.hidden.length === 1 ? "" : "s"}`,
+          el("button", { "aria-label": "Show hidden columns", onclick: () => this.setSpec({ ...this.spec, hidden: [] }) }, "×")));
+      }
+      if (this.currentSaved) {
+        chips.unshift(el("span", { class: "chip chip-view", title: "A saved live view: it always shows the table's current data" },
+          `View: ${this.currentSaved.name}${this.savedViewModified() ? " (changed)" : ""}`));
+      }
       if (chips.length > 1) {
         chips.push(el("button", { class: "chip-clear", onclick: () => this.setSpec({ ...this.spec, sort: [], filters: [] }) }, "Clear all"));
       }
@@ -816,6 +923,8 @@ export class WorkbookScreen {
         action: () => this.setSpec({ ...this.spec, sort: [...this.spec.sort, { column: col.name, desc: false }] }) },
       "sep",
       { label: "Filter…", action: () => this.filterDialog(c) },
+      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1,
+        action: () => this.setSpec({ ...this.spec, hidden: [...this.spec.hidden, this.view!.columns[c].name] }) },
     ];
     if (activeValue !== undefined && activeValue !== null) {
       const shown = formatValue(activeValue, col.kind);
@@ -885,7 +994,7 @@ export class WorkbookScreen {
           if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
         } catch (e) { toast((e as Error).message, "error"); }
       } },
-      { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [] }, "csv") },
+      { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [], hidden: [] }, "csv") },
       { label: "Copy to a sheet…", action: () => this.copyTableToSheet(t) },
       "sep",
       { label: "Delete table", danger: true, action: async () => {
@@ -1242,6 +1351,9 @@ export class WorkbookScreen {
         if (a?.kind === "sheet" && e.origin !== this.rpc.session && (e.sheet === null || e.sheet === a.index)) {
           await this.refreshSheet();
         }
+        break;
+      case "views_changed":
+        if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) await this.loadSavedViews();
         break;
       case "workbook_deleted":
         this.rpc.close();

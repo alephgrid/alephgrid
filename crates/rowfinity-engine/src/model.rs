@@ -103,6 +103,22 @@ pub struct ViewSpec {
     pub sort: Vec<SortKey>,
     #[serde(default)]
     pub filters: Vec<Filter>,
+    /// Columns left out of the view (and of its exports); the data is untouched.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+}
+
+/// A named, saved view of a table. Live: opening it re-applies the sort and filters to
+/// the table's current data.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SavedView {
+    pub id: String,
+    pub name: String,
+    pub spec: ViewSpec,
+    /// Column widths in pixels, by column name.
+    #[ts(type = "Record<string, number>")]
+    pub widths: std::collections::BTreeMap<String, f64>,
+    pub updated_at: u64,
 }
 
 impl ViewSpec {

@@ -2,7 +2,7 @@
 export type {
   Align, CellEdit, CellValue, Column, ColumnType, EditOutcome, FilePreview, Filter, FilterOp, ImportProblem, ImportRequest,
   Imported, JobStatus, Kind, Op, OpName, Params, PreviewColumn, UploadCreated, UploadPreview,
-  QueryPreview, Results, RowBlock, SheetBlock, SheetCell, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
+  QueryPreview, Results, RowBlock, SavedView, SheetBlock, SheetCell, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
   ViewInfo, ViewSpec, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
 } from "./protocol";
 import type { Event, Hello } from "./protocol";

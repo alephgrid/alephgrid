@@ -69,6 +69,7 @@ test("keyboard focus is visible and Tab can leave the grid", async ({ page }) =>
   await page.goto(`${server.url}/w/${wb}`);
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
   // Reach the grid with the keyboard from the formula bar.
+  await expect(page.getByRole("grid", { name: "Table people" })).toHaveAttribute("aria-colcount", "2");
   await page.locator(".formula-input").focus();
   await page.keyboard.press("Tab");
   const grid = page.locator(".grid-host");

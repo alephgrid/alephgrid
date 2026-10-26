@@ -29,6 +29,8 @@ pub enum Event {
     TablesChanged { origin: u64 },
     /// Sheet cells changed. `sheet` is None when every sheet may have changed (undo/redo).
     SheetChanged { sheet: Option<u32>, origin: u64 },
+    /// Saved views of this table were added, changed or removed.
+    ViewsChanged { table: String, origin: u64 },
     /// The workbook was moved to the trash; the server closes the connection.
     WorkbookDeleted { origin: u64 },
 }
@@ -87,6 +89,20 @@ pub enum Op {
     CreateSheetFromQuery { name: String, sql: String },
     /// Copy the first rows of a table view (its sort and filters) into a new sheet.
     TableToSheet { view_id: u64, name: String },
+    /// Saved (live) views of a table, or of every table.
+    SavedViews { #[serde(default)] #[ts(optional, as = "Option<String>")] table: String },
+    /// Create a saved view, or update the one with id `saved`. (Op parameters cannot be
+    /// called `id`: that is the request frame's own id.)
+    SaveView {
+        #[serde(default)] #[ts(optional, as = "Option<String>")] saved: String,
+        name: String,
+        spec: ViewSpec,
+        #[serde(default)] #[ts(optional, as = "Option<std::collections::BTreeMap<String, f64>>")] widths: std::collections::BTreeMap<String, f64>,
+    },
+    RenameSavedView { saved: String, name: String },
+    DeleteSavedView { saved: String },
+    /// Copy a view's current rows into a new table (a snapshot).
+    TableFromView { view_id: u64, name: String },
     SheetToTable { sheet: u32, name: String },
 }
 
@@ -237,6 +253,28 @@ fn handle(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)
                 bail!("SQL is disabled on this server");
             }
             (json!(wb.create_sheet_from_query(&name, &sql, ctx.sheet_copy_rows)?), Some(Event::TablesChanged { origin }))
+        }
+        Op::SavedViews { table } => {
+            let table = Some(table.as_str()).filter(|t| !t.is_empty());
+            (json!(wb.saved_views(table)?), None)
+        }
+        Op::SaveView { saved, name, spec, widths } => {
+            let id = Some(saved.as_str()).filter(|i| !i.is_empty());
+            let table = spec.table.clone();
+            (json!(wb.save_view(id, &name, spec, widths)?), Some(Event::ViewsChanged { table, origin }))
+        }
+        Op::RenameSavedView { saved, name } => {
+            let v = wb.rename_saved_view(&saved, &name)?;
+            let table = v.spec.table.clone();
+            (json!(v), Some(Event::ViewsChanged { table, origin }))
+        }
+        Op::DeleteSavedView { saved } => {
+            let table = wb.saved_views(None)?.into_iter().find(|v| v.id == saved).map(|v| v.spec.table).unwrap_or_default();
+            wb.delete_saved_view(&saved)?;
+            (Value::Null, Some(Event::ViewsChanged { table, origin }))
+        }
+        Op::TableFromView { view_id, name } => {
+            (json!(wb.table_from_view(view_id, &name)?), Some(Event::TablesChanged { origin }))
         }
         Op::TableToSheet { view_id, name } => {
             (json!(wb.sheet_from_view(view_id, &name, ctx.sheet_copy_rows)?), Some(Event::TablesChanged { origin }))

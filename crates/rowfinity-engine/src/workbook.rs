@@ -87,7 +87,10 @@ impl Workbook {
             "CREATE TABLE IF NOT EXISTS _rf_columns (
                 table_name VARCHAR, name VARCHAR, formula VARCHAR, position INTEGER
              );
-             CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);",
+             CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);
+             CREATE TABLE IF NOT EXISTS _rf_views (
+                id VARCHAR PRIMARY KEY, name VARCHAR, table_name VARCHAR, spec VARCHAR, widths VARCHAR, updated_at BIGINT
+             );",
         )?;
         // Show TIMESTAMPTZ values in UTC so results do not depend on the server's zone.
         let _ = conn.execute_batch("SET TimeZone = 'UTC';");
@@ -278,6 +281,7 @@ impl Workbook {
     }
 
     pub fn drop_table(&mut self, table: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM _rf_views WHERE table_name = ?", duckdb::params![table])?;
         self.views.retain(|_, v| v.spec.table != table);
         self.conn.execute_batch(&format!(
             "DROP TABLE {}; DELETE FROM _rf_columns WHERE table_name = {};",
@@ -299,6 +303,10 @@ impl Workbook {
         for v in self.views.values_mut().filter(|v| v.spec.table == table) {
             v.spec.table = new_name.clone();
         }
+        self.rewrite_saved_views(table, |spec, _| {
+            spec.table = new_name.clone();
+            Ok(())
+        })?;
         Ok(new_name)
     }
 
@@ -422,8 +430,23 @@ impl Workbook {
                 users.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>().join(", "),
                 if users.len() == 1 { "it" } else { "them" });
         }
+        let in_views: Vec<String> = self
+            .saved_views(Some(table))?
+            .into_iter()
+            .filter(|v| v.spec.sort.iter().any(|k| k.column == name) || v.spec.filters.iter().any(|f| f.column == name))
+            .map(|v| format!("{:?}", v.name))
+            .collect();
+        if !in_views.is_empty() {
+            bail!("{name:?} sorts or filters the saved view{} {}; change or delete {} first",
+                if in_views.len() == 1 { "" } else { "s" }, in_views.join(", "), if in_views.len() == 1 { "it" } else { "them" });
+        }
         let is_formula = self.formulas(table)?.iter().any(|(n, _)| n == name);
         self.transaction(|wb| {
+            wb.rewrite_saved_views(table, |spec, widths| {
+                spec.hidden.retain(|h| h != name);
+                widths.remove(name);
+                Ok(())
+            })?;
             if is_formula {
                 wb.conn.execute("DELETE FROM _rf_columns WHERE table_name = ? AND name = ?", duckdb::params![table, name])?;
             } else {
@@ -475,10 +498,48 @@ impl Workbook {
                     duckdb::params![updated, table, fname],
                 )?;
             }
+            wb.rewrite_saved_views(table, |spec, widths| {
+                for k in &mut spec.sort {
+                    if k.column == name {
+                        k.column = new_name.to_string();
+                    }
+                }
+                for f in &mut spec.filters {
+                    if f.column == name {
+                        f.column = new_name.to_string();
+                    }
+                }
+                for h in &mut spec.hidden {
+                    if h == name {
+                        *h = new_name.to_string();
+                    }
+                }
+                if let Some(w) = widths.remove(name) {
+                    widths.insert(new_name.to_string(), w);
+                }
+                Ok(())
+            })?;
             faults::check("rename_column")?;
             wb.describe(&wb.base_select(table)?).map_err(|e| anyhow!("rename would break a formula: {e}"))?;
             Ok(())
         })?;
+        for v in self.views.values_mut().filter(|v| v.spec.table == table) {
+            for k in &mut v.spec.sort {
+                if k.column == name {
+                    k.column = new_name.to_string();
+                }
+            }
+            for f in &mut v.spec.filters {
+                if f.column == name {
+                    f.column = new_name.to_string();
+                }
+            }
+            for h in &mut v.spec.hidden {
+                if h == name {
+                    *h = new_name.to_string();
+                }
+            }
+        }
         self.refresh_views_for(table)
     }
 
@@ -509,6 +570,106 @@ impl Workbook {
                 Err(e)
             }
         }
+    }
+
+    // ----------------------------------------------------------- saved views
+
+    /// Saved views, of one table or of all tables, by name.
+    pub fn saved_views(&self, table: Option<&str>) -> Result<Vec<SavedView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, spec, widths, updated_at FROM _rf_views WHERE ? IS NULL OR table_name = ? ORDER BY lower(name)",
+        )?;
+        let rows = stmt.query_map(duckdb::params![table, table], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, spec, widths, updated_at) = row?;
+            out.push(SavedView {
+                id,
+                name,
+                spec: serde_json::from_str(&spec)?,
+                widths: serde_json::from_str(&widths)?,
+                updated_at: updated_at as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Create a saved view, or update the one with `id`. The spec must open (columns exist)
+    /// and names are unique per table.
+    pub fn save_view(
+        &mut self,
+        id: Option<&str>,
+        name: &str,
+        spec: ViewSpec,
+        widths: std::collections::BTreeMap<String, f64>,
+    ) -> Result<SavedView> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("a view needs a name");
+        }
+        // Validate by building it once.
+        let probe = self.open_view(spec.clone())?;
+        self.close_view(probe.view_id);
+        let clash = self
+            .saved_views(Some(&spec.table))?
+            .into_iter()
+            .any(|v| v.name.to_lowercase() == name.to_lowercase() && Some(v.id.as_str()) != id);
+        if clash {
+            bail!("a view named {name:?} already exists for this table");
+        }
+        let id = match id {
+            Some(id) => {
+                if !self.saved_views(None)?.iter().any(|v| v.id == id) {
+                    bail!("unknown saved view {id}");
+                }
+                id.to_string()
+            }
+            None => format!("v{:x}{:04x}", now_secs(), self.saved_views(None)?.len()),
+        };
+        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: now_secs() };
+        self.conn.execute(
+            "INSERT OR REPLACE INTO _rf_views VALUES (?, ?, ?, ?, ?, ?)",
+            duckdb::params![
+                view.id,
+                view.name,
+                view.spec.table,
+                serde_json::to_string(&view.spec)?,
+                serde_json::to_string(&view.widths)?,
+                view.updated_at as i64
+            ],
+        )?;
+        Ok(view)
+    }
+
+    pub fn rename_saved_view(&mut self, id: &str, name: &str) -> Result<SavedView> {
+        let v = self.saved_views(None)?.into_iter().find(|v| v.id == id).ok_or_else(|| anyhow!("unknown saved view {id}"))?;
+        self.save_view(Some(id), name, v.spec, v.widths)
+    }
+
+    pub fn delete_saved_view(&mut self, id: &str) -> Result<()> {
+        let n = self.conn.execute("DELETE FROM _rf_views WHERE id = ?", duckdb::params![id])?;
+        if n == 0 {
+            bail!("unknown saved view {id}");
+        }
+        Ok(())
+    }
+
+    /// Apply `f` to every saved view of `table` (inside the caller's transaction, if any).
+    fn rewrite_saved_views(
+        &self,
+        table: &str,
+        mut f: impl FnMut(&mut ViewSpec, &mut std::collections::BTreeMap<String, f64>) -> Result<()>,
+    ) -> Result<()> {
+        for mut v in self.saved_views(Some(table))? {
+            f(&mut v.spec, &mut v.widths)?;
+            self.conn.execute(
+                "UPDATE _rf_views SET table_name = ?, spec = ?, widths = ? WHERE id = ?",
+                duckdb::params![v.spec.table, serde_json::to_string(&v.spec)?, serde_json::to_string(&v.widths)?, v.id],
+            )?;
+        }
+        Ok(())
     }
 
     // ----------------------------------------------------------------- views
@@ -557,8 +718,17 @@ impl Workbook {
     }
 
     fn build_view(&mut self, id: u64, spec: ViewSpec) -> Result<View> {
-        let columns = self.columns(&spec.table)?;
-        let by_name: HashMap<&str, &Column> = columns.iter().map(|c| (c.name.as_str(), c)).collect();
+        let all = self.columns(&spec.table)?;
+        for h in &spec.hidden {
+            if !all.iter().any(|c| &c.name == h) {
+                bail!("unknown column {h:?}");
+            }
+        }
+        if all.iter().all(|c| spec.hidden.contains(&c.name)) && !all.is_empty() {
+            bail!("a view must show at least one column");
+        }
+        let columns: Vec<Column> = all.iter().filter(|c| !spec.hidden.contains(&c.name)).cloned().collect();
+        let by_name: HashMap<&str, &Column> = all.iter().map(|c| (c.name.as_str(), c)).collect();
         let total = self.count_rows(&spec.table)?;
         let dense = {
             let max: Option<i64> = self.conn.query_row(
@@ -603,9 +773,15 @@ impl Workbook {
     }
 
     /// Rebuild every view on `table` (after its rows were renumbered or its schema changed).
+    /// References to columns that no longer exist are dropped from open views; clients
+    /// learn the new spec from `view_info` after the `table_changed` event.
     fn refresh_views_for(&mut self, table: &str) -> Result<()> {
+        let names: Vec<String> = self.columns(table)?.into_iter().map(|c| c.name).collect();
         for id in self.views_on(table) {
-            let spec = self.view(id)?.spec.clone();
+            let mut spec = self.view(id)?.spec.clone();
+            spec.hidden.retain(|h| names.contains(h));
+            spec.sort.retain(|k| names.contains(&k.column));
+            spec.filters.retain(|f| names.contains(&f.column));
             let v = self.build_view(id, spec)?;
             self.views.insert(id, v);
         }
@@ -1007,14 +1183,7 @@ impl Workbook {
         let v = self.view(id)?;
         let total = v.row_count;
         let limit = Self::sheet_copy_limit(v.columns.len(), max_rows);
-        let base = self.base_select(&v.spec.table)?;
-        let select = match &v.permutation {
-            None => format!("SELECT * EXCLUDE ({ID}) FROM ({base}) WHERE {ID} < {limit} ORDER BY {ID}"),
-            Some(perm) => format!(
-                "SELECT b.* EXCLUDE ({ID}) FROM ({base}) b JOIN {} p USING ({ID}) WHERE p._rf_pos < {limit} ORDER BY p._rf_pos",
-                ident(perm)
-            ),
-        };
+        let select = self.view_select(id, Some(limit))?;
         let preview = self.run_preview(&select, limit)?;
         self.write_sheet(name, preview, Some(total), limit)
     }
@@ -1176,16 +1345,35 @@ impl Workbook {
 
     /// Write a view (respecting its sort and filters) to a file.
     pub fn export_view(&self, id: u64, path: &Path, format: ExportFormat) -> Result<()> {
+        let select = self.view_select(id, None)?;
+        self.copy_to(&select, path, format)
+    }
+
+    /// The view's visible columns, in view order, optionally only the first `limit` rows.
+    fn view_select(&self, id: u64, limit: Option<usize>) -> Result<String> {
         let v = self.view(id)?;
         let base = self.base_select(&v.spec.table)?;
-        let select = match &v.permutation {
-            None => format!("SELECT * EXCLUDE ({ID}) FROM ({base}) ORDER BY {ID}"),
-            Some(perm) => format!(
-                "SELECT b.* EXCLUDE ({ID}) FROM ({base}) b JOIN {} p USING ({ID}) ORDER BY p._rf_pos",
-                ident(perm)
-            ),
-        };
-        self.copy_to(&select, path, format)
+        let cols: Vec<String> = v.columns.iter().map(|c| format!("b.{}", ident(&c.name))).collect();
+        let cols = cols.join(", ");
+        Ok(match &v.permutation {
+            None => {
+                let limit = limit.map(|l| format!("WHERE b.{ID} < {l}")).unwrap_or_default();
+                format!("SELECT {cols} FROM ({base}) b {limit} ORDER BY b.{ID}")
+            }
+            Some(perm) => {
+                let limit = limit.map(|l| format!("WHERE p._rf_pos < {l}")).unwrap_or_default();
+                format!("SELECT {cols} FROM ({base}) b JOIN {} p USING ({ID}) {limit} ORDER BY p._rf_pos", ident(perm))
+            }
+        })
+    }
+
+    /// Materialize a view's current rows as a new table (a snapshot: later changes to the
+    /// source do not reach it).
+    pub fn table_from_view(&mut self, id: u64, name: &str) -> Result<TableInfo> {
+        let select = self.view_select(id, None)?;
+        let name = self.unique_table_name(name)?;
+        self.create_table_from_select(&name, &select)?;
+        self.table_info(&name)
     }
 
     pub fn export_table(&self, table: &str, path: &Path, format: ExportFormat) -> Result<()> {
@@ -1254,4 +1442,8 @@ fn fits_double(text: &str) -> bool {
 
 fn tracing_like_warn(msg: &str) {
     eprintln!("rowfinity-engine: {msg}");
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

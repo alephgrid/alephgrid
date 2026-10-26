@@ -11,6 +11,7 @@ mod precision;
 mod props;
 mod sheets;
 mod sql;
+mod views;
 mod xlsx;
 
 use crate::*;

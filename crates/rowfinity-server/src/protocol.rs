@@ -4,7 +4,7 @@
 
 use rowfinity_engine::{
     Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
-    Kind, PreviewColumn, QueryPreview, RowBlock, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
+    Kind, PreviewColumn, QueryPreview, RowBlock, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
     UploadPreview, ViewInfo, ViewSpec,
 };
 use ts_rs::{Config, TS};
@@ -80,6 +80,11 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_delete_columns", "null"),
     ("create_sheet_from_query", "SheetCopy"),
     ("table_to_sheet", "SheetCopy"),
+    ("saved_views", "SavedView[]"),
+    ("save_view", "SavedView"),
+    ("rename_saved_view", "SavedView"),
+    ("delete_saved_view", "null"),
+    ("table_from_view", "TableInfo"),
     ("sheet_to_table", "TableInfo"),
 ];
 
@@ -94,7 +99,7 @@ pub fn bindings() -> String {
     let mut out = HEADER.to_string();
     decls!(
         &cfg, out,
-        Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, ViewInfo, RowBlock, CellEdit, EditOutcome,
+        Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
         Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,

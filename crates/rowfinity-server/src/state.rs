@@ -572,10 +572,7 @@ impl AppState {
     }
 
     fn save_workspaces(&self, list: &[Workspace]) -> Result<()> {
-        let tmp = self.workspaces_path().with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(list)?)?;
-        std::fs::rename(tmp, self.workspaces_path())?;
-        Ok(())
+        write_atomic(&self.workspaces_path(), &serde_json::to_vec_pretty(list)?)
     }
 
     fn check_workspace(&self, id: Option<String>) -> Result<Option<String>> {
@@ -639,9 +636,18 @@ pub struct WorkbookPatch {
     pub starred: Option<bool>,
 }
 
-fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
-    let tmp = dir.join("workbook.json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
-    std::fs::rename(tmp, dir.join("workbook.json"))?;
+/// Replace `path` atomically. Every write uses its own temporary file, so concurrent
+/// writers (a delete and a summary refresh, say) cannot take each other's file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", new_id()));
+    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
+}
+
+fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
+    write_atomic(&dir.join("workbook.json"), &serde_json::to_vec_pretty(meta)?)
 }

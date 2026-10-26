@@ -59,3 +59,10 @@ fn optional_fields_are_omitted_not_null() {
     }
     assert!(problems.is_empty(), "optional fields sent as null:\n{}", problems.join("\n"));
 }
+
+/// Op parameters share the request frame with its `id`, so no op may have a field `id`.
+#[test]
+fn no_op_parameter_is_named_id() {
+    let decl = <rowfinity_server::ws::Op as ts_rs::TS>::decl(&ts_rs::Config::new());
+    assert!(!decl.contains(" id:") && !decl.contains(" id?:"), "{decl}");
+}

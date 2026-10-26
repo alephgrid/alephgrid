@@ -208,7 +208,8 @@ async fn delete_disconnects_clients_moves_to_trash_and_restores() {
     ws.close().await;
 
     // Delete forever.
-    server.send(Method::DELETE, &format!("/api/workbooks/{wb}"), None).await;
+    let (status, body) = server.send(Method::DELETE, &format!("/api/workbooks/{wb}"), None).await;
+    assert_eq!(status, 204, "{body}");
     let (status, _) = server.send(Method::DELETE, &format!("/api/trash/{wb}"), None).await;
     assert_eq!(status, 204);
     assert!(!dir.path().join(".trash").join(&wb).exists());
@@ -322,6 +323,8 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SheetInfo" => conforms::<SheetInfo>(op, v),
         "SheetBlock" => conforms::<SheetBlock>(op, v),
         "SheetCopy" => conforms::<rowfinity_engine::SheetCopy>(op, v),
+        "SavedView" => conforms::<rowfinity_engine::SavedView>(op, v),
+        "SavedView[]" => conforms::<Vec<rowfinity_engine::SavedView>>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
@@ -378,14 +381,26 @@ async fn every_operation_replies_with_its_declared_type() {
         run("open_view", json!({ "spec": { "table": "t" } })),
         run("table_to_sheet", json!({ "view_id": 2, "name": "Copy" })),
         run("sheet_delete", json!({ "sheet": 2 })),
+        run("save_view", json!({ "name": "Top", "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [], "hidden": ["s"] }, "widths": { "n": 120.0 } })),
+        run("saved_views", json!({ "table": "t" })),
+        run("table_from_view", json!({ "view_id": 2, "name": "snap" })),
         run("sheet_set", json!({ "sheet": 1, "inputs": [{ "row": 0, "column": 0, "value": "h" }, { "row": 1, "column": 0, "value": "1" }] })),
         run("sheet_to_table", json!({ "sheet": 1, "name": "from_sheet" })),
         run("sheet_delete", json!({ "sheet": 1 })),
+        run("rename_saved_view", json!({ "saved": "PLACEHOLDER", "name": "Top two" })),
+        run("delete_saved_view", json!({ "saved": "PLACEHOLDER" })),
         run("close_view", json!({ "view_id": 1 })),
     ];
-    for (op, params) in script {
+    let mut saved_id = String::new();
+    for (op, mut params) in script {
+        if params["saved"] == "PLACEHOLDER" {
+            params["saved"] = json!(saved_id);
+        }
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
+        if op == "save_view" {
+            saved_id = v["id"].as_str().unwrap().to_string();
+        }
     }
     let all: BTreeSet<&str> = declared.keys().copied().collect();
     assert_eq!(seen, all, "every declared operation is exercised");
