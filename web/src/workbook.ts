@@ -201,7 +201,9 @@ export class WorkbookScreen {
     else if (this.sheets.length) await this.openSheet(this.sheets[0].index);
     else if (demo > 0) await this.createDemo(demo);
     else this.renderEmpty();
-    this.grid.focus();
+    // Start on the grid, unless the user has already moved focus while it was loading.
+    const focused = document.activeElement;
+    if (!focused || focused === document.body) this.grid.focus();
   }
 
   /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */

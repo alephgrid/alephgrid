@@ -130,7 +130,7 @@ Not executed: scheduled 2000-case run (`scheduled.yml`), any CI run, Linux/Windo
 - **Tests:** C `W/disposal.spec.ts` counts window/document/media-query listeners, ResizeObservers and open WebSockets across six open/leave cycles with menus. The pre-fix code leaked 18 listeners and 6 observers.
 
 ### 2.09 Accessible grid, keyboard navigation, visible focus
-- **Tests:** C `W/a11y.spec.ts`: axe (no serious/critical violations on home, workbook, dialog, sheet; it caught badge contrast), ARIA grid with active cell and announcements, visible focus ring, Tab leaving the grid, keyboard menus and tabs. **Gap:** no screen-reader testing with real assistive technology.
+- **Tests:** C `W/a11y.spec.ts`: axe (no serious/critical violations on home, workbook, dialog, sheet; it caught badge contrast), ARIA grid with active cell and announcements, visible focus ring, Tab leaving the grid, keyboard menus and tabs, loading a workbook does not take focus away from a control the user moved to (found on CI: the menu test lost focus when the table finished opening). **Gap:** no screen-reader testing with real assistive technology.
 
 ### 2.10 Gate
 - **Tests:** C `W/sheets.spec.ts` "gate: a new user creates, imports, edits and reopens a table and a sheet with the UI alone" (new workbook → import dialog → table edit with append → blank sheet with formulas → home and back → server restart → values intact), plus the phase-1 journeys.

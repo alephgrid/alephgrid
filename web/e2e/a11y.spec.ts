@@ -83,6 +83,27 @@ test("keyboard focus is visible and Tab can leave the grid", async ({ page }) =>
   await expect(grid).not.toBeFocused();
 });
 
+test("loading a workbook focuses the grid, but not when the user has moved focus already", async ({ page }) => {
+  const wb = await workbook();
+  // Slow replies keep the workbook loading long enough to focus something else first.
+  await page.routeWebSocket(/\/ws/, (ws) => {
+    const srv = ws.connectToServer();
+    srv.onMessage((m) => { setTimeout(() => ws.send(m), 300); });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  const add = page.getByRole("button", { name: "New table or sheet" });
+  await add.focus();
+  await expect(page.locator(".row-count")).toHaveText("2 rows");
+  await expect(page.locator(".busy")).toBeHidden();
+  // Focus would move right after the table opens; give it the chance before checking.
+  await page.waitForTimeout(200);
+  await expect(add).toBeFocused();
+  // With nothing focused, the grid takes focus once the table opens.
+  await page.reload();
+  await expect(page.locator(".row-count")).toHaveText("2 rows");
+  await expect(page.getByRole("grid", { name: "Table people" })).toBeFocused();
+});
+
 test("tabs use arrow keys and menus are keyboard operable", async ({ page }) => {
   const wb = await workbook();
   await page.goto(`${server.url}/w/${wb}`);
