@@ -448,6 +448,12 @@ impl WorkbookHandle {
         self.with_control(|c| Ok((c.setting("memory_limit")?, c.setting("threads")?)))
     }
 
+    /// Rough memory the sheet model takes: 8 × its serialized size (IronCalc keeps parsed
+    /// formulas, styles and indexes in memory). An estimate for the budget, not a measurement.
+    pub fn sheet_memory_estimate(&self) -> u64 {
+        self.with_control(|c| Ok(c.sheets().to_bytes().map(|b| b.len() as u64 * 8).unwrap_or(0))).unwrap_or(0)
+    }
+
     pub fn expire_views(&self, ttl_ms: u64) -> usize {
         self.with_control(|c| Ok(c.shared().expire_views(ttl_ms))).unwrap_or(0)
     }

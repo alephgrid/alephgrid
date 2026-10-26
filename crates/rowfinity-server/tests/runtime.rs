@@ -396,6 +396,28 @@ async fn open_workbooks_share_the_budget_and_never_exceed_it() {
     server.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_memory_comes_out_of_duckdbs_share() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start_with(dir.path(), |c| c.memory_budget = Some(1 << 30)).await;
+    let wb = server.create_workbook("sheets").await;
+    let mut ws = server.ws(&wb).await;
+    ws.ok("sheet_create", json!({ "name": "S" })).await;
+    let inputs: Vec<Value> = (0..20000).map(|i| json!({ "row": i, "column": 0, "value": format!("text value number {i}") })).collect();
+    ws.ok("sheet_set", json!({ "sheet": 0, "inputs": inputs })).await;
+    ws.close().await;
+    // Reopen so the estimate is taken at start.
+    server.send(Method::POST, &format!("/api/workbooks/{wb}/runtime"), Some(json!({ "action": "stop" }))).await;
+    let ws = server.ws(&wb).await;
+    let (_, usage) = server.get("/api/admin/resources").await;
+    let mem = parse_bytes(usage["allocations"][0]["duckdb_memory_limit"].as_str().unwrap()).unwrap();
+    // Without sheets the limit equals the whole share (see the budget test); with them it is lower.
+    assert!(mem < 1 << 30, "DuckDB's limit {mem} must be below the whole 1 GiB share");
+    assert!(mem > (1 << 30) - (256 << 20), "{mem}");
+    ws.close().await;
+    server.stop().await;
+}
+
 // ------------------------------------------------------------------ 3.04
 
 #[tokio::test(flavor = "multi_thread")]

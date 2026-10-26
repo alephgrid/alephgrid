@@ -304,7 +304,19 @@ impl Controller {
                     return Err(self.finish_failed(workbook, operation, e));
                 }
                 slot.handle = Some(handle.clone());
-                self.ledger().set(workbook, record.reservation);
+                // Sheets live outside DuckDB's buffer manager: take their estimate out of its share.
+                let sheets = handle.sheet_memory_estimate();
+                {
+                    let mut ledger = self.ledger();
+                    ledger.set(workbook, record.reservation);
+                    if sheets > 0 {
+                        ledger.set_sheet_estimate(workbook, sheets);
+                        let mem = ledger.duckdb_memory(workbook, &record.reservation);
+                        if let Err(e) = handle.apply_limits(mem, &record.reservation) {
+                            tracing::warn!(workbook, "could not apply resource limits: {e:#}");
+                        }
+                    }
+                }
                 self.changed.notify_all();
                 drop(slots);
                 self.pin_spec(&handle);
