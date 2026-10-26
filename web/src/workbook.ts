@@ -1,11 +1,13 @@
-import { api, Rpc, uploadFile } from "./api";
+import { api, HttpError, isRuntimeFailure, Rpc, RpcError, type CallOptions } from "./api";
+import { importFile } from "./importer";
+
 import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { Grid, type Cell, type Range } from "./grid";
 import type {
-  CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
+  CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
-import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
+import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 
 const FILTER_OPS: { value: FilterOp; label: string; needsValue: boolean }[] = [
   { value: "eq", label: "is equal to", needsValue: true },
@@ -81,6 +83,11 @@ function tsvCell(v: CellValue): string {
   return /[\t\n"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/** The workbook no longer exists (or is in the trash): the server answers "not found". */
+function isGone(e: unknown): boolean {
+  return e instanceof HttpError && (e.status === 404 || e.status === 410 || (e.status === 400 && /not found/i.test(e.message)));
+}
+
 function sheetColumns(count: number): Column[] {
   return Array.from({ length: count }, (_, i) => ({ name: columnLetter(i), sql_type: "", kind: "text" as const }));
 }
@@ -96,10 +103,18 @@ export class WorkbookScreen {
   private sheets: SheetInfo[] = [];
   private active: Active | null = null;
   private view: ViewInfo | null = null;
-  private spec: ViewSpec = { table: "", sort: [], filters: [] };
+  private spec: ViewSpec = { table: "", sort: [], filters: [], hidden: [] };
+  /** Saved views of the open table, and the one applied (if any). */
+  private savedViews: SavedView[] = [];
+  private currentSaved: SavedView | null = null;
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
   private allowSql = true;
+  /** Rows copied into a sheet at most (from /api/config). */
+  private sheetCopyRows = 100_000;
+  /** Largest request frame and edit the server accepts (from /api/config). */
+  private maxMessageBytes = 16 << 20;
+  private maxEditCells = 1_000_000;
 
   private titleEl = el("button", { class: "wb-title", title: "Rename workbook" });
   private statusDot = el("span", { class: "status-dot", title: "Connecting…" });
@@ -109,13 +124,19 @@ export class WorkbookScreen {
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
   private statsEl = el("div", { class: "stats" });
   private rowsEl = el("div", { class: "row-count" });
+  /** Says whether the open item is a Table or a Sheet, and what that means. */
+  private kindEl = el("span", { class: "kind-badge", hidden: true });
   private gridWrap = el("div", { class: "grid-wrap" });
   private busyEl = el("div", { class: "busy", hidden: true });
+  /** Shown when the workbook cannot be opened (incompatible, held elsewhere, no capacity). */
+  private failureEl = el("div", { class: "fatal workbook-failure", role: "alert", hidden: true });
   private fileInput!: HTMLInputElement;
   private tableButtons: HTMLElement[] = [];
   private sheetButtons: HTMLElement[] = [];
   private statsTimer = 0;
   private statsSeq = 0;
+  private timers = new Set<number>();
+  private disposed = false;
 
   constructor(meta: WorkbookMeta, private goHome: () => void) {
     this.meta = meta;
@@ -137,8 +158,8 @@ export class WorkbookScreen {
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
         sort: () => (this.isSheet() ? [] : this.spec.sort),
         filters: () => (this.isSheet() ? [] : this.spec.filters),
-        row: (r) => this.cache.row(r),
-        ensure: (a, b) => (this.isSheet() ? this.sheetCache.ensure(a, b) : this.cache.ensure(a, b)),
+        value: (r, c) => this.cache.value(r, c),
+        ensure: (a, b, c0, c1) => (this.isSheet() ? this.sheetCache.ensure(a, b) : this.cache.ensure(a, b, c0, c1)),
         mode: () => (this.isSheet() ? "sheet" : "table"),
         cell: (r, c) => {
           const cell = this.sheetCache.cell(r, c);
@@ -161,44 +182,143 @@ export class WorkbookScreen {
         redo: () => self.undo(true),
       },
     );
-    this.gridWrap.append(this.grid.host, this.busyEl);
+    this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
     this.rpc.onStatus = (s) => {
-      this.statusDot.className = `status-dot status-${s}`;
-      this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : "Disconnected — retrying";
+      this.setStatus(s);
+      if (s === "open") this.failureEl.hidden = true;
     };
     this.rpc.onEvent = (e) => this.onEvent(e);
     this.rpc.onReconnect = () => this.reopen();
+    this.rpc.onConnectFailed = () => this.checkFailure();
   }
 
   private isSheet(): boolean {
     return this.active?.kind === "sheet";
   }
 
+  private setStatus(s: "connecting" | "open" | "closed"): void {
+    this.statusDot.className = `status-dot status-${s}`;
+    this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : "Disconnected — retrying";
+  }
+
+  private leaveDeleted(): void {
+    if (this.disposed || this.rpc.isClosed) return;
+    this.rpc.close();
+    toast(`“${this.meta.name}” was moved to the trash. Restore it from Trash on the home screen.`, "error");
+    this.goHome();
+  }
+
+  /** True (and the screen is left) when the workbook is no longer there. */
+  private async goneToTrash(): Promise<boolean> {
+    // While a deletion is under way the server may still answer "unavailable"; ask again
+    // for a little while until it says either way.
+    for (let attempt = 0; attempt < 10 && !this.disposed; attempt++) {
+      try {
+        await api.get(this.meta.id);
+        return false;
+      } catch (e) {
+        if (isGone(e)) {
+          this.leaveDeleted();
+          return true;
+        }
+        if (!isRuntimeFailure(e)) return false;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return false;
+  }
+
+  /** A reconnect failed: if the server refuses to open the workbook, say why. */
+  private async checkFailure(): Promise<void> {
+    try {
+      await api.get(this.meta.id);
+    } catch (e) {
+      if (this.disposed) return;
+      if (isGone(e)) { this.leaveDeleted(); return; }
+      if (!isRuntimeFailure(e)) return;
+      this.failureEl.replaceChildren(
+        el("h2", {}, "This workbook can't be opened right now"),
+        el("p", {}, (e as Error).message),
+        el("button", { class: "btn btn-primary", onclick: () => { this.failureEl.hidden = true; this.rpc.reconnectNow(); } }, "Try again"),
+      );
+      this.failureEl.hidden = false;
+    }
+  }
+
   async start(): Promise<void> {
     try {
-      this.allowSql = (await api.config()).allow_sql;
+      const config = await api.config();
+      this.allowSql = config.allow_sql;
+      this.sheetCopyRows = config.sheet_copy_rows ?? this.sheetCopyRows;
+      this.maxMessageBytes = config.max_message_bytes ?? this.maxMessageBytes;
+      this.maxEditCells = config.max_edit_cells ?? this.maxEditCells;
     } catch { /* keep default */ }
-    await this.rpc.connect();
-    await this.loadItems();
+    try {
+      await this.rpc.connect();
+    } catch (e) {
+      // Never connected: stop retrying (the caller shows what went wrong). The upgrade's
+      // HTTP status is not visible to scripts, so ask the REST API why.
+      this.rpc.close();
+      await api.get(this.meta.id);
+      throw e;
+    }
+    try {
+      await this.loadItems();
+    } catch (e) {
+      // Deleted while connecting (before its event could reach this session)?
+      if (await this.goneToTrash()) return;
+      throw e;
+    }
     const demo = Number(new URLSearchParams(location.search).get("demo"));
     if (demo > 0) history.replaceState(null, "", location.pathname);
     if (this.tables.length) await this.openTable(this.tables[0].name);
     else if (this.sheets.length) await this.openSheet(this.sheets[0].index);
     else if (demo > 0) await this.createDemo(demo);
     else this.renderEmpty();
-    this.grid.focus();
+    // Start on the grid, unless the user has already moved focus while it was loading.
+    const focused = document.activeElement;
+    if (!focused || focused === document.body) this.grid.focus();
   }
 
+  /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   dispose(): void {
+    this.disposed = true;
     this.rpc.close();
+    clearTimeout(this.statsTimer);
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.clear();
+    this.cache.reset(0);
+    this.sheetCache.reset(0, 0);
+    this.grid.dispose();
+    this.root.remove();
+  }
+
+  /** setTimeout that is cancelled by dispose(). */
+  private later(fn: () => void, ms: number): void {
+    const t = window.setTimeout(() => {
+      this.timers.delete(t);
+      if (!this.disposed) fn();
+    }, ms);
+    this.timers.add(t);
   }
 
   // ---------------------------------------------------------------- layout
 
   private render(): HTMLElement {
     this.titleEl.addEventListener("click", () => this.renameWorkbook());
+    this.tabsEl.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") return;
+      const tabs = [...this.tabsEl.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      const i = tabs.indexOf(document.activeElement as HTMLButtonElement);
+      if (i < 0 || !tabs.length) return;
+      e.preventDefault();
+      const next = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1
+        : (i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].focus();
+      tabs[next].click();
+    });
     this.formulaInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); this.commitFormulaBar(); }
       if (e.key === "Escape") { this.onSelection(this.grid.selection(), this.grid.active); this.grid.focus(); }
@@ -210,6 +330,7 @@ export class WorkbookScreen {
         (e.target as HTMLInputElement).value = "";
       } });
     this.tableButtons = [
+      el("button", { class: "btn", onclick: (e: MouseEvent) => this.viewsMenu(e) }, "Views ▾"),
       el("button", { class: "btn", onclick: () => this.addColumnDialog() }, "Add column"),
       el("button", { class: "btn", onclick: () => this.filterDialog(this.grid.active.c) }, "Filter"),
     ];
@@ -239,6 +360,7 @@ export class WorkbookScreen {
         this.tabsEl,
         el("div", { class: "spacer" }),
         this.statsEl,
+        this.kindEl,
         this.rowsEl,
       ),
     );
@@ -254,6 +376,143 @@ export class WorkbookScreen {
     return root;
   }
 
+  private setKind(kind: "table" | "sheet"): void {
+    this.kindEl.hidden = false;
+    this.kindEl.className = `kind-badge kind-${kind}`;
+    this.kindEl.textContent = kind === "table" ? "Table" : "Sheet";
+    this.kindEl.title = kind === "table"
+      ? "Table: typed columns of any size. Sort, filter, formula columns and SQL run on the server, so millions of rows stay fast."
+      : `Sheet: free-form cells with Excel formulas, kept in memory. Best for thousands of rows; copying a table or query brings in at most ${formatCount(this.sheetCopyRows)} rows.`;
+  }
+
+  /** Tell the user how much of the data reached the sheet. */
+  private reportCopy(copy: SheetCopy, what: string): void {
+    const n = formatCount(copy.rows_copied);
+    if (!copy.truncated) {
+      toast(`Copied ${n} rows of ${what} into sheet ${copy.sheet.name}`, "success");
+    } else {
+      const of = copy.total_rows != null ? ` of ${formatCount(copy.total_rows)}` : "";
+      toast(`Copied the first ${n}${of} rows of ${what} into sheet ${copy.sheet.name}. Sheets take at most ${formatCount(copy.row_limit)} rows of this width; keep working with the full data in its table.`, "info", 10_000);
+    }
+  }
+
+  private savedViewModified(): boolean {
+    const v = this.currentSaved;
+    if (!v) return false;
+    const norm = (s: ViewSpec) => JSON.stringify({ sort: s.sort, filters: s.filters, hidden: [...s.hidden].sort() });
+    return norm(v.spec) !== norm(this.spec);
+  }
+
+  private async loadSavedViews(): Promise<void> {
+    if (this.active?.kind !== "table") return;
+    try {
+      this.savedViews = await this.rpc.call("saved_views", { table: this.active.name });
+    } catch { this.savedViews = []; }
+    if (this.currentSaved) this.currentSaved = this.savedViews.find((v) => v.id === this.currentSaved!.id) ?? null;
+    this.renderChips();
+  }
+
+  private currentWidths(): Record<string, number> {
+    const widths = this.grid.columnWidths();
+    const out: Record<string, number> = {};
+    this.view?.columns.forEach((c, i) => (out[c.name] = widths[i]));
+    return out;
+  }
+
+  private async applySaved(v: SavedView): Promise<void> {
+    this.storeWidths({ ...this.loadWidths(), ...v.widths });
+    this.currentSaved = v;
+    await this.setSpec(v.spec);
+  }
+
+  private viewsMenu(e: MouseEvent): void {
+    if (this.active?.kind !== "table") return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const current = this.currentSaved;
+    const items: MenuItem[] = [
+      { label: "Live views always show the table's current data", disabled: true, action: () => {} },
+      ...this.savedViews.map((v): MenuItem => ({ label: `${v.id === current?.id ? "✓ " : ""}${v.name}`, action: () => this.applySaved(v) })),
+      ...(this.savedViews.length ? [] : [{ label: "No saved views yet", disabled: true, action: () => {} } as MenuItem]),
+      "sep",
+      { label: "Save view as…", action: () => this.saveViewAs() },
+    ];
+    if (current) {
+      items.push(
+        { label: `Update “${current.name}”`, disabled: !this.savedViewModified(), action: () => this.saveView(current.id, current.name) },
+        { label: `Rename “${current.name}”…`, action: async () => {
+          const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
+          if (!v) return;
+          try { this.currentSaved = await this.rpc.call("rename_saved_view", { saved: current.id, name: v.name }); await this.loadSavedViews(); }
+          catch (err) { toast((err as Error).message, "error"); }
+        } },
+        { label: `Delete “${current.name}”`, danger: true, action: async () => {
+          if (!(await confirmDialog(`Delete the view “${current.name}”?`, "Only the saved view goes; the table and its data stay."))) return;
+          await this.rpc.call("delete_saved_view", { saved: current.id }).catch((err) => toast((err as Error).message, "error"));
+          this.currentSaved = null;
+          await this.loadSavedViews();
+        } },
+      );
+    }
+    items.push("sep", { label: "Save rows as a new table (snapshot)…", action: () => this.snapshotView() });
+    showMenu(items, r.left, r.bottom + 4);
+  }
+
+  private async saveViewAs(): Promise<void> {
+    const v = await formDialog("Save view", [{ name: "name", label: "View name", placeholder: "e.g. Late flights by fare",
+      hint: "Saves the sort, filters, hidden columns and column widths. The view is live: it always shows current data." }], "Save view");
+    if (v) await this.saveView(undefined, v.name);
+  }
+
+  private async saveView(id: string | undefined, name: string): Promise<void> {
+    try {
+      this.currentSaved = await this.rpc.call("save_view", { saved: id, name, spec: this.spec, widths: this.currentWidths() });
+      await this.loadSavedViews();
+      toast(`Saved view “${this.currentSaved.name}”`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  private async snapshotView(): Promise<void> {
+    if (!this.view || this.active?.kind !== "table") return;
+    const v = await formDialog("Save rows as a new table", [{ name: "name", label: "Table name", value: `${this.active.name}_snapshot`,
+      hint: `Copies the ${formatCount(this.view.row_count)} rows of this view, in this order, into a new table. It is a snapshot: later changes to ${this.active.name} do not reach it.` }], "Create table");
+    if (!v) return;
+    try {
+      const info = await this.rpc.call("table_from_view", { view_id: this.view.view_id, name: v.name });
+      await this.loadItems();
+      await this.openTable(info.name);
+      toast(`Created ${info.name} (${formatCount(info.row_count)} rows, snapshot)`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  private async copyTableToSheet(t: TableInfo): Promise<void> {
+    const current = this.active?.kind === "table" && this.active.name === t.name && this.view;
+    const filtered = current && (this.spec.sort.length || this.spec.filters.length);
+    const v = await formDialog(`Copy ${t.name} to a sheet`, [
+      { name: "name", label: "Sheet name", value: t.name,
+        hint: `Copies the first ${formatCount(Math.min(t.row_count, this.sheetCopyRows))} of ${formatCount(t.row_count)} rows${filtered ? " in the current sort and filter" : ""}. The sheet is a separate copy: later table edits do not change it.` },
+    ], "Copy to sheet");
+    if (!v) return;
+    try {
+      let viewId = current ? this.view!.view_id : 0;
+      let temporary = false;
+      if (!current) {
+        viewId = (await this.rpc.call("open_view", { spec: { table: t.name, sort: [], filters: [], hidden: [] } })).view_id;
+        temporary = true;
+      }
+      const copy = await this.rpc.call("table_to_sheet", { view_id: viewId, name: v.name });
+      if (temporary) this.rpc.call("close_view", { view_id: viewId }).catch(() => {});
+      await this.loadItems();
+      await this.openSheet(copy.sheet.index);
+      this.reportCopy(copy, t.name);
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
   private updateToolbar(): void {
     const sheet = this.isSheet();
     for (const b of this.tableButtons) b.hidden = sheet || !this.active;
@@ -266,6 +525,7 @@ export class WorkbookScreen {
     this.view = null;
     this.grid.setColumns([]);
     this.rowsEl.textContent = "";
+    this.kindEl.hidden = true;
     this.renderTabs();
     this.renderChips();
     this.updateToolbar();
@@ -317,7 +577,12 @@ export class WorkbookScreen {
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
       }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "ƒ"), s.name);
     });
+    const tabsHadFocus = this.tabsEl.contains(document.activeElement);
     this.tabsEl.replaceChildren(...tableTabs, ...sheetTabs);
+    // ARIA tabs: only the active tab is in the Tab order; arrow keys move between tabs.
+    const all = [...tableTabs, ...sheetTabs];
+    all.forEach((t) => (t.tabIndex = t.classList.contains("active") || (!all.some((x) => x.classList.contains("active")) && t === all[0]) ? 0 : -1));
+    if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
   }
 
   private closeTableView(): void {
@@ -329,8 +594,12 @@ export class WorkbookScreen {
     this.gridWrap.querySelector(".empty")?.remove();
     this.closeTableView();
     this.active = { kind: "table", name };
-    this.spec = { table: name, sort: [], filters: [] };
+    this.grid.setLabel(`Table ${name}`);
+    this.spec = { table: name, sort: [], filters: [], hidden: [] };
+    this.currentSaved = null;
+    this.savedViews = [];
     this.updateToolbar();
+    this.loadSavedViews();
     this.busy("Opening…");
     try {
       const info = await this.rpc.call("open_view", { spec: this.spec });
@@ -351,6 +620,7 @@ export class WorkbookScreen {
     const info = this.sheets.find((s) => s.index === index);
     if (!info) return;
     this.active = { kind: "sheet", index, name: info.name };
+    this.grid.setLabel(`Sheet ${info.name}`);
     this.applySheetInfo(info, true);
     this.renderChips();
     this.updateToolbar();
@@ -372,6 +642,7 @@ export class WorkbookScreen {
       this.grid.setColumns(this.sheetCols.map((c) => saved[c.name] ?? SHEET_COL_WIDTH));
     }
     this.rowsEl.textContent = info.rows ? `Used ${columnLetter(Math.max(0, info.columns - 1))}${info.rows}` : "Empty sheet";
+    this.setKind("sheet");
     this.grid.invalidate();
   }
 
@@ -394,14 +665,16 @@ export class WorkbookScreen {
     this.view = info;
     this.spec = info.spec;
     if (reset) {
-      this.cache.reset(info.view_id);
+      this.cache.reset(info.view_id, info.columns.length);
     } else {
       this.cache.viewId = info.view_id;
+      this.cache.columns = info.columns.length;
       this.cache.refresh();
     }
     const saved = this.loadWidths();
     this.grid.setColumns(info.columns.map((c) => saved[c.name] ?? defaultWidth(c)));
     this.rowsEl.textContent = `${formatCount(info.row_count)} rows`;
+    this.setKind("table");
     this.renderChips();
     this.grid.invalidate();
     this.onSelection(this.grid.selection(), this.grid.active);
@@ -411,8 +684,33 @@ export class WorkbookScreen {
     try {
       await this.loadItems();
       if (this.active?.kind === "table") {
+        const old = this.view;
         const info = await this.rpc.call("open_view", { spec: this.spec });
-        this.applyView(info, true);
+        // Changes sent for the old view (kept across the reconnect) go to the new one.
+        if (old) this.rpc.aliasView(old.view_id, info.view_id);
+        const same = !!old && JSON.stringify(old.columns) === JSON.stringify(info.columns);
+        this.applyView(info, !same);
+        await this.loadSavedViews();
+      } else if (this.active?.kind === "sheet") {
+        await this.refreshSheet();
+      }
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  /** Refresh the item list, the open view's shape and the visible data. */
+  private async resync(): Promise<void> {
+    try {
+      await this.loadItems();
+      if (this.active?.kind === "table" && this.view) {
+        try {
+          this.applyView(await this.rpc.call("view_info", { view_id: this.view.view_id }), false);
+        } catch {
+          await this.reopen();
+          return;
+        }
+        await this.loadSavedViews();
       } else if (this.active?.kind === "sheet") {
         await this.refreshSheet();
       }
@@ -423,10 +721,12 @@ export class WorkbookScreen {
 
   private async setSpec(spec: ViewSpec): Promise<void> {
     if (!this.view) return;
-    this.busy(spec.sort.length ? "Sorting…" : "Filtering…");
+    const label = spec.sort.length ? "Sorting…" : "Filtering…";
+    this.busy(label);
     const started = performance.now();
     try {
-      const info = await this.rpc.call("update_view", { view_id: this.view.view_id, spec });
+      const info = await this.rpc.request("update_view", { view_id: this.view.view_id, spec },
+        { onProgress: (pct) => this.busy(`${label} ${Math.round(pct)}%`) });
       this.applyView(info, true);
       this.grid.scrollToTop();
       this.grid.select({ r: 0, c: this.grid.active.c });
@@ -450,6 +750,14 @@ export class WorkbookScreen {
         el("span", { class: "chip chip-filter" }, describeFilter(f),
           el("button", { "aria-label": "Remove filter", onclick: () => this.setSpec({ ...this.spec, filters: this.spec.filters.filter((_, j) => j !== i) }) }, "×")),
       ));
+      if (this.spec.hidden.length) {
+        chips.push(el("span", { class: "chip" }, `${this.spec.hidden.length} hidden column${this.spec.hidden.length === 1 ? "" : "s"}`,
+          el("button", { "aria-label": "Show hidden columns", onclick: () => this.setSpec({ ...this.spec, hidden: [] }) }, "×")));
+      }
+      if (this.currentSaved) {
+        chips.unshift(el("span", { class: "chip chip-view", title: "A saved live view: it always shows the table's current data" },
+          `View: ${this.currentSaved.name}${this.savedViewModified() ? " (changed)" : ""}`));
+      }
       if (chips.length > 1) {
         chips.push(el("button", { class: "chip-clear", onclick: () => this.setSpec({ ...this.spec, sort: [], filters: [] }) }, "Clear all"));
       }
@@ -531,8 +839,8 @@ export class WorkbookScreen {
     }
     const col = this.view?.columns[this.grid.active.c];
     if (!col || col.formula) return;
-    const row = this.cache.row(this.grid.active.r);
-    this.formulaInput.value = row ? rawText(row[this.grid.active.c]) : "";
+    const v = this.cache.value(this.grid.active.r, this.grid.active.c);
+    this.formulaInput.value = v !== undefined ? rawText(v) : "";
   }
 
   // ------------------------------------------------------------------ edits
@@ -542,6 +850,14 @@ export class WorkbookScreen {
     if (this.active?.kind === "sheet") return this.commitSheetEdits(this.active.index, edits);
     if (!this.view) return true;
     const cols = this.view.columns;
+    const rowCount = this.view.row_count;
+    // Existing rows are addressed by record id, so the edit lands on the right row even if
+    // rows moved meanwhile; rows at or after the end append by position.
+    const cellEdits = edits.map((e) => {
+      const record = e.r < rowCount ? this.cache.record(e.r) : undefined;
+      return { row: e.r, column: cols[e.c].name, value: e.value, ...(record !== undefined ? { record } : {}) };
+    });
+    if (!this.fits(cellEdits.length, { op: "edit", view_id: this.view.view_id, edits: cellEdits })) return false;
     for (const e of edits) {
       const kind = cols[e.c].kind;
       const num = e.value !== null && isNumericKind(kind) ? Number(e.value) : NaN;
@@ -549,10 +865,7 @@ export class WorkbookScreen {
     }
     this.grid.invalidate();
     try {
-      const out = await this.rpc.call("edit", {
-        view_id: this.view.view_id,
-        edits: edits.map((e) => ({ row: e.r, column: cols[e.c].name, value: e.value })),
-      });
+      const out = await this.rpc.call("edit", { view_id: this.view.view_id, edits: cellEdits });
       if (out.rows_appended > 0) {
         this.view = await this.rpc.call("view_info", { view_id: this.view.view_id });
         this.rowsEl.textContent = `${formatCount(this.view.row_count)} rows`;
@@ -568,13 +881,24 @@ export class WorkbookScreen {
     }
   }
 
+  /** Paste guard: refuse an edit the server would reject as too large, before sending it. */
+  private fits(cells: number, frame: unknown): boolean {
+    const tooMany = cells > this.maxEditCells;
+    // The sent frame also carries its id and mutation id.
+    const bytes = tooMany ? 0 : new TextEncoder().encode(JSON.stringify(frame)).length + 100;
+    if (!tooMany && bytes <= this.maxMessageBytes) return true;
+    const limit = tooMany ? this.maxEditCells : Math.max(1, Math.floor((cells * this.maxMessageBytes) / bytes));
+    toast(`That paste is too large (${formatCount(cells)} cells; the limit is ${formatCount(limit)})`, "error");
+    return false;
+  }
+
   private async commitSheetEdits(sheet: number, edits: { r: number; c: number; value: string | null }[]): Promise<boolean> {
+    const inputs = edits.map((e) => ({ row: e.r, column: e.c, value: e.value ?? "" }));
+    if (!this.fits(inputs.length, { op: "sheet_set", sheet, inputs })) return false;
     for (const e of edits) this.sheetCache.patch(e.r, e.c, e.value ?? "");
     this.grid.invalidate();
     try {
-      const info = await this.rpc.call("sheet_set", {
-        sheet, inputs: edits.map((e) => ({ row: e.r, column: e.c, value: e.value ?? "" })),
-      });
+      const info = await this.rpc.call("sheet_set", { sheet, inputs });
       this.sheets = this.sheets.map((s) => (s.index === info.index ? info : s));
       this.applySheetInfo(info, false);
       this.sheetCache.refresh();
@@ -638,8 +962,16 @@ export class WorkbookScreen {
           out.push(Array.from({ length: range.c1 + 1 }, (_, c) => row[c]?.[0] ?? null));
         }
       } else {
-        const block = await this.rpc.call("fetch", { view_id: this.view!.view_id, row_start: start, row_count: count });
-        out.push(...block.rows);
+        // Only the copied columns; a reply may stop short (`truncated`), so continue from there.
+        for (let got = 0; got < count;) {
+          const block = await this.rpc.call("fetch", {
+            view_id: this.view!.view_id, row_start: start + got, row_count: count - got,
+            column_start: range.c0, column_count: range.c1 - range.c0 + 1,
+          });
+          for (const row of block.rows) out.push([...Array<CellValue>(range.c0).fill(null), ...row]);
+          got += block.rows.length;
+          if (!block.truncated || !block.rows.length) break;
+        }
       }
     }
     return out;
@@ -674,7 +1006,6 @@ export class WorkbookScreen {
       const c = at.c + j;
       if (sheet || (c < cols.length && !cols[c].formula)) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
     }));
-    if (edits.length > 500_000) { toast("Paste is too large (max 500,000 cells)", "error"); return; }
     if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
   }
 
@@ -712,8 +1043,7 @@ export class WorkbookScreen {
       this.editFormulaDialog(col);
       return;
     }
-    const activeRow = this.cache.row(this.grid.active.r);
-    const activeValue = activeRow && this.grid.active.c === c ? activeRow[c] : undefined;
+    const activeValue = this.grid.active.c === c ? this.cache.value(this.grid.active.r, c) : undefined;
     const items: MenuItem[] = [
       { label: "Sort ascending", hint: "A→Z", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: false }] }) },
       { label: "Sort descending", hint: "Z→A", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: true }] }) },
@@ -721,6 +1051,8 @@ export class WorkbookScreen {
         action: () => this.setSpec({ ...this.spec, sort: [...this.spec.sort, { column: col.name, desc: false }] }) },
       "sep",
       { label: "Filter…", action: () => this.filterDialog(c) },
+      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1,
+        action: () => this.setSpec({ ...this.spec, hidden: [...this.spec.hidden, this.view!.columns[c].name] }) },
     ];
     if (activeValue !== undefined && activeValue !== null) {
       const shown = formatValue(activeValue, col.kind);
@@ -790,7 +1122,8 @@ export class WorkbookScreen {
           if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
         } catch (e) { toast((e as Error).message, "error"); }
       } },
-      { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [] }, "csv") },
+      { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [], hidden: [] }, "csv") },
+      { label: "Copy to a sheet…", action: () => this.copyTableToSheet(t) },
       "sep",
       { label: "Delete table", danger: true, action: async () => {
         if (!(await confirmDialog(`Delete “${t.name}”?`, `${formatCount(t.row_count)} rows will be permanently removed from this workbook.`))) return;
@@ -926,7 +1259,7 @@ export class WorkbookScreen {
     });
     if (v) {
       toast(`Added column ${v.name}`, "success");
-      setTimeout(() => this.grid.select({ r: this.grid.active.r, c: (this.view?.columns.length ?? 1) - 1 }), 300);
+      this.later(() => this.grid.select({ r: this.grid.active.r, c: (this.view?.columns.length ?? 1) - 1 }), 300);
     }
   }
 
@@ -983,13 +1316,16 @@ export class WorkbookScreen {
       } else {
         rows.push(["Min", String(s.min ?? "–")], ["Max", String(s.max ?? "–")]);
       }
-      const box = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === box && box.remove() },
+      const closeBtn = el("button", { class: "btn btn-primary", onclick: () => modal.close() }, "Close");
+      const modal = openModal(
         el("div", { class: "dialog" },
           el("h2", {}, col.name),
-          el("table", { class: "kv" }, ...rows.map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", {}, v)))),
-          el("div", { class: "dialog-actions" }, el("button", { class: "btn btn-primary", onclick: () => box.remove() }, "Close")),
-        ));
-      document.body.append(box);
+          el("table", { class: "kv" }, ...rows.map(([k, v]) => el("tr", {}, el("th", { scope: "row" }, k), el("td", {}, v)))),
+          el("div", { class: "dialog-actions" }, closeBtn),
+        ),
+        () => modal.close(),
+      );
+      closeBtn.focus();
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
@@ -1009,12 +1345,30 @@ export class WorkbookScreen {
     editor.value = sample;
     const results = el("div", { class: "sql-results" }, el("p", { class: "muted" },
       "Run a query to preview results. Any DuckDB SQL works: joins across tables, group-bys, window functions, read_parquet() on local files."));
-    const status = el("span", { class: "muted" });
+    const status = el("span", { class: "muted sql-status", role: "status" });
+    // While a query runs: its progress, and a Cancel button that stops it on the server.
+    let running: { id: number; label: string } | null = null;
+    const cancelBtn = el("button", { class: "btn sql-cancel", hidden: true, onclick: () => {
+      if (running) this.rpc.cancel(running.id).catch(() => {});
+    } }, "Cancel");
+    const track = <T>(label: string, work: (opts: CallOptions) => Promise<T>): Promise<T> => {
+      running = { id: 0, label };
+      status.textContent = `${label}…`;
+      cancelBtn.hidden = false;
+      return work({
+        onSent: (id) => { if (running) running.id = id; },
+        onProgress: (pct) => { if (running) status.textContent = `${running.label}… ${Math.round(pct)}%`; },
+      }).finally(() => {
+        running = null;
+        cancelBtn.hidden = true;
+      });
+    };
+    const cancelled = (e: unknown) => e instanceof RpcError && e.code === "cancelled";
     const run = async () => {
-      status.textContent = "Running…";
+      if (running) return;
       const started = performance.now();
       try {
-        const p = await this.rpc.call("query", { sql: editor.value, limit: 500 });
+        const p = await track("Running", (opts) => this.rpc.request("query", { sql: editor.value, limit: 500 }, opts));
         status.textContent = `${p.rows.length}${p.truncated ? "+" : ""} rows · ${Math.round(performance.now() - started)} ms`;
         results.replaceChildren(el("table", { class: "result-table" },
           el("thead", {}, el("tr", {}, ...p.columns.map((c) => el("th", {}, c.name)))),
@@ -1022,52 +1376,68 @@ export class WorkbookScreen {
             el("td", { class: isNumericKind(p.columns[i].kind) ? "num" : "" }, formatValue(v, p.columns[i].kind)))))),
         ));
       } catch (e) {
+        if (cancelled(e)) {
+          status.textContent = "Cancelled.";
+          return;
+        }
         status.textContent = "";
         results.replaceChildren(el("pre", { class: "sql-error" }, (e as Error).message));
       }
     };
     const save = async (target: "table" | "sheet") => {
       const v = await formDialog(target === "table" ? "Save result as a table" : "Open result in a new sheet",
-        [{ name: "name", label: target === "table" ? "Table name" : "Sheet name", value: target === "table" ? "query_result" : "Query result" }],
+        [{ name: "name", label: target === "table" ? "Table name" : "Sheet name", value: target === "table" ? "query_result" : "Query result",
+          hint: target === "table"
+            ? "Keeps every row of the result as a new table (a snapshot: it does not change when the source does)."
+            : `Copies at most the first ${formatCount(this.sheetCopyRows)} rows (fewer for very wide results). Use “Save as table” to keep all of them.` }],
         target === "table" ? "Create table" : "Create sheet");
-      if (!v) return;
+      if (!v || running) return;
       try {
         if (target === "table") {
-          const info = await this.rpc.call("create_table_from_query", { name: v.name, sql: editor.value });
-          panel.remove();
+          const info = await track("Creating table", (opts) =>
+            this.rpc.request("create_table_from_query", { name: v.name, sql: editor.value }, opts));
+          panel.close();
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created ${info.name} (${formatCount(info.row_count)} rows)`, "success");
         } else {
-          const info = await this.rpc.call("create_sheet_from_query", { name: v.name, sql: editor.value });
-          panel.remove();
+          const copy = await track("Creating sheet", (opts) =>
+            this.rpc.request("create_sheet_from_query", { name: v.name, sql: editor.value }, opts));
+          panel.close();
           await this.loadItems();
-          await this.openSheet(info.index);
-          toast(`Created sheet ${info.name}`, "success");
+          await this.openSheet(copy.sheet.index);
+          this.reportCopy(copy, "the query result");
         }
       } catch (e) {
-        toast((e as Error).message, "error");
+        if (cancelled(e)) status.textContent = "Cancelled.";
+        else toast((e as Error).message, "error");
       }
     };
     editor.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
-      if (e.key === "Escape") panel.remove();
     });
-    const panel = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === panel && panel.remove() },
+    const panel = openModal(
       el("div", { class: "dialog dialog-wide" },
         el("h2", {}, "SQL"),
         editor,
         el("div", { class: "dialog-actions" },
           status,
+          cancelBtn,
           el("div", { class: "spacer" }),
-          el("button", { class: "btn", onclick: () => panel.remove() }, "Close"),
-          el("button", { class: "btn", onclick: () => save("sheet"), title: "Up to 100,000 rows" }, "Open in sheet"),
+          el("button", { class: "btn", onclick: () => closePanel() }, "Close"),
+          el("button", { class: "btn", onclick: () => save("sheet"), title: `Up to ${formatCount(this.sheetCopyRows)} rows` }, "Open in sheet"),
           el("button", { class: "btn", onclick: () => save("table") }, "Save as table"),
           el("button", { class: "btn btn-primary", onclick: run, title: "⌘/Ctrl + Enter" }, "Run"),
         ),
         results,
-      ));
-    document.body.append(panel);
+      ),
+      () => closePanel(),
+    );
+    // Closing the console stops whatever it is still running.
+    const closePanel = () => {
+      if (running?.id) this.rpc.cancel(running.id).catch(() => {});
+      panel.close();
+    };
     editor.focus();
   }
 
@@ -1084,21 +1454,18 @@ export class WorkbookScreen {
   private async importFiles(files: File[]): Promise<void> {
     let last: Imported | null = null;
     for (const file of files) {
-      const started = performance.now();
-      this.busy(`Uploading ${file.name}…`);
       try {
-        last = await uploadFile(this.meta.id, file, (f) => {
-          this.busy(f < 1 ? `Uploading ${file.name} · ${Math.round(f * 100)}%` : `Importing ${file.name}…`);
-        });
-        const secs = ((performance.now() - started) / 1000).toFixed(1);
-        toast(last.kind === "table"
-          ? `Imported ${file.name}: ${formatCount(last.table.row_count)} rows in ${secs}s`
-          : `Imported ${file.name}: ${last.sheets.length} sheet${last.sheets.length === 1 ? "" : "s"} in ${secs}s`, "success");
+        const result = await importFile(this.meta.id, file);
+        if (!result) continue;
+        last = result;
+        toast(result.kind === "table"
+          ? `Imported ${file.name}: ${formatCount(result.table.row_count)} rows`
+          : `Imported ${file.name}: ${result.sheets.length} sheet${result.sheets.length === 1 ? "" : "s"}`, "success");
       } catch (e) {
         toast(`${file.name}: ${(e as Error).message}`, "error");
       }
     }
-    this.busy(null);
+    if (this.disposed) return;
     await this.loadItems();
     if (last?.kind === "table") await this.openTable(last.table.name);
     else if (last?.kind === "sheets" && last.sheets.length) await this.openSheet(last.sheets[0].index);
@@ -1108,7 +1475,8 @@ export class WorkbookScreen {
     this.busy(`Generating ${formatCount(rows)} rows…`);
     const started = performance.now();
     try {
-      const info = await this.rpc.call("create_demo_table", { rows });
+      const info = await this.rpc.request("create_demo_table", { rows },
+        { onProgress: (pct) => this.busy(`Generating ${formatCount(rows)} rows… ${Math.round(pct)}%`) });
       await this.loadItems();
       await this.openTable(info.name);
       toast(`Generated ${formatCount(rows)} rows in ${((performance.now() - started) / 1000).toFixed(1)}s`, "success");
@@ -1144,10 +1512,21 @@ export class WorkbookScreen {
           await this.refreshSheet();
         }
         break;
+      case "views_changed":
+        if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) await this.loadSavedViews();
+        break;
+      case "workbook_closed":
+        // The server ends the connection next; the reconnect reopens views and refetches,
+        // and changes not yet acknowledged are resent.
+        this.setStatus("connecting");
+        if (e.reason === "shutdown") toast("The server is restarting…");
+        break;
+      case "resync":
+        // Events were dropped: refresh everything shown.
+        await this.resync();
+        break;
       case "workbook_deleted":
-        this.rpc.close();
-        toast(`“${this.meta.name}” was moved to the trash. Restore it from Trash on the home screen.`, "error");
-        this.goHome();
+        this.leaveDeleted();
         break;
       case "tables_changed": {
         await this.loadItems();

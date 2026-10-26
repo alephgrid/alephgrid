@@ -38,7 +38,7 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
 | E. Differential / metamorphic | `tests/sql.rs`, `tests/precision.rs`, `tests/sheets.rs`, `tests/journey.rs` | Formula columns vs the same expression written inline; closed-form sums; Parquet round trip compared with `EXCEPT`; xlsx export→import equality; export before and after restart |
 | F. Fault injection and recovery | `faults::fail_next(point)` in the engine; raw-TCP interrupted uploads; `tests/crash.rs` (SIGKILL of the real binary) | Failed saves, failed mutations, interrupted uploads, process kill during writes |
 | G. Fuzz | Not yet implemented, apart from the proptest generators over formula translation and table-name sanitizing. Planned targets: WebSocket frame parsing, CSV/xlsx import adapters, formula translation | — |
-| H. Performance / resource | `docs/bench.mjs` (manual). No regression gates yet; capacity work is phase 3/9 | — |
+| H. Performance / resource | `docs/bench.mjs` (manual); phase 3 resource tests (`runtime.rs` budget sums read back from DuckDB, `scheduling.rs` bounded queues, replies and outboxes) | No performance regression gates yet (phase 9) |
 
 ### Oracles and their limits
 
@@ -52,13 +52,18 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
 
 ## Fault simulation scope
 
-- **Simulated:** application-level failures at named points (`save_sheets`, `edit`,
-  `rename_column`, `drop_column`, `sheet_to_table`), dropped client connections mid-upload,
-  clients that disappear, and `SIGKILL` of the server process during and between writes.
-- **Not simulated:** power loss, disk-full, `fsync` failures, storage corruption,
-  read-only volumes. Process termination keeps the OS page cache, so the crash tests
-  say nothing about durability on power loss. That needs a VM or `dm-flakey` style
-  environment and is tracked under 3.10 and 9.04.
+- **Simulated:** application-level failures at named points (engine: `save_sheets`, `edit`,
+  `rename_column`, `drop_column`, `sheet_to_table`, `history`, `commit`, `migrate`, `backup`; server:
+  `write_durably`, `upload_write`, `open_workbook`, and start-stage hooks), dropped client
+  connections mid-upload, clients that disappear or never read, `SIGKILL` of the server during and
+  between writes, `SIGTERM` during edits and imports, a **genuinely full filesystem**
+  (`storage_faults.rs` on a 64 MB disk image or tmpfs named by `ROWFINITY_SMALL_FS`), read-only
+  workbook and data directories, corrupt database files, damaged backups, and a lock held by
+  another process.
+- **Not simulated:** power loss, `fsync` failures, torn or reordered writes, media errors,
+  network filesystems. Process termination keeps the OS page cache, so the crash tests say nothing
+  about durability on power loss. That needs a VM or `dm-flakey`-style environment and remains
+  open (9.04). See [DURABILITY.md](DURABILITY.md).
 
 ## Mutation testing
 
@@ -89,4 +94,5 @@ UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol # regenerate we
 cargo clippy --workspace --all-targets -- -D warnings
 (cd web && npm run build)                                   # type check + bundle
 cargo build -p rowfinity-server && (cd web && npm run e2e)  # C (needs Google Chrome)
+ROWFINITY_SMALL_FS=/path/to/small/fs cargo test -p rowfinity-server --test storage_faults  # real disk full
 ```

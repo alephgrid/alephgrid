@@ -137,3 +137,33 @@ async fn kill_during_a_large_write_leaves_the_old_or_new_state() {
     drop(ws);
     p.kill();
 }
+
+/// 3.13/3.14: after SIGKILL the allocation record still says "ready"; the restarted
+/// controller finds the lock free (the kernel released it with the process), marks the
+/// allocation lost, removes its scratch, and opens the workbook under a new epoch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_servers_allocations_are_reconciled_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = spawn(dir.path()).await;
+    let wb = post_json(p.addr, "/api/workbooks", json!({ "name": "lost" })).await["id"].as_str().unwrap().to_string();
+    let mut ws = Ws::connect(p.addr, &wb).await;
+    ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT 5 AS x" })).await;
+    let before: Value = reqwest::get(format!("http://{}/api/workbooks/{wb}/runtime", p.addr)).await.unwrap().json().await.unwrap();
+    assert_eq!(before["allocation"]["state"], "ready");
+    assert!(dir.path().join(".tmp").join(&wb).exists(), "a live allocation has a scratch directory");
+    p.kill();
+    let record: Value = serde_json::from_slice(&std::fs::read(dir.path().join(".control/allocations").join(format!("{wb}.json"))).unwrap()).unwrap();
+    assert_eq!(record["state"], "ready", "nothing ran on SIGKILL");
+    let p = spawn(dir.path()).await;
+    let after: Value = reqwest::get(format!("http://{}/api/workbooks/{wb}/runtime", p.addr)).await.unwrap().json().await.unwrap();
+    assert_eq!(after["allocation"]["state"], "failed", "{after}");
+    assert_eq!(after["allocation"]["failure"]["kind"], "lost");
+    assert!(!dir.path().join(".tmp").join(&wb).exists());
+    let mut ws = Ws::connect(p.addr, &wb).await;
+    assert_eq!(ws.ok("query", json!({ "sql": "SELECT x FROM t" })).await["rows"], json!([[5]]));
+    let reopened: Value = reqwest::get(format!("http://{}/api/workbooks/{wb}/runtime", p.addr)).await.unwrap().json().await.unwrap();
+    assert_eq!(reopened["allocation"]["state"], "ready");
+    assert_eq!(reopened["allocation"]["epoch"].as_u64().unwrap(), before["allocation"]["epoch"].as_u64().unwrap() + 1);
+    ws.close().await;
+    p.kill();
+}

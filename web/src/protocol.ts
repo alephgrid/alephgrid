@@ -7,14 +7,19 @@ export type CellValue = string | number | boolean | null;
 /** One rendered sheet cell: [display, align, input?]; input is present when it differs from display. */
 export type SheetCell = [string, Align, string?];
 
-/** A WebSocket request frame. */
-export type Request = Op & { id: number };
+/** A WebSocket request frame. `mutation_id` makes a retried change apply once; `timeout_ms` caps the wait. */
+export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: number };
 
-/** A WebSocket reply frame. */
-export type Reply = { id: number; ok: true; result: unknown } | { id: number | null; ok: false; error: string };
+/** Machine-readable reason of a failed request. */
+export type ErrorCode = "overloaded" | "deadline_exceeded" | "cancelled" | "too_large" | "capacity" | "unavailable";
+
+/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
+export type Reply =
+  | { id: number; ok: true; result: unknown; revision?: number; replayed?: boolean }
+  | { id: number | null; ok: false; error: string; code?: ErrorCode };
 
 /** Pushed after connecting. */
-export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta };
+export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number };
 
 export type Kind = "int" | "number" | "bool" | "date" | "datetime" | "time" | "text";
 
@@ -32,7 +37,17 @@ export type FilterOp = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "contains" |
 
 export type Filter = { column: string, op: FilterOp, value: CellValue, };
 
-export type ViewSpec = { table: string, sort: Array<SortKey>, filters: Array<Filter>, };
+export type ViewSpec = { table: string, sort: Array<SortKey>, filters: Array<Filter>, 
+/**
+ * Columns left out of the view (and of its exports); the data is untouched.
+ */
+hidden: Array<string>, };
+
+export type SavedView = { id: string, name: string, spec: ViewSpec, 
+/**
+ * Column widths in pixels, by column name.
+ */
+widths: Record<string, number>, updated_at: number, };
 
 export type ViewInfo = { view_id: number, spec: ViewSpec, row_count: number, columns: Array<Column>, 
 /**
@@ -40,13 +55,36 @@ export type ViewInfo = { view_id: number, spec: ViewSpec, row_count: number, col
  */
 can_append: boolean, };
 
-export type RowBlock = { row_start: number, rows: CellValue[][], };
+export type RowBlock = { row_start: number, 
+/**
+ * Values of the view's columns `column_start..column_start + rows[i].len()`.
+ */
+rows: CellValue[][], 
+/**
+ * Stable record id of each row (see [`CellEdit::record`]).
+ */
+ids: Array<number>, column_start: number, 
+/**
+ * Fewer rows than asked for, because the reply reached its size limit; fetch the
+ * rest from `row_start + rows.len()`.
+ */
+truncated: boolean, };
 
-export type CellEdit = { row: number, column: string, 
+export type CellEdit = { 
+/**
+ * View position. Ignored when `record` is given, except that rows at or after the
+ * end append new rows.
+ */
+row: number, column: string, 
 /**
  * `None` or an empty string clears the cell.
  */
-value: string | null, };
+value: string | null, 
+/**
+ * Record id from a fetch. The edit then lands on that record even if rows were
+ * inserted, deleted or re-sorted since the fetch; it fails if the record is gone.
+ */
+record?: number, };
 
 export type EditOutcome = { table: string, cells_changed: number, rows_appended: number, };
 
@@ -80,7 +118,23 @@ export type SheetInput = { row: number, column: number,
  */
 value: string, };
 
-export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, };
+export type SheetCopy = { sheet: SheetInfo, rows_copied: number, 
+/**
+ * Rows in the source, when known without running the query to the end.
+ */
+total_rows?: number, 
+/**
+ * True when rows were left out because of `row_limit`.
+ */
+truncated: boolean, row_limit: number, };
+
+export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
+
+export type HistoryEntry = { revision: number, mutation_id?: string, op: string, actor?: string, at_ms: number, 
+/**
+ * Short description of the change, at most [`SUMMARY_BYTES`] bytes.
+ */
+summary: string, };
 
 export type Summary = { tables: number, sheets: number, rows: number, };
 
@@ -88,13 +142,21 @@ export type WorkbookMeta = { id: string, name: string, created_at: number, works
 /**
  * Set while the workbook is in the trash.
  */
-deleted_at?: number, };
+deleted_at?: number, 
+/**
+ * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
+ */
+runtime_spec?: string, };
 
 export type WorkbookListing = { size_bytes: number, id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
-deleted_at?: number, };
+deleted_at?: number, 
+/**
+ * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
+ */
+runtime_spec?: string, };
 
 export type WorkbookPatch = { name?: string, 
 /**
@@ -104,9 +166,151 @@ workspace?: string, starred?: boolean, };
 
 export type Workspace = { id: string, name: string, created_at: number, };
 
-export type Event = { "event": "cells_changed", table: string, origin: number, } | { "event": "table_changed", table: string, origin: number, } | { "event": "tables_changed", origin: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, } | { "event": "workbook_deleted", origin: number, };
+export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "progress", request: number, percentage: number, };
 
-export type Op = { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "create_sheet_from_query", name: string, sql: string, } | { "op": "sheet_to_table", sheet: number, name: string, };
+export type Op = { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "create_sheet_from_query", name: string, sql: string, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "cancel", request: number, };
+
+export type ColumnType = { name: string, sql_type: string, };
+
+export type PreviewColumn = { name: string, 
+/**
+ * The type the column will be imported as (detected, or the override).
+ */
+sql_type: string, kind: Kind, 
+/**
+ * What the reader detected, before overrides.
+ */
+detected: string, };
+
+export type FilePreview = { 
+/**
+ * "CSV", "Parquet" or "JSON".
+ */
+format: string, suggested_name: string, columns: Array<PreviewColumn>, 
+/**
+ * The first rows, converted as they will be imported.
+ */
+rows: CellValue[][], 
+/**
+ * Types a user can choose from.
+ */
+type_choices: Array<string>, };
+
+export type UploadPreview = { "kind": "table", preview: FilePreview, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
+
+export type ImportProblem = { message: string, line?: number, column?: string, value?: string, 
+/**
+ * A type that would accept the failing value (always Text for conversion errors).
+ */
+suggested_type?: string, };
+
+export type UploadCreated = { upload_id: string, filename: string, size_bytes: number, preview: UploadPreview, };
+
+export type ImportRequest = { 
+/**
+ * Table name (tables only); defaults to the file name.
+ */
+table?: string, types: Array<ColumnType>, 
+/**
+ * Client-chosen id for `GET/DELETE /api/workbooks/{id}/jobs/{job}` while it runs.
+ */
+job?: string, };
+
+export type JobStatus = { running: boolean, percentage?: number, rows_processed: number, total_rows: number, };
+
+export type Capability = "tables" | "sheets" | "sql" | "python";
+
+export type RuntimeSpec = { engine: string, engine_version: string, 
+/**
+ * Workbook storage format the runtime reads and writes (`rowfinity_engine::storage`).
+ */
+storage_format: number, 
+/**
+ * Versions of the components that compute results.
+ */
+components: { [key in string]: string }, capabilities: Array<Capability>, };
+
+export type IsolationClass = "shared_process" | "process" | "container" | "virtual_machine";
+
+export type ProviderKind = "local";
+
+export type ComputePolicy = { id: string, 
+/**
+ * Smallest memory share an allocation may run with; below it, opening another
+ * workbook evicts an idle one or fails with `capacity`.
+ */
+min_memory_bytes: number, 
+/**
+ * Largest share for one allocation; `None` is a fair share of the host budget.
+ */
+max_memory_bytes?: number, isolation: IsolationClass, 
+/**
+ * Close an allocation after this long without sessions or jobs.
+ */
+idle_timeout_ms: number, providers: Array<ProviderKind>, };
+
+export type AllocationState = "requested" | "starting" | "running" | "ready" | "draining" | "stopped" | "failed";
+
+export type FailureKind = "incompatible" | "capacity" | "owned_elsewhere" | "startup_failed" | "cancelled" | "lost";
+
+export type RuntimeFailure = { kind: FailureKind, message: string, };
+
+export type Reservation = { memory_bytes: number, threads: number, temp_disk_bytes: number, };
+
+export type Transition = { at_ms: number, from: AllocationState, to: AllocationState, operation: string, };
+
+export type RuntimeAllocation = { id: string, workbook: string, spec: string, policy: string, provider: ProviderKind, state: AllocationState, 
+/**
+ * Ownership epoch; increases with every allocation of the workbook.
+ */
+epoch: number, reservation: Reservation, 
+/**
+ * Host and process that own it (`host:pid` for the Local provider).
+ */
+holder: string, requested_at_ms: number, ready_at_ms?: number, stopped_at_ms?: number, failure?: RuntimeFailure, 
+/**
+ * Operation ids applied to this allocation, with what they did (bounded).
+ */
+transitions: Array<Transition>, };
+
+export type OwnershipAssignment = { workbook: string, allocation: string, epoch: number, holder: string, acquired_at_ms: number, 
+/**
+ * How exclusivity is enforced ("flock" for the Local provider).
+ */
+mechanism: string, };
+
+export type RuntimeStatus = { workbook: string, spec: RuntimeSpec, spec_id: string, policy: ComputePolicy, allocation?: RuntimeAllocation, ownership?: OwnershipAssignment, sessions: number, };
+
+export type RuntimeAction = "start" | "stop" | "cancel";
+
+export type RuntimeRequest = { action: RuntimeAction, 
+/**
+ * Repeating an operation id that already moved this workbook's allocation returns the
+ * current status and does nothing.
+ */
+operation_id?: string, };
+
+export type HostBudget = { memory_bytes: number, threads: number, temp_disk_bytes: number, };
+
+export type AllocationUsage = { workbook: string, reservation: Reservation, 
+/**
+ * Settings read back from the workbook's DuckDB instance.
+ */
+duckdb_memory_limit: string, duckdb_threads: string, 
+/**
+ * Jobs waiting or running.
+ */
+jobs: number, };
+
+export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationUsage>, reserved: Reservation, upload_bytes: number, upload_budget: number, };
+
+export type BackupEntry = { id: string, name: string, 
+/**
+ * Revision the copy holds.
+ */
+revision: number, storage_format: number, bytes: number, sha256: string, };
+
+export type BackupManifest = { format: number, created_at_ms: number, server_version: string, workbooks: Array<BackupEntry>, };
 
 /** Result type of each operation. */
 export interface Results {
@@ -142,8 +346,16 @@ export interface Results {
   sheet_delete_rows: null;
   sheet_insert_columns: null;
   sheet_delete_columns: null;
-  create_sheet_from_query: SheetInfo;
+  create_sheet_from_query: SheetCopy;
+  table_to_sheet: SheetCopy;
+  saved_views: SavedView[];
+  save_view: SavedView;
+  rename_saved_view: SavedView;
+  delete_saved_view: null;
+  table_from_view: TableInfo;
   sheet_to_table: TableInfo;
+  history: HistoryEntry[];
+  cancel: boolean;
 }
 
 export type OpName = Op["op"];

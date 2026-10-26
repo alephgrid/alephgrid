@@ -7,17 +7,30 @@
 //! * Formula columns are lazily evaluated DuckDB expressions.
 //! * Free-form Excel-style sheets run on IronCalc and live in the same file.
 
+pub mod catalog;
 pub mod faults;
 mod formula;
+pub mod import;
+pub mod limits;
 pub mod model;
+mod reads;
 pub mod sheets;
 pub mod sql;
+pub mod storage;
 pub mod wire;
 mod workbook;
 
 pub use model::*;
 pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
-pub use workbook::{Imported, Workbook};
+pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
+pub use storage::{HistoryEntry, OpenReport, TooNew, WrongWorkbook};
+pub use workbook::{Committed, Imported, Mutation, Reader, SheetCopy, UploadPreview, Workbook};
+
+/// DuckDB handles the server uses for progress and cancellation.
+pub mod duckdb_handles {
+    pub use duckdb::progress::{ProgressHandle, QueryProgress};
+    pub use duckdb::InterruptHandle;
+}
 
 #[cfg(test)]
 mod tests;

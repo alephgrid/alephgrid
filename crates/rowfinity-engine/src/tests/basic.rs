@@ -49,8 +49,8 @@ fn edit_append_and_type_errors() {
         .edit(
             v.view_id,
             &[
-                CellEdit { row: 3, column: "carrier".into(), value: Some("ZZ".into()) },
-                CellEdit { row: 101, column: "distance_mi".into(), value: Some("42".into()) },
+                CellEdit { row: 3, column: "carrier".into(), value: Some("ZZ".into()), record: None },
+                CellEdit { row: 101, column: "distance_mi".into(), value: Some("42".into()), record: None },
             ],
         )
         .unwrap();
@@ -61,7 +61,7 @@ fn edit_append_and_type_errors() {
     assert_eq!(wb.fetch(v.view_id, 3, 1).unwrap().rows[0][carrier], json!("ZZ"));
 
     let err = wb
-        .edit(v.view_id, &[CellEdit { row: 0, column: "distance_mi".into(), value: Some("far".into()) }])
+        .edit(v.view_id, &[CellEdit { row: 0, column: "distance_mi".into(), value: Some("far".into()), record: None }])
         .unwrap_err();
     assert!(err.to_string().contains("not a valid"), "{err}");
 }
@@ -82,7 +82,7 @@ fn formula_columns_are_lazy_and_sortable() {
     let values: Vec<f64> = block.rows.iter().map(|r| r[last].as_f64().unwrap()).collect();
     assert!(values.windows(2).all(|w| w[0] <= w[1]));
 
-    let err = wb.edit(v.view_id, &[CellEdit { row: 0, column: "fare_x2".into(), value: Some("1".into()) }]);
+    let err = wb.edit(v.view_id, &[CellEdit { row: 0, column: "fare_x2".into(), value: Some("1".into()), record: None }]);
     assert!(err.is_err());
 }
 
@@ -173,7 +173,7 @@ fn xlsx_roundtrip_and_bridges() {
     let dir = std::env::temp_dir().join(format!("rowfinity-xlsx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let (mut wb, t) = demo(500);
-    let sheet = wb.create_sheet_from_query("By carrier", &format!("SELECT carrier, count(*) AS n FROM {t} GROUP BY 1 ORDER BY 1"), 1000).unwrap();
+    let sheet = wb.create_sheet_from_query("By carrier", &format!("SELECT carrier, count(*) AS n FROM {t} GROUP BY 1 ORDER BY 1"), 1000).unwrap().sheet;
     assert_eq!((sheet.rows, sheet.columns), (9, 2), "header + 8 carriers");
     wb.with_sheets(|s| s.set(sheet.index, &[input(9, 0, "Total"), input(9, 1, "=SUM(B2:B9)")])).unwrap();
 
@@ -181,7 +181,10 @@ fn xlsx_roundtrip_and_bridges() {
     wb.sheets().export_xlsx(&xlsx).unwrap();
     let mut other = Workbook::open_in_memory().unwrap();
     match other.import_any(&xlsx, None).unwrap() {
-        Imported::Sheets { sheets } => assert_eq!(sheets[0].name, "By carrier"),
+        Imported::Sheets { sheets, warnings } => {
+            assert_eq!(sheets[0].name, "By carrier");
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
         _ => panic!("xlsx should import as sheets"),
     }
     let total = other.sheets().fetch(0, 9, 1, 2).unwrap();

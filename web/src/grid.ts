@@ -13,10 +13,10 @@ export interface GridModel {
   canAppend(): boolean;
   sort(): SortKey[];
   filters(): Filter[];
-  /** Cached row or undefined while loading. */
-  row(r: number): CellValue[] | undefined;
-  /** Make sure rows [first, last] are (being) loaded. */
-  ensure(first: number, last: number): void;
+  /** Cached value of a table cell, or undefined while loading. */
+  value(r: number, c: number): CellValue | undefined;
+  /** Make sure rows [first, last] of columns [c0, c1] are (being) loaded. */
+  ensure(first: number, last: number, c0: number, c1: number): void;
   /** "sheet" switches to A/B/C headers and per-cell rendering via `cell`. */
   mode?(): "table" | "sheet";
   /** Sheet mode: rendered cell, null when empty, undefined while loading. */
@@ -82,6 +82,18 @@ export class Grid {
   private dragging: "cells" | "cols" | "rows" | null = null;
   private resizing: { col: number; startX: number; startW: number } | null = null;
   private editing: Cell | null = null;
+  /** Removes every listener this grid added (including window and media-query ones). */
+  private abort = new AbortController();
+  private observer: ResizeObserver;
+  private frame = 0;
+  private disposed = false;
+  /** Screen-reader view of the canvas: the active cell and a polite announcer. */
+  private a11yRow: HTMLDivElement;
+  private a11yCell: HTMLDivElement;
+  private announcer: HTMLDivElement;
+  private announced = "";
+  private announceTimer = 0;
+  private static nextId = 1;
 
   constructor(private model: GridModel, private handlers: GridHandlers) {
     this.host = document.createElement("div");
@@ -98,22 +110,44 @@ export class Grid {
     this.editor = document.createElement("input");
     this.editor.className = "grid-editor";
     this.editor.spellcheck = false;
-    this.host.append(this.canvas, this.scroller, this.editor);
+    this.editor.setAttribute("aria-label", "Edit cell");
+    this.host.setAttribute("role", "grid");
+    this.host.setAttribute("aria-multiselectable", "true");
+    this.host.setAttribute("aria-roledescription", "spreadsheet");
+    const cellId = `grid-active-${Grid.nextId++}`;
+    this.a11yRow = document.createElement("div");
+    this.a11yRow.className = "sr-only";
+    this.a11yRow.setAttribute("role", "row");
+    this.a11yCell = document.createElement("div");
+    this.a11yCell.id = cellId;
+    this.a11yCell.setAttribute("role", "gridcell");
+    this.a11yCell.setAttribute("aria-selected", "true");
+    this.a11yRow.append(this.a11yCell);
+    this.host.setAttribute("aria-activedescendant", cellId);
+    this.announcer = document.createElement("div");
+    this.announcer.className = "sr-only";
+    this.announcer.setAttribute("aria-live", "polite");
+    this.announcer.setAttribute("aria-atomic", "true");
+    this.host.append(this.canvas, this.scroller, this.editor, this.a11yRow);
+    // A grid may only own rows, so the announcer lives outside it.
+    document.body.append(this.announcer);
 
-    new ResizeObserver(() => this.resize()).observe(this.host);
+    this.observer = new ResizeObserver(() => this.resize());
+    this.observer.observe(this.host);
+    const signal = this.abort.signal;
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
       this.colors = palette();
       this.invalidate();
-    });
-    this.scroller.addEventListener("scroll", () => this.onScroll());
-    this.scroller.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
-    this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e));
-    this.scroller.addEventListener("mousemove", (e) => this.onHover(e));
-    this.scroller.addEventListener("dblclick", (e) => this.onDoubleClick(e));
-    this.scroller.addEventListener("contextmenu", (e) => this.onContextMenu(e));
-    window.addEventListener("mousemove", (e) => this.onDrag(e));
-    window.addEventListener("mouseup", () => this.onMouseUp());
-    this.host.addEventListener("keydown", (e) => this.onKey(e));
+    }, { signal });
+    this.scroller.addEventListener("scroll", () => this.onScroll(), { signal });
+    this.scroller.addEventListener("wheel", (e) => this.onWheel(e), { passive: false, signal });
+    this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e), { signal });
+    this.scroller.addEventListener("mousemove", (e) => this.onHover(e), { signal });
+    this.scroller.addEventListener("dblclick", (e) => this.onDoubleClick(e), { signal });
+    this.scroller.addEventListener("contextmenu", (e) => this.onContextMenu(e), { signal });
+    window.addEventListener("mousemove", (e) => this.onDrag(e), { signal });
+    window.addEventListener("mouseup", () => this.onMouseUp(), { signal });
+    this.host.addEventListener("keydown", (e) => this.onKey(e), { signal });
     this.host.addEventListener("paste", (e) => {
       if (this.editing) return;
       const text = e.clipboardData?.getData("text/plain");
@@ -121,9 +155,21 @@ export class Grid {
         e.preventDefault();
         this.handlers.paste(this.active, text);
       }
-    });
-    this.editor.addEventListener("keydown", (e) => this.onEditorKey(e));
-    this.editor.addEventListener("blur", () => this.editing && this.commitEditor(0, 0));
+    }, { signal });
+    this.editor.addEventListener("keydown", (e) => this.onEditorKey(e), { signal });
+    this.editor.addEventListener("blur", () => this.editing && this.commitEditor(0, 0), { signal });
+  }
+
+  /** Detach everything: listeners, the resize observer and any pending frame. */
+  dispose(): void {
+    this.disposed = true;
+    this.abort.abort();
+    this.observer.disconnect();
+    cancelAnimationFrame(this.frame);
+    clearTimeout(this.announceTimer);
+    this.announcer.remove();
+    this.editing = null;
+    this.host.remove();
   }
 
   // ------------------------------------------------------------ public API
@@ -141,13 +187,66 @@ export class Grid {
     return this.widths.slice();
   }
 
+  /** The polite live region that announces the active cell. */
+  get liveRegion(): HTMLElement {
+    return this.announcer;
+  }
+
+  /** Accessible name of the grid, e.g. the table or sheet name. */
+  setLabel(label: string): void {
+    this.host.setAttribute("aria-label", label);
+  }
+
+  /** Column label as announced: the table column name, or the sheet letter. */
+  private columnLabel(c: number): string {
+    return this.model.columns()[c]?.name ?? "";
+  }
+
+  /** Displayed text of a cell, as drawn on the canvas. */
+  displayText(cell: Cell): string {
+    const cols = this.model.columns();
+    if (this.isSheet() && this.model.cell) return this.model.cell(cell.r, cell.c)?.text ?? "";
+    const v = this.model.value(cell.r, cell.c);
+    return v !== undefined && cols[cell.c] ? formatValue(v, cols[cell.c].kind) : "";
+  }
+
+  /** Keep the accessible active cell and the announcement in step with the canvas. */
+  private updateA11y(): void {
+    const cols = this.model.columns();
+    this.host.setAttribute("aria-rowcount", String(this.model.rowCount() + 1));
+    this.host.setAttribute("aria-colcount", String(cols.length));
+    if (!cols.length) {
+      this.a11yCell.textContent = "";
+      this.a11yCell.removeAttribute("aria-label");
+      return;
+    }
+    const { r, c } = this.active;
+    const loaded = this.isSheet() && this.model.cell ? this.model.cell(r, c) !== undefined : this.model.value(r, c) !== undefined || r >= this.model.rowCount();
+    const text = this.displayText(this.active);
+    const where = this.isSheet() ? `${this.columnLabel(c)}${r + 1}` : `${this.columnLabel(c)}, row ${r + 1}`;
+    const label = `${where}: ${loaded ? text || "empty" : "loading"}`;
+    this.a11yRow.setAttribute("aria-rowindex", String(r + 2));
+    this.a11yCell.setAttribute("aria-colindex", String(c + 1));
+    this.a11yCell.setAttribute("aria-label", label);
+    this.a11yCell.textContent = text;
+    const sel = this.selection();
+    const cells = (sel.r1 - sel.r0 + 1) * (sel.c1 - sel.c0 + 1);
+    const message = cells > 1 ? `${label}. ${sel.r1 - sel.r0 + 1} by ${sel.c1 - sel.c0 + 1} selected` : label;
+    if (message !== this.announced && loaded) {
+      this.announced = message;
+      clearTimeout(this.announceTimer);
+      this.announceTimer = window.setTimeout(() => (this.announcer.textContent = message), 150);
+    }
+  }
+
   invalidate(): void {
-    if (this.dirty) return;
+    if (this.dirty || this.disposed) return;
     this.dirty = true;
-    requestAnimationFrame(() => {
+    this.frame = requestAnimationFrame(() => {
       this.dirty = false;
       this.updateSpacer();
       this.draw();
+      this.updateA11y();
     });
   }
 
@@ -203,8 +302,8 @@ export class Grid {
 
   private currentText(cell: Cell): string {
     if (this.isSheet() && this.model.editText) return this.model.editText(cell.r, cell.c);
-    const row = this.model.row(cell.r);
-    return row ? rawText(row[cell.c]) : "";
+    const v = this.model.value(cell.r, cell.c);
+    return v !== undefined ? rawText(v) : "";
   }
 
   // -------------------------------------------------------------- geometry
@@ -457,8 +556,8 @@ export class Grid {
       let text: string | undefined;
       if (this.isSheet() && this.model.cell) text = this.model.cell(r, col)?.text;
       else {
-        const row = this.model.row(r);
-        if (row) text = formatValue(row[col], cols[col].kind);
+        const v = this.model.value(r, col);
+        if (v !== undefined) text = formatValue(v, cols[col].kind);
       }
       if (text) w = Math.max(w, this.ctx.measureText(text).width + 20);
     }
@@ -490,7 +589,11 @@ export class Grid {
       case "PageUp": move(-pageRows, 0); break;
       case "Home": this.select(mod ? { r: 0, c: 0 } : { r: this.active.r, c: 0 }); break;
       case "End": this.select(mod ? { r: lastRow, c: lastCol } : { r: this.active.r, c: lastCol }); break;
-      case "Tab": move(0, e.shiftKey ? -1 : 1); break;
+      case "Tab":
+        // At the grid's edge Tab leaves the grid, so keyboard users are never trapped.
+        if (e.shiftKey ? this.active.c === 0 : this.active.c >= lastCol) return;
+        move(0, e.shiftKey ? -1 : 1);
+        break;
       case "Enter": case "F2": this.startEdit(); break;
       case "Escape": this.select(this.active); break;
       case "Delete": case "Backspace": this.clearSelection(); break;
@@ -534,9 +637,12 @@ export class Grid {
   }
 
   private onEditorKey(e: KeyboardEvent): void {
-    if (e.key === "Enter") { e.preventDefault(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
-    else if (e.key === "Tab") { e.preventDefault(); this.commitEditor(0, e.shiftKey ? -1 : 1); }
-    else if (e.key === "Escape") { e.preventDefault(); this.cancelEditor(); }
+    // Keys the editor handles must not bubble to the grid, which would treat the same
+    // Enter as "start editing the next cell".
+    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
+    else if (e.key === "Tab") { e.preventDefault(); e.stopPropagation(); this.commitEditor(0, e.shiftKey ? -1 : 1); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.cancelEditor(); }
+    else e.stopPropagation();
   }
 
   private cancelEditor(): void {
@@ -576,12 +682,12 @@ export class Grid {
     const display = this.displayRows();
     const first = Math.max(0, Math.floor(this.scrollY / ROW_H));
     const last = Math.min(display - 1, Math.floor((this.scrollY + this.bodyHeight()) / ROW_H));
-    if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1));
 
     let c0 = Math.max(0, this.colAt(rhw + 1));
     let c1 = this.colAt(W - 1);
     if (c1 < 0) c1 = cols.length - 1;
     if (!cols.length) { c0 = 0; c1 = -1; }
+    if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1), c0, Math.max(c0, c1));
 
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, W, H);
@@ -623,13 +729,13 @@ export class Grid {
           ctx.fillText(cell.text, tx, y + ROW_H / 2 + 1);
           continue;
         }
-        const row = this.model.row(r);
-        if (!row) {
+        const v = this.model.value(r, c);
+        if (v === undefined) {
           ctx.fillStyle = colors.placeholder;
           ctx.fillRect(x + 8, y + 9, Math.min(w - 16, 40 + ((r * 7 + c * 13) % 50)), 6);
           continue;
         }
-        const text = formatValue(row[c], col.kind);
+        const text = formatValue(v, col.kind);
         if (!text) continue;
         ctx.fillStyle = colors.text;
         if (numeric || col.kind === "bool") {

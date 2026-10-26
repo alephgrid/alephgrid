@@ -102,7 +102,7 @@ fn sorted_view_edits_hit_the_right_record() {
 fn clearing_cells_writes_null() {
     let mut t = TempWb::new();
     let v = people(&mut t);
-    t.wb.edit(v, &[CellEdit { row: 0, column: "name".into(), value: None }, edit(1, "age", "")]).unwrap();
+    t.wb.edit(v, &[CellEdit { row: 0, column: "name".into(), value: None, record: None }, edit(1, "age", "")]).unwrap();
     let rows = snapshot(&t, v);
     assert_eq!(rows[0][1], Value::Null);
     assert_eq!(rows[1][0], Value::Null);

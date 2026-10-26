@@ -63,7 +63,7 @@ pub struct TableInfo {
     pub column_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct SortKey {
     pub column: String,
     #[serde(default)]
@@ -86,7 +86,7 @@ pub enum FilterOp {
     NotEmpty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Filter {
     pub column: String,
     pub op: FilterOp,
@@ -96,13 +96,29 @@ pub struct Filter {
 }
 
 /// What a client wants to look at: a table, optionally sorted and filtered.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct ViewSpec {
     pub table: String,
     #[serde(default)]
     pub sort: Vec<SortKey>,
     #[serde(default)]
     pub filters: Vec<Filter>,
+    /// Columns left out of the view (and of its exports); the data is untouched.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+}
+
+/// A named, saved view of a table. Live: opening it re-applies the sort and filters to
+/// the table's current data.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SavedView {
+    pub id: String,
+    pub name: String,
+    pub spec: ViewSpec,
+    /// Column widths in pixels, by column name.
+    #[ts(type = "Record<string, number>")]
+    pub widths: std::collections::BTreeMap<String, f64>,
+    pub updated_at: u64,
 }
 
 impl ViewSpec {
@@ -125,16 +141,32 @@ pub struct ViewInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct RowBlock {
     pub row_start: u64,
+    /// Values of the view's columns `column_start..column_start + rows[i].len()`.
     #[ts(type = "CellValue[][]")]
     pub rows: Vec<Vec<Value>>,
+    /// Stable record id of each row (see [`CellEdit::record`]).
+    pub ids: Vec<i64>,
+    #[serde(default)]
+    pub column_start: u32,
+    /// Fewer rows than asked for, because the reply reached its size limit; fetch the
+    /// rest from `row_start + rows.len()`.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct CellEdit {
+    /// View position. Ignored when `record` is given, except that rows at or after the
+    /// end append new rows.
     pub row: u64,
     pub column: String,
     /// `None` or an empty string clears the cell.
     pub value: Option<String>,
+    /// Record id from a fetch. The edit then lands on that record even if rows were
+    /// inserted, deleted or re-sorted since the fetch; it fails if the record is gone.
+    #[serde(default)]
+    #[ts(optional, as = "Option<i64>")]
+    pub record: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

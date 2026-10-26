@@ -97,6 +97,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .grid-wrap { flex: 1; position: relative; min-height: 0; }
 .grid-host { position: absolute; inset: 0; overflow: hidden; outline: none; }
+/* The canvas covers the host, so the focus ring is drawn on an overlay above it. */
+.grid-host:focus-visible::after { content: ""; position: absolute; inset: 0; border: 2px solid var(--accent); pointer-events: none; z-index: 5; }
 .grid-canvas { position: absolute; inset: 0; }
 .grid-scroller { position: absolute; inset: 0; overflow: auto; }
 .grid-spacer { pointer-events: none; }
@@ -231,6 +233,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .search { width: 100%; }
 }
 .fatal { max-width: 560px; margin: 15vh auto; padding: 0 16px; }
+.workbook-failure .empty-actions { justify-content: flex-start; }
+/* Inside an open workbook the message covers the grid until the connection is back. */
+.grid-wrap > .workbook-failure { position: absolute; inset: 0; z-index: 5; max-width: none; margin: 0; padding: 12vh max(16px, calc(50% - 280px)); background: var(--bg); }
+.grid-wrap > .workbook-failure[hidden] { display: none; }
 
 @media (max-width: 720px) {
   .toolbar { flex-wrap: wrap; }
@@ -246,3 +252,22 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .trash-row { grid-template-columns: 40px minmax(0, 1fr) minmax(0, 220px) 80px 110px auto; }
 @media (max-width: 760px) { .trash-row { grid-template-columns: 0 minmax(0, 1fr) auto; } }
 .cell-center { display: flex; justify-content: center; align-items: center; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* import dialog */
+.import-body p { margin: 0 0 10px; }
+.import-preview { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; }
+.import-preview th { vertical-align: top; text-align: left; position: sticky; top: 0; background: var(--panel); }
+.import-preview select { margin-top: 4px; max-width: 160px; font: inherit; font-weight: 400; }
+.import-col { font-weight: 600; }
+.import-sheets { margin: 6px 0 12px; padding-left: 18px; }
+.import-fixes { display: flex; gap: 8px; margin: 6px 0; }
+.import-fixes:empty { display: none; }
+.import-progress { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+.import-progress progress { flex: 1; }
+.notice { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; background: var(--panel); }
+.notice ul { margin: 6px 0 0; padding-left: 18px; }
+dialog progress, .dialog progress { width: 100%; }
+.kind-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--text); background: var(--panel); cursor: help; }
+.kind-table { border-color: var(--accent); }

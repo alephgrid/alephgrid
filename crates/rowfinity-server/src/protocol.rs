@@ -3,11 +3,20 @@
 //! (regenerate with `UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`).
 
 use rowfinity_engine::{
-    Align, CellEdit, Column, EditOutcome, ExportFormat, Filter, FilterOp, Imported, Kind, QueryPreview, RowBlock,
-    SheetBlock, SheetInfo, SheetInput, SortKey, Stats, TableInfo, ViewInfo, ViewSpec,
+    Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
+    HistoryEntry, Kind, PreviewColumn, QueryPreview, RowBlock, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
+    UploadPreview, ViewInfo, ViewSpec,
 };
 use ts_rs::{Config, TS};
 
+use crate::backup::{BackupEntry, BackupManifest};
+use crate::http::{ImportRequest, JobStatus, RuntimeAction, RuntimeRequest, UploadCreated};
+use crate::runtime::budget::{AllocationUsage, HostBudget, ResourceUsage};
+use crate::runtime::controller::RuntimeStatus;
+use crate::runtime::{
+    AllocationState, Capability, ComputePolicy, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
+    RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
+};
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace};
 use crate::ws::{Event, Op};
 
@@ -21,14 +30,19 @@ export type CellValue = string | number | boolean | null;
 /** One rendered sheet cell: [display, align, input?]; input is present when it differs from display. */
 export type SheetCell = [string, Align, string?];
 
-/** A WebSocket request frame. */
-export type Request = Op & { id: number };
+/** A WebSocket request frame. `mutation_id` makes a retried change apply once; `timeout_ms` caps the wait. */
+export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: number };
 
-/** A WebSocket reply frame. */
-export type Reply = { id: number; ok: true; result: unknown } | { id: number | null; ok: false; error: string };
+/** Machine-readable reason of a failed request. */
+export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\";
+
+/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
+export type Reply =
+  | { id: number; ok: true; result: unknown; revision?: number; replayed?: boolean }
+  | { id: number | null; ok: false; error: string; code?: ErrorCode };
 
 /** Pushed after connecting. */
-export type Hello = { event: \"hello\"; session: number; workbook: WorkbookMeta };
+export type Hello = { event: \"hello\"; session: number; workbook: WorkbookMeta; revision: number };
 ";
 
 macro_rules! decls {
@@ -76,8 +90,16 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_delete_rows", "null"),
     ("sheet_insert_columns", "null"),
     ("sheet_delete_columns", "null"),
-    ("create_sheet_from_query", "SheetInfo"),
+    ("create_sheet_from_query", "SheetCopy"),
+    ("table_to_sheet", "SheetCopy"),
+    ("saved_views", "SavedView[]"),
+    ("save_view", "SavedView"),
+    ("rename_saved_view", "SavedView"),
+    ("delete_saved_view", "null"),
+    ("table_from_view", "TableInfo"),
     ("sheet_to_table", "TableInfo"),
+    ("history", "HistoryEntry[]"),
+    ("cancel", "boolean"),
 ];
 
 /// Op names in the order `Op` declares them, read from its generated declaration.
@@ -91,9 +113,13 @@ pub fn bindings() -> String {
     let mut out = HEADER.to_string();
     decls!(
         &cfg, out,
-        Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, ViewInfo, RowBlock, CellEdit, EditOutcome,
-        Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, Imported,
-        Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
+        Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
+        Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
+        HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
+        ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
+        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
+        Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,
+        HostBudget, AllocationUsage, ResourceUsage, BackupEntry, BackupManifest,
     );
     out.push_str("\n/** Result type of each operation. */\nexport interface Results {\n");
     for (op, ty) in RESULTS {
