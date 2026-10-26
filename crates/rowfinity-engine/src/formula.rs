@@ -54,6 +54,8 @@ pub(crate) fn analyze(conn: &Connection, formula: &str) -> Result<Vec<ColumnRef>
     if !only_expression {
         bail!("formula error: a formula must be a single expression");
     }
+    // Same function policy as user SQL (settings, secrets, dynamic SQL, sequences).
+    crate::sqlpolicy::check_expression_functions(&node["select_list"][0]).map_err(|e| anyhow!("formula error: {e}"))?;
     let mut refs = Vec::new();
     walk(&node["select_list"][0], &mut |obj| match obj.get("class").and_then(Value::as_str) {
         Some("SUBQUERY") => Err(anyhow!("formula error: subqueries are not allowed in formula columns")),
@@ -153,7 +155,18 @@ mod tests {
         let names: Vec<_> = refs.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["Fare USD", "distance", "Mixed Case"]);
         assert!(refs.iter().all(|r| r.span.is_some() && !r.qualified));
-        for bad in ["(SELECT 1)", "1) AS v FROM t WHERE (1", "1; SELECT 2", "", "  =  ", "1) AS v, (2"] {
+        for bad in [
+            "(SELECT 1)",
+            "1) AS v FROM t WHERE (1",
+            "1; SELECT 2",
+            "",
+            "  =  ",
+            "1) AS v, (2",
+            "current_setting('temp_directory')",
+            "upper(json_execute_serialized_sql('{}'))",
+            "nextval('s')",
+            "system.main.lower('x')",
+        ] {
             assert!(analyze(&conn, bad).is_err(), "{bad:?}");
         }
     }

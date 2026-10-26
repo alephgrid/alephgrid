@@ -220,3 +220,113 @@ impl ExportFormat {
         }
     }
 }
+
+/// A table's data revision as read by a query: the revision that last changed its rows,
+/// columns or formulas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SourceRevision {
+    pub table: String,
+    pub data_rev: u64,
+}
+
+/// The first rows of a user query (a preview, never the whole result unless `truncated` is
+/// false), with how long it took and what it read.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct QueryResult {
+    pub columns: Vec<Column>,
+    #[ts(type = "CellValue[][]")]
+    pub rows: Vec<Vec<Value>>,
+    /// More rows exist than were returned (the row limit or the reply size was reached).
+    pub truncated: bool,
+    /// Most rows this preview could hold.
+    pub row_limit: u64,
+    pub elapsed_ms: u64,
+    /// Workbook revision of the snapshot the query read.
+    pub revision: u64,
+    /// User tables the query read, with their data revisions in that snapshot.
+    pub sources: Vec<SourceRevision>,
+}
+
+/// A user table and its columns, for the schema browser and autocomplete.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct TableSchema {
+    pub name: String,
+    pub row_count: u64,
+    pub columns: Vec<Column>,
+}
+
+/// A saved SQL query: plain (`query`, run on demand) or `live` (run on current data every
+/// time it is opened; its result goes stale when a source table changes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum QueryKind {
+    Query,
+    Live,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SavedQuery {
+    pub id: String,
+    pub name: String,
+    pub kind: QueryKind,
+    /// Latest version number (versions start at 1 and never change).
+    pub version: u64,
+    pub sql: String,
+    pub params: Vec<crate::sqlpolicy::QueryParam>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// One immutable version of a saved query.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct QueryVersion {
+    pub version: u64,
+    pub sql: String,
+    pub params: Vec<crate::sqlpolicy::QueryParam>,
+    pub created_at: u64,
+    /// Workbook revision that saved it.
+    pub revision: u64,
+}
+
+/// A source table of a materialized result: its data revision when the result was computed
+/// and now (absent when the table no longer exists).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MaterializedSource {
+    pub table: String,
+    pub data_rev: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current_rev: Option<u64>,
+}
+
+/// A table created from a query, and how it was computed.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct MaterializedTable {
+    pub table: String,
+    /// The saved query and version it came from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub query_version: Option<u64>,
+    pub sql: String,
+    pub params: Vec<crate::sqlpolicy::QueryParam>,
+    pub sources: Vec<MaterializedSource>,
+    /// Workbook revision at which the rows were computed.
+    pub revision: u64,
+    pub refreshed_at: u64,
+    /// A source changed (or disappeared) since the rows were computed.
+    pub stale: bool,
+    /// The table itself was changed by hand since; a refresh replaces those changes.
+    pub edited: bool,
+}
+
+/// What `sql_change` did.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct SqlChangeOutcome {
+    pub table: String,
+    /// `insert`, `update` or `delete`.
+    pub kind: String,
+    pub rows: u64,
+}

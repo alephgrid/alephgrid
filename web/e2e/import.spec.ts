@@ -11,9 +11,11 @@ const server = new Server();
 test.beforeAll(async () => server.start());
 test.afterAll(async () => server.dispose());
 
+/** Upload directories left behind: `.uploads/<workbook>/<upload>/` (each workbook keeps its own folder). */
 function uploadsLeft(): number {
   try {
-    return readdirSync(join(server.dataDir, ".uploads")).length;
+    const root = join(server.dataDir, ".uploads");
+    return readdirSync(root).reduce((n, wb) => n + readdirSync(join(root, wb)).length, 0);
   } catch {
     return 0;
   }

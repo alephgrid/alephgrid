@@ -84,6 +84,11 @@ impl LocalProvider {
                 ("max_temp_directory_size", format!("{}B", req.reservation.temp_disk_bytes.max(1 << 20))),
             ];
             engine.configure(&settings).map_err(startup)?;
+            // The database may read and write only this workbook's scratch directories; user
+            // SQL cannot reach files, URLs or extensions (4.07).
+            let data_dir = req.workbook_dir.parent().unwrap_or(req.workbook_dir);
+            let dirs = crate::state::allowed_dirs(data_dir, req.workbook, &temp).map_err(startup)?;
+            engine.restrict_access(&dirs.iter().map(|d| d.as_path()).collect::<Vec<_>>()).map_err(startup)?;
             // Health check before serving.
             engine.revision().map_err(startup)?;
             let ownership = OwnershipAssignment {

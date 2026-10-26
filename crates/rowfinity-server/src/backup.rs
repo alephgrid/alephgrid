@@ -116,7 +116,16 @@ pub fn backup_online(state: &Shared, dest: &Path) -> Result<BackupManifest> {
             let dir = dest.join(&id);
             std::fs::create_dir_all(&dir)?;
             let db = dir.join("data.duckdb");
-            let revision = handle.with_reader(|r| r.backup_to(&db))?;
+            // The workbook's database may only write its own scratch directories (4.07):
+            // copy there, then move the file into the backup.
+            let scratch = state.scratch_dir(".exports", &id)?;
+            let staged = scratch.join("data.duckdb");
+            let copied = handle.with_reader(|r| r.backup_to(&staged)).and_then(|rev| {
+                std::fs::rename(&staged, &db)?;
+                Ok(rev)
+            });
+            let _ = std::fs::remove_dir_all(&scratch);
+            let revision = copied?;
             let meta = handle.meta.lock().unwrap().clone();
             crate::runtime::write_durably(&dir.join("workbook.json"), &serde_json::to_vec_pretty(&meta)?)?;
             entries.push(entry(&meta, &db, revision)?);
@@ -216,7 +225,9 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
             wb.checkpoint()?;
             drop(wb);
             // A migration during the check leaves a pre-migration copy; it belongs to the backup, not the restore.
-            let _ = std::fs::remove_file(to.join("data.duckdb.v1.bak"));
+            for v in 1..rowfinity_engine::storage::FORMAT {
+                let _ = std::fs::remove_file(to.join(format!("data.duckdb.v{v}.bak")));
+            }
         }
         if src.join("workspaces.json").exists() {
             rowfinity_engine::storage::copy_durably(&src.join("workspaces.json"), &staging.join("workspaces.json"))?;

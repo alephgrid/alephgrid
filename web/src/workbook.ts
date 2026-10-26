@@ -1,4 +1,4 @@
-import { api, HttpError, isRuntimeFailure, Rpc, RpcError, type CallOptions } from "./api";
+import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
 
 import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
@@ -7,6 +7,9 @@ import { Grid, type Cell, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
+import type { MaterializedTable, SavedQuery } from "./protocol";
+import { quoteIdent } from "./sqltext";
+import { SqlWorkspace } from "./sqlworkspace";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 
 const FILTER_OPS: { value: FilterOp; label: string; needsValue: boolean }[] = [
@@ -106,6 +109,8 @@ export class WorkbookScreen {
   private spec: ViewSpec = { table: "", sort: [], filters: [], hidden: [] };
   /** Saved views of the open table, and the one applied (if any). */
   private savedViews: SavedView[] = [];
+  /** The saved-views request in flight, so the Views menu never shows a list that is still loading. */
+  private savedViewsLoading: Promise<void> = Promise.resolve();
   private currentSaved: SavedView | null = null;
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
@@ -133,6 +138,12 @@ export class WorkbookScreen {
   private fileInput!: HTMLInputElement;
   private tableButtons: HTMLElement[] = [];
   private sheetButtons: HTMLElement[] = [];
+  /** The open SQL workspace, if any (it receives server events). */
+  private sql: SqlWorkspace | null = null;
+  /** Tables made from a query, and the saved queries they may name. */
+  private materialized: MaterializedTable[] = [];
+  private savedQueries: SavedQuery[] = [];
+  private snapshotEl = el("div", { class: "snapshot-banner", role: "region", "aria-label": "Snapshot", hidden: true });
   private statsTimer = 0;
   private statsSeq = 0;
   private timers = new Set<number>();
@@ -285,6 +296,7 @@ export class WorkbookScreen {
   /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   dispose(): void {
     this.disposed = true;
+    this.sql?.close();
     this.rpc.close();
     clearTimeout(this.statsTimer);
     for (const t of this.timers) clearTimeout(t);
@@ -352,6 +364,7 @@ export class WorkbookScreen {
         this.fileInput,
       ),
       this.chips,
+      this.snapshotEl,
       el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput),
       this.gridWrap,
       el("footer", { class: "footer" },
@@ -403,7 +416,12 @@ export class WorkbookScreen {
     return norm(v.spec) !== norm(this.spec);
   }
 
-  private async loadSavedViews(): Promise<void> {
+  private loadSavedViews(): Promise<void> {
+    this.savedViewsLoading = this.fetchSavedViews();
+    return this.savedViewsLoading;
+  }
+
+  private async fetchSavedViews(): Promise<void> {
     if (this.active?.kind !== "table") return;
     try {
       this.savedViews = await this.rpc.call("saved_views", { table: this.active.name });
@@ -425,9 +443,10 @@ export class WorkbookScreen {
     await this.setSpec(v.spec);
   }
 
-  private viewsMenu(e: MouseEvent): void {
+  private async viewsMenu(e: MouseEvent): Promise<void> {
     if (this.active?.kind !== "table") return;
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    await this.savedViewsLoading;
     const current = this.currentSaved;
     const items: MenuItem[] = [
       { label: "Live views always show the table's current data", disabled: true, action: () => {} },
@@ -527,6 +546,7 @@ export class WorkbookScreen {
     this.rowsEl.textContent = "";
     this.kindEl.hidden = true;
     this.renderTabs();
+    this.renderSnapshot();
     this.renderChips();
     this.updateToolbar();
     const card = el("div", { class: "empty" },
@@ -555,6 +575,7 @@ export class WorkbookScreen {
       this.rpc.call("sheets"),
     ]);
     this.renderTabs();
+    if (this.allowSql) this.loadMaterialized();
   }
 
   private renderTabs(): void {
@@ -563,10 +584,11 @@ export class WorkbookScreen {
       const on = a?.kind === "table" && a.name === t.name;
       return el("button", {
         class: `tab${on ? " active" : ""}`, role: "tab", "aria-selected": on ? "true" : "false",
-        title: `Table · ${formatCount(t.row_count)} rows · ${t.column_count} columns`,
+        title: `Table · ${formatCount(t.row_count)} rows · ${t.column_count} columns${this.snapshotNote(t.name)}`,
         onclick: () => this.openTable(t.name),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.tableTabMenu(t, e.clientX, e.clientY); },
-      }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "▦"), t.name);
+      }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "▦"), t.name,
+      this.materialized.some((m) => m.table === t.name && m.stale) ? el("span", { class: "tab-stale", "aria-hidden": "true" }, " •") : null);
     });
     const sheetTabs = this.sheets.map((s) => {
       const on = a?.kind === "sheet" && a.index === s.index;
@@ -585,6 +607,12 @@ export class WorkbookScreen {
     if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
   }
 
+  private snapshotNote(table: string): string {
+    const m = this.materialized.find((x) => x.table === table);
+    if (!m) return "";
+    return ` · Snapshot of a query, computed at revision ${m.revision}${m.stale ? " (stale: a source changed)" : ""}`;
+  }
+
   private closeTableView(): void {
     if (this.view) this.rpc.call("close_view", { view_id: this.view.view_id }).catch(() => {});
     this.view = null;
@@ -599,6 +627,7 @@ export class WorkbookScreen {
     this.currentSaved = null;
     this.savedViews = [];
     this.updateToolbar();
+    this.renderSnapshot();
     this.loadSavedViews();
     this.busy("Opening…");
     try {
@@ -622,6 +651,7 @@ export class WorkbookScreen {
     this.active = { kind: "sheet", index, name: info.name };
     this.grid.setLabel(`Sheet ${info.name}`);
     this.applySheetInfo(info, true);
+    this.renderSnapshot();
     this.renderChips();
     this.updateToolbar();
     this.renderTabs();
@@ -1335,110 +1365,107 @@ export class WorkbookScreen {
 
   private sqlPanel(): void {
     if (!this.allowSql) { toast("SQL is disabled on this server", "error"); return; }
+    if (this.sql) return;
     const tableName = this.active?.kind === "table" ? this.active.name : this.tables[0]?.name;
-    const t = tableName ? `"${tableName}"` : "my_table";
+    const t = tableName ? quoteIdent(tableName) : "my_table";
     const firstCol = this.active?.kind === "table" ? this.view?.columns.find((c) => c.kind === "text")?.name : undefined;
-    const sample = firstCol
-      ? `SELECT "${firstCol}", count(*) AS rows\nFROM ${t}\nGROUP BY 1\nORDER BY rows DESC`
+    const sampleSql = firstCol
+      ? `SELECT ${quoteIdent(firstCol)}, count(*) AS rows\nFROM ${t}\nGROUP BY 1\nORDER BY rows DESC`
       : `SELECT *\nFROM ${t}\nLIMIT 100`;
-    const editor = el("textarea", { class: "sql-editor mono", spellcheck: false, rows: 8 });
-    editor.value = sample;
-    const results = el("div", { class: "sql-results" }, el("p", { class: "muted" },
-      "Run a query to preview results. Any DuckDB SQL works: joins across tables, group-bys, window functions, read_parquet() on local files."));
-    const status = el("span", { class: "muted sql-status", role: "status" });
-    // While a query runs: its progress, and a Cancel button that stops it on the server.
-    let running: { id: number; label: string } | null = null;
-    const cancelBtn = el("button", { class: "btn sql-cancel", hidden: true, onclick: () => {
-      if (running) this.rpc.cancel(running.id).catch(() => {});
-    } }, "Cancel");
-    const track = <T>(label: string, work: (opts: CallOptions) => Promise<T>): Promise<T> => {
-      running = { id: 0, label };
-      status.textContent = `${label}…`;
-      cancelBtn.hidden = false;
-      return work({
-        onSent: (id) => { if (running) running.id = id; },
-        onProgress: (pct) => { if (running) status.textContent = `${running.label}… ${Math.round(pct)}%`; },
-      }).finally(() => {
-        running = null;
-        cancelBtn.hidden = true;
-      });
-    };
-    const cancelled = (e: unknown) => e instanceof RpcError && e.code === "cancelled";
-    const run = async () => {
-      if (running) return;
-      const started = performance.now();
-      try {
-        const p = await track("Running", (opts) => this.rpc.request("query", { sql: editor.value, limit: 500 }, opts));
-        status.textContent = `${p.rows.length}${p.truncated ? "+" : ""} rows · ${Math.round(performance.now() - started)} ms`;
-        results.replaceChildren(el("table", { class: "result-table" },
-          el("thead", {}, el("tr", {}, ...p.columns.map((c) => el("th", {}, c.name)))),
-          el("tbody", {}, ...p.rows.map((row) => el("tr", {}, ...row.map((v, i) =>
-            el("td", { class: isNumericKind(p.columns[i].kind) ? "num" : "" }, formatValue(v, p.columns[i].kind)))))),
-        ));
-      } catch (e) {
-        if (cancelled(e)) {
-          status.textContent = "Cancelled.";
-          return;
-        }
-        status.textContent = "";
-        results.replaceChildren(el("pre", { class: "sql-error" }, (e as Error).message));
-      }
-    };
-    const save = async (target: "table" | "sheet") => {
-      const v = await formDialog(target === "table" ? "Save result as a table" : "Open result in a new sheet",
-        [{ name: "name", label: target === "table" ? "Table name" : "Sheet name", value: target === "table" ? "query_result" : "Query result",
-          hint: target === "table"
-            ? "Keeps every row of the result as a new table (a snapshot: it does not change when the source does)."
-            : `Copies at most the first ${formatCount(this.sheetCopyRows)} rows (fewer for very wide results). Use “Save as table” to keep all of them.` }],
-        target === "table" ? "Create table" : "Create sheet");
-      if (!v || running) return;
-      try {
-        if (target === "table") {
-          const info = await track("Creating table", (opts) =>
-            this.rpc.request("create_table_from_query", { name: v.name, sql: editor.value }, opts));
-          panel.close();
-          await this.loadItems();
-          await this.openTable(info.name);
-          toast(`Created ${info.name} (${formatCount(info.row_count)} rows)`, "success");
-        } else {
-          const copy = await track("Creating sheet", (opts) =>
-            this.rpc.request("create_sheet_from_query", { name: v.name, sql: editor.value }, opts));
-          panel.close();
-          await this.loadItems();
-          await this.openSheet(copy.sheet.index);
-          this.reportCopy(copy, "the query result");
-        }
-      } catch (e) {
-        if (cancelled(e)) status.textContent = "Cancelled.";
-        else toast((e as Error).message, "error");
-      }
-    };
-    editor.addEventListener("keydown", (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
+    const ws = new SqlWorkspace({
+      rpc: this.rpc,
+      workbookId: this.meta.id,
+      sheetCopyRows: this.sheetCopyRows,
+      sampleSql,
+      openTable: async (name) => {
+        await this.loadItems();
+        await this.openTable(name);
+      },
+      openSheet: async (copy) => {
+        await this.loadItems();
+        await this.openSheet(copy.sheet.index);
+        this.reportCopy(copy, "the query result");
+      },
+      download: (href) => {
+        const a = el("a", { href, download: "" });
+        document.body.append(a);
+        a.click();
+        a.remove();
+      },
+      closed: () => { if (this.sql === ws) this.sql = null; },
     });
-    const panel = openModal(
-      el("div", { class: "dialog dialog-wide" },
-        el("h2", {}, "SQL"),
-        editor,
-        el("div", { class: "dialog-actions" },
-          status,
-          cancelBtn,
-          el("div", { class: "spacer" }),
-          el("button", { class: "btn", onclick: () => closePanel() }, "Close"),
-          el("button", { class: "btn", onclick: () => save("sheet"), title: `Up to ${formatCount(this.sheetCopyRows)} rows` }, "Open in sheet"),
-          el("button", { class: "btn", onclick: () => save("table") }, "Save as table"),
-          el("button", { class: "btn btn-primary", onclick: run, title: "⌘/Ctrl + Enter" }, "Run"),
-        ),
-        results,
-      ),
-      () => closePanel(),
+    this.sql = ws;
+    ws.open();
+  }
+
+  // ------------------------------------------------------ materialized tables
+
+  /** Banner over a table that was made from a query: when, whether stale, Refresh. */
+  private renderSnapshot(): void {
+    const a = this.active;
+    const m = a?.kind === "table" ? this.materialized.find((x) => x.table === a.name) : undefined;
+    if (!m) {
+      this.snapshotEl.hidden = true;
+      this.snapshotEl.replaceChildren();
+      return;
+    }
+    const changed = m.sources.filter((s) => s.current_rev === undefined || s.current_rev === null || s.current_rev !== s.data_rev);
+    const describe = (s: { table: string; current_rev?: number }) => (s.current_rev === undefined || s.current_rev === null ? `${s.table} (gone)` : s.table);
+    const origin = m.query ? this.queryName(m.query, m.query_version) : "a query";
+    this.snapshotEl.hidden = false;
+    this.snapshotEl.className = `snapshot-banner${m.stale ? " stale" : ""}`;
+    this.snapshotEl.replaceChildren(
+      el("span", { class: "kind-badge kind-snapshot", title: `Snapshot: the rows were computed once from SQL and stored. It changes only when refreshed.\n\n${m.sql}` }, "Snapshot"),
+      el("span", {}, `Snapshot of ${origin} · computed at revision ${m.revision}`),
+      m.stale ? el("strong", { class: "snapshot-stale" },
+        `Stale: ${changed.length ? changed.map(describe).join(", ") : "a source"} changed`) : el("span", { class: "muted" }, "Up to date with its sources"),
+      ...(m.edited ? [el("span", { class: "snapshot-edited" }, "Changed by hand since; refreshing replaces those changes")] : []),
+      el("div", { class: "spacer" }),
+      el("button", { class: "btn", onclick: () => this.refreshSnapshot(m) }, "Refresh snapshot"),
     );
-    // Closing the console stops whatever it is still running.
-    const closePanel = () => {
-      if (running?.id) this.rpc.cancel(running.id).catch(() => {});
-      panel.close();
-    };
-    editor.focus();
+  }
+
+  private queryName(id: string, version?: number): string {
+    const q = this.savedQueries.find((x) => x.id === id);
+    return q ? `“${q.name}”${version ? ` v${version}` : ""}` : "a saved query";
+  }
+
+  /** Coalesce bursts of edit events into one reload. */
+  private matPending = false;
+  private reloadMaterializedSoon(): void {
+    if (this.matPending) return;
+    this.matPending = true;
+    this.later(() => { this.matPending = false; this.loadMaterialized(); }, 150);
+  }
+
+  private async loadMaterialized(): Promise<void> {
+    try {
+      const [m, q] = await Promise.all([this.rpc.call("materialized"), this.rpc.call("saved_queries").catch(() => this.savedQueries)]);
+      this.materialized = m;
+      this.savedQueries = q;
+    } catch {
+      return;
+    }
+    if (this.disposed) return;
+    this.renderSnapshot();
+    this.renderTabs();
+  }
+
+  private async refreshSnapshot(m: MaterializedTable): Promise<void> {
+    if (m.edited && !(await confirmDialog(`Refresh “${m.table}”?`,
+      "This table was changed by hand since it was computed. Refreshing re-runs its query and replaces every row, including those changes.",
+      "Refresh and replace"))) return;
+    this.busy(`Refreshing ${m.table}…`);
+    try {
+      const out = await this.rpc.request("refresh_materialized", { table: m.table },
+        { onProgress: (pct) => this.busy(`Refreshing ${m.table}… ${Math.round(pct)}%`) });
+      toast(`Refreshed ${out.table}: computed at revision ${out.revision}`, "success");
+    } catch (e) {
+      toast(`${m.table} was not refreshed: ${(e as Error).message}`, "error", 8000);
+    } finally {
+      this.busy(null);
+      await this.loadMaterialized();
+    }
   }
 
   private async renameWorkbook(): Promise<void> {
@@ -1491,12 +1518,18 @@ export class WorkbookScreen {
 
   private async onEvent(e: ServerEvent): Promise<void> {
     const a = this.active;
+    this.sql?.onEvent(e);
     switch (e.event) {
       case "cells_changed":
         if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) {
           this.cache.refresh();
           this.grid.invalidate();
         }
+        // A snapshot or one of its sources was edited.
+        if (this.materialized.length) this.reloadMaterializedSoon();
+        break;
+      case "queries_changed":
+        if (this.materialized.length) this.loadMaterialized();
         break;
       case "table_changed":
         if (a?.kind === "table" && e.table === a.name && this.view) {

@@ -56,7 +56,7 @@ Reproduce with `rowfinity --demo-rows 20000000` and the script in `docs/bench.mj
 | Edit | Typed cell edits with validation, append by typing below the last row, insert and delete rows, paste TSV from Excel or Sheets, copy ranges |
 | Columns | Add, rename and delete columns; **formula columns** (`=[fare_usd] / [distance_mi]`, any DuckDB expression) |
 | Views | Multi-column sort, filters (equals, contains, greater than, empty, …) applied to the whole dataset |
-| Analysis | Live sum, avg, count, min and max of the selection; column summary; **SQL console** (joins, group-bys, window functions) with "save as table" |
+| Analysis | Live sum, avg, count, min and max of the selection; column summary; **SQL workspace** (schema browser, autocomplete, `$parameters`, cancellable previews, complete exports, saved and live queries with versions, refreshable query tables, INSERT/UPDATE/DELETE that keep history); SQL reads the workbook's own tables only |
 | **Sheets** | Excel-style formula grids on [IronCalc](https://github.com/ironcalc/IronCalc): `=SUM`, `XLOOKUP`, cross-sheet references, undo/redo, insert/delete rows and columns with reference shifting. Stored in the same workbook file |
 | Bridges | SQL result → sheet, sheet → columnar table (types sniffed), all sheets → .xlsx |
 | Export | CSV, Parquet or JSON lines for any table or the current filtered and sorted view; .xlsx for sheets. Free |

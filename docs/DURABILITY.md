@@ -69,7 +69,7 @@ lease or a SIGKILL test is not evidence of distributed fencing.
 
 | Class | What it separates | What it does not | Available |
 |---|---|---|---|
-| `shared_process` | Workbooks' data by the server's own code; per-workbook DuckDB instances with their own memory/thread/spill limits | A bug, a crash, or a hostile query affects every workbook in the process; SQL can read files the server can read (use `--disable-sql`); limits are DuckDB-level, not OS-level | Yes (Local provider) |
+| `shared_process` | Workbooks' data by the server's own code; per-workbook DuckDB instances with their own memory/thread/spill limits | A bug, a crash, or a hostile query affects every workbook in the process; user SQL cannot reach files, URLs or extensions (SQL policy plus DuckDB external access disabled per workbook, phase 4), but a DuckDB defect would not be contained; limits are DuckDB-level, not OS-level | Yes (Local provider) |
 | `process` | A crash stays in its process | Same user, same file access, unless the OS confines it further; a subprocess is not a security boundary by itself | No |
 | `container` | Filesystem view, cgroup CPU/memory limits | Kernel shared with other containers | No |
 | `virtual_machine` | Kernel and memory | Shared hardware and hypervisor | No |

@@ -8,8 +8,9 @@
 //! <data-dir>/<workbook-id>/owner.json   who holds it, under which epoch
 //! <data-dir>/.control/                  runtime specs, allocation records, controller lock
 //! <data-dir>/.trash/<workbook-id>/      deleted workbooks (same layout + deleted_at), restorable
-//! <data-dir>/.uploads/<random>/<file>   uploads in progress; removed after import or failure
-//! <data-dir>/.exports/<random>/<file>   exports being streamed; removed once opened
+//! <data-dir>/.uploads/<workbook>/<random>/<file>  uploads in progress; removed after import or failure
+//! <data-dir>/.exports/<workbook>/<random>/<file>  exports being streamed or waiting for their
+//!                                                 download; removed once taken or expired
 //! <data-dir>/.tmp/<workbook-id>/        DuckDB spill files of a live allocation
 //! ```
 //!
@@ -328,8 +329,12 @@ impl WorkbookHandle {
                     stopped = Some(JobError::Cancelled);
                     self.sched.interrupt(job.key);
                 }
-                _ = tick.tick(), if progress.is_some() => {
-                    if let Some(p) = self.progress_of(lane, slot).percentage() {
+                _ = tick.tick(), if progress.is_some() || stopped.is_some() => {
+                    if stopped.is_some() {
+                        // An interrupt that lands between two statements of a job is lost
+                        // (the next statement starts afresh), so repeat it until the job ends.
+                        self.sched.interrupt(job.key);
+                    } else if let Some(p) = self.progress_of(lane, slot).percentage() {
                         (progress.as_ref().unwrap())(p);
                     }
                 }
@@ -337,8 +342,10 @@ impl WorkbookHandle {
         };
         let result = result.map_err(|e| anyhow!("internal error: {e}"))?;
         match (result, stopped) {
-            // Interrupted: report why. A job that finished anyway keeps its result.
-            (Err(e), Some(why)) if format!("{e:#}").contains("INTERRUPT") => Err(anyhow::Error::new(why)),
+            // Stopped (cancel or deadline) and then failed: report why it was stopped. The
+            // interrupt may have hit any statement, not only one that says INTERRUPT. A job
+            // that finished anyway keeps its result.
+            (Err(_), Some(why)) => Err(anyhow::Error::new(why)),
             (r, _) => r,
         }
     }
@@ -585,6 +592,70 @@ pub struct Upload {
 
 /// Unclaimed uploads are removed after this long.
 pub const UPLOAD_TTL: Duration = Duration::from_secs(3600);
+/// Exported query results not downloaded within this long are removed.
+pub const DOWNLOAD_TTL: Duration = Duration::from_secs(3600);
+
+/// A finished export waiting to be downloaded once.
+#[derive(Debug, Clone)]
+pub struct Download {
+    pub workbook: String,
+    pub dir: PathBuf,
+    pub path: PathBuf,
+    pub file_name: String,
+    pub created: std::time::Instant,
+}
+
+/// Exports waiting for their download. Each is taken once; the file is removed when it is
+/// taken (after streaming), cancelled or expired.
+#[derive(Default)]
+pub struct Downloads(Mutex<HashMap<String, Download>>);
+
+impl Downloads {
+    pub fn register(&self, workbook: &str, dir: PathBuf, path: PathBuf, file_name: &str) -> String {
+        let id = new_id();
+        let d = Download { workbook: workbook.to_string(), dir, path, file_name: file_name.to_string(), created: std::time::Instant::now() };
+        self.0.lock().unwrap().insert(id.clone(), d);
+        id
+    }
+
+    /// Take a download of `workbook` (it can be taken only once).
+    pub fn take(&self, workbook: &str, id: &str) -> Option<Download> {
+        let mut map = self.0.lock().unwrap();
+        match map.get(id) {
+            Some(d) if d.workbook == workbook => map.remove(id),
+            _ => None,
+        }
+    }
+
+    /// Drop a download and its file.
+    pub fn discard(&self, id: &str) {
+        if let Some(d) = self.0.lock().unwrap().remove(id) {
+            let _ = std::fs::remove_dir_all(d.dir);
+        }
+    }
+
+    /// Remove downloads older than `ttl`; returns how many.
+    pub fn expire(&self, ttl: Duration) -> usize {
+        let mut map = self.0.lock().unwrap();
+        let before = map.len();
+        map.retain(|_, d| {
+            let keep = d.created.elapsed() < ttl;
+            if !keep {
+                let _ = std::fs::remove_dir_all(&d.dir);
+            }
+            keep
+        });
+        before - map.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 pub struct AppState {
     pub config: Config,
@@ -597,6 +668,8 @@ pub struct AppState {
     pub shutting_down: AtomicBool,
     /// Open WebSocket sessions (for `/api/admin/sessions`).
     pub sessions: Mutex<HashMap<u64, crate::ws::SessionInfo>>,
+    /// Exported query results waiting to be downloaded.
+    pub downloads: Arc<Downloads>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -605,7 +678,17 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn new_id() -> String {
+/// Directories a workbook's database may touch: its upload and export scratch
+/// directories and its spill directory. Created here, so DuckDB can resolve them.
+pub fn allowed_dirs(data_dir: &Path, workbook: &str, temp: &Path) -> Result<Vec<PathBuf>> {
+    let dirs = vec![data_dir.join(".uploads").join(workbook), data_dir.join(".exports").join(workbook), temp.to_path_buf()];
+    for d in &dirs {
+        std::fs::create_dir_all(d)?;
+    }
+    Ok(dirs)
+}
+
+pub fn new_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mixed = (nanos as u64)
@@ -718,6 +801,7 @@ impl AppState {
             _dir_lock: dir_lock,
             shutting_down: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
+            downloads: Arc::new(Downloads::default()),
         }))
     }
 
@@ -768,12 +852,19 @@ impl AppState {
         }
     }
 
-    /// A fresh private directory under `.uploads` or `.exports` for one request.
-    pub fn scratch_dir(&self, kind: &str) -> Result<PathBuf> {
-        let dir = self.config.data_dir.join(kind).join(new_id());
+    /// A fresh private directory for one request under `.uploads/<workbook>` or
+    /// `.exports/<workbook>`: the only places that workbook's database may read or write
+    /// files (see [`allowed_dirs`]).
+    pub fn scratch_dir(&self, kind: &str, workbook: &str) -> Result<PathBuf> {
+        let dir = self.workbook_scratch(kind, workbook).join(new_id());
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }
+
+    pub fn workbook_scratch(&self, kind: &str, workbook: &str) -> PathBuf {
+        self.config.data_dir.join(kind).join(workbook)
+    }
+
 
     // ------------------------------------------------------------- workbooks
 
@@ -887,7 +978,13 @@ impl AppState {
         std::fs::create_dir_all(&dir)?;
         let copied = (|| -> Result<()> {
             let target = dir.join("data.duckdb");
-            src.with_reader(|r| r.backup_to(&target))?;
+            // The source database may only write its own scratch directories (4.07): copy
+            // there, then move the file into the new workbook's directory.
+            let scratch = self.scratch_dir(".exports", id)?;
+            let staged = scratch.join("data.duckdb");
+            let copied = src.with_reader(|r| r.backup_to(&staged)).and_then(|_| Ok(std::fs::rename(&staged, &target)?));
+            let _ = std::fs::remove_dir_all(&scratch);
+            copied?;
             // The copy is a new workbook: bind it to its own id.
             Workbook::open(&target)?.rebind_identity(&new)?;
             Ok(())
@@ -1104,6 +1201,7 @@ pub fn start_janitor(state: &Shared) -> tokio::task::JoinHandle<()> {
                     tracing::info!("closed {} idle workbook(s)", evicted.len());
                 }
                 s.controller.expire_views(ttl);
+                s.downloads.expire(DOWNLOAD_TTL);
             })
             .await;
         }

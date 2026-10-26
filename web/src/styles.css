@@ -10,6 +10,7 @@
   --accent-text: #ffffff;
   --danger: #cf222e;
   --success: #1a7f37;
+  --warn: #8a4b00;
   --grid-bg: #ffffff;
   --grid-line: #e8eaee;
   --grid-header-bg: #f5f6f8;
@@ -31,6 +32,7 @@
     --accent: #4c8dff;
     --danger: #ff6b6b;
     --success: #3fb950;
+    --warn: #e3a33b;
     --grid-bg: #0f1216;
     --grid-line: #232830;
     --grid-header-bg: #161a20;
@@ -157,6 +159,74 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .result-table th, .result-table td { padding: 4px 10px; border-bottom: 1px solid var(--grid-line); white-space: nowrap; text-align: left; }
 .result-table th { position: sticky; top: 0; background: var(--grid-header-bg); }
 .result-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* SQL workspace: schema and saved queries on the left, editor and results on the right. */
+.sql-workspace { width: min(1240px, 100%); }
+.sql-head { display: flex; flex-direction: column; gap: 4px; }
+.sql-hint { font-size: 13px; }
+.sql-body { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; min-height: 0; }
+.sql-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; max-height: 70vh; overflow: auto; }
+.sql-side h3 { margin: 0 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.sql-side small { display: block; margin-top: 4px; font-size: 12px; }
+.sql-main { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sql-tree, .sql-tree ul, .sql-saved-list { list-style: none; margin: 0; padding: 0; }
+.sql-tree ul { padding-left: 18px; }
+.sql-tree [role="treeitem"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sql-tree [role="treeitem"]:focus { background: var(--panel); }
+.sql-tree-row { display: flex; align-items: center; gap: 6px; padding: 2px 6px; cursor: pointer; border-radius: 5px; font-size: 13px; }
+.sql-tree-row:hover { background: var(--panel); }
+.sql-tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sql-tree-detail { margin-left: auto; font-size: 11px; font-family: var(--font-mono); white-space: nowrap; }
+.sql-twisty { width: 14px; flex: none; color: var(--muted); text-align: center; }
+.sql-formula { color: var(--accent); font-style: italic; font-family: var(--font-mono); }
+.sql-empty { font-size: 13px; padding: 2px 6px; }
+.sql-saved { display: flex; align-items: center; gap: 2px; border-radius: 6px; }
+.sql-saved.current { background: var(--panel); }
+.sql-saved-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: none; cursor: pointer; padding: 4px 6px; border-radius: 6px; text-align: left; color: var(--text); font-size: 13px; }
+.sql-saved-open:hover { background: var(--panel); }
+.sql-saved-open:focus-visible, .sql-saved-more:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sql-saved-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sql-saved-version { font-size: 12px; margin-left: auto; }
+.sql-saved-more { width: 26px; height: 26px; }
+.sql-saved-more:hover { color: var(--text); }
+.kind-badge.kind-query { color: var(--text); }
+.kind-badge.kind-live, .kind-badge.kind-snapshot { border-color: var(--accent); }
+.sql-loaded { font-size: 12px; }
+.sql-editor-wrap { position: relative; }
+.sql-editor:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sql-suggest { position: absolute; z-index: 45; list-style: none; margin: 0; padding: 4px; min-width: 240px; max-width: 420px; max-height: 240px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); font-size: 13px; }
+.sql-suggest [role="option"] { display: flex; justify-content: space-between; gap: 16px; padding: 4px 8px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.sql-suggest [role="option"].active { background: var(--accent); color: var(--accent-text); }
+.sql-suggest [role="option"].active .muted { color: inherit; }
+.sql-suggest-label { font-family: var(--font-mono); }
+.sql-suggest-detail { font-size: 11px; }
+.sql-params { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.sql-params-title { font-size: 12px; font-weight: 600; color: var(--muted); }
+.sql-param-row { display: grid; grid-template-columns: minmax(80px, 160px) 140px minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.sql-param-row select, .sql-param-row input:not([type="checkbox"]) { height: 30px; border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; background: var(--bg); color: var(--text); }
+.sql-param-row select:focus-visible, .sql-param-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sql-param-row input:disabled { opacity: .5; }
+.sql-param-name { overflow: hidden; text-overflow: ellipsis; }
+.sql-param-null { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-family: var(--font-mono); }
+.sql-actions { flex-wrap: wrap; justify-content: flex-start; }
+.sql-actions .spacer { flex: 1; }
+.sql-live, .sql-notice { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); }
+.sql-live[hidden], .sql-notice[hidden] { display: none; }
+.sql-notice { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+.sql-live.stale, .snapshot-banner.stale { border-color: var(--danger); }
+.sql-stale, .snapshot-stale { color: var(--danger); }
+.sql-results:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sql-results > .sql-applied { color: var(--success); }
+.result-table td.null { color: var(--muted); font-style: italic; }
+.sql-versions { max-height: 50vh; overflow: auto; }
+.sql-version-sql { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Banner over a table made from a query. */
+.snapshot-banner { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 13px; }
+.snapshot-banner[hidden] { display: none; }
+.snapshot-banner .spacer { flex: 1; }
+.snapshot-edited { color: var(--warn); }
+.tab-stale { color: var(--danger); }
 
 .toasts { position: fixed; right: 16px; bottom: 52px; z-index: 60; display: flex; flex-direction: column; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
 .toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow); font-size: 13px; }

@@ -30,7 +30,7 @@ fn every_op_has_a_result_type() {
 #[test]
 fn optional_fields_are_omitted_not_null() {
     let src_files = ["../rowfinity-engine/src/model.rs", "../rowfinity-engine/src/import.rs", "../rowfinity-engine/src/workbook.rs",
-        "../rowfinity-engine/src/sheets.rs", "src/state.rs", "src/http.rs", "src/ws.rs"];
+        "../rowfinity-engine/src/sheets.rs", "../rowfinity-engine/src/sqlpolicy.rs", "src/state.rs", "src/http.rs", "src/ws.rs"];
     let mut problems = Vec::new();
     for f in src_files {
         let text = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(f)).unwrap();
