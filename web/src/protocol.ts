@@ -50,13 +50,36 @@ export type ViewInfo = { view_id: number, spec: ViewSpec, row_count: number, col
  */
 can_append: boolean, };
 
-export type RowBlock = { row_start: number, rows: CellValue[][], };
+export type RowBlock = { row_start: number, 
+/**
+ * Values of the view's columns `column_start..column_start + rows[i].len()`.
+ */
+rows: CellValue[][], 
+/**
+ * Stable record id of each row (see [`CellEdit::record`]).
+ */
+ids: Array<number>, column_start: number, 
+/**
+ * Fewer rows than asked for, because the reply reached its size limit; fetch the
+ * rest from `row_start + rows.len()`.
+ */
+truncated: boolean, };
 
-export type CellEdit = { row: number, column: string, 
+export type CellEdit = { 
+/**
+ * View position. Ignored when `record` is given, except that rows at or after the
+ * end append new rows.
+ */
+row: number, column: string, 
 /**
  * `None` or an empty string clears the cell.
  */
-value: string | null, };
+value: string | null, 
+/**
+ * Record id from a fetch. The edit then lands on that record even if rows were
+ * inserted, deleted or re-sorted since the fetch; it fails if the record is gone.
+ */
+record?: number, };
 
 export type EditOutcome = { table: string, cells_changed: number, rows_appended: number, };
 

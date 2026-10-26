@@ -11,6 +11,7 @@ mod precision;
 mod props;
 mod sheets;
 mod sql;
+mod storage;
 mod views;
 mod xlsx;
 
@@ -48,7 +49,7 @@ pub(crate) fn spec(table: &str) -> ViewSpec {
 }
 
 pub(crate) fn edit(row: u64, column: &str, value: &str) -> CellEdit {
-    CellEdit { row, column: column.into(), value: Some(value.into()) }
+    CellEdit { row, column: column.into(), value: Some(value.into()), record: None }
 }
 
 /// All rows of a view as JSON values, read in fetch-sized windows.

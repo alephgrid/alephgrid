@@ -134,3 +134,150 @@ Not executed: scheduled 2000-case run (`scheduled.yml`), any CI run, Linux/Windo
 
 ### 2.10 Gate
 - **Tests:** C `W/sheets.spec.ts` "gate: a new user creates, imports, edits and reopens a table and a sheet with the UI alone" (new workbook → import dialog → table edit with append → blank sheet with formulas → home and back → server restart → values intact), plus the phase-1 journeys.
+
+## Phase 3
+
+Contracts below were written before implementation (TEST_STRATEGY "Rules for every change"). Each task
+lists its observable behavior, invariants, scenarios and oracle; **Tests** and **Result** are filled in
+as the work is verified. Nothing here is checked off until its tests have run and passed.
+
+### Shared decisions
+- **Limits are enforced where they are named.** DuckDB `memory_limit` bounds DuckDB's buffer manager per
+  workbook instance, not the process's resident memory; `threads` bounds DuckDB worker threads per
+  instance; `max_temp_directory_size` bounds DuckDB spill files. Rowfinity's own accounting covers the sum
+  across open workbooks, staged uploads and an estimate of sheet memory. Nothing in phase 3 is an OS-level
+  (cgroup/rlimit) limit, and nothing is a security boundary between workbooks.
+- **Local provider = in-process allocations.** A local allocation is a workbook engine opened inside the
+  server process. Its exclusivity comes from an OS file lock (`flock`) on the workbook directory, held for
+  the allocation's lifetime. That is enforceable on one host and a local filesystem only.
+
+### 3.01 Bounded job queues, cancellation, deadlines, priority
+- **Behavior:** every workbook request becomes a job with a class (interactive: fetches, view info, sheet
+  reads, small edits; bulk: imports, queries, sorts, copies, exports), a deadline and a client request id.
+  Interactive reads run on reader connections and do not wait behind a running bulk job. Writes run one at
+  a time. Within a class, sessions are served round-robin. A full queue rejects new jobs with code
+  `overloaded`. `cancel {request}` removes a queued job or interrupts the running one; a job past its
+  deadline fails with `deadline_exceeded` (queued) or is interrupted (running). Closing a session cancels
+  its queued jobs.
+- **Invariants:** queued jobs per workbook and per session never exceed their bounds; a cancelled or expired
+  job changes nothing (or, for a write that already committed, reports success); cancelling job A never
+  interrupts job B; every accepted request gets exactly one reply.
+- **Scenarios:** saturation from one session and from many; one flooding session vs a light one (the light
+  one still progresses); a fetch during a long import or sort; cancel before start, while running, after
+  completion (no-op), of someone else's request id (no effect); deadline while queued and while running;
+  disconnect with queued work.
+- **Oracle:** per-job timestamps and outcomes recorded by the test; table contents checked with SQL after
+  cancellations; reply ids counted against request ids.
+
+### 3.02 Bounded uploads, requests, responses, pasted cells, dimensions
+- **Behavior:** limits on upload bytes (checked against `Content-Length` before reading and while
+  streaming), WebSocket message bytes, cells per edit/paste, rows × columns per fetch, response bytes per
+  reply, rows per insert, query preview rows. Oversized requests fail with `too_large` and a message naming
+  the limit; dimensions are clamped before any allocation, with overflow-safe arithmetic.
+- **Invariants:** no request allocates in proportion to an unchecked client number; a rejected upload leaves
+  no file; responses never exceed the byte bound (a fetch returns fewer rows and says so).
+- **Scenarios:** `row_start = u64::MAX`, `row_count = u64::MAX`, `column_count = u32::MAX`, start + count
+  overflow; exactly-at-limit and limit+1 uploads, with and without Content-Length; 1 MB text cells; wide
+  tables (500 columns).
+- **Oracle:** closed-form expected row counts; byte length of the serialized reply; directory listings.
+
+### 3.03 Host-wide resource budgets
+- **Behavior:** a host budget (memory, threads, temporary disk) is shared by every open workbook. Opening a
+  workbook reserves a share; DuckDB settings of every open workbook are rebalanced so their sum stays
+  within the budget. Staged uploads reserve temporary disk. When no share is left, idle workbooks are
+  evicted, otherwise the open fails with `capacity` (HTTP 503).
+- **Invariants:** at every observable point, Σ memory_limit ≤ memory budget, Σ threads ≤ thread budget,
+  Σ (temp limits + staged upload bytes) ≤ temp budget.
+- **Scenarios:** 1, 2, N workbooks; budget for exactly N; N+1 with and without an idle workbook; uploads
+  exceeding the temp budget; concurrent opens.
+- **Oracle:** `current_setting('memory_limit'|'threads'|'max_temp_directory_size')` read from each DuckDB
+  instance, summed by the test.
+
+### 3.04 Idle eviction and view expiry
+- **Behavior:** a workbook with no sessions and no jobs for `--idle-timeout` is drained (checkpointed) and
+  closed; its data stays. Permutations of views unused for `--view-ttl` are dropped and rebuilt
+  transparently on next use. Views per session and per workbook are bounded.
+- **Invariants:** eviction never closes a workbook that has a session or a queued/running job; work arriving
+  during eviction either runs on the old allocation or waits for a new one, never on a closed one.
+- **Scenarios:** eviction racing new connections and HTTP requests (repeated); view expiry then fetch (same
+  rows); many open views.
+- **Oracle:** fetched rows equal before and after expiry/eviction; allocation state history.
+
+### 3.05 Visible column ranges and a byte-bounded client cache
+- **Behavior:** `fetch` takes an optional column range; the client requests only visible columns (plus
+  margin), and its cache is bounded by an estimate of bytes over fresh and stale blocks together.
+- **Invariants:** cache bytes ≤ bound after every insertion; visible blocks are never evicted for invisible
+  ones; values for a column range equal the corresponding slice of a full fetch.
+- **Scenarios:** 500-column table; very long text cells; scrolling sideways; refresh with stale blocks.
+- **Oracle:** full-width fetch sliced by the test; byte estimate recomputed independently.
+
+### 3.06 Stable record ids separate from display order
+- **Behavior:** each row has an immutable `_rf_id` (never reused within its table) and an ordering key
+  `_rf_ord`. Inserting or deleting rows changes neither other rows' ids nor their stored data; positional
+  access uses arithmetic for untouched (dense) tables and a chunked order index otherwise. Fetches return
+  record ids, and edits may address a record instead of a position, so an edit lands on the intended row
+  even after someone else inserted rows above it.
+- **Invariants:** display order = order of `_rf_ord`; ids unique and stable; no tail renumbering of the base
+  table on insert/delete (only bounded local rebalancing of ordering keys when a gap is exhausted).
+- **Scenarios:** random edit/insert/delete/sort/reopen sequences; repeated inserts at one position (gap
+  exhaustion); deletes of first/last/middle; migrated v1 tables.
+- **Oracle:** `props.rs` reference model extended with record ids (a `Vec<(id, row)>`).
+
+### 3.07 Revisions, idempotent mutation ids, operation history
+- **Behavior:** each workbook has a revision, incremented by exactly one per committed mutation in the
+  same transaction as the change, together with a history entry (revision, mutation id, op, session, time,
+  bounded summary). A mutation carrying a `mutation_id` that is already in the history is not applied
+  again; the reply repeats the original revision and result with `replayed: true`. Replies and change
+  events carry the revision.
+- **Invariants:** revisions are strictly increasing with no gaps; failed mutations do not change the
+  revision or the history; history and data never disagree after a crash.
+- **Scenarios:** duplicate and retried mutation ids (including after reconnect and restart), concurrent
+  sessions, injected failure after the change and before the history write, kill during commit.
+- **Oracle:** history rows vs the test's own log of acknowledged mutations; data checked with SQL.
+
+### 3.08 Versioned migrations; consistent backup and restore
+- **Behavior:** workbooks record a storage format version. Opening an older workbook migrates it in one
+  transaction after keeping a copy of the original file; opening a newer one is refused. Backups copy every
+  workbook from a transaction snapshot (writers keep working), with `workbook.json`, workspaces and a
+  manifest with checksums. Restore verifies and only writes into an empty data directory.
+- **Invariants:** a migration is all-or-nothing; a backup contains each workbook exactly as of one
+  revision; restore yields identical data and metadata or fails without writing.
+- **Rollback limits (to document):** no downgrade path; the pre-migration copy is the only rollback.
+- **Scenarios:** the committed v1 fixture written by the phase-2 code; a crash during migration; a newer
+  version; backup during a stream of edits; restore onto a clean directory; corrupted backup; non-empty
+  target.
+- **Oracle:** v1 fixture contents listed in its README; restored data compared with `EXCEPT` and history.
+
+### 3.09 Graceful shutdown on SIGTERM
+- **Behavior:** stop admitting (new requests get `shutting_down`), let running and queued work finish
+  within `--shutdown-grace`, interrupt what remains, checkpoint, release locks, record allocations as
+  stopped, exit 0.
+- **Invariants:** every acknowledged mutation survives; unacknowledged ones are absent or complete; no
+  partial imports.
+- **Scenarios:** SIGTERM idle, during an import, during a stream of edits, twice.
+- **Oracle:** the test's log of acknowledged mutations vs data and history after restart.
+
+### 3.11–3.14 Runtime objects, provider contract, Local provider, lifecycle
+- **Behavior:** `RuntimeSpec` (immutable, content-addressed: engine version, storage format, components,
+  required capabilities), `ComputePolicy` (resources, isolation class, idle timeout, providers),
+  `RuntimeAllocation` (state, operation id, provider, reservation, failure) and `OwnershipAssignment`
+  (workbook, allocation, epoch). Workbooks pin a spec; their identity and data do not depend on any
+  allocation. `RuntimeProvider` offers idempotent ensure, status, drain, stop, capability reporting and
+  typed failures. The Local provider persists allocation records, reconciles them at startup and
+  distinguishes requested → starting → running → ready → draining → stopped/failed.
+- **Invariants:** at most one live allocation per workbook; duplicate ensure/stop with the same or
+  different operation ids never create a second allocation; failed startup releases its reservation, lock
+  and scratch files; after a controller restart no record claims a live allocation that does not exist.
+- **Scenarios:** duplicate starts (concurrent), stop twice, cancel before ready, startup failure (corrupt
+  file, injected fault), incompatible spec (newer storage format, missing capability), controller restart
+  with stale records and orphaned scratch, data retained after stop.
+- **Oracle:** allocation records on disk, lock state probed from a second file handle, reservations summed.
+
+### 3.15 Durability contract and isolation classes
+- **Deliverable:** docs/DURABILITY.md: when an edit is acknowledged, what survives a process crash, a host
+  crash/power loss and storage loss, which of those are tested, and the trust classes (same-process,
+  separate process, container, VM) with what each does and does not isolate.
+
+### 3.T01–3.T03, 3.10
+- Test packages and the gate are recorded with commands and results once the tasks above pass. Storage
+  faults that cannot be simulated here are listed explicitly.

@@ -6,7 +6,9 @@ use std::io::{Read, Write};
 /// Every non-empty cell of every sheet: (sheet, row, col) -> (display, align, input).
 fn snapshot(wb: &Workbook) -> Vec<(String, u32, u32, String, String, Option<String>)> {
     let mut out = Vec::new();
-    for info in wb.sheets().list() {
+    // Bind the list first: a guard in the `for` expression would live for the whole loop.
+    let list = wb.sheets().list();
+    for info in list {
         let block = wb.sheets().fetch(info.index, 0, info.rows.max(1), info.columns.max(1)).unwrap();
         for (r, row) in block.rows.iter().enumerate() {
             for (c, cell) in row.iter().enumerate() {

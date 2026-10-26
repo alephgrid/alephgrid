@@ -657,6 +657,7 @@ fn column_names(header: &[String]) -> Vec<String> {
             let base = match h.trim() {
                 "" => format!("column_{}", i + 1),
                 h if h.eq_ignore_ascii_case("_rf_id") => "rf_id".to_string(),
+                h if h.eq_ignore_ascii_case("_rf_ord") => "rf_ord".to_string(),
                 h => h.to_string(),
             };
             let mut name = base.clone();
