@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -35,13 +36,36 @@ struct Cli {
     #[arg(long)]
     demo_rows: Option<u64>,
 
-    /// DuckDB memory limit, e.g. "8GB". Defaults to 80% of RAM.
-    #[arg(long, env = "ROWFINITY_MEMORY_LIMIT")]
-    memory_limit: Option<String>,
+    /// Memory shared by all open workbooks' DuckDB instances, e.g. "8GB". Defaults to 80%
+    /// of RAM (or of the container's memory limit). Bounds DuckDB's buffer managers, not
+    /// the process's total memory.
+    #[arg(long, alias = "memory-limit", env = "ROWFINITY_MEMORY_BUDGET", value_parser = parse_size)]
+    memory_budget: Option<u64>,
 
-    /// DuckDB worker threads. Defaults to all cores.
+    /// DuckDB worker threads shared by all open workbooks. Defaults to all cores.
     #[arg(long, env = "ROWFINITY_THREADS")]
     threads: Option<usize>,
+
+    /// Temporary disk for DuckDB spill files and staged uploads (half each), e.g. "100GB".
+    #[arg(long, env = "ROWFINITY_TEMP_BUDGET", value_parser = parse_size, default_value = "64GiB")]
+    temp_budget: u64,
+
+    /// Smallest memory share one open workbook may get; below it, idle workbooks are closed
+    /// or new ones refused.
+    #[arg(long, env = "ROWFINITY_MIN_WORKBOOK_MEMORY", value_parser = parse_size, default_value = "256MiB")]
+    min_workbook_memory: u64,
+
+    /// Seconds without sessions or work before a workbook is closed (its data stays).
+    #[arg(long, env = "ROWFINITY_IDLE_TIMEOUT", default_value_t = 600)]
+    idle_timeout: u64,
+
+    /// Seconds before an unused sorted or filtered view's materialization is dropped.
+    #[arg(long, env = "ROWFINITY_VIEW_TTL", default_value_t = 900)]
+    view_ttl: u64,
+
+    /// Seconds running work may take to finish on shutdown before it is interrupted.
+    #[arg(long, env = "ROWFINITY_SHUTDOWN_GRACE", default_value_t = 30)]
+    shutdown_grace: u64,
 
     /// Disable the ad-hoc SQL console (recommended for shared servers you don't fully trust users on).
     #[arg(long, env = "ROWFINITY_DISABLE_SQL")]
@@ -67,14 +91,19 @@ async fn main() -> Result<()> {
         tracing::warn!("serving on {} without --token: anyone who can reach this port can read and edit your data", cli.host);
     }
 
-    let state = AppState::new(Config {
-        data_dir: cli.data_dir.clone(),
-        sheet_copy_rows: cli.sheet_copy_rows.max(1),
-        token: cli.token.clone(),
-        allow_sql: !cli.disable_sql,
-        memory_limit: cli.memory_limit.clone(),
-        threads: cli.threads,
-    })?;
+    let mut config = Config::new(cli.data_dir.clone());
+    config.sheet_copy_rows = cli.sheet_copy_rows.max(1);
+    config.token = cli.token.clone();
+    config.allow_sql = !cli.disable_sql;
+    config.memory_budget = cli.memory_budget;
+    config.threads = cli.threads;
+    config.temp_budget = Some(cli.temp_budget);
+    config.min_workbook_memory = cli.min_workbook_memory;
+    config.idle_timeout = Duration::from_secs(cli.idle_timeout);
+    config.view_ttl = Duration::from_secs(cli.view_ttl);
+    config.shutdown_grace = Duration::from_secs(cli.shutdown_grace);
+    let state = AppState::new(config)?;
+    let janitor = rowfinity_server::state::start_janitor(&state);
 
     let mut open_path = String::new();
     if !cli.files.is_empty() {
@@ -105,11 +134,31 @@ async fn main() -> Result<()> {
     let token = cli.token.as_ref().map(|t| format!("?token={t}")).unwrap_or_default();
     println!("\n  Rowfinity is running → http://{shown_host}:{}/{open_path}{token}\n  Data: {}\n", cli.port, cli.data_dir.display());
 
+    let stopping = state.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Stop admitting work and drain every workbook now: open WebSocket sessions end
+            // when their workbook closes, which lets the server finish.
+            stopping.begin_shutdown();
+            let s = stopping.clone();
+            tokio::task::spawn_blocking(move || s.checkpoint_all());
+            tokio::spawn(async {
+                shutdown_signal().await;
+                tracing::warn!("second signal: exiting without waiting for running work (committed changes are safe)");
+                std::process::exit(130);
+            });
+        })
         .await?;
-    state.checkpoint_all();
+    janitor.abort();
+    let s = state.clone();
+    tokio::task::spawn_blocking(move || s.checkpoint_all()).await?;
+    tracing::info!("stopped cleanly");
     Ok(())
+}
+
+fn parse_size(s: &str) -> Result<u64, String> {
+    rowfinity_server::runtime::budget::parse_bytes(s)
 }
 
 /// Ctrl-C, or SIGTERM from `docker stop` / systemd.

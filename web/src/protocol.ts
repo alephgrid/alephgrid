@@ -131,13 +131,21 @@ export type WorkbookMeta = { id: string, name: string, created_at: number, works
 /**
  * Set while the workbook is in the trash.
  */
-deleted_at?: number, };
+deleted_at?: number, 
+/**
+ * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
+ */
+runtime_spec?: string, };
 
 export type WorkbookListing = { size_bytes: number, id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
-deleted_at?: number, };
+deleted_at?: number, 
+/**
+ * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
+ */
+runtime_spec?: string, };
 
 export type WorkbookPatch = { name?: string, 
 /**
@@ -147,7 +155,7 @@ workspace?: string, starred?: boolean, };
 
 export type Workspace = { id: string, name: string, created_at: number, };
 
-export type Event = { "event": "cells_changed", table: string, origin: number, } | { "event": "table_changed", table: string, origin: number, } | { "event": "tables_changed", origin: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, } | { "event": "views_changed", table: string, origin: number, } | { "event": "workbook_deleted", origin: number, };
+export type Event = { "event": "cells_changed", table: string, origin: number, } | { "event": "table_changed", table: string, origin: number, } | { "event": "tables_changed", origin: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, } | { "event": "views_changed", table: string, origin: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, };
 
 export type Op = { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "create_sheet_from_query", name: string, sql: string, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, };
 
@@ -198,6 +206,88 @@ table?: string, types: Array<ColumnType>,
 job?: string, };
 
 export type JobStatus = { running: boolean, percentage?: number, rows_processed: number, total_rows: number, };
+
+export type Capability = "tables" | "sheets" | "sql" | "python";
+
+export type RuntimeSpec = { engine: string, engine_version: string, 
+/**
+ * Workbook storage format the runtime reads and writes (`rowfinity_engine::storage`).
+ */
+storage_format: number, 
+/**
+ * Versions of the components that compute results.
+ */
+components: { [key in string]: string }, capabilities: Array<Capability>, };
+
+export type IsolationClass = "shared_process" | "process" | "container" | "virtual_machine";
+
+export type ProviderKind = "local";
+
+export type ComputePolicy = { id: string, 
+/**
+ * Smallest memory share an allocation may run with; below it, opening another
+ * workbook evicts an idle one or fails with `capacity`.
+ */
+min_memory_bytes: number, 
+/**
+ * Largest share for one allocation; `None` is a fair share of the host budget.
+ */
+max_memory_bytes?: number, isolation: IsolationClass, 
+/**
+ * Close an allocation after this long without sessions or jobs.
+ */
+idle_timeout_ms: number, providers: Array<ProviderKind>, };
+
+export type AllocationState = "requested" | "starting" | "running" | "ready" | "draining" | "stopped" | "failed";
+
+export type FailureKind = "incompatible" | "capacity" | "owned_elsewhere" | "startup_failed" | "cancelled" | "lost";
+
+export type RuntimeFailure = { kind: FailureKind, message: string, };
+
+export type Reservation = { memory_bytes: number, threads: number, temp_disk_bytes: number, };
+
+export type Transition = { at_ms: number, from: AllocationState, to: AllocationState, operation: string, };
+
+export type RuntimeAllocation = { id: string, workbook: string, spec: string, policy: string, provider: ProviderKind, state: AllocationState, 
+/**
+ * Ownership epoch; increases with every allocation of the workbook.
+ */
+epoch: number, reservation: Reservation, 
+/**
+ * Host and process that own it (`host:pid` for the Local provider).
+ */
+holder: string, requested_at_ms: number, ready_at_ms?: number, stopped_at_ms?: number, failure?: RuntimeFailure, 
+/**
+ * Operation ids applied to this allocation, with what they did (bounded).
+ */
+transitions: Array<Transition>, };
+
+export type OwnershipAssignment = { workbook: string, allocation: string, epoch: number, holder: string, acquired_at_ms: number, 
+/**
+ * How exclusivity is enforced ("flock" for the Local provider).
+ */
+mechanism: string, };
+
+export type RuntimeStatus = { workbook: string, spec: RuntimeSpec, spec_id: string, policy: ComputePolicy, allocation?: RuntimeAllocation, ownership?: OwnershipAssignment, sessions: number, };
+
+export type RuntimeAction = "start" | "stop" | "cancel";
+
+export type RuntimeRequest = { action: RuntimeAction, 
+/**
+ * Repeating an operation id that already moved this workbook's allocation returns the
+ * current status and does nothing.
+ */
+operation_id?: string, };
+
+export type HostBudget = { memory_bytes: number, threads: number, temp_disk_bytes: number, };
+
+export type AllocationUsage = { workbook: string, reservation: Reservation, 
+/**
+ * Settings read back from the workbook's DuckDB instance.
+ */
+duckdb_memory_limit: string, duckdb_threads: string, };
+
+export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationUsage>, reserved: Reservation, upload_bytes: number, upload_budget: number, };
 
 /** Result type of each operation. */
 export interface Results {

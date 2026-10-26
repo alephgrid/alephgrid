@@ -19,6 +19,7 @@ pub struct TestServer {
     pub data_dir: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+    janitor: Option<tokio::task::JoinHandle<()>>,
     pub http: reqwest::Client,
 }
 
@@ -28,16 +29,13 @@ impl TestServer {
     }
 
     pub async fn start_with(data_dir: &Path, configure: impl FnOnce(&mut Config)) -> TestServer {
-        let mut config = Config {
-            data_dir: data_dir.to_path_buf(),
-            sheet_copy_rows: rowfinity_server::ws::SHEET_COPY_ROWS,
-            token: None,
-            allow_sql: true,
-            memory_limit: Some("1GB".into()),
-            threads: Some(2),
-        };
+        let mut config = Config::new(data_dir);
+        config.memory_budget = Some(1 << 30);
+        config.threads = Some(2);
+        config.temp_budget = Some(4 << 30);
         configure(&mut config);
         let state = AppState::new(config).unwrap();
+        let janitor = rowfinity_server::state::start_janitor(&state);
         let app = rowfinity_server::http::router(state.clone(), None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -50,18 +48,23 @@ impl TestServer {
                 .await
                 .unwrap();
         });
-        TestServer { addr, state, data_dir: data_dir.to_path_buf(), shutdown: Some(tx), task: Some(task), http: reqwest::Client::new() }
+        TestServer { addr, state, data_dir: data_dir.to_path_buf(), shutdown: Some(tx), task: Some(task), janitor: Some(janitor), http: reqwest::Client::new() }
     }
 
-    /// Graceful stop, as on SIGTERM: stop serving, checkpoint, close every database.
+    /// Graceful stop, as on SIGTERM: stop admitting, drain and close every workbook (which
+    /// ends their sessions), then stop serving.
     pub async fn stop(mut self) {
+        if let Some(j) = self.janitor.take() {
+            j.abort();
+        }
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || state.checkpoint_all()).await.unwrap();
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         if let Some(task) = self.task.take() {
             let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
         }
-        self.state.checkpoint_all();
         let state = self.state.clone();
         drop(self);
         // WebSocket sessions finish on their own once their client is gone; wait for them,

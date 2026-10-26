@@ -9,7 +9,13 @@ use rowfinity_engine::{
 };
 use ts_rs::{Config, TS};
 
-use crate::http::{ImportRequest, JobStatus, UploadCreated};
+use crate::http::{ImportRequest, JobStatus, RuntimeAction, RuntimeRequest, UploadCreated};
+use crate::runtime::budget::{AllocationUsage, HostBudget, ResourceUsage};
+use crate::runtime::controller::RuntimeStatus;
+use crate::runtime::{
+    AllocationState, Capability, ComputePolicy, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
+    RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
+};
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace};
 use crate::ws::{Event, Op};
 
@@ -103,6 +109,9 @@ pub fn bindings() -> String {
         Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
         Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
+        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
+        Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,
+        HostBudget, AllocationUsage, ResourceUsage,
     );
     out.push_str("\n/** Result type of each operation. */\nexport interface Results {\n");
     for (op, ty) in RESULTS {

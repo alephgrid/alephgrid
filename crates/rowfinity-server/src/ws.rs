@@ -33,6 +33,9 @@ pub enum Event {
     ViewsChanged { table: String, origin: u64 },
     /// The workbook was moved to the trash; the server closes the connection.
     WorkbookDeleted { origin: u64 },
+    /// The server closed the workbook (`reason`: "idle", "stopped" or "shutdown") and ends
+    /// the connection; reconnecting reopens it. Unacknowledged requests may not have run.
+    WorkbookClosed { reason: String },
 }
 
 impl Event {
@@ -287,6 +290,7 @@ fn handle(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)
 
 pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>) {
     let session = state.next_session_id();
+    handle.session_started();
     let _ = handle.touch(true);
     {
         // Keep home-screen counts accurate, including for workbooks made by older versions.
@@ -333,7 +337,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         loop {
             match events.recv().await {
                 Ok(ev) => {
-                    let deleted = matches!(ev, Event::WorkbookDeleted { .. });
+                    let deleted = matches!(ev, Event::WorkbookDeleted { .. } | Event::WorkbookClosed { .. });
                     if event_tx.send(serde_json::to_string(&ev).unwrap()).is_err() {
                         break;
                     }
@@ -409,8 +413,9 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     forwarder.abort();
     drop(out_tx);
     let _ = writer.await;
+    handle.session_ended();
     let leftover: Vec<u64> = views.lock().unwrap().drain().collect();
-    if !leftover.is_empty() && !handle.is_deleted() {
+    if !leftover.is_empty() && !handle.is_closing() {
         let h = handle.clone();
         let _ = tokio::task::spawn_blocking(move || {
             h.with_engine(|wb| {

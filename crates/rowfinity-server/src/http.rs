@@ -18,6 +18,7 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::runtime::{FailureKind, RuntimeFailure};
 use crate::state::{Shared, WorkbookPatch};
 use crate::ws;
 
@@ -46,6 +47,9 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(f) = e.chain().find_map(|c| c.downcast_ref::<RuntimeFailure>()) {
+            return ApiError(runtime_status(f.kind), f.message.clone(), None);
+        }
         let problem = e.chain().find_map(|c| c.downcast_ref::<ImportProblem>()).cloned().map(Box::new);
         let message = match &problem {
             Some(p) => p.message.clone(),
@@ -90,6 +94,36 @@ pub struct JobStatus {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+/// HTTP status for a runtime failure.
+fn runtime_status(kind: FailureKind) -> StatusCode {
+    match kind {
+        FailureKind::Incompatible => StatusCode::CONFLICT,
+        FailureKind::Capacity | FailureKind::StartupFailed | FailureKind::Lost => StatusCode::SERVICE_UNAVAILABLE,
+        FailureKind::OwnedElsewhere => StatusCode::LOCKED,
+        FailureKind::Cancelled => StatusCode::CONFLICT,
+    }
+}
+
+/// `POST /api/workbooks/{id}/runtime`.
+#[derive(Deserialize, TS)]
+pub struct RuntimeRequest {
+    pub action: RuntimeAction,
+    /// Repeating an operation id that already moved this workbook's allocation returns the
+    /// current status and does nothing.
+    #[serde(default)]
+    #[ts(optional, as = "Option<String>")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAction {
+    Start,
+    Stop,
+    /// Cancel a start that has not reached `ready`.
+    Cancel,
+}
+
 pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
     let api = Router::new()
         .route("/api/workbooks", get(list_workbooks).post(create_workbook))
@@ -111,6 +145,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/workbooks/{id}/uploads/{upload}/preview", post(preview_upload))
         .route("/api/workbooks/{id}/uploads/{upload}/import", post(import_upload))
         .route("/api/workbooks/{id}/jobs/{job}", get(job_status).delete(cancel_job))
+        .route("/api/workbooks/{id}/runtime", get(runtime_status_handler).post(runtime_action))
+        .route("/api/admin/resources", get(resources))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
 
@@ -173,9 +209,13 @@ struct CreateBody {
 }
 
 async fn create_workbook(State(state): State<Shared>, Json(body): Json<CreateBody>) -> ApiResult<impl IntoResponse> {
-    let name = if body.name.trim().is_empty() { "Untitled workbook" } else { body.name.as_str() };
-    let h = state.create(name, body.workspace.filter(|w| !w.is_empty()))?;
-    let meta = h.meta.lock().unwrap().clone();
+    let name = if body.name.trim().is_empty() { "Untitled workbook".to_string() } else { body.name };
+    let meta = blocking(move || {
+        let h = state.create(&name, body.workspace.filter(|w| !w.is_empty()))?;
+        let meta = h.meta.lock().unwrap().clone();
+        Ok(meta)
+    })
+    .await?;
     Ok(Json(meta))
 }
 
@@ -205,10 +245,54 @@ async fn delete_workspace(State(state): State<Shared>, Path(id): Path<String>) -
 }
 
 async fn get_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
-    let meta = h.meta.lock().unwrap().clone();
-    let (tables, sheets) = blocking(move || h.with_engine(|wb| Ok((wb.list_tables()?, wb.sheets().list())))).await?;
+    let (meta, tables, sheets) = blocking(move || {
+        let h = state.get(&id)?;
+        let meta = h.meta.lock().unwrap().clone();
+        let (tables, sheets) = h.with_reader(|r| Ok((r.list_tables()?, r.sheets().list())))?;
+        Ok((meta, tables, sheets))
+    })
+    .await?;
     Ok(Json(json!({ "workbook": meta, "tables": tables, "sheets": sheets })))
+}
+
+async fn runtime_status_handler(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    if !crate::state::valid_id(&id) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
+    }
+    Ok(Json(blocking(move || state.controller.status(&id)).await?))
+}
+
+/// Start, stop or cancel a workbook's allocation. The workbook's data is unaffected.
+async fn runtime_action(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(req): Json<RuntimeRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if !crate::state::valid_id(&id) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
+    }
+    let status = blocking(move || {
+        let c = &state.controller;
+        let op = req.operation_id.filter(|o| !o.is_empty()).unwrap_or_else(|| crate::runtime::controller::operation_id("api"));
+        if !c.seen(&id, &op) {
+            match req.action {
+                RuntimeAction::Start => {
+                    state.get_with(&id, &op)?;
+                }
+                RuntimeAction::Stop => c.stop(&id, &op, crate::runtime::controller::StopReason::Requested)?,
+                RuntimeAction::Cancel => {
+                    c.cancel(&id);
+                }
+            }
+        }
+        c.status(&id)
+    })
+    .await?;
+    Ok(Json(status))
+}
+
+async fn resources(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(blocking(move || Ok(state.controller.usage())).await?))
 }
 
 async fn update_workbook(
@@ -255,7 +339,7 @@ async fn import_file(
     Query(q): Query<ImportQuery>,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (scratch, path, _) = receive(&state, &file_name, body).await?;
 
@@ -318,7 +402,7 @@ async fn stage_upload(
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (dir, path, size_bytes) = receive(&state, &file_name, body).await?;
     let p = path.clone();
@@ -346,7 +430,7 @@ async fn preview_upload(
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
     Ok(Json(blocking(move || h.with_engine(|wb| wb.preview_any(&u.path, &req.types))).await?))
 }
@@ -358,7 +442,7 @@ async fn import_upload(
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
     let h2 = h.clone();
     let job = req.job.clone();
@@ -386,7 +470,7 @@ async fn cancel_upload(State(state): State<Shared>, Path((id, upload)): Path<(St
 }
 
 async fn job_status(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let running = h.job.lock().unwrap().as_deref() == Some(job.as_str());
     let p = h.progress.query_progress();
     Ok(Json(if running {
@@ -398,7 +482,7 @@ async fn job_status(State(state): State<Shared>, Path((id, job)): Path<(String, 
 
 /// Cancel a running job. Only the named job is interrupted, never someone else's work.
 async fn cancel_job(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let current = h.job.lock().unwrap();
     if current.as_deref() != Some(job.as_str()) {
         return Err(ApiError::new(StatusCode::CONFLICT, "that job is not running"));
@@ -425,7 +509,7 @@ async fn export(
     Query(q): Query<ExportQuery>,
 ) -> ApiResult<Response> {
     let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
     let scratch = state.scratch_dir(".exports")?;
     let path = scratch.join("export");
@@ -457,7 +541,7 @@ async fn export(
 
 /// Download all sheets of a workbook as one .xlsx file.
 async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
-    let h = state.get(&id)?;
+    let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
     let scratch = state.scratch_dir(".exports")?;
     let path = scratch.join("sheets.xlsx");
@@ -485,7 +569,7 @@ async fn websocket(
     Path(id): Path<String>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    let handle = state.get(&id)?;
+    let handle = open(&state, &id).await?;
     Ok(upgrade
         .max_message_size(64 << 20)
         .on_upgrade(move |socket| ws::serve_socket(socket, state, handle)))
@@ -525,6 +609,12 @@ pub fn attachment(name: &str) -> axum::http::HeaderValue {
         .collect();
     axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"))
         .unwrap_or_else(|_| axum::http::HeaderValue::from_static("attachment"))
+}
+
+/// Open (or find) a workbook off the async threads: starting an allocation can migrate files.
+async fn open(state: &Shared, id: &str) -> ApiResult<std::sync::Arc<crate::state::WorkbookHandle>> {
+    let (state, id) = (state.clone(), id.to_string());
+    blocking(move || state.get(&id)).await
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {

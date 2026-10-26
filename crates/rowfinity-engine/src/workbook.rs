@@ -207,6 +207,12 @@ impl Workbook {
         }
     }
 
+    /// Bind a copy of a workbook's file to the new workbook it now belongs to.
+    pub fn rebind_identity(&self, workbook_id: &str) -> Result<()> {
+        storage::meta_set(&self.conn, "workbook_id", workbook_id)?;
+        self.checkpoint()
+    }
+
     pub fn identity(&self) -> Result<Option<String>> {
         storage::meta_get(&self.conn, "workbook_id")
     }
@@ -1418,6 +1424,23 @@ fn update_view(db: &Db, id: u64, spec: ViewSpec) -> Result<ViewInfo> {
 }
 
 impl Reader {
+    /// Apply DuckDB settings; settings such as `memory_limit` and `threads` belong to the
+    /// database instance, so this changes them for the writer and every reader.
+    pub fn configure(&self, settings: &[(&str, String)]) -> Result<()> {
+        for (key, value) in settings {
+            self.conn.execute_batch(&format!("SET {key} = {};", lit(value)))?;
+        }
+        Ok(())
+    }
+
+    pub fn setting(&self, key: &str) -> Result<String> {
+        Ok(self.conn.query_row("SELECT current_setting(?)::VARCHAR", [key], |r| r.get(0))?)
+    }
+
+    pub fn shared(&self) -> &Shared {
+        &self.shared
+    }
+
     fn db(&self) -> Db<'_> {
         self.shared.sweep(&self.conn);
         Db { conn: &self.conn, shared: &self.shared, in_txn: false }
