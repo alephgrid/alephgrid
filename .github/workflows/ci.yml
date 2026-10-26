@@ -37,17 +37,16 @@ jobs:
           name: web-dist
           path: web/dist
       - uses: Swatinem/rust-cache@v2
-      # Includes tests/protocol.rs, which fails when web/src/protocol.ts is stale.
       # A small filesystem for the disk-full tests (tests/storage_faults.rs).
       - run: |
           sudo mkdir -p /mnt/rfsmall
           sudo mount -t tmpfs -o size=64m tmpfs /mnt/rfsmall
           sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
+      # Includes tests/protocol.rs, which fails when web/src/protocol.ts is stale.
       - run: cargo test --workspace
         env:
-          ROWFINITY_SMALL_FS: /mnt/rfsmall
-        env:
           PROPTEST_CASES: "96"
+          ROWFINITY_SMALL_FS: /mnt/rfsmall
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build -p rowfinity-server
       - uses: actions/upload-artifact@v4
