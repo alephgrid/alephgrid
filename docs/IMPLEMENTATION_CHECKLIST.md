@@ -6,11 +6,48 @@ Goal: an open-source analytical spreadsheet with SQL, user-defined formula funct
 
 ## How to track progress
 
-Work through phases in order. Within a phase, follow the numbered task IDs. Check an item only when its behavior is implemented and verified; partial backend support does not count as a finished user feature. Add a test, commit, PR or verification note beside completed items. Keep blocked items unchecked and record the dependency.
+Follow the delivery sequence and dependencies below. Task IDs are stable references, not a strict execution order: newly added tasks may appear before an older gate. Check an item only when its behavior and applicable test tasks are implemented and verified; partial backend support does not count as a finished user feature. Add a test, commit, PR or verification note beside completed items. Keep blocked items unchecked and record the dependency.
 
-All implementation tasks below start unchecked: they describe remaining work from the assessment, not a fresh certification of current code. Some foundations already exist. Re-check findings against current code before changing it.
+Existing checked tasks and their evidence are preserved. New tasks start unchecked. This enhancement is planning work, not a fresh certification of the implementation. Re-check findings against current code before changing it.
 
-Supporting documents: [assessment](OPEN_SOURCE_ASSESSMENT.md), [SQL and custom-function design](SQL_AND_CUSTOM_FUNCTIONS.md). This file is the ordered execution tracker; those documents provide rationale. The older [roadmap](ROADMAP.md) is background and may lag implementation.
+Supporting documents: [assessment](OPEN_SOURCE_ASSESSMENT.md), [SQL and custom-function design](SQL_AND_CUSTOM_FUNCTIONS.md), [enterprise architecture decision](ENTERPRISE_ARCHITECTURE_DECISION.md), [test strategy](TEST_STRATEGY.md), [test matrix](TEST_MATRIX.md). This file is the execution tracker; those documents provide rationale. The older [roadmap](ROADMAP.md) is background and may lag implementation.
+
+## Architecture requirements
+
+The chosen direction is **durable workbooks with automatic, policy-managed compute**. Opening a workbook is the default action. Approved profiles and dedicated compute are advanced options, not mandatory steps for every user.
+
+- Spaces own membership, permissions and budgets; they are not machines.
+- Workbooks retain stable identities, data, revisions and pinned dependencies across runtime replacement.
+- Immutable `RuntimeSpec` objects describe engine/image/package versions and required capabilities. `ComputePolicy` controls profiles, quotas and isolation. `RuntimeAllocation` describes replaceable execution capacity.
+- One mutable workbook has one authoritative owner at a time. Shared nodes do not imply shared application processes across untrusted tenants.
+- Keep permissions, revision validation, durable commit, migrations and audit enforcement in the core. Extensions cannot bypass them.
+- Preserve a useful standalone distribution. Kubernetes is an execution provider; EKS is one deployment target. Neither JupyterHub nor a cloud service becomes a mandatory dependency.
+- Lease expiry alone cannot fence direct DuckDB file writes. Never start a replacement writer without enforceable exclusivity; fail closed when ownership is uncertain.
+
+## Delivery sequence and release boundaries
+
+| Milestone | Required work | Exit condition |
+|---|---|---|
+| Reliable local product | Phases 1–3, including new local runtime tasks | Verified data integrity, bounded execution and recovery |
+| SQL and reusable functions | Phases 4–5; phase 6 can proceed independently | Complete user workflows and versioned calculations |
+| Single-node team release | Phase 7 and operational tasks in phase 9 | Authorization, collaboration, quotas, restore and upgrade verified |
+| Python-function release | Phase 8 after phase 7 | Isolated, bounded, versioned code execution verified; do not block a non-Python team release on this |
+| Connected data | Phase 10 | Scoped credentials and reliable refresh |
+| Kubernetes beta | Phase 11 launch tasks and 11.16 gate | Conservative single-owner placement and tested storage handoff |
+| Cluster recovery release | All phase 11 tasks and 11.10 gate | Published durability/recovery objectives demonstrated |
+| Extension ecosystem | Phase E below, after real adapters exercise contracts | External contributors can implement and verify compatible extensions |
+
+Phase 7 design and implementation may proceed alongside phases 4–6 once phase 3 and SQL capability restrictions are ready. Phase 10 is not a prerequisite for Kubernetes; phase 11 requires the single-node operational foundations. Optional phase 12 work remains demand-driven.
+
+## Testing and completion requirements for every feature
+
+Use the existing TEST_STRATEGY and TEST_MATRIX; extend them rather than creating a second reporting system. Before coding, record each task's observable contract, invariants, normal/boundary/invalid/concurrent/failure cases and expected-result oracle. Add a failing regression test for confirmed bugs where feasible.
+
+Each feature needs relevant unit/integration tests and a real browser journey for user-facing behavior. Use property/state-machine tests, differential or metamorphic checks, fault injection, fuzzing and performance tests where the behavior warrants them. Tests must assert values, persisted state and side effects, not merely successful responses. Tests comparing shared implementation paths need an additional independent oracle for critical correctness claims.
+
+Use deterministic seeds, isolated fixtures and observable synchronization. Record commands, versions, results, failures and gaps. Do not mask flaky tests with retries or use test counts/coverage percentages as proof of correctness. Process-kill testing is not proof of power-loss durability. Run destructive fault tests only in disposable environments.
+
+New `N.Txx` entries are required test packages mapped to implementation IDs. Complete relevant test cases alongside each feature; do not defer all verification to the phase gate. Checked legacy entries remain historical evidence and should be rerun when affected.
 
 ## 1. Fix data integrity and existing workflows
 
@@ -116,7 +153,17 @@ Depends on phase 1. Complete before shared hosting or expensive custom-function 
 - [ ] **3.07** Add monotonic workbook revisions, idempotent mutation IDs and an atomic operation-history format.
 - [ ] **3.08** Add versioned storage migrations and a consistent backup/restore mechanism covering workbook data and metadata.
 - [ ] **3.09** Handle SIGTERM: stop admission, drain work, persist/checkpoint and close cleanly.
+- [ ] **3.11** Define workbook, immutable RuntimeSpec, ComputePolicy, RuntimeAllocation and ownership-assignment schemas; preserve workbook identity independently of allocation lifetime.
+- [ ] **3.12** Add a narrow internal RuntimeProvider contract: idempotent ensure/start, status/readiness, drain/stop, capability reporting and typed failures; distinguish requested, running and ready states.
+- [ ] **3.13** Implement a Local provider using the same core binary where practical; persist/reconcile allocation state after controller restart without introducing mandatory cluster services.
+- [ ] **3.14** Define lifecycle transitions and operation IDs for start, cancel, drain, stop and recover; prevent duplicate allocations and clean up failed startup resources.
+- [ ] **3.15** Define the acknowledged-edit durability contract and trust/isolation classes; document what survives process, host and storage loss before promising recovery.
+- [ ] **3.T01** Test 3.01–3.05: queue saturation, fair progress, cancellation races, slow consumers, overflow-sized fetches, wide/text-heavy cache bounds, idle eviction and host-wide resource accounting.
+- [ ] **3.T02** Test 3.06–3.09: randomized edits against a reference model, stable IDs, duplicate mutations, revision monotonicity, migration rollback limits and consistent backup/restore under activity.
+- [ ] **3.T03** Test 3.08–3.15: injected write/disk-full/permission failures, crash during persistence, SIGTERM, duplicate starts, cancel-before-ready, controller restart and failed allocation cleanup; explicitly record unsupported storage-fault simulations.
 - [ ] **3.10 — Gate:** Cancellation, overload, disk-full, crash/restart and restore tests preserve consistency and keep resource use bounded.
+
+Gate 3.10 also requires the local runtime/lifecycle tasks 3.11–3.15 and their tests. It does not imply multi-node failover.
 
 ## 4. Deliver the SQL workspace
 
@@ -130,6 +177,8 @@ Build on the existing SQL console. Depends on phases 1–3; shared query permiss
 - [ ] **4.06** Distinguish saved SQL, live query views and materialized results; track source revisions and refresh status.
 - [ ] **4.07** Restrict SQL/formula capabilities, external readers, extension loading and internal metadata access for shared-host mode; console disabling alone is insufficient.
 - [ ] **4.08** Route supported mutations through operations that maintain Rowfinity metadata, history and revisions.
+- [ ] **4.T01** Test 4.01–4.06: schema/autocomplete correctness, bound parameters, hostile strings, joins/CTEs/calculated columns, exact values, truncated previews, cancellation and saved-result refresh/reopen in API and browser journeys.
+- [ ] **4.T02** Test 4.07–4.08: direct SQL and formula attempts to access files/network/internal metadata, install extensions or bypass mutation bookkeeping; verify rejection and unchanged durable state, including statements that appear read-only.
 - [ ] **4.09 — Gate:** Verify joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and result materialization end to end.
 
 ## 5. Add user-defined formula functions
@@ -145,6 +194,9 @@ Depends on phases 2–4. This phase covers formula-defined and SQL functions; Py
 - [ ] **5.07** Specify blanks/NULL, decimals, dates, errors, array outputs, spill collisions and naming conflicts.
 - [ ] **5.08** Add validated SQL expression functions/macros for SQL queries and calculated table columns; explicitly document which engines support each function type.
 - [ ] **5.09** Verify dependency recalculation, cycles, save/reopen, version changes and unsupported XLSX-export behavior.
+- [ ] **5.11** Bind function dependencies to immutable RuntimeSpec versions; declare which execution adapters support each signature and reject unsupported combinations before execution.
+- [ ] **5.T01** Test 5.01–5.05 and 5.08: define/test/call via UI, nested/range calls, SQL-function registration, malformed definitions, naming conflicts and autocomplete; check outputs against hand-computed or independent results.
+- [ ] **5.T02** Test 5.06–5.11: old-version reproducibility, explicit upgrade/rollback, dependency cycles, precision/null/error/spill semantics, reopen and incompatible-runtime refusal; do not silently replace missing versions.
 - [ ] **5.10 — Gate:** A user can define, test, call and persist their own function from the UI, with correct recalculation after argument edits.
 
 ## 6. Add analysis tools for users who do not write SQL
@@ -157,6 +209,8 @@ Depends on phases 2–4. These items can proceed alongside phase 5 once dependen
 - [ ] **6.04** Add null, duplicate, distinct-count and type profiling.
 - [ ] **6.05** Add find/replace with preview and reversible mutations.
 - [ ] **6.06** Add number/date/locale formats, freeze/hide columns and bounded conditional formatting.
+- [ ] **6.T01** Test 6.01–6.04: pivots/joins/profiling against known datasets with duplicates, skew and NULLs; enforce chart/output bounds and verify source refresh semantics.
+- [ ] **6.T02** Test 6.05–6.06 and the full UI journey: replacement preview/rollback, locale/timezone formatting, keyboard/accessibility, saved presentation and correct reopening.
 - [ ] **6.07 — Gate:** An analyst can import data, join it, summarize it, chart it and reopen the saved analysis without writing SQL.
 
 ## 7. Make organizations and spaces safe for teams
@@ -174,7 +228,17 @@ Depends on phase 3 and the SQL restrictions in phase 4. Design can begin earlier
 - [ ] **7.09** Expose table operation history/undo and define its behavior under concurrent edits.
 - [ ] **7.10** Record audit events for access changes, mutations, exports and function publication.
 - [ ] **7.11** Enable authorized sharing of saved queries, views and function versions; keep publication, editing and execution permissions distinct.
+- [ ] **7.13** Implement server-validated ComputePolicy entitlements and quota reservations for approved resource profiles; prevent concurrent starts from exceeding space budgets.
+- [ ] **7.14** Make Open workbook automatically locate/start compatible capacity and route collaborators to its owner; show queued/starting/ready/draining/failed states with actionable errors.
+- [ ] **7.15** Add optional profile selection and dedicated-allocation requests for authorized users; preserve workbook URL, ownership and version pins across controlled resize/restart.
+- [ ] **7.16** Implement idle shutdown based on meaningful activity and active jobs; checkpoint/drain before stopping, retain storage and show its retention/cost implications. Heartbeats alone must not keep compute alive forever.
+- [ ] **7.17** Define identity-provider claim mapping and revocation behavior; keep authorization in Rowfinity and reject untrusted forwarded identity headers.
+- [ ] **7.T01** Test 7.01–7.07, 7.10–7.11 and 7.17: positive/negative role-operation matrix across every HTTP/WS path, cross-space object IDs, export/query/function access, expired/revoked sessions, secret redaction and audit attribution.
+- [ ] **7.T02** Test 7.08–7.09: same/different-row concurrent edits, structural races, duplicate/delayed/missed events, reconnect and undo under the documented conflict policy.
+- [ ] **7.T03** Test 7.13–7.16: concurrent quota admission, forged profile requests, two collaborators opening a stopped workbook, failed start, controlled resize, heartbeat-only idle and long-running jobs during idle evaluation.
 - [ ] **7.12 — Gate:** Two spaces on one host cannot access each other's data; concurrent/reconnecting users cannot silently lose or misapply edits.
+
+Gate 7.12 includes policy-managed local execution and its lifecycle tests; it does not require Kubernetes.
 
 ## 8. Add Python functions callable from cells
 
@@ -191,11 +255,14 @@ Core product scope. Prototype after phase 5; shared release depends on phases 3 
 - [ ] **8.09** Integrate Python editing, test runs, documentation, version publishing and formula autocomplete into the function library.
 - [ ] **8.10** Handle worker crash, duplicate job delivery, permission revocation and unavailable functions explicitly.
 - [ ] **8.11** Explain XLSX compatibility and offer an explicit cached-value export option; custom Python code does not become an Excel-native function.
+- [ ] **8.13** Implement a versioned internal FunctionRuntime adapter with capability declarations, typed batch schemas and explicit runtime identity; integrate it with RuntimeSpec and ComputePolicy.
+- [ ] **8.T01** Test 8.01–8.02, 8.05–8.09 and 8.11–8.13: scalar/range/batch equivalence, errors/precision, dependency versions, offline installation, caching, recalculation, reopen and export compatibility in engine/API/browser paths.
+- [ ] **8.T02** Test 8.03–8.04 and 8.10: filesystem/network/credential escape attempts, child processes, timeout/memory/output exhaustion, crash, cancellation, duplicate jobs, revoked permission and stale results; assert other workbooks remain responsive and durable state is unchanged on failure.
 - [ ] **8.12 — Gate:** Define → test → publish → call from cells → recalculate → reopen works; worker isolation and failure tests pass without hanging other workbooks.
 
 ## 9. Package and release the single-node product
 
-An earlier local alpha may ship after phases 1–5 with explicit limitations. The team release requires phases 7–8; analysis features can be released incrementally.
+An earlier local alpha may ship after phases 1–5 with explicit limitations. The team release requires phase 7 and this phase's operational checks. Python functionality requires phase 8 before it is enabled/advertised; it need not block a non-Python team release. Analysis features can be released incrementally.
 
 - [ ] **9.01** Verify the core binary/container runs with one durable data directory and no mandatory cluster services.
 - [ ] **9.02** Smoke-test fresh Docker named volumes and bind mounts; fix ownership and document required permissions.
@@ -208,6 +275,12 @@ An earlier local alpha may ship after phases 1–5 with explicit limitations. Th
 - [ ] **9.09** Add SECURITY.md, maintainer/contribution guidance, issue/PR templates, changelog and version support policy.
 - [ ] **9.10** Make CI run protocol/browser journeys, authorization, reconnect, crash recovery and install/restore checks alongside builds, unit tests and linting.
 - [ ] **9.11** Publish locked reproducible builds, tested platform binaries, container architectures, checksums/signatures and dependency inventory/SBOM.
+- [ ] **9.13** Add correlated request/job/workbook/allocation identifiers, lifecycle metrics and structured logs without secrets; define operational alerts, health versus readiness and support diagnostics.
+- [ ] **9.14** Automate PR, scheduled and release test tiers from TEST_STRATEGY; add bounded fuzz targets/corpus retention, longer state-machine runs and targeted mutation/critical-branch review. Report implemented versus actually executed checks separately.
+- [ ] **9.15** Publish supported trust boundaries, capacity envelope, recovery objectives and upgrade compatibility; add incident, stuck-allocation, credential-rotation and restore runbooks.
+- [ ] **9.T01** Test 9.01–9.04 and 9.11: clean-machine/bare-volume installation, ownership, no-cloud standalone start, optional Python profile, backup restore on another host, supported upgrade and rollback limitations.
+- [ ] **9.T02** Verify 9.05–9.06 and 9.13–9.15: seeded narrow/wide/text datasets, 1/5/20-client mixed workloads, p50/p95/p99, RSS/spill/browser heap and leaks; validate metric/log attribution and exercise incident runbooks.
+- [ ] **9.T03** Verify 9.07–9.11 and 9.14: release artifacts match versioned source, dependency notices/provenance and checksums are present, required CI tiers enforce failures and quarantined tests have explicit follow-up.
 - [ ] **9.12 — Gate:** A new user can install, analyze data, create a function, back up, restore and upgrade using published instructions; organization controls remain available in open source.
 
 ## 10. Connect external data
@@ -220,22 +293,51 @@ Depends on phase 7 permissions and phase 9 operational foundations.
 - [ ] **10.04** Add scheduled/manual refresh with progress, cancellation, failure history and last-success status.
 - [ ] **10.05** Detect schema drift and define replace/append behavior without silently breaking formulas or saved queries.
 - [ ] **10.06** Record source lineage and result versions; define how user edits interact with refresh.
+- [ ] **10.08** Exercise a shared DataConnector contract through both initial connectors: capability/schema discovery, credential references, bounded reads, cancellation, refresh lineage and typed failures; avoid exposing raw credentials in extension metadata.
+- [ ] **10.T01** Test 10.01–10.08: credential scope/rotation/revocation, unauthorized refresh, schema drift, duplicate refresh, source timeout, partial import failure, cancellation, concurrent edits and lineage; compare imported rows/types with independent fixtures using real disposable source services.
 - [ ] **10.07 — Gate:** Authorized users can refresh connected data reliably while credentials and cross-space data remain isolated.
 
 ## 11. Distribute workbooks across workers
 
-Depends on the single-node release and its durability, identity and revision foundations. This scales multiple workbooks; it does not split one query across machines.
+Depends on the single-node release and its durability, identity and revision foundations, including the Local RuntimeProvider and ComputePolicy. This scales multiple workbooks; it does not split one query across machines. Phase 10 connectors are not a prerequisite. Deliver the conservative Kubernetes beta before advertising stronger cluster recovery.
 
 - [ ] **11.01** Separate gateway/auth/routing, shared control metadata and workbook-worker interfaces.
 - [ ] **11.02** Add PostgreSQL-backed cluster metadata for users, permissions, jobs and workbook ownership while preserving standalone mode.
 - [ ] **11.03** Assign one authoritative worker per mutable workbook and route HTTP/WebSocket traffic to it.
 - [ ] **11.04** Store immutable imports, versioned snapshots and durable recovery logs in object storage; keep active workbook files on worker storage.
-- [ ] **11.05** Implement ownership leases and fencing to prevent an old worker from committing after reassignment.
+- [ ] **11.05** Implement enforceable ownership transfer. For the initial direct-file implementation, prove old-owner termination and exclusive storage handoff before replacement writes; lease expiry alone is insufficient. Fail closed when exclusivity cannot be established, with a documented recovery procedure.
 - [ ] **11.06** Define acknowledgement durability, recovery-point and recovery-time objectives; implement replay and revision-aware reconnect.
 - [ ] **11.07** Add worker admission/placement, quotas, draining, recovery and controlled rebalancing.
 - [ ] **11.08** Dispatch isolated function jobs across workers with version checks and idempotent result commits.
 - [ ] **11.09** Add cluster deployment examples and metrics for queue depth, resource usage, ownership and recovery.
+- [ ] **11.11** Implement a Kubernetes RuntimeProvider using the same lifecycle contract as Local; delegate pod/node scheduling to Kubernetes and support capability discovery without a mandatory bespoke scheduler/operator.
+- [ ] **11.12** Package a Helm deployment with least-privilege controller/service identities, runtime isolation, network policy, probes, drain behavior and persistent storage. Provide EKS/Karpenter guidance as an optional deployment target, not an engine dependency.
+- [ ] **11.13** Reconcile desired and observed allocations after retries/controller restarts; deduplicate starts and bound/clean orphan resources without deleting retained workbook data.
+- [ ] **11.14** Keep profile selection server-validated and cloud-neutral; define node/zone/architecture/storage compatibility and quota limits. Share nodes only within policy; never equate a namespace or shared node with adequate untrusted-code isolation.
+- [ ] **11.15** Define an explicit storage lifecycle for attach, consistent checkpoint/backup, retain, transfer and restore; distinguish same-node restart, node loss and zone loss. Refuse unsafe handoffs and report pending capacity/storage constraints.
+- [ ] **11.T01** Run provider conformance for 11.01–11.03 and 11.07–11.15: duplicate starts/stops, timeout, readiness failure, insufficient capacity, denied API calls, controller restart, idle drain and orphan cleanup in a disposable Kubernetes cluster.
+- [ ] **11.T02** Test 11.05, 11.13 and 11.15 with an old worker still alive during lease expiry/network partition; prove the replacement cannot write and verify exclusive handoff before resuming. A mocked lease test alone does not establish storage fencing.
+- [ ] **11.16 — Kubernetes beta gate:** Automatic workbook placement, shared collaboration, policy enforcement, durable retained storage and conservative handoff pass 11.T01–11.T02. Requires 11.01–11.03, 11.05, applicable 11.07/11.09 work and 11.11–11.15; does not certify remote-log recovery or zero acknowledged-edit loss across node/zone failures.
+- [ ] **11.T03** Test 11.04–11.08: durable-log acknowledgement boundaries, interrupted snapshots/replay, duplicate jobs, stale function results, lost workers and restore in a new failure domain; measure achieved recovery point/time and compare with published objectives.
 - [ ] **11.10 — Gate:** Kill/restart workers and interrupt networking; verify no split-brain writes, no unauthorized access and recovery within documented objectives.
+
+Gate 11.10 is the stronger cluster recovery release gate and requires all phase 11 work. It must not be inferred from 11.16 or a successful Kubernetes deployment.
+
+## E. Publish a tested extension ecosystem
+
+Design internal seams in phases 3/5/7/8/10. Publish each external contract only after real adapters exercise it; phase E is not a prerequisite for the standalone release. RuntimeProvider stabilization requires Local and Kubernetes evidence; connectors require their real source adapters. Stable IDs use `E.xx` to preserve existing phase/task references.
+
+- [ ] **E.01** Define versioned extension manifests with identity, protocol version, capabilities, runtime dependencies, permissions and compatible core versions; reject incompatible registrations.
+- [ ] **E.02** Publish RuntimeProvider lifecycle schemas and a reference adapter after Local/Kubernetes conformance passes; document idempotency, readiness, cancellation, reconciliation and cleanup obligations.
+- [ ] **E.03** Publish DataConnector and FunctionRuntime SDK/protocol examples with typed schemas, credential references, batching, provenance and deterministic/volatile semantics.
+- [ ] **E.04** Define identity-integration contracts for validated claims and revocation while retaining core authorization; prevent extensions from granting themselves resource access.
+- [ ] **E.05** Publish supported workbook APIs and events with pagination, error schemas, revision/idempotency semantics and reconnect rules for integrations and alternative clients.
+- [ ] **E.06** Enforce administrator-approved extension installation, scoped capabilities and out-of-process execution for untrusted code; preserve audit, commit and migration invariants regardless of adapter.
+- [ ] **E.07** Publish executable conformance suites and reference implementations; require results for each supported provider, connector and runtime version.
+- [ ] **E.08** Define compatibility/deprecation and security-reporting policies, extension maintainer guidance and architecture decision review; document upgrade/migration expectations without promising an untested stable in-process ABI.
+- [ ] **E.T01** Test E.01–E.06: incompatible protocol/manifests, forged capabilities, revoked credentials, duplicate/out-of-order operations, crash/restart and attempts to bypass ACL/revision/commit checks through real extension boundaries.
+- [ ] **E.T02** Verify E.02–E.08 with an extension authored from published documentation without changes to core; run the conformance suite across supported version combinations and a breaking-upgrade rejection case.
+- [ ] **E.09 — Gate:** A contributor can implement, package, install and test a supported extension using documented contracts; its failure cannot bypass the declared core invariants.
 
 ## 12. Evaluate later extensions
 
@@ -248,6 +350,8 @@ These are optional follow-on decisions, not blockers for a useful open-source re
 - [ ] **12.05** Evaluate an optional local/BYOK AI assistant with explicit data access and reviewable operations.
 - [ ] **12.06** Evaluate general Python notebooks and table-returning function jobs separately from pure cell functions.
 - [ ] **12.07** Evaluate a Microsoft Excel add-in if users need custom Rowfinity functions inside Excel itself.
+- [ ] **12.08** Evaluate optional JupyterHub integration through supported authentication/routing contracts for existing customer deployments; do not fork or require JupyterHub core.
+- [ ] **12.T01** For each evaluation 12.01–12.08, record demand, decision, prototype evidence, cost/operational tradeoffs and acceptance tests if adopted. Checking an evaluation does not mean its proposed feature is implemented; add implementation tasks before advertising support.
 
 ## Progress notes
 
@@ -258,3 +362,4 @@ Add one row when starting work, encountering a blocker or completing a task. Kee
 | 2026-10-26 | Planning | Checklist created | Consolidated the assessment and SQL/custom-function requirements; implementation completion has not been reassessed. |
 | 2026-10-26 | 1.01–1.11 | Complete | Engine, server, generated protocol, trash UI and browser journeys. Commands and results in TEST_MATRIX.md; new tests failed on `ff3e736` as expected. |
 | 2026-10-26 | 2.01–2.10 | Complete | Import preview/overrides/progress/cancel, xlsx notes, bounded sheet copies, saved live views and snapshots, grid disposal, accessibility. Nine defects found by the new tests and fixed; see TEST_MATRIX.md. |
+| 2026-10-26 | Architecture / remaining phases | Checklist enhanced | Preserved completed tasks and stable IDs; added workbook-first runtime/provider foundations, automatic placement and compute policy, conservative Kubernetes handoff versus stronger recovery gates, phase-specific test packages and extension ecosystem. Planning changes only; no new implementation completion claimed. |
