@@ -97,6 +97,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .grid-wrap { flex: 1; position: relative; min-height: 0; }
 .grid-host { position: absolute; inset: 0; overflow: hidden; outline: none; }
+/* The canvas covers the host, so the focus ring is drawn on an overlay above it. */
+.grid-host:focus-visible::after { content: ""; position: absolute; inset: 0; border: 2px solid var(--accent); pointer-events: none; z-index: 5; }
 .grid-canvas { position: absolute; inset: 0; }
 .grid-scroller { position: absolute; inset: 0; overflow: auto; }
 .grid-spacer { pointer-events: none; }
@@ -246,3 +248,5 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .trash-row { grid-template-columns: 40px minmax(0, 1fr) minmax(0, 220px) 80px 110px auto; }
 @media (max-width: 760px) { .trash-row { grid-template-columns: 0 minmax(0, 1fr) auto; } }
 .cell-center { display: flex; justify-content: center; align-items: center; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

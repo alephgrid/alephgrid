@@ -5,7 +5,7 @@ import { Grid, type Cell, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, ServerEvent, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
-import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
+import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 
 const FILTER_OPS: { value: FilterOp; label: string; needsValue: boolean }[] = [
   { value: "eq", label: "is equal to", needsValue: true },
@@ -116,6 +116,8 @@ export class WorkbookScreen {
   private sheetButtons: HTMLElement[] = [];
   private statsTimer = 0;
   private statsSeq = 0;
+  private timers = new Set<number>();
+  private disposed = false;
 
   constructor(meta: WorkbookMeta, private goHome: () => void) {
     this.meta = meta;
@@ -191,14 +193,43 @@ export class WorkbookScreen {
     this.grid.focus();
   }
 
+  /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   dispose(): void {
+    this.disposed = true;
     this.rpc.close();
+    clearTimeout(this.statsTimer);
+    for (const t of this.timers) clearTimeout(t);
+    this.timers.clear();
+    this.cache.reset(0);
+    this.sheetCache.reset(0, 0);
+    this.grid.dispose();
+    this.root.remove();
+  }
+
+  /** setTimeout that is cancelled by dispose(). */
+  private later(fn: () => void, ms: number): void {
+    const t = window.setTimeout(() => {
+      this.timers.delete(t);
+      if (!this.disposed) fn();
+    }, ms);
+    this.timers.add(t);
   }
 
   // ---------------------------------------------------------------- layout
 
   private render(): HTMLElement {
     this.titleEl.addEventListener("click", () => this.renameWorkbook());
+    this.tabsEl.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") return;
+      const tabs = [...this.tabsEl.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      const i = tabs.indexOf(document.activeElement as HTMLButtonElement);
+      if (i < 0 || !tabs.length) return;
+      e.preventDefault();
+      const next = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1
+        : (i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].focus();
+      tabs[next].click();
+    });
     this.formulaInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); this.commitFormulaBar(); }
       if (e.key === "Escape") { this.onSelection(this.grid.selection(), this.grid.active); this.grid.focus(); }
@@ -317,7 +348,12 @@ export class WorkbookScreen {
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
       }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "ƒ"), s.name);
     });
+    const tabsHadFocus = this.tabsEl.contains(document.activeElement);
     this.tabsEl.replaceChildren(...tableTabs, ...sheetTabs);
+    // ARIA tabs: only the active tab is in the Tab order; arrow keys move between tabs.
+    const all = [...tableTabs, ...sheetTabs];
+    all.forEach((t) => (t.tabIndex = t.classList.contains("active") || (!all.some((x) => x.classList.contains("active")) && t === all[0]) ? 0 : -1));
+    if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
   }
 
   private closeTableView(): void {
@@ -329,6 +365,7 @@ export class WorkbookScreen {
     this.gridWrap.querySelector(".empty")?.remove();
     this.closeTableView();
     this.active = { kind: "table", name };
+    this.grid.setLabel(`Table ${name}`);
     this.spec = { table: name, sort: [], filters: [] };
     this.updateToolbar();
     this.busy("Opening…");
@@ -351,6 +388,7 @@ export class WorkbookScreen {
     const info = this.sheets.find((s) => s.index === index);
     if (!info) return;
     this.active = { kind: "sheet", index, name: info.name };
+    this.grid.setLabel(`Sheet ${info.name}`);
     this.applySheetInfo(info, true);
     this.renderChips();
     this.updateToolbar();
@@ -926,7 +964,7 @@ export class WorkbookScreen {
     });
     if (v) {
       toast(`Added column ${v.name}`, "success");
-      setTimeout(() => this.grid.select({ r: this.grid.active.r, c: (this.view?.columns.length ?? 1) - 1 }), 300);
+      this.later(() => this.grid.select({ r: this.grid.active.r, c: (this.view?.columns.length ?? 1) - 1 }), 300);
     }
   }
 
@@ -983,13 +1021,16 @@ export class WorkbookScreen {
       } else {
         rows.push(["Min", String(s.min ?? "–")], ["Max", String(s.max ?? "–")]);
       }
-      const box = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === box && box.remove() },
+      const closeBtn = el("button", { class: "btn btn-primary", onclick: () => modal.close() }, "Close");
+      const modal = openModal(
         el("div", { class: "dialog" },
           el("h2", {}, col.name),
-          el("table", { class: "kv" }, ...rows.map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", {}, v)))),
-          el("div", { class: "dialog-actions" }, el("button", { class: "btn btn-primary", onclick: () => box.remove() }, "Close")),
-        ));
-      document.body.append(box);
+          el("table", { class: "kv" }, ...rows.map(([k, v]) => el("tr", {}, el("th", { scope: "row" }, k), el("td", {}, v)))),
+          el("div", { class: "dialog-actions" }, closeBtn),
+        ),
+        () => modal.close(),
+      );
+      closeBtn.focus();
     } catch (e) {
       toast((e as Error).message, "error");
     } finally {
@@ -1034,13 +1075,13 @@ export class WorkbookScreen {
       try {
         if (target === "table") {
           const info = await this.rpc.call("create_table_from_query", { name: v.name, sql: editor.value });
-          panel.remove();
+          panel.close();
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created ${info.name} (${formatCount(info.row_count)} rows)`, "success");
         } else {
           const info = await this.rpc.call("create_sheet_from_query", { name: v.name, sql: editor.value });
-          panel.remove();
+          panel.close();
           await this.loadItems();
           await this.openSheet(info.index);
           toast(`Created sheet ${info.name}`, "success");
@@ -1051,23 +1092,23 @@ export class WorkbookScreen {
     };
     editor.addEventListener("keydown", (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); }
-      if (e.key === "Escape") panel.remove();
     });
-    const panel = el("div", { class: "backdrop", onmousedown: (e: Event) => e.target === panel && panel.remove() },
+    const panel = openModal(
       el("div", { class: "dialog dialog-wide" },
         el("h2", {}, "SQL"),
         editor,
         el("div", { class: "dialog-actions" },
           status,
           el("div", { class: "spacer" }),
-          el("button", { class: "btn", onclick: () => panel.remove() }, "Close"),
+          el("button", { class: "btn", onclick: () => panel.close() }, "Close"),
           el("button", { class: "btn", onclick: () => save("sheet"), title: "Up to 100,000 rows" }, "Open in sheet"),
           el("button", { class: "btn", onclick: () => save("table") }, "Save as table"),
           el("button", { class: "btn btn-primary", onclick: run, title: "⌘/Ctrl + Enter" }, "Run"),
         ),
         results,
-      ));
-    document.body.append(panel);
+      ),
+      () => panel.close(),
+    );
     editor.focus();
   }
 

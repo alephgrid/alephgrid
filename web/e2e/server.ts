@@ -33,7 +33,7 @@ export class Server {
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {
-        const r = await fetch(`${this.url}/api/config`);
+        const r = await fetch(`${this.url}/api/config`, { signal: AbortSignal.timeout(2_000) });
         if (r.ok) return;
       } catch { /* not up yet */ }
       if (Date.now() > deadline) throw new Error(`server did not start (${BIN})`);

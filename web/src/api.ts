@@ -110,6 +110,7 @@ export class Rpc {
   private nextId = 1;
   private closed = false;
   private retry = 0;
+  private retryTimer = 0;
   session = 0;
   onEvent: (e: ServerEvent) => void = () => {};
   onStatus: (s: "connecting" | "open" | "closed") => void = () => {};
@@ -134,8 +135,9 @@ export class Rpc {
         resolve();
         if (reconnecting) this.onReconnect();
       };
-      ws.onmessage = (m) => this.receive(m.data);
+      ws.onmessage = (m) => !this.closed && this.receive(m.data);
       ws.onclose = () => {
+        if (this.closed) return;
         this.ws = null;
         for (const p of this.pending.values()) p.reject(new Error("connection lost"));
         this.pending.clear();
@@ -143,16 +145,30 @@ export class Rpc {
         if (!opened && this.retry === 0) reject(new Error("could not connect to workbook"));
         if (!this.closed) {
           const delay = Math.min(10_000, 500 * 2 ** this.retry++);
-          setTimeout(() => !this.closed && this.connect().catch(() => {}), delay);
+          this.retryTimer = window.setTimeout(() => !this.closed && this.connect().catch(() => {}), delay);
         }
       };
       this.ws = ws;
     });
   }
 
+  /**
+   * Close for good: no reconnects, no more events, and replies still in flight are
+   * dropped (their promises never settle, so no callback runs after the screen is gone).
+   */
   close(): void {
     this.closed = true;
+    clearTimeout(this.retryTimer);
+    this.pending.clear();
+    this.onEvent = () => {};
+    this.onStatus = () => {};
+    this.onReconnect = () => {};
     this.ws?.close();
+    this.ws = null;
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   /** Send one operation; request and result types come from the generated protocol. */
