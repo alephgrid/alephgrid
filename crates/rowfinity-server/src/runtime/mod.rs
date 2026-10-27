@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn incompatibility_names_the_reason() {
         let provider = ProviderCapabilities {
-            kind: ProviderKind::Local, max_storage_format: 2,
+            kind: ProviderKind::Local, max_storage_format: rowfinity_engine::storage::FORMAT,
             capabilities: [Capability::Tables, Capability::Sheets, Capability::Sql].into_iter().collect(),
             isolation: vec![IsolationClass::SharedProcess],
         };
@@ -453,8 +453,9 @@ mod tests {
         let spec = RuntimeSpec::current();
         assert_eq!(provider.incompatibility(&spec, &policy), None);
         let mut newer = spec.clone();
-        newer.storage_format = 3;
-        assert!(provider.incompatibility(&newer, &policy).unwrap().contains("storage format 3"));
+        newer.storage_format = rowfinity_engine::storage::FORMAT + 1;
+        let reason = provider.incompatibility(&newer, &policy).unwrap();
+        assert!(reason.contains(&format!("storage format {}", rowfinity_engine::storage::FORMAT + 1)), "{reason}");
         let mut python = spec.clone();
         python.capabilities.insert(Capability::Python);
         assert!(provider.incompatibility(&python, &policy).unwrap().contains("python"));

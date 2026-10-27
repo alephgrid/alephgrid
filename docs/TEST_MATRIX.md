@@ -318,3 +318,202 @@ Injected write/disk-full/permission failures (`S/storage_faults.rs` on a real 64
 
 Cancellation, overload, disk-full, crash/restart and restore preserve consistency, and resource use stays bounded at the limits that are named. Not established: multi-node failover, power-loss durability, OS-level resource limits. CI has not run this branch.
 
+
+## Phase 4
+
+Contracts below were written before implementation (TEST_STRATEGY "Rules for every change"). **Tests** and
+**Result** are filled in as each item is verified; nothing is checked off before its tests have run and passed.
+
+### Shared decisions
+- **One entry point for user SQL.** Every path that runs SQL a client wrote (the console preview, exports,
+  query-to-table, query-to-sheet, saved-query refresh, SQL changes, formula columns) first goes through the
+  engine's SQL policy (`sqlpolicy.rs`), which analyses the statement with DuckDB's own parser
+  (`json_serialize_sql`) — never by keyword matching — and only then builds the SQL that runs. The policy is
+  enforced in the engine, so the WebSocket, HTTP and any embedding all get it; the UI only mirrors it.
+- **The database boundary.** Each workbook's DuckDB instance runs with `enable_external_access = false`
+  (which cannot be switched back on from SQL), `allowed_directories` limited to that workbook's own scratch
+  directories (uploads, exports, spill), extension auto-install/auto-load off and community extensions off.
+  Application imports and exports use those directories; user SQL cannot name files at all.
+- **Statements that run are the statements that were checked.** The `duckdb` crate's `prepare` executes every
+  statement but the last of a multi-statement string. User SQL is therefore checked to be exactly one
+  statement before it is embedded anywhere, and is always embedded inside parentheses on its own lines.
+- **Values are bound, identifiers are quoted.** Parameters (`$name`) are bound through DuckDB's prepared
+  statement API with an explicit type; identifiers chosen by users (table and column names) are validated and
+  quoted with `sql::ident`; nothing a client sends is pasted into SQL as a value.
+- **No new privacy claims.** The server has one shared token and no user identities (phase 7). Saved queries
+  live in the workbook and are visible to anyone who can open it; the unsaved editor draft stays in the
+  browser that typed it. Nothing here is "private" beyond that.
+
+### 4.01 Schema browser and autocomplete
+- **Behavior:** a `schema` read returns every user table with its columns (name, SQL type, kind, formula) in
+  one snapshot; internal tables and hidden columns are never listed. The SQL panel shows them as a tree and
+  inserts correctly quoted identifiers; the editor offers table names after `FROM`/`JOIN` and the columns of
+  tables named in the statement elsewhere, navigable with the keyboard.
+- **Invariants:** quoted insertions round-trip (`"a ""b"""` names the column `a "b"`); suggestions never
+  include `_rf_*` names; the list matches `tables` + `view_info`.
+- **Scenarios:** no tables; Unicode, mixed-case, reserved-word and quote-containing names; formula columns;
+  a table renamed or dropped while the panel is open (`tables_changed` refreshes it).
+- **Oracle:** names created by the test; executing the inserted identifier must select that column.
+
+### 4.02 Bound parameters and clear errors
+- **Behavior:** `query` and every other user-SQL op take `params: [{name, type, value}]` for `$name`
+  placeholders, `type` ∈ text, integer, decimal, double, boolean, date, timestamp; `value: null` binds NULL.
+  Values are parsed exactly in Rust (integers as i128, decimals as scaled i128) and bound with that DuckDB
+  type. A missing value, an unknown parameter, a value that does not parse as its type, or positional
+  `?`/`$1` placeholders fail before running with a message naming the parameter. Parse and runtime errors are
+  reported with DuckDB's message, without host paths of the server's data directory.
+- **Invariants:** a parameter value is never part of SQL text; hostile strings (`'; DROP TABLE t; --`,
+  quotes, backslashes, NUL-free Unicode, 1 MB text) select exactly the rows equal to that string.
+- **Scenarios:** quotes, `%`/`_` in LIKE, Unicode, empty string vs NULL, 2^63 and 10^30 integers, decimal
+  scale beyond the column, dates out of range, type mismatch against the column, repeated `$p`.
+- **Oracle:** rows inserted by the test with known values; counts computed in Rust.
+
+### 4.03 Bounded previews, truncation, timing, cancellation, full export
+- **Behavior:** a preview returns at most `limit` (≤ 5,000) rows and stops near 8 MiB; it says `truncated`,
+  `row_limit`, `elapsed_ms` and the `revision` it read. `cancel` stops the preview it names and nothing else.
+  `export_query {sql, params, format}` writes the *complete* result to a file inside the workbook's export
+  directory from one snapshot (streamed by DuckDB, never held in memory), then returns a one-time
+  download id; `GET /api/workbooks/{id}/downloads/{download}` streams the file once and deletes it.
+  Unclaimed exports expire. A failed, cancelled or disconnected export leaves no file.
+- **Invariants:** an export holds exactly the rows of the query at one revision; a preview never claims to
+  be complete when it is not.
+- **Scenarios:** 0 rows, exactly `limit`, `limit + 1`, 100,000 rows; cancel queued and running; two
+  concurrent queries, cancel one; deadline; client disconnect during export; data changed between preview
+  and export (export reports the later revision).
+- **Oracle:** closed-form row counts and sums over `range(n)`; exported CSV/Parquet read back and compared.
+
+### 4.04 Saved queries with versions
+- **Behavior:** `save_query {saved?, name, sql, params, kind}` creates a query or appends an immutable new
+  version when the SQL or parameters changed; `rename_query` changes only the name; `delete_query`;
+  `saved_queries` lists name, kind, latest version and timestamps; `query_versions` lists the versions;
+  each change is one revision with a history entry and a `queries_changed` event. Names are unique.
+- **Invariants:** versions are numbered 1, 2, … without gaps and never change; reopening returns the latest
+  version unless one is named; saved queries survive restart and are included in backups.
+- **Scenarios:** save unchanged text (no new version), rename to a taken name, delete then recreate, a
+  hostile name, restart, concurrent saves from two sessions.
+- **Oracle:** the test's own log of saves.
+
+### 4.05 Result to table, bounded result to sheet
+- **Behavior:** `create_table_from_query` keeps every row and records how it was made (4.06).
+  `create_sheet_from_query` copies at most the sheet limit; when the result is larger it fails with
+  `too_large` *unless* the request says `allow_truncation: true`, so the UI states the limit before
+  anything is dropped. Both take parameters.
+- **Invariants:** a failed or cancelled conversion creates no table or sheet and no revision.
+- **Scenarios:** 0 rows, limit − 1, limit, limit + 1; exact big integers and decimals; NULLs; duplicate and
+  odd column names; cancellation mid-way.
+- **Oracle:** closed-form sums; values compared with a preview of the same query.
+
+### 4.06 Saved SQL vs live query vs materialized result
+- **Behavior:** three different things, stored and labelled differently: a *saved query* (text and
+  parameters, versions); a *live query* (a saved query of kind `live`: opening it always runs it on current
+  data and the result says which revision it read; a change to one of its source tables marks the shown
+  result stale); a *materialized result* (a table created from a query, with provenance in
+  `_rf_materialized`: query id/version or SQL, parameters, source tables, the revision it was computed at,
+  each source table's data revision, refresh status). `materialized` lists them with `stale` computed from
+  the source tables' current data revisions. `refresh_materialized` re-runs the recorded SQL and replaces the
+  table's rows in one transaction (new record ids, one revision), or fails without changing anything when a
+  source table is missing or the result's columns changed (`schema_changed`). *Changed during
+  implementation:* the failure is returned to the client, not recorded (recording it would need a second
+  committed change); the table simply stays `stale`.
+- **Invariants:** a refresh is all or nothing; editing a materialized table by hand marks it `edited` so a
+  refresh warns that it overwrites those edits; every table-changing operation advances that table's data
+  revision.
+- **Scenarios:** refresh after source edits; source column renamed; source dropped; refresh cancelled;
+  materialized table renamed; restart between materialize and refresh.
+- **Oracle:** sums recomputed from the source by the test.
+
+### 4.07 SQL and formula capability restrictions
+- **Behavior:** user SQL must be one SELECT (including `WITH`, `VALUES`, `FROM`-first, set operations).
+  It may read user tables and its own CTEs only: no `_rf_*` tables, no other catalogs or schemas
+  (`rf_scratch`, `system`, `temp`, `information_schema`, `pg_catalog`), no file or URL replacement scans,
+  no table functions other than an allow-list (`range`, `generate_series`, `unnest`), no scalar functions
+  on a deny-list (settings, environment, secrets, dynamic SQL execution, sequences, variables), no PIVOT
+  without explicit values (DuckDB runs a hidden `CREATE TYPE` for it). A CTE may not reuse the name of a
+  system relation. Formula columns get the same function policy. The database boundary (shared decisions)
+  holds even if the parser-level check missed something.
+- **Invariants:** a rejected statement changes nothing: revision, history, files on disk, settings
+  (`current_setting` read back by the test) and table contents are unchanged.
+- **Scenarios:** `read_csv`/`read_text`/`glob`/`'file.csv'`/`'https://…'`; `COPY … TO`; `ATTACH`;
+  `INSTALL`/`LOAD`; `SET`/`RESET`/`PRAGMA`/`CALL`; `SELECT 1; DROP TABLE t` (and the wrapped variants that
+  break out of a subquery); `query('…')`, `json_execute_serialized_sql`; `current_setting`, `getenv`,
+  `duckdb_settings()`; `_rf_history`, `main._rf_views`, `rf_scratch.*`; CTE named `duckdb_settings`;
+  mixed case, comments, quoted identifiers; the same through formula columns and through direct HTTP and
+  WebSocket requests that skip the UI.
+- **Oracle:** state snapshots before and after (revision, history length, table checksums, settings,
+  directory listings).
+
+### 4.08 SQL changes through operations that keep Rowfinity's bookkeeping
+- **Behavior:** `INSERT INTO t [(cols)] <query or VALUES>`, `UPDATE t SET col = expr, … [WHERE cond]` and
+  `DELETE FROM t [WHERE cond]` typed in the SQL panel are recognised (`query` replies with code
+  `sql_change` and the statement kind; *narrowed during implementation:* it does not count the affected
+  rows in advance, the UI asks for confirmation and the outcome reports the rows changed); `sql_change {sql, params}` applies them as one Rowfinity change:
+  new rows get record ids and order keys, updated cells are cast exactly like edits, deleted rows leave
+  other ids untouched, the table's structure generation and data revision advance, one revision and history
+  entry, a `table_changed` event, and a `mutation_id` makes a retry apply once. Each expression is checked by
+  the SQL policy. Anything else that changes data or schema (`CREATE`, `DROP`, `ALTER`, `UPDATE … FROM`,
+  `RETURNING`, `ON CONFLICT`, writes to formula columns or `_rf_*` columns, more than one statement) is
+  refused with a message that says what to use instead.
+- **Invariants:** after any accepted change, `_rf_id` values are unique and stable for untouched rows,
+  `_rf_ord` order is consistent with the position index, formula columns still evaluate; after any refused
+  change, nothing differs.
+- **Scenarios:** insert into an empty table, a dense and a non-dense table, with column list and without;
+  update with NULL, exact decimals and a type mismatch (refused whole); delete everything / nothing; a WHERE
+  using a subquery over another table; a retried mutation id; concurrent edits from another session.
+- **Oracle:** a Rust reference model of the table (as in `props.rs`), index verification (`verify_index`).
+
+### Results (2026-10-26, Linux x86_64 cloud container, local; branch `claude/eager-ramanujan-lns8s1`)
+
+| Task | Tests | Result | Found and fixed / gaps |
+|---|---|---|---|
+| 4.01 | B `E/sqlwork.rs::schema_lists_user_tables_with_columns_and_nothing_internal` (Unicode, quoted, reserved and mixed-case names; schema equals the view's columns; inserted identifiers select their columns); B `S/sqlworkspace.rs` `schema` over the wire; C `W/sql.spec.ts` "browse the schema…", "names inserted from the tree are quoted…", "completion offers tables after FROM…" (keyboard, ARIA combobox/listbox) | pass | — |
+| 4.02 | A `sqlpolicy.rs` unit (exact integer/decimal/date/timestamp parsing, dates vs DuckDB for 7 boundary dates, positional placeholders refused, params must match placeholders); B `E/sqlwork.rs::parameters_are_bound_not_spliced` (hostile strings, LIKE, NULL vs empty, 2^53+1, decimals, repeated `$p`), `parameter_errors_name_the_parameter` (missing, unused, bad value, type mismatch, `LINE n` in the user's text); B `S/sqlworkspace.rs::queries_bind_parameters_and_explain_refusals_with_codes` (codes `bad_parameter`/`not_allowed`/`sql_change`, data-dir paths redacted); C hostile `$region` value sent only in `params` | pass | **Fixed:** a decimal parameter such as `-0.000001` was bound as `DECIMAL(6,6)` and came back as `-.000001`; decimals now keep one integer digit. |
+| 4.03 | B `E/sqlwork.rs::previews_are_bounded_and_say_what_they_read` (0, limit, limit+1, 20,000 rows; 5,000 cap; revision and source data revisions), `exports_hold_every_row_of_one_snapshot` (100,000 rows to CSV/Parquet/JSON read back against closed-form sums, a failing export); B `S/sqlworkspace.rs::cancel_hits_one_query_and_interactive_reads_are_not_starved` (queued vs running cancel, other session unaffected, fetch < 5 s during three long queries, deadline, disconnect), `exports_hold_every_row_download_once_and_leave_nothing_behind` (120,000-row CSV parsed and summed, once-only download, other workbook's id 404, expiry, cancelled/failing/disconnected exports leave no file, 20 cancel-vs-completion races); C "a superseded run's reply never replaces the newer result" (failed with the guard removed), "previews say when they are truncated…", "export writes every row…" | pass | **Fixed:** a read whose COMMIT failed (a cancel landing as it finished) left its reader connection inside a transaction, so every later read on it failed (`E/capabilities.rs::a_failed_snapshot_commit_does_not_poison_the_connection` fails on the old code, passes now); a cancelled read that finished anyway now publishes nothing and its export file is removed; the decision is taken after the request leaves the cancel table, so a cancel that answered `true` never sees a result (the 20-iteration race in `sqlworkspace.rs` caught it); reads of `_rf_meta`/`_rf_history` no longer swallow errors (an interrupt there silently aborted the transaction and surfaced as an uncoded error); a job that fails after a cancel or deadline is reported as such; a stopped job is interrupted again every 500 ms until it ends, because an interrupt landing between two statements is lost (seen as a cancelled export that ran on for minutes). |
+| 4.04 | B `E/sqlwork.rs::saved_queries_keep_immutable_versions_across_reopen` (versions 1–3, unchanged saves, renames, clashes, refusals leave the fingerprint unchanged, reopen, delete); B `S/sqlworkspace.rs::saved_queries_and_materializations_persist_and_notify` (`queries_changed` to another session, restart); C "saved queries survive a reload…" | pass | No per-user privacy (no identities before phase 7); stated in UI and docs. |
+| 4.05 | B `E/sqlwork.rs::sheet_copies_never_drop_rows_silently` (limit−1, limit, limit+1 refused without `allow_truncation`, accepted with it, big integers as text, refused copies change nothing); B `E/sql.rs` materialized formula values (existing); C "a result larger than a sheet asks first…", `W/kinds.spec.ts` (now confirms before truncating) | pass | — |
+| 4.06 | B `E/sqlwork.rs::materialized_tables_record_sources_and_refresh_all_or_nothing` (provenance, stale after a source edit, injected refresh failure changes nothing, new record ids, `edited`, `schema_changed`, renamed/dropped sources, reopen, drop), `every_table_change_advances_its_data_revision_and_nothing_else_does` (12 operations; saves, renames and failures do not), `E/storage.rs::v2_fixture_migrates_to_format_3` (committed fixture written by the phase-3 server); F `S/crash.rs::a_killed_materialization_or_refresh_is_all_or_nothing` (SIGKILL during a 20M-row refresh and a new materialization); C "a live query runs on open and turns stale…", "a materialized table keeps exact values, survives a restart, and refreshes when stale" | pass | Refresh failures are returned, not recorded (contract narrowed above). |
+| 4.07 | A `sqlpolicy.rs` (allowed query forms; refused statements, files/URLs, catalogs, internal tables, CTE scoping and shadowing, functions), `sqllex.rs`, `formula.rs`; B `E/capabilities.rs::every_user_sql_path_refuses_the_same_statements_and_changes_nothing` (40 statements × 7 entry points, fingerprint of every table incl. `_rf_*`, settings and files), `formulas_get_the_same_function_policy`, `earlier_statements_of_a_multi_statement_string_never_run`, `the_database_refuses_files_extensions_and_settings_once_restricted` (database layer alone, past the policy), `internal_tables_are_not_reachable_through_table_operations`; D `random_statements_never_change_state_through_queries` (proptest over hostile fragments); B `S/sqlworkspace.rs::every_open_workbook_is_locked_down_but_application_files_still_work` (settings read back, per-workbook directories, imports/exports/duplicate/backup still work, internal tables refused over WS and HTTP); C "refused statements change nothing…" | pass | **Fixed:** (1) the `duckdb` crate's `prepare` runs every statement but the last: on the phase-3 code, query → sheet with `SELECT 1; DROP TABLE t; SELECT 1` dropped `t` with no revision or history (shown with a scratch test in the baseline worktree, not committed; previews were saved by their snapshot rollback); (2) table operations took internal names: `columns("_rf_history")` read metadata and `drop_table("_rf_views")` was possible (regression test failed before the fix); (3) the first policy walker missed CTE bodies (DuckDB 2.0 stores them at `query_node`); found by the tests before anything shipped, now fail-closed. |
+| 4.08 | A `sqlchange.rs` unit (statement splitting, refused forms); B `E/capabilities.rs::sql_changes_keep_record_ids_order_index_revisions_and_history` (reference model of record ids and values, index verified, formula columns, other tables in WHERE, one revision each, mutation-id replay, reopen), `sql_changes_that_would_bypass_bookkeeping_are_refused_whole` (29 statements incl. shape break-outs, rounding, internal columns/tables; injected failures roll back), `queries_name_the_change_path_for_dml`; B `S/sqlworkspace.rs::sql_changes_apply_once_with_revisions_and_events`; C "…a change is applied only after confirmation" | pass | — |
+
+**Baseline before phase 4** (`HEAD` = `bbd4c2c`, separate worktree and target directory, run while this
+container was also compiling): engine 100 passed; server unit 13, api 9, backup 3, crash 3, imports 5,
+journey 2, protocol 4 passed; `runtime.rs` 10 passed, 1 failed:
+`eviction_racing_new_work_never_serves_from_a_closed_workbook` stopped on its own precondition (6 evictions
+within its 60 s cap, it requires 10) under CPU contention — its correctness assertions held. Cargo stopped
+there (no `--no-fail-fast`), so the baseline did not run scheduling, shutdown or storage_faults. The same test
+passed in every later run here.
+
+**Phase-3 tests corrected (races in the tests, found under load here):** `scheduling.rs::uploads_are_bounded…`
+now accepts a reset connection for the 507 case exactly as it already did for 413 (the server answers while
+the client still sends; nothing stored is still asserted); `scheduling.rs::a_client_that_does_not_read…` now
+waits for the slow session to be registered before waiting for it to be closed (otherwise "one session
+left" could hold before it existed).
+
+**Client fix found by the full browser suite:** `views.spec.ts` failed 1 time in 2 after phase 4: the Views
+menu was built from saved views that were still loading after a reload (a pre-existing race made more likely
+by the extra requests the workspace makes when a table opens). The menu now waits for the load; 5/5 alone and
+in the full suite afterwards.
+
+### 4.T01 (4.01–4.06)
+Schema/autocomplete, bound parameters and hostile strings, joins/CTEs/calculated columns and exact values
+against hand-computed results, truncated previews, cancellation, complete exports, saved queries and
+materializations across refresh/reopen/restart, in engine, HTTP/WebSocket and browser tests listed above. **Pass.**
+
+### 4.T02 (4.07–4.08)
+Direct SQL and formula attempts on files, network, extensions, settings and internal metadata through every
+entry point and over the wire without the UI; multi-statement and break-out forms; the database layer tested
+on its own; SQL changes against a reference model; rejections leave the fingerprint (tables incl. internal
+ones, settings, files) unchanged. **Pass.**
+
+### 4.09 Gate (2026-10-26, Linux x86_64, local cloud container)
+
+| Command | Result |
+|---|---|
+| `PROPTEST_CASES=96 ROWFINITY_SMALL_FS=<64 MB tmpfs> cargo test --workspace --no-fail-fast` | engine 134; server unit 13, api 9, backup 3, crash 4, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, sqlworkspace 6, storage_faults 2 — all pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cd web && npm run build` | type check + bundle pass |
+| `E2E_CHROME_PATH=/opt/pw-browsers/chromium-1243/chrome-linux64/chrome npx playwright test` (headless Chromium 1243; Google Chrome is not installed here) | 41 pass (12 in `sql.spec.ts`); also 41/41 in the run before the last server fixes |
+| Repeated: `sqlworkspace` + `scheduling` suites | 8/8 and 3/3 consecutive passes after the cancellation fixes |
+
+Joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and materialization are verified
+end to end (engine, HTTP/WebSocket and browser). Not established: CI on this branch, Google Chrome (CI's
+browser), macOS, scheduled 2000-case property runs, power loss. Organization authorization is phase 7.

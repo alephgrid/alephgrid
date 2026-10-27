@@ -239,3 +239,32 @@ export function confirmDialog(title: string, message: string, confirmLabel = "De
     ok.focus();
   });
 }
+
+/**
+ * A question with several answers (the first is the default and gets focus). Resolves
+ * with the chosen answer's `value`, or null when dismissed.
+ */
+export function choiceDialog(
+  title: string,
+  message: string,
+  choices: { value: string; label: string; primary?: boolean }[],
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    const done = (v: string | null) => { modal.close(); resolve(v); };
+    const buttons = choices.map((c) =>
+      el("button", { class: `btn${c.primary ? " btn-primary" : ""}`, onclick: () => done(c.value) }, c.label));
+    const modal = openModal(
+      el("div", { class: "dialog" },
+        el("h2", {}, title),
+        el("p", {}, message),
+        el("div", { class: "dialog-actions" },
+          el("button", { class: "btn", onclick: () => done(null) }, "Cancel"),
+          ...buttons,
+        ),
+      ),
+      () => done(null),
+      "alertdialog",
+    );
+    (buttons.find((_, i) => choices[i].primary) ?? buttons[0])?.focus();
+  });
+}

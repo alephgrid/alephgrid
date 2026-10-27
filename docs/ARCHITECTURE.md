@@ -35,8 +35,11 @@
   search and one `LIMIT 1 OFFSET k` inside a chunk. Inserting takes keys between the neighbours;
   when a gap runs out, only a window around the insert point is re-spread. Nothing renumbers the
   table, so edits addressed by record id stay correct while rows move.
-* Storage format (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
-  (next id, density, structure generation), `_rf_history` (one entry per committed change). Every
+* Storage format 3 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
+  (next id, density, structure generation, `data_rev`: the revision that last changed the table's
+  rows, columns or formulas), `_rf_history` (one entry per committed change), `_rf_queries` and
+  `_rf_query_versions` (saved queries, immutable versions), `_rf_materialized` (how a table made
+  from a query was computed). Every
   change runs in `Workbook::mutate`: one transaction with the change, revision + 1 and its history
   entry; a `mutation_id` already in the history is not applied again. Older files are copied to
   `data.duckdb.v<N>.bak` and migrated in one transaction; newer ones are refused.
@@ -52,6 +55,51 @@
 * Every mutation is a single DuckDB transaction and validates its input first (edits,
   appends, renames, sheet → table). Ad-hoc SQL sees formula columns through CTEs that
   shadow each table; a user's own `WITH` list is extended, not replaced.
+
+## SQL workspace
+
+User SQL enters through one engine function, `sqlpolicy::check_select`, on every path: the
+preview (`query`), complete exports (`export_query`), query → table, query → sheet, saved queries,
+refreshes, SQL changes and (for functions) formula columns.
+
+* **Policy, from the parse tree.** The statement is parsed by DuckDB's own parser
+  (`json_serialize_sql`, which never binds or runs anything) and walked: exactly one query;
+  relations are this workbook's user tables or CTEs in scope (scope-aware; a CTE may not reuse a
+  system relation's name), never `_rf_*`, other catalogs/schemas, system views, files or URLs;
+  table functions from an allow-list (`range`, `generate_series`, `unnest`); no functions that
+  read settings, secrets or variables, run or plan SQL text, or touch sequences; named `$params`
+  only. The `duckdb` crate's `prepare` runs every statement but the last of a multi-statement
+  string, so this check happens before user text is embedded anywhere, and user text is always
+  embedded on lines of its own inside parentheses. Table operations (`open_view`, `add_column`,
+  `drop_table`, exports …) refuse internal table names too.
+* **Database boundary.** When a workbook is opened by the server, its DuckDB instance gets
+  `allowed_directories` = that workbook's `.uploads/<id>/`, `.exports/<id>/` and spill directory,
+  then `enable_external_access = false` (irreversible while open), with extension auto-install,
+  auto-load and community extensions off. Imports, exports, online backups and duplicates stage
+  their files in those directories (backups and duplicates then move the file into place).
+* **Parameters** are parsed exactly in Rust (integers as i128, decimals as scaled i128, dates,
+  timestamps) and bound through the prepared-statement API with that type; values never become
+  SQL text. Identifiers are validated and quoted with `sql::ident`.
+* **Previews and exports.** A preview reads at most `limit` (≤ 5,000) rows and ~8 MiB in one
+  snapshot and reports `truncated`, the row limit, the time taken, the revision it read and each
+  source table's data revision. An export runs `COPY (…) TO` inside the workbook's export
+  directory from one snapshot (DuckDB streams it; nothing is held in memory), and the file is
+  downloaded once (`/api/workbooks/{id}/downloads/{download}`), then deleted; unclaimed files
+  expire after an hour. A read cancelled as it finishes publishes nothing (its file is removed).
+* **Saved SQL, live queries, materialized results** are three different things: saved queries are
+  text + parameters with immutable versions; a *live* saved query is re-run on current data
+  whenever it is opened and its result goes stale when a source table's data revision moves; a
+  table created from a query is a snapshot with provenance (SQL, parameters, sources and their
+  data revisions, the revision it was computed at), listed with `stale` and `edited`, and
+  refreshed only on request, all or nothing, with new record ids. A refresh whose result columns
+  differ fails with `schema_changed` and changes nothing.
+* **SQL changes.** `INSERT INTO`, `UPDATE … SET … WHERE` and `DELETE FROM … WHERE` are split into
+  their parts by a small tokenizer (`sqllex.rs`, used for routing only) and reassembled into one
+  SELECT that must pass the policy *and* have exactly the expected shape. That SELECT runs once
+  into a staging table, values are checked to convert to the target types without rounding, and
+  the change is applied like an edit, insert or delete: record ids, order keys and the position
+  index are maintained, one revision and history entry, `mutation_id` replay. Everything else
+  that changes data or schema is refused (`not_allowed`).
 
 ## Sheets (IronCalc)
 
@@ -71,7 +119,8 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
   returns `[display, align, input?]`, so the client never re-implements number
   formatting or formula evaluation.
 * Bridges: `create_sheet_from_query` writes a bounded SQL result into a new sheet,
-  keeping text as text and numbers that a double cannot hold as text.
+  keeping text as text and numbers that a double cannot hold as text. A result larger than the
+  limit is refused (`too_large`) unless the request agrees to copy only the first rows.
   `sheet_to_table` reads every used row and infers each column's type from the cell
   values (numbers, dates, booleans, otherwise displayed text).
 * `.xlsx` import and export use the `ironcalc` crate's reader and writer. Importing
@@ -184,12 +233,12 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
 * By default it binds to `127.0.0.1`: only you can reach it.
 * `--token` (or `ROWFINITY_TOKEN`) enables a shared bearer token for the API and
   WebSocket.
-* Formula columns are restricted to single expressions, but they and the SQL console
-  still run DuckDB functions; `--disable-sql` hides only the console.
-* The SQL console runs arbitrary DuckDB SQL. DuckDB can read local files and URLs,
-  so on a shared server either trust your users or run with `--disable-sql`, inside
-  a container whose filesystem holds only the data volume.
+* User SQL and formulas are checked by the SQL policy (below) and run in a database that is
+  closed to the outside world. `--disable-sql` additionally refuses every user-SQL operation.
+* Saved queries live in the workbook and are visible to anyone who can open it. There are no
+  per-user identities yet (phase 7), so nothing is private beyond that; the unsaved editor draft
+  stays in the browser that typed it.
 * All workbooks of a server share one process (`shared_process`): resource limits are DuckDB-level,
   not a security boundary between workbooks. See DURABILITY.md for isolation classes.
-* Planned: OIDC login, per-workbook roles, DuckDB `enable_external_access=false`
-  with an allow-list.
+* Planned: OIDC login, per-workbook and per-space roles (phase 7). Completing the SQL
+  restrictions is not organization authorization.

@@ -8,6 +8,9 @@
 //!   is `_rf_ord` (see `catalog.rs`). `_rf_meta` holds the format, the revision and the
 //!   workbook id; `_rf_tables` per-table id counters and structure generations;
 //!   `_rf_history` one entry per committed mutation.
+//! * **3** (phase 4): `_rf_tables.data_rev`, the revision that last changed a table's rows,
+//!   columns or formulas; `_rf_queries` / `_rf_query_versions` saved queries with immutable
+//!   versions; `_rf_materialized` how a table made from a query was computed.
 //!
 //! Opening an older file keeps a copy of it (`<file>.v<N>.bak`) and migrates it in one
 //! transaction. There is no downgrade: the copy is the only way back. Opening a file
@@ -16,13 +19,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use duckdb::Connection;
+use duckdb::{Connection, OptionalExt};
 
 use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -109,6 +112,21 @@ const V2_SCHEMA: &str = "
         at_ms BIGINT NOT NULL, summary VARCHAR, result VARCHAR
     );";
 
+/// Added in format 3. `data_rev = -1` marks a table changed by the transaction in progress;
+/// [`record`] stamps it with the new revision.
+const V3_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS _rf_queries (
+        id VARCHAR NOT NULL, name VARCHAR NOT NULL, kind VARCHAR NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS _rf_query_versions (
+        query_id VARCHAR NOT NULL, version BIGINT NOT NULL, sql VARCHAR NOT NULL, params VARCHAR NOT NULL,
+        created_at BIGINT NOT NULL, revision BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS _rf_materialized (
+        table_name VARCHAR NOT NULL, query_id VARCHAR, query_version BIGINT, sql VARCHAR NOT NULL, params VARCHAR NOT NULL,
+        sources VARCHAR NOT NULL, revision BIGINT NOT NULL, own_rev BIGINT NOT NULL, refreshed_at BIGINT NOT NULL
+    );";
+
 /// Bring a database at `path` to [`FORMAT`], copying it first when it is migrated.
 /// Returns the open connection.
 pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {
@@ -170,7 +188,8 @@ pub fn sync_dir(dir: &Path) {
 
 fn create_fresh(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
-        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA}
+        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA}
+         ALTER TABLE _rf_tables ADD COLUMN data_rev BIGINT NOT NULL DEFAULT 0;
          INSERT INTO _rf_meta VALUES ('format', '{FORMAT}'), ('revision', '0');
          COMMIT;"
     ))?;
@@ -183,6 +202,9 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
     let result = (|| -> Result<()> {
         if from < 2 {
             migrate_v1_to_v2(conn)?;
+        }
+        if from < 3 {
+            migrate_v2_to_v3(conn)?;
         }
         faults::check("migrate")?;
         Ok(())
@@ -214,14 +236,24 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<()> {
             duckdb::params![table, next, dense],
         )?;
     }
-    conn.execute_batch(&format!("INSERT INTO _rf_meta VALUES ('format', '{FORMAT}'), ('revision', '0');"))?;
+    conn.execute_batch("INSERT INTO _rf_meta VALUES ('format', '2'), ('revision', '0');")?;
     Ok(())
+}
+
+/// Tables existing before format 3 count as last changed at the current revision.
+fn migrate_v2_to_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(V3_SCHEMA)?;
+    let rev = revision(conn)? as i64;
+    conn.execute_batch(&format!("ALTER TABLE _rf_tables ADD COLUMN data_rev BIGINT NOT NULL DEFAULT {rev};"))?;
+    meta_set(conn, "format", &FORMAT.to_string())
 }
 
 // ------------------------------------------------------------------ metadata
 
 pub fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn.query_row("SELECT value FROM _rf_meta WHERE key = ?", [key], |r| r.get(0)).ok())
+    // Only "no such row" is None; any other failure (an interrupt) must not be swallowed,
+    // or the caller's transaction is left aborted behind its back.
+    Ok(conn.query_row("SELECT value FROM _rf_meta WHERE key = ?", [key], |r| r.get(0)).optional()?)
 }
 
 pub fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -258,14 +290,28 @@ pub fn table_meta(conn: &Connection, table: &str) -> Result<TableMeta> {
 
 pub fn register_table(conn: &Connection, table: &str, rows: i64) -> Result<()> {
     conn.execute("DELETE FROM _rf_tables WHERE table_name = ?", [table])?;
-    conn.execute("INSERT INTO _rf_tables VALUES (?, ?, true, 0)", duckdb::params![table, rows])?;
+    conn.execute("INSERT INTO _rf_tables (table_name, next_id, dense, gen, data_rev) VALUES (?, ?, true, 0, -1)", duckdb::params![table, rows])?;
     Ok(())
+}
+
+/// Mark a table's data as changed by the transaction in progress (see [`record`]).
+pub fn touch_table(conn: &Connection, table: &str) -> Result<()> {
+    conn.execute("UPDATE _rf_tables SET data_rev = -1 WHERE table_name = ?", [table])?;
+    Ok(())
+}
+
+/// The revision that last changed each table's data, by table name.
+pub fn data_revisions(conn: &Connection) -> Result<std::collections::HashMap<String, u64>> {
+    Ok(conn
+        .prepare("SELECT table_name, data_rev FROM _rf_tables")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?
+        .collect::<Result<_, _>>()?)
 }
 
 /// Record a structural change: new id counter and density, generation + 1.
 pub fn update_table(conn: &Connection, table: &str, next_id: Option<i64>, dense: Option<bool>) -> Result<()> {
     let n = conn.execute(
-        "UPDATE _rf_tables SET next_id = coalesce(?, next_id), dense = coalesce(?, dense), gen = gen + 1 WHERE table_name = ?",
+        "UPDATE _rf_tables SET next_id = coalesce(?, next_id), dense = coalesce(?, dense), gen = gen + 1, data_rev = -1 WHERE table_name = ?",
         duckdb::params![next_id, dense, table],
     )?;
     if n != 1 {
@@ -275,12 +321,15 @@ pub fn update_table(conn: &Connection, table: &str, next_id: Option<i64>, dense:
 }
 
 pub fn rename_table(conn: &Connection, from: &str, to: &str) -> Result<()> {
+    // A rename does not change the rows; materializations that read the old name see it gone.
     conn.execute("UPDATE _rf_tables SET table_name = ?, gen = gen + 1 WHERE table_name = ?", duckdb::params![to, from])?;
+    conn.execute("UPDATE _rf_materialized SET table_name = ? WHERE table_name = ?", duckdb::params![to, from])?;
     Ok(())
 }
 
 pub fn forget_table(conn: &Connection, table: &str) -> Result<()> {
     conn.execute("DELETE FROM _rf_tables WHERE table_name = ?", [table])?;
+    conn.execute("DELETE FROM _rf_materialized WHERE table_name = ?", [table])?;
     Ok(())
 }
 
@@ -314,7 +363,7 @@ pub fn find_mutation(conn: &Connection, mutation_id: &str) -> Result<Option<(u64
             [mutation_id],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Option<String>>(1)?)),
         )
-        .ok())
+        .optional()?)
 }
 
 /// Append a history entry for the next revision and bump the revision; the caller's
@@ -329,6 +378,11 @@ pub fn record(conn: &Connection, mutation_id: Option<&str>, op: &str, actor: Opt
         duckdb::params![next as i64, mutation_id, op, actor, now_ms() as i64, summary, result],
     )?;
     meta_set(conn, "revision", &next.to_string())?;
+    // Stamp what this transaction changed with its revision.
+    conn.execute("UPDATE _rf_tables SET data_rev = ? WHERE data_rev = -1", [next as i64])?;
+    conn.execute("UPDATE _rf_materialized SET revision = ? WHERE revision = -1", [next as i64])?;
+    conn.execute("UPDATE _rf_materialized SET own_rev = ? WHERE own_rev = -1", [next as i64])?;
+    conn.execute("UPDATE _rf_query_versions SET revision = ? WHERE revision = -1", [next as i64])?;
     if next > HISTORY_KEEP {
         conn.execute("DELETE FROM _rf_history WHERE revision <= ?", [(next - HISTORY_KEEP) as i64])?;
     }

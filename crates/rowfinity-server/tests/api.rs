@@ -326,6 +326,15 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SavedView" => conforms::<rowfinity_engine::SavedView>(op, v),
         "SavedView[]" => conforms::<Vec<rowfinity_engine::SavedView>>(op, v),
         "HistoryEntry[]" => conforms::<Vec<rowfinity_engine::HistoryEntry>>(op, v),
+        "QueryResult" => conforms::<rowfinity_engine::QueryResult>(op, v),
+        "TableSchema[]" => conforms::<Vec<rowfinity_engine::TableSchema>>(op, v),
+        "QueryExport" => conforms::<rowfinity_server::ws::QueryExport>(op, v),
+        "SqlChangeOutcome" => conforms::<rowfinity_engine::SqlChangeOutcome>(op, v),
+        "SavedQuery" => conforms::<rowfinity_engine::SavedQuery>(op, v),
+        "SavedQuery[]" => conforms::<Vec<rowfinity_engine::SavedQuery>>(op, v),
+        "QueryVersion[]" => conforms::<Vec<rowfinity_engine::QueryVersion>>(op, v),
+        "MaterializedTable" => conforms::<rowfinity_engine::MaterializedTable>(op, v),
+        "MaterializedTable[]" => conforms::<Vec<rowfinity_engine::MaterializedTable>>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
@@ -392,17 +401,36 @@ async fn every_operation_replies_with_its_declared_type() {
         run("delete_saved_view", json!({ "saved": "PLACEHOLDER" })),
         run("close_view", json!({ "view_id": 1 })),
         run("history", json!({ "after": 0, "limit": 5 })),
+        run("schema", json!({})),
+        run("save_query", json!({ "name": "Big", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }] })),
+        run("query_versions", json!({ "saved": "QUERY" })),
+        run("saved_queries", json!({})),
+        run("rename_query", json!({ "saved": "QUERY", "name": "Bigger" })),
+        run("query", json!({ "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "limit": 1 })),
+        run("export_query", json!({ "sql": "SELECT * FROM t", "format": "csv" })),
+        run("create_table_from_query", json!({ "name": "mat", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "saved": "QUERY", "version": 1 })),
+        run("materialized", json!({})),
+        run("sql_change", json!({ "sql": "UPDATE t SET s = 'q' WHERE n = 1" })),
+        run("refresh_materialized", json!({ "table": "mat" })),
+        run("delete_query", json!({ "saved": "QUERY" })),
         run("cancel", json!({ "request": 1 })),
     ];
     let mut saved_id = String::new();
+    let mut query_id = String::new();
     for (op, mut params) in script {
         if params["saved"] == "PLACEHOLDER" {
             params["saved"] = json!(saved_id);
+        }
+        if params["saved"] == "QUERY" {
+            params["saved"] = json!(query_id);
         }
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
         if op == "save_view" {
             saved_id = v["id"].as_str().unwrap().to_string();
+        }
+        if op == "save_query" {
+            query_id = v["id"].as_str().unwrap().to_string();
         }
     }
     let all: BTreeSet<&str> = declared.keys().copied().collect();

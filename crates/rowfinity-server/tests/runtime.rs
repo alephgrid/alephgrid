@@ -92,7 +92,7 @@ async fn specs_are_content_addressed_pinned_and_data_outlives_compute() {
     let s = status(&server, &wb).await;
     let current = RuntimeSpec::current();
     assert_eq!(s["spec_id"], current.id());
-    assert_eq!(s["spec"]["storage_format"], 2);
+    assert_eq!(s["spec"]["storage_format"], rowfinity_engine::storage::FORMAT);
     assert_eq!(s["spec"]["capabilities"], json!(["tables", "sheets", "sql"]));
     let meta: Value = serde_json::from_slice(&std::fs::read(dir.path().join(&wb).join("workbook.json")).unwrap()).unwrap();
     assert_eq!(meta["runtime_spec"], current.id());

@@ -1,0 +1,15 @@
+{
+  "id": "6409aea04569",
+  "name": "v2 fixture",
+  "created_at": 1793041384,
+  "workspace": null,
+  "starred": false,
+  "opened_at": 1793041392,
+  "updated_at": 1793041392,
+  "summary": {
+    "tables": 1,
+    "sheets": 1,
+    "rows": 4
+  },
+  "runtime_spec": "rs-abdd54b7ff569716"
+}

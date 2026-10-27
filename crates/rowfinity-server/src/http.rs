@@ -157,6 +157,7 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
             post(import_file).layer(DefaultBodyLimit::disable()),
         )
         .route("/api/workbooks/{id}/export", get(export))
+        .route("/api/workbooks/{id}/downloads/{download}", get(download))
         .route("/api/workbooks/{id}/uploads", post(stage_upload).layer(DefaultBodyLimit::disable()))
         .route("/api/workbooks/{id}/uploads/{upload}", axum::routing::delete(cancel_upload))
         .route("/api/workbooks/{id}/uploads/{upload}/preview", post(preview_upload))
@@ -388,7 +389,7 @@ async fn import_file(
 ) -> ApiResult<impl IntoResponse> {
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
-    let (scratch, path, size) = receive(&state, &file_name, &headers, body).await?;
+    let (scratch, path, size) = receive(&state, &id, &file_name, &headers, body).await?;
     let import_path = path.clone();
     let result = h
         .run(
@@ -431,13 +432,13 @@ fn upload_name(filename: &str) -> ApiResult<String> {
 /// upload leaves nothing behind. The size is checked against `--max-upload-bytes` before
 /// reading (from `Content-Length`) and while streaming, and every byte is reserved from
 /// the temporary-disk budget as it arrives. On success the caller owns the reservation.
-async fn receive(state: &Shared, file_name: &str, headers: &HeaderMap, body: Body) -> ApiResult<(PathBuf, PathBuf, u64)> {
+async fn receive(state: &Shared, workbook: &str, file_name: &str, headers: &HeaderMap, body: Body) -> ApiResult<(PathBuf, PathBuf, u64)> {
     let max = state.config.max_upload_bytes;
     let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     if let Some(n) = declared.filter(|&n| n > max) {
         return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_big(n, max)));
     }
-    let scratch = state.scratch_dir(".uploads")?;
+    let scratch = state.scratch_dir(".uploads", workbook)?;
     let path = scratch.join(file_name);
     let mut reserved = 0u64;
     let received = async {
@@ -498,7 +499,7 @@ async fn stage_upload(
 ) -> ApiResult<impl IntoResponse> {
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
-    let (dir, path, size_bytes) = receive(&state, &file_name, &headers, body).await?;
+    let (dir, path, size_bytes) = receive(&state, &id, &file_name, &headers, body).await?;
     let p = path.clone();
     let preview = h.run(http_job(Class::Bulk, &state), None, None, Work::Write(Box::new(move |wb| wb.preview_any(&p, &[])))).await;
     match preview {
@@ -604,7 +605,7 @@ async fn export(
     let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
     let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
-    let scratch = state.scratch_dir(".exports")?;
+    let scratch = state.scratch_dir(".exports", &id)?;
     let path = scratch.join("export");
     let p = path.clone();
     let format = q.format;
@@ -637,11 +638,29 @@ async fn export(
     Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
 }
 
+/// Stream a finished query export (`export_query`) once; the file is removed afterwards.
+async fn download(State(state): State<Shared>, Path((id, download)): Path<(String, String)>) -> ApiResult<Response> {
+    let d = state
+        .downloads
+        .take(&id, &download)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "this export was already downloaded or has expired; export again"))?;
+    let opened = tokio::fs::File::open(&d.path).await;
+    // The open handle keeps the bytes readable after the directory is removed.
+    let _ = tokio::fs::remove_dir_all(&d.dir).await;
+    let file = opened.map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
+    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+    headers.insert(header::CONTENT_DISPOSITION, attachment(&d.file_name));
+    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+}
+
 /// Download all sheets of a workbook as one .xlsx file.
 async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
     let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
-    let scratch = state.scratch_dir(".exports")?;
+    let scratch = state.scratch_dir(".exports", &id)?;
     let path = scratch.join("sheets.xlsx");
     let p = path.clone();
     let written = h

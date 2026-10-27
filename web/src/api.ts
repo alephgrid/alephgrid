@@ -94,6 +94,11 @@ export const api = {
     const t = token();
     return `/api/workbooks/${id}/export.xlsx${t ? `?token=${encodeURIComponent(t)}` : ""}`;
   },
+  /** A finished `export_query` file; it can be downloaded once. */
+  downloadUrl(id: string, download: string): string {
+    const t = token();
+    return `/api/workbooks/${id}/downloads/${encodeURIComponent(download)}${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+  },
   exportUrl(id: string, spec: unknown, format: string): string {
     const q = new URLSearchParams({ spec: JSON.stringify(spec), format });
     const t = token();
@@ -130,7 +135,9 @@ export function stageUpload(
 /** Operations that change nothing: never given a mutation id, retried when the server is busy. */
 const READS = new Set<OpName>([
   "tables", "open_view", "update_view", "view_info", "close_view", "fetch", "stats", "query", "sheets", "sheet_fetch",
-  "saved_views", "history", "cancel",
+  "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
+  // Writes a file to download but changes no data: never kept and resent after a reconnect.
+  "export_query",
 ]);
 /** Backoff before retrying a read the server refused as "overloaded". */
 const OVERLOAD_RETRIES = [200, 400, 800];

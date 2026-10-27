@@ -1,4 +1,4 @@
-# WebSocket protocol (v0.3)
+# WebSocket protocol (v0.4)
 
 Connect to `ws(s)://<host>/ws/<workbook-id>` (add `?token=…` when the server uses a
 token). Every frame is a JSON text message.
@@ -26,6 +26,7 @@ the Rust types and are the precise definition of every request, event and result
 { "event": "tables_changed", "origin": 3, "revision": 14 }   // tables or sheets added/removed/renamed
 { "event": "sheet_changed",  "sheet": 0, "origin": 3, "revision": 15 }  // sheet: null after undo/redo
 { "event": "views_changed", "table": "flights", "origin": 3, "revision": 16 }  // saved views of a table changed
+{ "event": "queries_changed", "origin": 3, "revision": 17 }  // saved queries were added, changed or removed
 { "event": "workbook_deleted", "origin": 0 }  // moved to the trash; the server then closes the socket
 { "event": "workbook_closed", "reason": "idle" | "stopped" | "shutdown" }  // reconnect to reopen
 { "event": "resync" }        // events were dropped for this slow client: refresh what is shown
@@ -72,6 +73,13 @@ revisions) is not applied again and the reply repeats the recorded result with `
 | `too_large` | a size limit (cells per edit, rows per insert); the message names it |
 | `capacity` | the server has no resources left to open the workbook |
 | `unavailable` | the workbook is closing or the server is stopping; reconnect |
+| `not_allowed` | the SQL policy refused the statement (see below); nothing ran |
+| `sql_change` | `query` got an INSERT/UPDATE/DELETE: confirm, then send it with `sql_change` |
+| `bad_parameter` | a `$name` has no value, is not used, or its value does not parse as its type |
+| `schema_changed` | a materialized table's query now produces different columns; nothing changed |
+
+Error messages never contain the server's data-directory path (it is shown as `<data>`). DuckDB's
+`LINE n:` positions refer to the user's own SQL text.
 
 ### Limits
 
@@ -100,8 +108,8 @@ not read until they drain; beyond 64 MiB it is closed.
 | `update_formula` | `table, name, formula` | `null` |
 | `drop_column` | `table, name` | `null`; refused while formula columns use it |
 | `rename_column` | `table, name, new_name` | `null`; formulas that use the column are rewritten in the same transaction |
-| `query` | `sql, limit?` | `{columns, rows, truncated}` |
-| `create_table_from_query` | `name, sql` | `TableInfo` |
+| `query` | `sql, params?, limit?` (≤ 5,000, default 500) | `QueryResult {columns, rows, truncated, row_limit, elapsed_ms, revision, sources: [{table, data_rev}]}`; a preview, never the whole result when `truncated` |
+| `create_table_from_query` | `name, sql, params?, saved?, version?` | `TableInfo`; keeps every row and records provenance (see `materialized`) |
 | `create_demo_table` | `rows?` | `TableInfo` |
 | `drop_table` | `table` | `null` |
 | `rename_table` | `table, new_name` | new name |
@@ -112,7 +120,7 @@ not read until they drain; beyond 64 MiB it is closed.
 | `sheet_set` | `sheet, inputs: [{row, column, value}]` (`""` clears; `=` starts a formula) | `SheetInfo`. All-or-nothing; one batch is one undo step |
 | `sheet_undo` / `sheet_redo` | – | `bool` (whether anything changed). History is shared by everyone in the workbook and kept in memory only |
 | `sheet_insert_rows` / `sheet_delete_rows` / `sheet_insert_columns` / `sheet_delete_columns` | `sheet, at, count` | `null` |
-| `create_sheet_from_query` | `name, sql` | `SheetCopy {sheet, rows_copied, total_rows?, truncated, row_limit}`. At most `--sheet-copy-rows` (default 100,000) rows, fewer for wide results |
+| `create_sheet_from_query` | `name, sql, params?, allow_truncation?` | `SheetCopy {sheet, rows_copied, total_rows?, truncated, row_limit}`. At most `--sheet-copy-rows` (default 100,000) rows, fewer for wide results; a larger result fails with `too_large` and creates nothing unless `allow_truncation` |
 | `table_to_sheet` | `view_id, name` | `SheetCopy`; copies the view's first rows in its sort and filter |
 | `table_from_view` | `view_id, name` | `TableInfo`; a snapshot table of the view's current rows |
 | `saved_views` | `table?` | `SavedView[]` (`{id, name, spec, widths, updated_at}`) |
@@ -120,9 +128,34 @@ not read until they drain; beyond 64 MiB it is closed.
 | `rename_saved_view` / `delete_saved_view` | `saved[, name]` | `SavedView` / `null` |
 | `sheet_to_table` | `sheet, name` | `TableInfo`. Reads every used row; column types come from the cells |
 | `history` | `after?, limit?` (≤ 1000) | `HistoryEntry[]` (`{revision, mutation_id?, op, actor?, at_ms, summary}`), oldest first |
+| `schema` | – | `TableSchema[]` (`{name, row_count, columns}`), user tables only |
+| `export_query` | `sql, params?, format?` (`csv` default, `parquet`, `json`) | `QueryExport {download, file_name, rows, bytes, revision}`: the complete result, from one snapshot, written server-side; fetch it once from `GET /api/workbooks/{id}/downloads/{download}` within an hour |
+| `sql_change` | `sql, params?` | `SqlChangeOutcome {table, kind, rows}`: `INSERT INTO t [(cols)] <query or VALUES>`, `UPDATE t SET col = expr, … [WHERE …]` or `DELETE FROM t [WHERE …]` as one change (record ids, revision, history); anything else is `not_allowed` |
+| `saved_queries` | – | `SavedQuery[]` (`{id, name, kind, version, sql, params, created_at, updated_at}`), latest version each |
+| `query_versions` | `saved` | `QueryVersion[]` (`{version, sql, params, created_at, revision}`) |
+| `save_query` | `saved?, name, kind?` (`query`/`live`), `sql, params?` | `SavedQuery`; updating appends a version only when the SQL or parameters changed. Names are unique |
+| `rename_query` / `delete_query` | `saved[, name]` | `SavedQuery` / `null` |
+| `materialized` | – | `MaterializedTable[]` (`{table, query?, query_version?, sql, params, sources: [{table, data_rev, current_rev?}], revision, refreshed_at, stale, edited}`) |
+| `refresh_materialized` | `table` | `MaterializedTable`; recomputes all rows in one change, or fails without changing anything |
 | `cancel` | `request` | `boolean` (see above) |
 
 Filter `op`: `eq neq gt gte lt lte contains not_contains starts_with is_empty not_empty`.
+
+### SQL
+
+Parameters are `$name` placeholders with `params: [{name, type, value?}]`, `type` ∈ `text integer
+decimal double boolean date timestamp`; values are strings parsed exactly by the server (no
+rounding); an omitted `value` binds NULL. Positional `?`/`$1` are refused.
+
+The SQL policy (all ops that take `sql`, and formula columns for functions): one query (`SELECT`,
+`WITH`, `VALUES`, `FROM`-first, set operations, `DESCRIBE`/`SUMMARIZE` of a query) reading this
+workbook's tables and its own CTEs. Refused: other statements, more than one statement, `_rf_*`
+tables, other catalogs and schemas, system views, files and URLs, table functions other than
+`range`, `generate_series`, `unnest`, functions reading settings/secrets/variables or running SQL
+text, sequences, `PIVOT` without explicit values. Independently, each workbook's database has
+external access disabled. Reads and writes run in the scheduler like other requests: `query` and
+`export_query` are bulk reads, `sql_change`, `create_*_from_query` and `refresh_materialized` bulk
+changes; all are cancellable.
 
 `ViewInfo`:
 
@@ -177,6 +210,7 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | POST | `/api/workbooks/{id}/uploads/{upload}/preview` | `ImportRequest {types?}` → `UploadPreview` with the given column types |
 | POST | `/api/workbooks/{id}/uploads/{upload}/import` | `ImportRequest {table?, types?, job?}` → `Imported`. On failure the upload is kept for a retry, and the error body carries `problem {message, line?, column?, value?, suggested_type?}` |
 | DELETE | `/api/workbooks/{id}/uploads/{upload}` | discard a staged upload |
+| GET | `/api/workbooks/{id}/downloads/{download}` | a finished `export_query` file, once; 404 once taken or expired |
 | GET/DELETE | `/api/workbooks/{id}/jobs/{job}` | progress `{running, percentage?, rows_processed, total_rows}` of a running import, or cancel it (only that job; 409 if it is not running) |
 
 | GET | `/api/workbooks/{id}/runtime` | `RuntimeStatus {workbook, spec, spec_id, policy, allocation?, ownership?, sessions}`; does not start anything |

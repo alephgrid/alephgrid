@@ -27,22 +27,23 @@ use crate::model::*;
 use crate::reads::{is_internal, Db};
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
 use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
+use crate::sqlpolicy::{self, QueryParam};
 use crate::storage::{self, HistoryEntry, OpenReport, ID, ORD, ORD_GAP};
 
 pub struct Workbook {
-    conn: Connection,
-    shared: Arc<Shared>,
+    pub(crate) conn: Connection,
+    pub(crate) shared: Arc<Shared>,
     /// 1 while [`Workbook::mutate`] holds a transaction.
     txn_depth: u32,
     /// Bumped whenever a sheet change was attempted inside the current transaction, so a
     /// rollback knows to reload the sheet model from the file.
     sheet_epoch: u64,
-    after_commit: Vec<AfterCommit>,
+    pub(crate) after_commit: Vec<AfterCommit>,
     report: OpenReport,
 }
 
 /// In-memory updates that may only happen once the transaction has committed.
-enum AfterCommit {
+pub(crate) enum AfterCommit {
     /// Store this position index for `table`, stamped with the committed generation.
     Index(String, PosIndex),
     RenameTable { from: String, to: String },
@@ -150,7 +151,7 @@ impl Workbook {
         &self.shared
     }
 
-    fn db(&self) -> Db<'_> {
+    pub(crate) fn db(&self) -> Db<'_> {
         let in_txn = self.txn_depth > 0;
         if !in_txn {
             self.shared.sweep(&self.conn);
@@ -238,7 +239,7 @@ impl Workbook {
 
     /// Run a public mutation method: inside an outer [`Workbook::mutate`] it is part of
     /// that transaction, otherwise it gets one (and a revision) of its own.
-    fn mutating<T>(&mut self, op: &str, view: Option<u64>, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn mutating<T>(&mut self, op: &str, view: Option<u64>, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.txn_depth > 0 {
             return f(self);
         }
@@ -348,7 +349,7 @@ impl Workbook {
         self.db().table_exists(name)
     }
 
-    fn unique_table_name(&self, raw: &str) -> Result<String> {
+    pub(crate) fn unique_table_name(&self, raw: &str) -> Result<String> {
         let base = sanitize_table_name(raw);
         let mut name = base.clone();
         let mut i = 2;
@@ -438,24 +439,62 @@ impl Workbook {
 
     /// Materialize any SELECT as a new table (e.g. a group-by or a join).
     pub fn create_table_from_query(&mut self, name: &str, sql: &str) -> Result<TableInfo> {
+        self.create_table_from_query_with(name, sql, &[], None)
+    }
+
+    /// Materialize a user query as a new table and record how it was computed (see
+    /// [`Workbook::materialized`]), optionally as a version of a saved query.
+    pub fn create_table_from_query_with(
+        &mut self,
+        name: &str,
+        sql: &str,
+        params: &[QueryParam],
+        origin: Option<(&str, u64)>,
+    ) -> Result<TableInfo> {
         let name = self.unique_table_name(name)?;
-        let select = self.db().expand_query(sql)?;
+        let checked = self.db().check(sql)?;
+        sqlpolicy::validate_params(&checked.params, params)?;
         self.mutating("create_table_from_query", None, |wb| {
-            wb.create_table_from_select(&name, &select)?;
+            let q = wb.db().expand_query(&checked)?;
+            wb.create_table_from_user_query(&name, &q, params)?;
+            crate::queries::record_materialized(&wb.conn, &name, sql, params, &q.sources, origin)?;
             wb.table_info(&name)
         })
+    }
+
+    /// New table from a checked user query, keeping its row order (see
+    /// [`Workbook::create_table_from_select`]).
+    pub(crate) fn create_table_from_user_query(&mut self, name: &str, q: &crate::reads::Expanded, params: &[QueryParam]) -> Result<u64> {
+        let cols = self.db().describe_query(q, params)?;
+        let rest = self.renamed_internals(&cols);
+        let sql = format!(
+            "CREATE TABLE {} AS SELECT (row_number() OVER () - 1)::BIGINT AS {ID}, {ID} * {ORD_GAP} AS {ORD}, {rest} FROM (\n{}\n);",
+            ident(name),
+            q.sql
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| crate::reads::user_error(e.into(), q.lines_before + 1))?;
+        sqlpolicy::bind(&mut stmt, params)?;
+        stmt.raw_execute().map_err(|e| crate::reads::user_error(e.into(), q.lines_before + 1))?;
+        let rows = self.db().count_rows(name)?;
+        storage::register_table(&self.conn, name, rows as i64)?;
+        Ok(rows)
+    }
+
+    /// `*`, or `* RENAME (…)` for source columns that use an internal name.
+    fn renamed_internals(&self, cols: &[Column]) -> String {
+        let renames: Vec<String> = cols
+            .iter()
+            .filter(|c| is_internal(&c.name))
+            .map(|c| format!("{} AS {}", ident(&c.name), ident(&self.free_name(cols, c.name.trim_start_matches('_')))))
+            .collect();
+        if renames.is_empty() { "*".to_string() } else { format!("* RENAME ({})", renames.join(", ")) }
     }
 
     /// New table from a SELECT, keeping its row order. Source columns that use an internal
     /// name are renamed rather than dropped.
     fn create_table_from_select(&mut self, name: &str, select: &str) -> Result<()> {
         let cols = self.db().describe(select)?;
-        let renames: Vec<String> = cols
-            .iter()
-            .filter(|c| is_internal(&c.name))
-            .map(|c| format!("{} AS {}", ident(&c.name), ident(&self.free_name(&cols, c.name.trim_start_matches('_')))))
-            .collect();
-        let rest = if renames.is_empty() { "*".to_string() } else { format!("* RENAME ({})", renames.join(", ")) };
+        let rest = self.renamed_internals(&cols);
         // A streaming row_number() keeps the source order.
         self.conn.execute_batch(&format!(
             "CREATE TABLE {} AS SELECT (row_number() OVER () - 1)::BIGINT AS {ID}, {ID} * {ORD_GAP} AS {ORD}, {rest} FROM ({select});",
@@ -1029,6 +1068,7 @@ impl Workbook {
             ));
         }
         let cells_changed = cells.len();
+        storage::touch_table(&self.conn, &table)?;
         if appended > 0 {
             self.conn.execute_batch(&format!(
                 "INSERT INTO {} ({ID}, {ORD}) SELECT {} + i, {} + i * {ORD_GAP} FROM range({appended}) t(i);",
@@ -1247,11 +1287,32 @@ impl Workbook {
     /// double cannot hold exactly, such as integers beyond 2^53 or long decimals, are
     /// written as text so their digits are kept; text values always stay text.
     pub fn create_sheet_from_query(&mut self, name: &str, sql: &str, max_rows: usize) -> Result<SheetCopy> {
+        self.create_sheet_from_query_with(name, sql, &[], max_rows, true)
+    }
+
+    /// As [`Workbook::create_sheet_from_query`], with parameters. Unless `allow_truncation`,
+    /// a result with more rows than fit fails with [`limits::TooLarge`] and creates nothing,
+    /// so nothing is dropped without the user having agreed to it.
+    pub fn create_sheet_from_query_with(
+        &mut self,
+        name: &str,
+        sql: &str,
+        params: &[QueryParam],
+        max_rows: usize,
+        allow_truncation: bool,
+    ) -> Result<SheetCopy> {
         let db = self.db();
-        let select = db.expand_query(sql)?;
-        let columns = db.describe(&select)?.iter().filter(|c| !is_internal(&c.name)).count();
+        let checked = db.check(sql)?;
+        sqlpolicy::validate_params(&checked.params, params)?;
+        let q = db.expand_query(&checked)?;
+        let columns = db.describe_query(&q, params)?.iter().filter(|c| !is_internal(&c.name)).count();
         let limit = Self::sheet_copy_limit(columns, max_rows);
-        let preview = db.run_bounded(&select, limit)?;
+        let preview = db.run_bounded_query(&q, params, limit, false)?;
+        if preview.truncated && !allow_truncation {
+            bail!(limits::TooLarge(format!(
+                "the result has more than {limit} rows, and a sheet copy holds at most {limit} rows of it; create a table to keep every row, or confirm copying only the first {limit}"
+            )));
+        }
         self.write_sheet(name, preview, None, limit)
     }
 
@@ -1261,7 +1322,7 @@ impl Workbook {
         let (preview, total, limit) = db.with_view(id, |m| {
             let limit = Self::sheet_copy_limit(m.columns.len(), max_rows);
             let select = db.view_select(m, Some(limit))?;
-            Ok((db.run_bounded(&select, limit)?, m.row_count, limit))
+            Ok((db.run_select(&select, limit)?, m.row_count, limit))
         })?;
         self.write_sheet(name, preview, Some(total), limit)
     }
@@ -1349,6 +1410,59 @@ impl Workbook {
         self.db().preview_query(sql, limit)
     }
 
+    /// Run a user query with parameters: its first rows, timing, revision and sources.
+    pub fn run_query(&self, sql: &str, params: &[QueryParam], limit: usize) -> Result<QueryResult> {
+        self.db().run_query(sql, params, limit)
+    }
+
+    /// Write a user query's complete result to a file; returns (rows, revision read).
+    pub fn export_query(&self, sql: &str, params: &[QueryParam], path: &Path, format: ExportFormat) -> Result<(u64, u64)> {
+        self.db().export_query(sql, params, path, format)
+    }
+
+    /// Every user table with its columns.
+    pub fn schema(&self) -> Result<Vec<TableSchema>> {
+        self.db().schema()
+    }
+
+    /// Close the database to the outside world: no files or URLs other than under
+    /// `allowed` (the workbook's own scratch directories), no extension installs or loads.
+    /// Once applied it cannot be undone from SQL, or at all while the database is open.
+    pub fn restrict_access(&self, allowed: &[&Path]) -> Result<()> {
+        let dirs: Vec<String> = allowed
+            .iter()
+            .map(|p| {
+                let mut s = p.to_string_lossy().to_string();
+                if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                    s.push(std::path::MAIN_SEPARATOR);
+                }
+                lit(&s)
+            })
+            .collect();
+        self.conn.execute_batch(&format!(
+            "SET allowed_directories = [{}];
+             SET autoinstall_known_extensions = false;
+             SET autoload_known_extensions = false;
+             SET allow_community_extensions = false;
+             SET enable_external_access = false;",
+            dirs.join(", ")
+        ))?;
+        Ok(())
+    }
+
+    /// Run SQL directly, bypassing the policy (tests inspect internals with it).
+    #[cfg(test)]
+    pub(crate) fn raw_query(&self, sql: &str) -> Result<Vec<Vec<duckdb::types::Value>>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let n = stmt.column_count();
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push((0..n).map(|i| r.get(i)).collect::<Result<_, _>>()?);
+        }
+        Ok(out)
+    }
+
     /// Write a view (respecting its sort and filters) to a file.
     pub fn export_view(&self, id: u64, path: &Path, format: ExportFormat) -> Result<()> {
         self.db().export_view(id, path, format)
@@ -1369,38 +1483,6 @@ impl Workbook {
 
     pub fn export_table(&self, table: &str, path: &Path, format: ExportFormat) -> Result<()> {
         self.db().export_table(table, path, format)
-    }
-}
-
-impl Db<'_> {
-    /// First `limit` rows of a SELECT for copying into a sheet (no reply-size limit: the
-    /// rows go to a sheet, not over the wire, and `limit` already bounds them).
-    pub fn run_bounded(&self, select: &str, limit: usize) -> Result<QueryPreview> {
-        let described = self.describe(select)?;
-        let keep: Vec<usize> = (0..described.len()).filter(|&i| !is_internal(&described[i].name)).collect();
-        let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
-        let columns: Vec<Column> = keep.iter().map(|&i| described[i].clone()).collect();
-        let projection: Vec<String> = keep.iter().map(|&i| crate::wire::projection(&described[i], &aliases[i])).collect();
-        let codecs: Vec<crate::wire::Codec> = columns.iter().map(|c| crate::wire::codec(&c.sql_type)).collect();
-        let sql = format!(
-            "SELECT {} FROM ({select}) AS _q({}) LIMIT {}",
-            if projection.is_empty() { "NULL".to_string() } else { projection.join(", ") },
-            aliases.join(", "),
-            limit + 1
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let mut values = Vec::with_capacity(columns.len());
-            for (i, codec) in codecs.iter().enumerate() {
-                values.push(crate::wire::decode(*codec, row.get_ref(i)?));
-            }
-            out.push(values);
-        }
-        let truncated = out.len() > limit;
-        out.truncate(limit);
-        Ok(QueryPreview { columns, rows: out, truncated })
     }
 }
 
@@ -1477,6 +1559,30 @@ impl Reader {
 
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {
         self.db().preview_query(sql, limit)
+    }
+
+    pub fn run_query(&self, sql: &str, params: &[QueryParam], limit: usize) -> Result<QueryResult> {
+        self.db().run_query(sql, params, limit)
+    }
+
+    pub fn export_query(&self, sql: &str, params: &[QueryParam], path: &Path, format: ExportFormat) -> Result<(u64, u64)> {
+        self.db().export_query(sql, params, path, format)
+    }
+
+    pub fn schema(&self) -> Result<Vec<TableSchema>> {
+        self.db().schema()
+    }
+
+    pub fn saved_queries(&self) -> Result<Vec<SavedQuery>> {
+        crate::queries::saved_queries(&self.db())
+    }
+
+    pub fn query_versions(&self, id: &str) -> Result<Vec<QueryVersion>> {
+        crate::queries::versions(&self.db(), id)
+    }
+
+    pub fn materialized(&self) -> Result<Vec<MaterializedTable>> {
+        crate::queries::materialized(&self.db())
     }
 
     pub fn saved_views(&self, table: Option<&str>) -> Result<Vec<SavedView>> {

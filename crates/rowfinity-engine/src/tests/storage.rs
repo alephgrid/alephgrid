@@ -15,7 +15,11 @@ fn fixture_copy(dir: &Path) -> PathBuf {
 }
 
 fn scratch_tables(wb: &Workbook) -> i64 {
-    scalar(wb, "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'rf_scratch'").as_i64().unwrap()
+    // Internal state: read past the SQL policy, which refuses duckdb_tables() to users.
+    match wb.raw_query("SELECT count(*) FROM duckdb_tables() WHERE database_name = 'rf_scratch'").unwrap()[0][0] {
+        duckdb::types::Value::BigInt(n) => n,
+        ref other => panic!("{other:?}"),
+    }
 }
 
 // ------------------------------------------------------------------- 3.08
@@ -420,4 +424,50 @@ fn a_backup_holds_one_revision_while_changes_continue() {
         writer.join().unwrap();
         assert_eq!(checked, 6);
     });
+}
+
+// ------------------------------------------------------------------- 4.06
+
+/// Format 2 (phase 3) → 3: the committed fixture written by the phase-3 server migrates with
+/// a copy of the original, keeps every value, id, order, view and sheet, and gains data
+/// revisions and empty saved-query tables.
+#[test]
+fn v2_fixture_migrates_to_format_3() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v2/data.duckdb");
+    let path = dir.path().join("data.duckdb");
+    std::fs::copy(&src, &path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut wb = Workbook::open(&path).unwrap();
+    let report = wb.open_report().clone();
+    assert_eq!(report.migrated_from, Some(2));
+    assert_eq!(std::fs::read(report.backup.unwrap()).unwrap(), original, "the pre-migration copy is the untouched file");
+    assert_eq!(wb.revision().unwrap(), 8, "the README's revision");
+    let v = wb.open_view(spec("sales")).unwrap();
+    let block = wb.fetch(v.view_id, 0, 10).unwrap();
+    assert_eq!(block.ids, vec![0, 4, 1, 3]);
+    assert_eq!(
+        block.rows,
+        vec![
+            vec![json!(1), json!("north"), json!("10.25"), json!("20.50")],
+            vec![json!("9007199254740993"), json!("inserted"), json!(null), json!(null)],
+            vec![json!(2), json!("south"), json!("0.10"), json!("0.20")],
+            vec![json!(4), json!("東京"), json!(null), json!(null)],
+        ]
+    );
+    assert!(!wb.verify_index("sales").unwrap(), "the display order stays non-dense");
+    assert_eq!(wb.saved_views(Some("sales")).unwrap()[0].name, "North only");
+    assert_eq!(cell_text(&wb, 0, 0, 1).as_deref(), Some("42"));
+    // New in format 3: data revisions (existing tables count as changed at the current
+    // revision), no saved queries and no materialization records for old tables.
+    assert_eq!(storage::data_revisions(&wb.conn).unwrap()["sales"], 8);
+    assert!(wb.saved_queries().unwrap().is_empty());
+    assert!(wb.materialized().unwrap().is_empty());
+    // It works as a format-3 workbook and is not migrated again.
+    wb.sql_change("UPDATE sales SET region = 'x' WHERE id = 2", &[]).unwrap();
+    assert_eq!(storage::data_revisions(&wb.conn).unwrap()["sales"], 9);
+    drop(wb);
+    let wb = Workbook::open(&path).unwrap();
+    assert_eq!(wb.open_report().migrated_from, None);
+    assert_eq!(wb.revision().unwrap(), 9);
 }

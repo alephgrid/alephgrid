@@ -18,12 +18,18 @@ use crate::catalog::{Materialized, PosIndex, Shared, ViewEntry};
 use crate::limits;
 use crate::model::*;
 use crate::sql::{formula_to_sql, ident, lit};
+use crate::sqlpolicy::{self, CheckedSelect, NotAllowed, QueryParam};
 use crate::storage::{self, ID, ORD};
 use crate::wire::{self, Codec};
 
 /// Internal columns never shown to users.
 pub(crate) fn is_internal(name: &str) -> bool {
     name == ID || name == ORD
+}
+
+/// Rowfinity's own tables (`_rf_meta`, `_rf_history`, …), in any letter case.
+pub(crate) fn is_internal_table(name: &str) -> bool {
+    name.get(..4).is_some_and(|p| p.eq_ignore_ascii_case("_rf_"))
 }
 
 pub(crate) struct Db<'a> {
@@ -41,21 +47,27 @@ impl Db<'_> {
             return f();
         }
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
-        match f() {
-            Ok(v) => {
-                self.conn.execute_batch("COMMIT;")?;
-                Ok(v)
-            }
-            Err(e) => {
-                let _ = self.conn.execute_batch("ROLLBACK;");
-                Err(e)
-            }
+        let out = f().and_then(|v| {
+            crate::faults::check("snapshot_commit")?;
+            // An interrupt aimed at the read can land on its COMMIT instead.
+            self.conn.execute_batch("COMMIT;")?;
+            Ok(v)
+        });
+        if out.is_err() {
+            // Whatever failed, never leave this connection inside a transaction.
+            let _ = self.conn.execute_batch("ROLLBACK;");
         }
+        out
     }
 
     // ------------------------------------------------------------- schema
 
+    /// Whether `name` is a user table. Internal tables (`_rf_*`) are never user tables, so
+    /// no table operation can reach Rowfinity's own metadata by name.
     pub fn table_exists(&self, name: &str) -> Result<bool> {
+        if is_internal_table(name) {
+            return Ok(false);
+        }
         let n: i64 = self.conn.query_row(
             &format!(
                 "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND database_name = current_database() AND table_name = {}",
@@ -103,6 +115,9 @@ impl Db<'_> {
     }
 
     pub fn columns(&self, table: &str) -> Result<Vec<Column>> {
+        if is_internal_table(table) {
+            bail!(NotAllowed(format!("{table} is internal to Rowfinity")));
+        }
         let formulas: HashMap<String, String> = self.formulas(table)?.into_iter().collect();
         let mut cols = self.describe(&self.base_select(table)?)?;
         cols.retain(|c| !is_internal(&c.name));
@@ -412,59 +427,130 @@ impl Db<'_> {
 
     // ------------------------------------------------------------ queries
 
-    /// Expose formula columns to ad-hoc SQL by shadowing each table with a CTE. When the
-    /// query has its own `WITH` list, the shadows are prepended to it, and a user CTE with
-    /// the same name as a table takes precedence.
-    pub fn expand_query(&self, sql: &str) -> Result<String> {
-        let sql = sql.trim().trim_end_matches(';').trim_end();
+    /// Check user SQL against the policy (see `sqlpolicy.rs`) for this workbook's tables.
+    pub fn check(&self, sql: &str) -> Result<CheckedSelect> {
+        sqlpolicy::check_select(self.conn, &storage::user_tables(self.conn)?, sql)
+    }
+
+    /// Expose formula columns to a checked query by shadowing each table it reads with a
+    /// CTE. When the query has its own `WITH` list, the shadows are prepended to it, and a
+    /// user CTE with the same name as a table takes precedence. The user's text is kept
+    /// verbatim on lines of its own.
+    pub fn expand_query(&self, q: &CheckedSelect) -> Result<Expanded> {
+        let sql = q.sql.as_str();
         let mut ctes = Vec::new();
-        for name in storage::user_tables(self.conn)? {
-            if !self.formulas(&name)?.is_empty() {
-                ctes.push((name.clone(), format!("{} AS ({})", ident(&name), self.base_select(&name)?)));
+        for name in &q.sources {
+            if !self.formulas(name)?.is_empty() {
+                ctes.push((name.clone(), format!("{} AS ({})", ident(name), self.base_select(name)?)));
             }
         }
+        let plain = Expanded { sql: sql.to_string(), lines_before: 0, sources: q.sources.clone() };
         if ctes.is_empty() {
-            return Ok(sql.to_string());
+            return Ok(plain);
         }
         match crate::sql::leading_with(sql) {
-            None => Ok(format!("WITH {} {sql}", ctes.into_iter().map(|(_, c)| c).collect::<Vec<_>>().join(", "))),
+            None => {
+                let prefix = format!("WITH {}\n", ctes.into_iter().map(|(_, c)| c).collect::<Vec<_>>().join(", "));
+                Ok(Expanded { lines_before: prefix.matches('\n').count(), sql: format!("{prefix}{sql}"), ..plain })
+            }
             Some(after_with) => {
-                let user = self.cte_names(sql);
+                let user = self.cte_names(sql)?;
                 let ours: Vec<String> = ctes
                     .into_iter()
                     .filter(|(name, _)| !user.iter().any(|u| crate::formula::same_name(u, name)))
                     .map(|(_, c)| c)
                     .collect();
                 if ours.is_empty() {
-                    return Ok(sql.to_string());
+                    return Ok(plain);
                 }
-                Ok(format!("{} {}, {}", &sql[..after_with], ours.join(", "), sql[after_with..].trim_start()))
+                let inserted = format!(" {},\n", ours.join(", "));
+                Ok(Expanded {
+                    lines_before: inserted.matches('\n').count(),
+                    sql: format!("{}{inserted}{}", &sql[..after_with], &sql[after_with..]),
+                    ..plain
+                })
             }
         }
     }
 
     /// Names of the top-level CTEs of a query, from DuckDB's parser (empty if it cannot parse).
-    fn cte_names(&self, sql: &str) -> Vec<String> {
-        let json: Option<String> = self.conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0)).ok();
-        let tree: Value = json.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or(Value::Null);
-        tree["statements"][0]["node"]["cte_map"]["map"]
+    fn cte_names(&self, sql: &str) -> Result<Vec<String>> {
+        let json: String = self.conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0))?;
+        let tree: Value = serde_json::from_str(&json).unwrap_or(Value::Null);
+        Ok(tree["statements"][0]["node"]["cte_map"]["map"]
             .as_array()
             .map(|m| m.iter().filter_map(|e| e["key"].as_str().map(String::from)).collect())
-            .unwrap_or_default()
+            .unwrap_or_default())
+    }
+
+    /// Columns of an expanded query, with its parameters bound.
+    pub fn describe_query(&self, q: &Expanded, params: &[QueryParam]) -> Result<Vec<Column>> {
+        let sql = format!("DESCRIBE SELECT * FROM (\n{}\n)", q.sql);
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| user_error(e.into(), q.lines_before + 1))?;
+        sqlpolicy::bind(&mut stmt, params)?;
+        stmt.raw_execute().map_err(|e| user_error(e.into(), q.lines_before + 1))?;
+        let mut rows = stmt.raw_query();
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let (name, sql_type): (String, String) = (r.get(0)?, r.get(1)?);
+            out.push(Column { kind: Kind::from_sql_type(&sql_type), name, sql_type, formula: None });
+        }
+        Ok(out)
     }
 
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {
+        let r = self.run_query(sql, &[], limit)?;
+        Ok(QueryPreview { columns: r.columns, rows: r.rows, truncated: r.truncated })
+    }
+
+    /// Run a user query in one snapshot: at most `limit` rows (see [`Db::run_preview`]), with
+    /// the time it took, the revision it read and the tables it read.
+    pub fn run_query(&self, sql: &str, params: &[QueryParam], limit: usize) -> Result<QueryResult> {
+        let checked = self.check(sql)?;
+        sqlpolicy::validate_params(&checked.params, params)?;
+        let started = std::time::Instant::now();
         self.snapshot(|| {
-            let select = self.expand_query(sql)?;
-            self.run_preview(&select, limit)
+            let q = self.expand_query(&checked)?;
+            let revision = storage::revision(self.conn)?;
+            let data = storage::data_revisions(self.conn)?;
+            let p = self.run_bounded_query(&q, params, limit, true)?;
+            Ok(QueryResult {
+                columns: p.columns,
+                rows: p.rows,
+                truncated: p.truncated,
+                row_limit: limit.min(limits::MAX_QUERY_ROWS) as u64,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                revision,
+                sources: q.sources.iter().map(|t| SourceRevision { table: t.clone(), data_rev: data.get(t).copied().unwrap_or(0) }).collect(),
+            })
         })
     }
 
-    /// First `limit` rows of a SELECT (at most [`limits::MAX_QUERY_ROWS`] and
-    /// [`limits::MAX_REPLY_BYTES`]), in wire form, with truncation reported.
+    /// First rows of an expanded user query with its parameters bound. `wire_bound` limits
+    /// the rows to [`limits::MAX_QUERY_ROWS`] and the reply to [`limits::MAX_REPLY_BYTES`];
+    /// without it only `limit` bounds them (copies into sheets).
+    pub fn run_bounded_query(&self, q: &Expanded, params: &[QueryParam], limit: usize, wire_bound: bool) -> Result<QueryPreview> {
+        let described = self.describe_query(q, params)?;
+        let limit = if wire_bound { limit.min(limits::MAX_QUERY_ROWS) } else { limit };
+        let select = format!("SELECT * FROM (\n{}\n)", q.sql);
+        self.read_rows(&select, &described, params, limit, wire_bound, q.lines_before + 1)
+    }
+
+    /// First `limit` rows of an application-built SELECT (no parameters), in wire form,
+    /// stopping at [`limits::MAX_QUERY_ROWS`] and [`limits::MAX_REPLY_BYTES`].
     pub fn run_preview(&self, select: &str, limit: usize) -> Result<QueryPreview> {
-        let limit = limit.min(limits::MAX_QUERY_ROWS);
         let described = self.describe(select)?;
+        self.read_rows(select, &described, &[], limit.min(limits::MAX_QUERY_ROWS), true, 0)
+    }
+
+    /// First `limit` rows of an application-built SELECT for copying into a sheet (no
+    /// reply-size limit: the rows go to a sheet, not over the wire, and `limit` bounds them).
+    pub fn run_select(&self, select: &str, limit: usize) -> Result<QueryPreview> {
+        let described = self.describe(select)?;
+        self.read_rows(select, &described, &[], limit, false, 0)
+    }
+
+    fn read_rows(&self, select: &str, described: &[Column], params: &[QueryParam], limit: usize, wire_bound: bool, lines_before: usize) -> Result<QueryPreview> {
         // Address result columns by position, so duplicate or odd names still work.
         let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
         let keep: Vec<usize> = (0..described.len()).filter(|&i| !is_internal(&described[i].name)).collect();
@@ -472,13 +558,15 @@ impl Db<'_> {
         let projection: Vec<String> = keep.iter().map(|&i| wire::projection(&described[i], &aliases[i])).collect();
         let codecs: Vec<Codec> = columns.iter().map(|c| wire::codec(&c.sql_type)).collect();
         let sql = format!(
-            "SELECT {} FROM ({select}) AS _q({}) LIMIT {}",
+            "SELECT {} FROM (\n{select}\n) AS _q({}) LIMIT {}",
             if projection.is_empty() { "NULL".to_string() } else { projection.join(", ") },
             aliases.join(", "),
             limit + 1
         );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query([])?;
+        let mut stmt = self.conn.prepare(&sql).map_err(|e| user_error(e.into(), lines_before + 1))?;
+        sqlpolicy::bind(&mut stmt, params)?;
+        stmt.raw_execute().map_err(|e| user_error(e.into(), lines_before + 1))?;
+        let mut rows = stmt.raw_query();
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut truncated = false;
@@ -491,14 +579,52 @@ impl Db<'_> {
             for (i, codec) in codecs.iter().enumerate() {
                 values.push(wire::decode(*codec, row.get_ref(i)?));
             }
-            bytes += values.iter().map(limits::json_size).sum::<usize>() + 2 * values.len() + 2;
-            if !out.is_empty() && bytes > limits::MAX_REPLY_BYTES {
-                truncated = true;
-                break;
+            if wire_bound {
+                bytes += values.iter().map(limits::json_size).sum::<usize>() + 2 * values.len() + 2;
+                if !out.is_empty() && bytes > limits::MAX_REPLY_BYTES {
+                    truncated = true;
+                    break;
+                }
             }
             out.push(values);
         }
         Ok(QueryPreview { columns, rows: out, truncated })
+    }
+
+    /// Write the complete result of a user query to `path`, from one snapshot, streamed by
+    /// DuckDB. Returns the rows written and the revision read.
+    pub fn export_query(&self, sql: &str, params: &[QueryParam], path: &Path, format: ExportFormat) -> Result<(u64, u64)> {
+        let checked = self.check(sql)?;
+        sqlpolicy::validate_params(&checked.params, params)?;
+        self.snapshot(|| {
+            let q = self.expand_query(&checked)?;
+            let described = self.describe_query(&q, params)?;
+            let keep: Vec<String> = described
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| !is_internal(&c.name))
+                .map(|(i, c)| format!("_c{i} AS {}", ident(&c.name)))
+                .collect();
+            let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
+            let select = format!("SELECT {} FROM (\n{}\n) AS _q({})", keep.join(", "), q.sql, aliases.join(", "));
+            let revision = storage::revision(self.conn)?;
+            let options = copy_options(format);
+            let copy = format!("COPY ({select}) TO {} ({options})", lit(&path.to_string_lossy()));
+            let mut stmt = self.conn.prepare(&copy).map_err(|e| user_error(e.into(), q.lines_before + 1))?;
+            sqlpolicy::bind(&mut stmt, params)?;
+            let rows = stmt.raw_execute().map_err(|e| user_error(e.into(), q.lines_before + 1))?;
+            Ok((rows as u64, revision))
+        })
+    }
+
+    /// Every user table with its columns, from one snapshot.
+    pub fn schema(&self) -> Result<Vec<TableSchema>> {
+        self.snapshot(|| {
+            storage::user_tables(self.conn)?
+                .into_iter()
+                .map(|name| Ok(TableSchema { row_count: self.count_rows(&name)?, columns: self.columns(&name)?, name }))
+                .collect()
+        })
     }
 
     pub fn export_view(&self, id: u64, path: &Path, format: ExportFormat) -> Result<()> {
@@ -506,6 +632,9 @@ impl Db<'_> {
     }
 
     pub fn export_table(&self, table: &str, path: &Path, format: ExportFormat) -> Result<()> {
+        if is_internal_table(table) {
+            bail!(NotAllowed(format!("{table} is internal to Rowfinity")));
+        }
         self.snapshot(|| {
             let select = format!("SELECT * EXCLUDE ({ID}, {ORD}) FROM ({}) ORDER BY {ORD}", self.base_select(table)?);
             self.copy_to(&select, path, format)
@@ -513,11 +642,7 @@ impl Db<'_> {
     }
 
     pub fn copy_to(&self, select: &str, path: &Path, format: ExportFormat) -> Result<()> {
-        let options = match format {
-            ExportFormat::Csv => "FORMAT csv, HEADER",
-            ExportFormat::Parquet => "FORMAT parquet, COMPRESSION zstd",
-            ExportFormat::Json => "FORMAT json",
-        };
+        let options = copy_options(format);
         self.conn
             .execute_batch(&format!("COPY ({select}) TO {} ({options});", lit(&path.to_string_lossy())))
             .with_context(|| format!("writing {}", path.display()))?;
@@ -546,6 +671,47 @@ impl Db<'_> {
         }
         Ok(out)
     }
+}
+
+fn copy_options(format: ExportFormat) -> &'static str {
+    match format {
+        ExportFormat::Csv => "FORMAT csv, HEADER",
+        ExportFormat::Parquet => "FORMAT parquet, COMPRESSION zstd",
+        ExportFormat::Json => "FORMAT json",
+    }
+}
+
+/// A checked user query with formula columns exposed, ready to run.
+#[derive(Debug, Clone)]
+pub(crate) struct Expanded {
+    pub sql: String,
+    /// Lines added before the user's text, so error positions can be reported in it.
+    pub lines_before: usize,
+    pub sources: Vec<String>,
+}
+
+/// DuckDB's error for user SQL, with `LINE n:` counted in the user's own text.
+pub(crate) fn user_error(e: anyhow::Error, lines_before: usize) -> anyhow::Error {
+    let text = format!("{e:#}");
+    if lines_before == 0 || !text.contains("LINE ") {
+        return e;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("LINE ") {
+        out.push_str(&rest[..i + 5]);
+        rest = &rest[i + 5..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        match digits.parse::<usize>() {
+            Ok(n) if n > lines_before && rest[digits.len()..].starts_with(':') => {
+                out.push_str(&(n - lines_before).to_string());
+                rest = &rest[digits.len()..];
+            }
+            _ => {}
+        }
+    }
+    out.push_str(rest);
+    anyhow!(out)
 }
 
 pub(crate) fn filter_sql(col: &Column, f: &Filter) -> Result<String> {

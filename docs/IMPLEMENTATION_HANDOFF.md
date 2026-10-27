@@ -1,36 +1,45 @@
 # Implementation handoff
 
-Updated: 26 October 2026. Branch `phase-3-bounded-execution` (from `phase-2-local-spreadsheet` at `7c9c65e`).
-Nothing pushed; no PR. Research docs (`docs/RESEARCH.md`, `OPEN_SOURCE_ASSESSMENT.md`, `SQL_AND_CUSTOM_FUNCTIONS.md`)
-are excluded via `.git/info/exclude` and must never be committed.
+Updated: 26 October 2026. Branch `claude/eager-ramanujan-lns8s1` (from `main` at `bbd4c2c`, phase 3 merged).
 
 ## State
 
-Phase 3 is complete locally: 3.01–3.09, 3.11–3.15, 3.T01–3.T03 and the 3.10 gate are checked in
-IMPLEMENTATION_CHECKLIST.md with evidence in TEST_MATRIX.md (results table, test packages, gate commands).
-CI has not run this branch; the first CI run will also be the first Linux run of the phase-3 tests (CI mounts a
-64 MB tmpfs for `storage_faults.rs`).
+Phase 4 (SQL workspace) is complete locally: 4.01–4.08, 4.T01, 4.T02 and the 4.09 gate are checked in
+IMPLEMENTATION_CHECKLIST.md with evidence in TEST_MATRIX.md ("## Phase 4": contracts, results, baseline,
+gate commands). Phases 1–3 are unchanged except for the fixes listed there (a reader left inside a failed
+transaction, internal-table names accepted by table operations, a Views-menu loading race).
+CI has not run this branch yet; all results are from a Linux x86_64 cloud container (gate: TEST_MATRIX 4.09).
 
-Next phase: 4 (SQL workspace), not started.
+Not started: phase 5 and later. Phase 7 (identities, roles, sharing) is not implied by anything here.
+
+Storage format is now **3** (data revisions, saved queries, materialization provenance). Older files migrate
+on open with a `.v<N>.bak` copy; `tests/fixtures/v2/` is a real format-2 workbook written by the phase-3
+server. `docs/SQL_AND_CUSTOM_FUNCTIONS.md`, named in the checklist header, is not in this repository.
 
 ## Verify
 
 ```bash
-ROWFINITY_SMALL_FS=<small fs> cargo test --workspace     # 166 tests; disk-full test runs only with the env var
+cargo test --workspace                                   # PROPTEST_CASES=96 in CI
+ROWFINITY_SMALL_FS=<64 MB fs> cargo test --workspace --test storage_faults
 cargo clippy --workspace --all-targets -- -D warnings
-cd web && npm run build && cd .. && cargo build -p rowfinity-server && cd web && npx playwright test   # 29
+cd web && npm run build && cd .. && cargo build --workspace --all-targets
+cd web && npx playwright test                            # 41 tests; needs Google Chrome, or:
+E2E_CHROME_PATH=/opt/pw-browsers/chromium-1243/chrome-linux64/chrome npx playwright test
 ```
-macOS small fs: `hdiutil create -size 64m -fs HFS+ -volname rfsmall -ov rfsmall.dmg && hdiutil attach rfsmall.dmg -mountpoint <dir> -nobrowse`.
+Use `--workspace` for every cargo command: `-p <crate>` resolves features differently and rebuilds DuckDB
+(10+ minutes on 4 cores).
 
 ## Known gaps
 
-- Power loss / host failure durability untested; limits are DuckDB-level, not OS-level; Local provider only (no
-  multi-node failover) — see DURABILITY.md.
-- No automated test for the client's "overloaded" retry, the kept-change bounds, or the paste guard.
-- One unexplained "server did not start" browser failure early in phase 3 (did not recur in 8+ full runs).
-- Each Playwright spec file leaves an empty data directory in TMPDIR (pre-existing `Server` constructor behaviour).
+- `too_large` from query → sheet carries its row limit only in the message text; the UI parses it.
+- `query` on an UPDATE/DELETE names the statement kind but does not count affected rows in advance.
+- Pre-existing formula columns that use functions now refused (e.g. `current_setting`) still evaluate; the
+  function policy applies when a formula is added or changed.
+- `runtime.rs::eviction_racing_new_work_never_serves_from_a_closed_workbook` can miss its own "≥ 10
+  evictions in 60 s" precondition under heavy CPU contention (seen once at baseline, never since).
+- Power loss / host failure, OS-level limits, multi-node: unchanged from DURABILITY.md.
 
 ## Temporary resources
 
-A 64 MB disk image may still be attached at the session scratchpad (`rfsmall`); detach with `hdiutil detach`.
-A phase-2 dev server may still run on :7878.
+The baseline worktree used for comparison has been removed. A 64 MB tmpfs may be mounted at
+`/mnt/rfsmall` (disk-full tests). No servers are left running.

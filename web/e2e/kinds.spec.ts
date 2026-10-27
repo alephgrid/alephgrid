@@ -30,7 +30,7 @@ test("tables and sheets are labelled and copies report what was left out", async
   await expect(badge).toHaveText("Sheet");
   await expect(badge).toHaveAttribute("title", /at most 1,000 rows/);
 
-  // Query → sheet over the limit says so.
+  // Query → sheet over the limit says so up front, and asks before leaving rows out.
   await page.getByRole("button", { name: "SQL" }).click();
   const sql = page.getByRole("dialog", { name: "SQL" });
   await sql.locator("textarea").fill("SELECT i FROM range(1500) r(i)");
@@ -38,5 +38,7 @@ test("tables and sheets are labelled and copies report what was left out", async
   const name = page.getByRole("dialog", { name: "Open result in a new sheet" });
   await expect(name).toContainText("at most the first 1,000 rows");
   await name.getByRole("button", { name: "Create sheet" }).click();
+  const confirm = page.getByRole("alertdialog", { name: "Copy only the first 1,000 rows?" });
+  await confirm.getByRole("button", { name: "Copy first 1,000 rows" }).click();
   await expect(page.locator(".toast").last()).toContainText("Copied the first 1,000 rows of the query result", { timeout: 60_000 });
 });

@@ -4,6 +4,7 @@
 //! expansion, `props` property/state-machine tests against a reference model.
 
 mod basic;
+mod capabilities;
 mod formulas;
 mod import;
 mod integrity;
@@ -11,6 +12,7 @@ mod precision;
 mod props;
 mod sheets;
 mod sql;
+mod sqlwork;
 mod storage;
 mod views;
 mod xlsx;
@@ -80,4 +82,25 @@ pub(crate) fn sheet_input(row: u32, column: u32, value: &str) -> SheetInput {
 
 pub(crate) fn cell_text(wb: &Workbook, sheet: u32, row: u32, column: u32) -> Option<String> {
     wb.sheets().fetch(sheet, row, 1, column + 1).unwrap().rows[0].get(column as usize).cloned().flatten().map(|c| c.0)
+}
+
+/// Everything a refused or failed operation must leave unchanged: revision, history, every
+/// table's contents (internal ones included), sheets and the settings user SQL could reach.
+pub(crate) fn fingerprint(wb: &Workbook) -> String {
+    let mut out = vec![format!("revision {}", wb.revision().unwrap())];
+    let tables = wb.raw_query(
+        "SELECT table_name FROM duckdb_tables() WHERE database_name = current_database() AND schema_name = 'main' ORDER BY table_name",
+    );
+    for row in tables.unwrap() {
+        let duckdb::types::Value::Text(name) = &row[0] else { panic!("{row:?}") };
+        let q = crate::sql::ident(name);
+        let digest = wb.raw_query(&format!("SELECT count(*), md5(coalesce(string_agg(CAST(x AS VARCHAR), '|' ORDER BY CAST(x AS VARCHAR)), '')) FROM {q} AS x")).unwrap();
+        out.push(format!("{name}: {:?}", digest[0]));
+    }
+    for setting in ["enable_external_access", "allowed_directories", "autoload_known_extensions", "autoinstall_known_extensions", "memory_limit", "threads"] {
+        out.push(format!("{setting} = {:?}", wb.raw_query(&format!("SELECT current_setting('{setting}')::VARCHAR")).unwrap()[0]));
+    }
+    let sheets: Vec<String> = wb.sheets().list().into_iter().map(|s| format!("{}:{}x{}", s.name, s.rows, s.columns)).collect();
+    out.push(format!("sheets {sheets:?}"));
+    out.join("\n")
 }

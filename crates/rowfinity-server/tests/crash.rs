@@ -167,3 +167,41 @@ async fn a_killed_servers_allocations_are_reconciled_on_restart() {
     ws.close().await;
     p.kill();
 }
+
+/// 4.05/4.06: SIGKILL while a table is being made from a query and while a materialized
+/// table is being refreshed. After restart the new table either does not exist or is
+/// complete, and the refreshed table holds either all old rows or all new ones, with
+/// provenance that matches them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_killed_materialization_or_refresh_is_all_or_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = spawn(dir.path()).await;
+    let wb = post_json(p.addr, "/api/workbooks", json!({ "name": "mat" })).await["id"].as_str().unwrap().to_string();
+    let mut ws = Ws::connect(p.addr, &wb).await;
+    let n: u64 = 20_000_000;
+    ws.ok("create_table_from_query", json!({ "name": "src", "sql": format!("SELECT i, i % 97 AS k FROM range({n}) r(i)") })).await;
+    ws.ok("create_table_from_query", json!({ "name": "m", "sql": "SELECT i, k * 2 AS k2 FROM src ORDER BY hash(i)" })).await;
+    let v = ws.ok("open_view", json!({ "spec": { "table": "src" } })).await["view_id"].as_u64().unwrap();
+    ws.ok("edit", json!({ "view_id": v, "edits": [{ "row": 0, "column": "k", "value": "1000" }] })).await;
+    // Start a refresh and a second, new materialization; kill once the server reports progress.
+    ws.send_raw(json!({ "id": 900, "op": "refresh_materialized", "table": "m" })).await;
+    ws.send_raw(json!({ "id": 901, "op": "create_table_from_query", "name": "fresh", "sql": "SELECT i, k FROM src ORDER BY k, i" })).await;
+    ws.event("progress").await;
+    p.kill();
+
+    let p = spawn(dir.path()).await;
+    let mut ws = Ws::connect(p.addr, &wb).await;
+    let r = ws.ok("query", json!({ "sql": "SELECT count(*), max(k2), count(*) FILTER (WHERE k2 = 2000) FROM m" })).await["rows"][0].clone();
+    assert_eq!(r[0], json!(n), "m keeps exactly one complete set of rows: {r}");
+    let refreshed = r[2] == json!(1);
+    assert!(refreshed || r[1] == json!(192), "old rows (max 2 × 96) or new rows (one 2000): {r}");
+    let m = ws.ok("materialized", json!({})).await;
+    let rec = m.as_array().unwrap().iter().find(|x| x["table"] == "m").unwrap().clone();
+    assert_eq!(rec["stale"], json!(!refreshed), "the record matches the rows that survived: {rec}");
+    let tables: Vec<String> = ws.ok("tables", json!({})).await.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    if tables.contains(&"fresh".to_string()) {
+        assert_eq!(ws.ok("query", json!({ "sql": "SELECT count(*) FROM fresh" })).await["rows"][0][0], json!(n));
+    }
+    ws.close().await;
+    p.kill();
+}

@@ -187,17 +187,28 @@ Gate 3.10 also requires the local runtime/lifecycle tasks 3.11–3.15 and their 
 
 Build on the existing SQL console. Depends on phases 1–3; shared query permissions depend on phase 7.
 
-- [ ] **4.01** Add a schema browser and table/column autocomplete.
-- [ ] **4.02** Support safely bound query parameters and clear parse/runtime errors.
-- [ ] **4.03** Show bounded result previews, explicit truncation, execution timing, cancellation and full export actions.
-- [ ] **4.04** Save, rename, reopen and version queries; keep local queries private until sharing permissions exist.
-- [ ] **4.05** Complete result-to-table and bounded result-to-sheet workflows.
-- [ ] **4.06** Distinguish saved SQL, live query views and materialized results; track source revisions and refresh status.
-- [ ] **4.07** Restrict SQL/formula capabilities, external readers, extension loading and internal metadata access for shared-host mode; console disabling alone is insufficient.
-- [ ] **4.08** Route supported mutations through operations that maintain Rowfinity metadata, history and revisions.
-- [ ] **4.T01** Test 4.01–4.06: schema/autocomplete correctness, bound parameters, hostile strings, joins/CTEs/calculated columns, exact values, truncated previews, cancellation and saved-result refresh/reopen in API and browser journeys.
-- [ ] **4.T02** Test 4.07–4.08: direct SQL and formula attempts to access files/network/internal metadata, install extensions or bypass mutation bookkeeping; verify rejection and unchanged durable state, including statements that appear read-only.
-- [ ] **4.09 — Gate:** Verify joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and result materialization end to end.
+- [x] **4.01** Add a schema browser and table/column autocomplete.
+  - Test: `sqlwork.rs` schema, `sqlworkspace.rs` (WS), `sql.spec.ts` tree/quoting/completion. Evidence: TEST_MATRIX 4.01.
+- [x] **4.02** Support safely bound query parameters and clear parse/runtime errors.
+  - Test: `sqlpolicy.rs` unit, `sqlwork.rs` parameters/errors, `sqlworkspace.rs` codes and redaction. Evidence: TEST_MATRIX 4.02.
+- [x] **4.03** Show bounded result previews, explicit truncation, execution timing, cancellation and full export actions.
+  - Test: `sqlwork.rs` previews/exports, `sqlworkspace.rs` cancel isolation, exports, races; `sql.spec.ts`. Evidence: TEST_MATRIX 4.03 (fixed a reader left inside a failed transaction).
+- [x] **4.04** Save, rename, reopen and version queries; keep local queries private until sharing permissions exist.
+  - Test: `sqlwork.rs` versions/reopen, `sqlworkspace.rs` restart, `sql.spec.ts`. Evidence: TEST_MATRIX 4.04. Saved queries are visible to anyone who can open the workbook (no identities before phase 7); the unsaved draft stays in the browser.
+- [x] **4.05** Complete result-to-table and bounded result-to-sheet workflows.
+  - Test: `sqlwork.rs` sheet limits, `sql.spec.ts`, `kinds.spec.ts`. Evidence: TEST_MATRIX 4.05.
+- [x] **4.06** Distinguish saved SQL, live query views and materialized results; track source revisions and refresh status.
+  - Test: `sqlwork.rs` materializations and data revisions, `storage.rs` v2 fixture, `crash.rs` kill during refresh, `sql.spec.ts`. Evidence: TEST_MATRIX 4.06 (storage format 3).
+- [x] **4.07** Restrict SQL/formula capabilities, external readers, extension loading and internal metadata access for shared-host mode; console disabling alone is insufficient.
+  - Test: `capabilities.rs`, `sqlpolicy.rs`, `sqlworkspace.rs` lockdown. Evidence: TEST_MATRIX 4.07 (fixed multi-statement execution and internal-table access). Applies to every server, not only shared hosts. Not organization authorization (phase 7).
+- [x] **4.08** Route supported mutations through operations that maintain Rowfinity metadata, history and revisions.
+  - Test: `capabilities.rs` reference model and refusals, `sqlworkspace.rs`, `sql.spec.ts`. Evidence: TEST_MATRIX 4.08. INSERT/UPDATE/DELETE only; other DDL/DML refused.
+- [x] **4.T01** Test 4.01–4.06: schema/autocomplete correctness, bound parameters, hostile strings, joins/CTEs/calculated columns, exact values, truncated previews, cancellation and saved-result refresh/reopen in API and browser journeys.
+  - Evidence: TEST_MATRIX 4.T01; pass 2026-10-26 (local).
+- [x] **4.T02** Test 4.07–4.08: direct SQL and formula attempts to access files/network/internal metadata, install extensions or bypass mutation bookkeeping; verify rejection and unchanged durable state, including statements that appear read-only.
+  - Evidence: TEST_MATRIX 4.T02; pass 2026-10-26 (local).
+- [x] **4.09 — Gate:** Verify joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and result materialization end to end.
+  - Evidence: TEST_MATRIX 4.09 gate run 2026-10-26 (local Linux; CI not yet run on this branch).
 
 ## 5. Add user-defined formula functions
 

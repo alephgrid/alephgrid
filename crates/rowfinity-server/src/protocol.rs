@@ -4,8 +4,9 @@
 
 use rowfinity_engine::{
     Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
-    HistoryEntry, Kind, PreviewColumn, QueryPreview, RowBlock, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, Stats, TableInfo,
-    UploadPreview, ViewInfo, ViewSpec,
+    HistoryEntry, Kind, MaterializedSource, MaterializedTable, ParamType, PreviewColumn, QueryKind, QueryParam, QueryPreview, QueryResult,
+    QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
+    Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec,
 };
 use ts_rs::{Config, TS};
 
@@ -18,7 +19,7 @@ use crate::runtime::{
     RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
 };
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace};
-use crate::ws::{Event, Op};
+use crate::ws::{Event, Op, QueryExport};
 
 const HEADER: &str = "\
 // Generated from the Rust types in crates/rowfinity-engine and crates/rowfinity-server.
@@ -34,7 +35,8 @@ export type SheetCell = [string, Align, string?];
 export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: number };
 
 /** Machine-readable reason of a failed request. */
-export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\";
+export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\"
+  | \"not_allowed\" | \"sql_change\" | \"bad_parameter\" | \"schema_changed\";
 
 /** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
 export type Reply =
@@ -73,7 +75,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("update_formula", "null"),
     ("drop_column", "null"),
     ("rename_column", "null"),
-    ("query", "QueryPreview"),
+    ("query", "QueryResult"),
     ("create_table_from_query", "TableInfo"),
     ("create_demo_table", "TableInfo"),
     ("drop_table", "null"),
@@ -99,6 +101,16 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("table_from_view", "TableInfo"),
     ("sheet_to_table", "TableInfo"),
     ("history", "HistoryEntry[]"),
+    ("schema", "TableSchema[]"),
+    ("export_query", "QueryExport"),
+    ("sql_change", "SqlChangeOutcome"),
+    ("saved_queries", "SavedQuery[]"),
+    ("query_versions", "QueryVersion[]"),
+    ("save_query", "SavedQuery"),
+    ("rename_query", "SavedQuery"),
+    ("delete_query", "null"),
+    ("materialized", "MaterializedTable[]"),
+    ("refresh_materialized", "MaterializedTable"),
     ("cancel", "boolean"),
 ];
 
@@ -114,7 +126,8 @@ pub fn bindings() -> String {
     decls!(
         &cfg, out,
         Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
-        Stats, QueryPreview, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
+        Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
+        MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
         HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,

@@ -362,8 +362,12 @@ async fn uploads_are_bounded_by_size_and_by_the_temp_budget() {
     }
     assert_eq!(files_under(&uploads).len(), 1);
     // Within the limit but beyond what is left of the budget: 507, nothing left behind.
-    let res = server.http.post(server.url(&format!("/api/workbooks/{wb}/uploads?filename=d.csv"))).body(csv(900_000)).send().await.unwrap();
-    assert_eq!(res.status(), 507);
+    // The server answers 507 as soon as the budget runs out, possibly while the client is
+    // still sending (as for 413 above): it may see the 507 or a reset; nothing is stored.
+    let res = server.http.post(server.url(&format!("/api/workbooks/{wb}/uploads?filename=d.csv"))).body(csv(900_000)).send().await;
+    if let Ok(res) = res {
+        assert_eq!(res.status(), 507);
+    }
     assert_eq!(staged_bytes().await, 1 << 20, "failed uploads released their reservation");
     assert_eq!(files_under(&uploads).len(), 1, "only the staged upload is on disk");
     // Discarding the staged upload frees the space.
@@ -397,6 +401,10 @@ async fn a_client_that_does_not_read_is_cut_off_with_bounded_buffering() {
         let (s, _) = tokio_tungstenite::connect_async(format!("ws://{}/ws/{wb}", server.addr)).await.unwrap();
         s.split()
     };
+    // Registered before it sends anything (and so before it can be cut off); otherwise "one
+    // session left" below could hold before the slow session even existed.
+    let state = server.state.clone();
+    eventually("the slow session is registered", move || state.sessions.lock().unwrap().len() == 2).await;
     {
         use futures_util::SinkExt;
         let v = server.state.controller.handle(&wb).unwrap();
