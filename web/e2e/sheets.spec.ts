@@ -100,6 +100,8 @@ test("gate: a new user creates, imports, edits and reopens a table and a sheet w
   await page.locator('.workbook input[type="file"]').setInputFiles({ name: "costs.csv", mimeType: "text/csv", buffer: Buffer.from("item,cost\nrent,1200\nfood,350.5\n") });
   await page.getByRole("dialog", { name: "Import costs.csv" }).getByRole("button", { name: "Import table" }).click();
   await expect(page.getByRole("tab", { name: /costs/ })).toBeVisible();
+  // Import publishes the tab before the table view has finished opening.
+  await expect(page.locator(".row-count")).toHaveText("2 rows");
   await type(page, [2, 0], "travel");
   await type(page, [2, 1], "99.5");
   await expect(page.locator(".row-count")).toHaveText("3 rows");

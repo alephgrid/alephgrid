@@ -75,6 +75,16 @@ struct Envelope {
 #[derive(Debug, Deserialize, TS)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
+    Analyze { spec: rowfinity_engine::AnalysisSpec },
+    Analyses,
+    SaveAnalysis { saved: Option<String>, name: String, spec: rowfinity_engine::AnalysisSpec, chart: bool },
+    DeleteAnalysis { analysis: String },
+    MaterializeAnalysis { name: String, spec: rowfinity_engine::AnalysisSpec },
+    ReplacePreview { spec: rowfinity_engine::ReplaceSpec },
+    ReplaceApply { spec: rowfinity_engine::ReplaceSpec, revision: u64 },
+    ReplaceUndo { revision: u64 },
+    Presentation { table: String },
+    SavePresentation { table: String, presentation: rowfinity_engine::Presentation },
     Functions,
     TestFunction { definition: rowfinity_engine::FunctionDefinition },
     PublishFunction { definition: rowfinity_engine::FunctionDefinition },
@@ -221,11 +231,11 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SavedViews { .. } | History { .. }
+        Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
-        TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
+        Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } => None,
-        PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
+        MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
     }
@@ -332,6 +342,10 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
                 }
             }
         }
+        Op::Analyze { spec } => json!(r.analyze(&spec)?),
+        Op::Analyses => json!(r.analyses()?),
+        Op::ReplacePreview { spec } => json!(r.replace_preview(&spec)?),
+        Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {
             if definition.kind == rowfinity_engine::FunctionKind::Sql { require_sql(ctx)?; }
             json!(r.test_function(&definition)?)
@@ -357,6 +371,12 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
+        Op::SaveAnalysis { saved, name, spec, chart } => (json!(wb.save_analysis(saved.as_deref(), &name, spec, chart)?),Some(Event::Resync {})),
+        Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync {})) },
+        Op::MaterializeAnalysis { name, spec } => (json!(wb.materialize_analysis(&name,&spec)?),tables()),
+        Op::ReplaceApply { spec, revision } => {let out=wb.replace_apply(&spec,revision)?;let event=changed(out.table.clone());(json!(out),event)},
+        Op::ReplaceUndo { revision } => {let out=wb.replace_undo(revision)?;let event=changed(out.table.clone());(json!(out),event)},
+        Op::SavePresentation { table, presentation } => (json!(wb.save_presentation(&table,presentation)?),Some(Event::Resync {})),
         Op::PublishFunction { definition } => {
             if definition.kind == rowfinity_engine::FunctionKind::Sql { require_sql(ctx)?; }
             (json!(wb.publish_function(definition)?), Some(Event::Resync {}))

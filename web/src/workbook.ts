@@ -1,3 +1,5 @@
+import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
+import { AnalysisWorkspace, replaceDialog } from "./analysis";
 import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
@@ -141,6 +143,10 @@ export class WorkbookScreen {
   private sheetButtons: HTMLElement[] = [];
   /** The open SQL workspace, if any (it receives server events). */
   private sql: SqlWorkspace | null = null;
+  private analysis: AnalysisWorkspace | null = null;
+  private presentation = emptyPresentation();
+  private closePresentation: (() => void) | null = null;
+  private closeReplace: (() => void) | null = null;
   /** Tables made from a query, and the saved queries they may name. */
   private materialized: MaterializedTable[] = [];
   private savedQueries: SavedQuery[] = [];
@@ -167,6 +173,9 @@ export class WorkbookScreen {
     const self = this;
     this.grid = new Grid(
       {
+        frozen: () => this.isSheet() ? 0 : this.presentation.frozen,
+        format: (value, column) => displayValue(value, column, this.presentation.formats[column.name]),
+        color: (value, column) => cellColor(value, column.name, this.presentation.rules),
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
         columns: () => (this.isSheet() ? this.sheetCols : this.view?.columns ?? []),
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
@@ -302,6 +311,9 @@ export class WorkbookScreen {
     this.closeFunctions?.();
     this.disposeFunctionCompletion?.();
     this.sql?.close();
+    this.analysis?.close();
+    this.closeReplace?.();
+    this.closePresentation?.();
     this.rpc.close();
     clearTimeout(this.statsTimer);
     for (const t of this.timers) clearTimeout(t);
@@ -348,6 +360,8 @@ export class WorkbookScreen {
         (e.target as HTMLInputElement).value = "";
       } });
     this.tableButtons = [
+      el("button", { class: "btn", onclick: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } } }, "Format table"),
+      el("button", { class: "btn", onclick: async () => { if (this.active?.kind !== "table") return; this.closeReplace?.(); try { this.closeReplace = await replaceDialog(this.rpc, this.active.name, this.meta.id); } catch (e) { toast(String(e), "error"); } } }, "Find / replace"),
       el("button", { class: "btn", onclick: (e: MouseEvent) => this.viewsMenu(e) }, "Views ▾"),
       el("button", { class: "btn", onclick: () => this.addColumnDialog() }, "Add column"),
       el("button", { class: "btn", onclick: () => this.filterDialog(this.grid.active.c) }, "Filter"),
@@ -365,6 +379,7 @@ export class WorkbookScreen {
         ...this.sheetButtons,
         el("button", { class: "btn", onclick: () => this.fileInput.click() }, "Import"),
         ...this.tableButtons,
+        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); }); } }, "Analyze"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
@@ -638,6 +653,8 @@ export class WorkbookScreen {
     this.loadSavedViews();
     this.busy("Opening…");
     try {
+      this.presentation = await this.rpc.call("presentation", { table: name });
+      this.spec.hidden = this.presentation.hidden;
       const info = await this.rpc.call("open_view", { spec: this.spec });
       this.applyView(info, true);
       this.grid.scrollToTop();
@@ -650,12 +667,22 @@ export class WorkbookScreen {
     this.renderTabs();
   }
 
+  private async reloadPresentation(table: string): Promise<void> {
+    const p = await this.rpc.call("presentation", { table });
+    if (this.active?.kind !== "table" || this.active.name !== table) return;
+    if (JSON.stringify(p) === JSON.stringify(this.presentation)) return;
+    this.presentation = p;
+    await this.setSpec({ ...this.spec, hidden: p.hidden });
+    this.grid.invalidate();
+  }
+
   private async openSheet(index: number): Promise<void> {
     this.gridWrap.querySelector(".empty")?.remove();
     this.closeTableView();
     const info = this.sheets.find((s) => s.index === index);
     if (!info) return;
     this.active = { kind: "sheet", index, name: info.name };
+    this.presentation = emptyPresentation();
     this.grid.setLabel(`Sheet ${info.name}`);
     this.applySheetInfo(info, true);
     this.renderSnapshot();
@@ -1526,6 +1553,7 @@ export class WorkbookScreen {
   private async onEvent(e: ServerEvent): Promise<void> {
     const a = this.active;
     this.sql?.onEvent(e);
+    this.analysis?.onEvent(e);
     switch (e.event) {
       case "cells_changed":
         if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) {
@@ -1562,6 +1590,7 @@ export class WorkbookScreen {
         if (e.reason === "shutdown") toast("The server is restarting…");
         break;
       case "resync":
+        if (a?.kind === "table") await this.reloadPresentation(a.name);
         // Events were dropped: refresh everything shown.
         await this.resync();
         break;

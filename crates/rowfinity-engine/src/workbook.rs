@@ -1521,6 +1521,11 @@ fn update_view(db: &Db, id: u64, spec: ViewSpec) -> Result<ViewInfo> {
 }
 
 impl Reader {
+    pub fn analyze(&self,spec:&crate::AnalysisSpec)->Result<crate::AnalysisResult>{crate::analysis::analyze(&self.db(),spec)}
+    pub fn analyses(&self)->Result<Vec<crate::SavedAnalysis>>{crate::analysis::analyses(&self.conn)}
+    pub fn presentation(&self,table:&str)->Result<crate::Presentation>{crate::analysis::presentation(&self.db(),table)}
+    pub fn replace_preview(&self,spec:&crate::ReplaceSpec)->Result<crate::ReplacePreview>{crate::analysis::replace_preview(&self.db(),spec)}
+
     pub fn test_function(&self, definition: &crate::FunctionDefinition) -> Result<Vec<crate::FunctionTestResult>> { crate::functions::test_definition(&self.conn, definition) }
     pub fn functions(&self) -> Result<Vec<crate::WorkbookFunction>> { crate::functions::list(&self.conn) }
     /// Apply DuckDB settings; settings such as `memory_limit` and `threads` belong to the
