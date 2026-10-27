@@ -570,3 +570,14 @@ browser matrix. The full-disk fault scenario requires `ROWFINITY_SMALL_FS` and s
 The first browser run passed 48/49; the import journey exposed a test readiness race (the tab appears before
 its view opens), now synchronized on loaded rows. An initial Rust link failed because local build artifacts
 filled the disk; clearing generated artifacts and rebuilding with incremental compilation disabled succeeded.
+
+### Phase 6 CI timing regression follow-up (28 October 2026)
+
+CI run 40536789345 exposed two UI races: function activation refreshed the version selector
+while a rollback selection was being made, and table controls were enabled before the view
+finished opening. Version selection is now disabled through mutation/refresh, and table
+controls remain disabled until a view is available. The existing function and saved-view
+journeys hold specific WebSocket replies to exercise these states deterministically.
+Both readiness assertions failed against the old build; after the fixes, frontend type
+checking/bundling, server rebuild and all **49 browser tests passed** locally. No retries or
+longer timeouts were added. Remote CI results must be checked separately.

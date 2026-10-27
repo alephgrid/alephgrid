@@ -139,7 +139,7 @@ export class WorkbookScreen {
   /** Shown when the workbook cannot be opened (incompatible, held elsewhere, no capacity). */
   private failureEl = el("div", { class: "fatal workbook-failure", role: "alert", hidden: true });
   private fileInput!: HTMLInputElement;
-  private tableButtons: HTMLElement[] = [];
+  private tableButtons: HTMLButtonElement[] = [];
   private sheetButtons: HTMLElement[] = [];
   /** The open SQL workspace, if any (it receives server events). */
   private sql: SqlWorkspace | null = null;
@@ -556,7 +556,10 @@ export class WorkbookScreen {
 
   private updateToolbar(): void {
     const sheet = this.isSheet();
-    for (const b of this.tableButtons) b.hidden = sheet || !this.active;
+    for (const b of this.tableButtons) {
+      b.hidden = sheet || !this.active;
+      b.disabled = !this.view;
+    }
     for (const b of this.sheetButtons) b.hidden = !sheet;
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
@@ -727,6 +730,7 @@ export class WorkbookScreen {
 
   private applyView(info: ViewInfo, reset: boolean): void {
     this.view = info;
+    this.updateToolbar();
     this.spec = info.spec;
     if (reset) {
       this.cache.reset(info.view_id, info.columns.length);
