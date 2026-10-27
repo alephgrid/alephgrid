@@ -96,6 +96,43 @@ impl Sheets {
         }
     }
 
+    pub fn has_function_name(&self, name: &str) -> bool {
+        self.model.as_ref().is_some_and(|m| m.get_model().workbook.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(name)))
+    }
+
+    pub fn has_function_definition(&self, d: &crate::functions::FunctionDefinition) -> bool {
+        self.model.as_ref().is_some_and(|m| m.get_model().workbook.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(&d.name) && n.sheet_id.is_none() && n.formula == crate::functions::canonical_lambda(d)) && !m.get_model().workbook.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(&d.name) && n.sheet_id.is_some()))
+    }
+
+    /// Registry changes clear cell undo history so undo cannot change a function pin.
+    pub fn install_function(&mut self, d: &crate::functions::FunctionDefinition) -> Result<()> {
+        if self.model.as_ref().is_some_and(|m| m.get_model().workbook.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(&d.name) && n.sheet_id.is_some())) {
+            bail!("sheet-local imported name conflicts with workbook function {}", d.name);
+        }
+        if self.has_function_definition(d) { return Ok(()); }
+        if self.model.is_none() { self.create("Sheet1")?; }
+        let model = self.model_mut()?;
+        let exists = model.get_model().workbook.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(&d.name));
+        let formula = crate::functions::lambda(d);
+        if exists { model.update_defined_name(&d.name, None, &d.name, None, &formula).map_err(|e| anyhow!(e))?; }
+        else { model.new_defined_name(&d.name, None, &formula).map_err(|e| anyhow!(e))?; }
+        model.evaluate();
+        self.undo_groups.clear(); self.redo_groups.clear();
+        Ok(())
+    }
+
+    pub fn test_function_call(&mut self, d: &crate::functions::FunctionDefinition, args: &[String]) -> Result<String> {
+        // Scratch model only. Values cannot inject formulas; ranges are entered in real sheets.
+        let mut inputs = Vec::new();
+        for (i, value) in args.iter().enumerate() {
+            inputs.push(SheetInput { row: 0, column: i as u32, value: if value.starts_with('=') { format!("'{value}") } else { value.clone() } });
+        }
+        let refs = (0..args.len()).map(|i| format!("{}1", column_name(i as u32))).collect::<Vec<_>>().join(",");
+        inputs.push(SheetInput { row: 1, column: 0, value: format!("={}({refs})", d.name) });
+        self.set(0, &inputs)?;
+        self.model()?.get_formatted_cell_value(0, 2, 1).map_err(|e| anyhow!(e))
+    }
+
     pub fn to_bytes(&self) -> Option<Vec<u8>> {
         self.model.as_ref().map(|m| m.to_bytes())
     }

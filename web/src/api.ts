@@ -135,7 +135,7 @@ export function stageUpload(
 /** Operations that change nothing: never given a mutation id, retried when the server is busy. */
 const READS = new Set<OpName>([
   "tables", "open_view", "update_view", "view_info", "close_view", "fetch", "stats", "query", "sheets", "sheet_fetch",
-  "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
+  "functions", "test_function", "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
   // Writes a file to download but changes no data: never kept and resent after a reconnect.
   "export_query",
 ]);

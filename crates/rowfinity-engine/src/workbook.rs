@@ -130,6 +130,7 @@ impl Workbook {
         // Lets long statements (imports, sorts) report progress to the UI.
         conn.set_query_progress_tracking(true)?;
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
+        crate::functions::check_runtime(&conn, &crate::functions::list(&conn)?)?;
         let sheets = Sheets::from_bytes(bytes)?;
         Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], report })
     }
@@ -1251,6 +1252,20 @@ impl Workbook {
             }
             let out = result?;
             if changed {
+                // A new sheet model (after deleting all sheets or importing XLSX) must
+                // receive the registry's exact pins. Registry pins take precedence over imported definitions.
+                let functions = crate::functions::list(&wb.conn)?;
+                {
+                    let mut sheets = wb.shared.sheets.lock().unwrap_or_else(|e| e.into_inner());
+                    if !sheets.list().is_empty() {
+                        for f in functions {
+                            let v = f.versions.iter().find(|v| v.version == f.pinned).ok_or_else(|| anyhow!("missing function version"))?;
+                            if v.definition.kind == crate::FunctionKind::Formula && !sheets.has_function_definition(&v.definition) {
+                                sheets.install_function(&v.definition)?;
+                            }
+                        }
+                    }
+                }
                 wb.save_sheets()?;
             }
             Ok(out)
@@ -1506,6 +1521,8 @@ fn update_view(db: &Db, id: u64, spec: ViewSpec) -> Result<ViewInfo> {
 }
 
 impl Reader {
+    pub fn test_function(&self, definition: &crate::FunctionDefinition) -> Result<Vec<crate::FunctionTestResult>> { crate::functions::test_definition(&self.conn, definition) }
+    pub fn functions(&self) -> Result<Vec<crate::WorkbookFunction>> { crate::functions::list(&self.conn) }
     /// Apply DuckDB settings; settings such as `memory_limit` and `threads` belong to the
     /// database instance, so this changes them for the writer and every reader.
     pub fn configure(&self, settings: &[(&str, String)]) -> Result<()> {

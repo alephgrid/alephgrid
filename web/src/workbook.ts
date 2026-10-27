@@ -1,3 +1,4 @@
+import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
 
@@ -148,6 +149,8 @@ export class WorkbookScreen {
   private statsSeq = 0;
   private timers = new Set<number>();
   private disposed = false;
+  private closeFunctions: (() => void) | null = null;
+  private disposeFunctionCompletion: (() => void) | null = null;
 
   constructor(meta: WorkbookMeta, private goHome: () => void) {
     this.meta = meta;
@@ -296,6 +299,8 @@ export class WorkbookScreen {
   /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   dispose(): void {
     this.disposed = true;
+    this.closeFunctions?.();
+    this.disposeFunctionCompletion?.();
     this.sql?.close();
     this.rpc.close();
     clearTimeout(this.statsTimer);
@@ -331,6 +336,7 @@ export class WorkbookScreen {
       tabs[next].focus();
       tabs[next].click();
     });
+    this.disposeFunctionCompletion = functionCompletion(this.formulaInput, this.rpc, () => this.isSheet() ? "formula" : "sql");
     this.formulaInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); this.commitFormulaBar(); }
       if (e.key === "Escape") { this.onSelection(this.grid.selection(), this.grid.active); this.grid.focus(); }
@@ -360,6 +366,7 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => this.fileInput.click() }, "Import"),
         ...this.tableButtons,
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
+        el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),

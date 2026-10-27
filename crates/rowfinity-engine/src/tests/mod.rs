@@ -104,3 +104,5 @@ pub(crate) fn fingerprint(wb: &Workbook) -> String {
     out.push(format!("sheets {sheets:?}"));
     out.join("\n")
 }
+
+mod functions;

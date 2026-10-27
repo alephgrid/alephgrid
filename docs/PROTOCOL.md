@@ -1,4 +1,4 @@
-# WebSocket protocol (v0.4)
+# WebSocket protocol (v0.5)
 
 Connect to `ws(s)://<host>/ws/<workbook-id>` (add `?token=…` when the server uses a
 token). Every frame is a JSON text message.
@@ -227,3 +227,25 @@ temporary-disk budget, or hit a full disk, fail with **507**. Busy queues give *
 **504**.
 
 Auth: `Authorization: Bearer <token>` or `?token=<token>`.
+
+
+## Workbook functions (phase 5)
+
+| Operation | Parameters | Result |
+|---|---|---|
+| `functions` | none | `WorkbookFunction[]` |
+| `test_function` | `definition: FunctionDefinition` | `FunctionTestResult[]` |
+| `publish_function` | `definition: FunctionDefinition` | `WorkbookFunction` |
+| `pin_functions` | `pins: Record<string, number>` | `WorkbookFunction[]` |
+
+`FunctionDefinition` has `name`, `kind` (`formula` or `sql`), `arguments` (names), `source`,
+`documentation`, `tests` (`{arguments: string[], expected: string}`), and optional `dependencies`
+(a function-name/version map; omitted entries capture the active pin). Replies include canonical
+names, immutable versions, exact dependency pins, adapter/DuckDB versions and the active `pinned` version.
+
+Testing is a bulk read with isolated scratch evaluation. Publishing and pinning are bulk mutations
+with the existing revision, idempotency, admission and history envelope. They broadcast `resync`
+after commit. Publishing a subsequent version does not activate it. A pin map is atomic; every
+dependency must match its recorded version. SQL definitions and SQL pin changes require SQL to be
+enabled; sheet functions remain available when SQL is disabled. See [FUNCTIONS.md](FUNCTIONS.md)
+for input semantics, limits, supported built-ins and export limitations.

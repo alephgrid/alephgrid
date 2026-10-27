@@ -312,6 +312,9 @@ fn conforms<T: DeserializeOwned + Serialize>(op: &str, v: &Value) {
 
 fn check_result(op: &str, ty: &str, v: &Value) {
     match ty {
+        "WorkbookFunction" => conforms::<rowfinity_engine::WorkbookFunction>(op, v),
+        "WorkbookFunction[]" => conforms::<Vec<rowfinity_engine::WorkbookFunction>>(op, v),
+        "FunctionTestResult[]" => conforms::<Vec<rowfinity_engine::FunctionTestResult>>(op, v),
         "TableInfo[]" => conforms::<Vec<TableInfo>>(op, v),
         "TableInfo" => conforms::<TableInfo>(op, v),
         "ViewInfo" => conforms::<ViewInfo>(op, v),
@@ -413,6 +416,10 @@ async fn every_operation_replies_with_its_declared_type() {
         run("sql_change", json!({ "sql": "UPDATE t SET s = 'q' WHERE n = 1" })),
         run("refresh_materialized", json!({ "table": "mat" })),
         run("delete_query", json!({ "saved": "QUERY" })),
+        run("functions", json!({})),
+        run("test_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [{"arguments":["2"],"expected":"3"}] } })),
+        run("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
+        run("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
         run("cancel", json!({ "request": 1 })),
     ];
     let mut saved_id = String::new();
