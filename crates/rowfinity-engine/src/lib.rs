@@ -10,6 +10,8 @@
 pub mod catalog;
 pub mod faults;
 mod formula;
+pub mod functions;
+pub use functions::{FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction};
 pub mod import;
 pub mod limits;
 pub mod model;

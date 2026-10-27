@@ -517,3 +517,33 @@ ones, settings, files) unchanged. **Pass.**
 Joins, aggregates, CTEs, calculated columns, parameters, cancellation, export and materialization are verified
 end to end (engine, HTTP/WebSocket and browser). Not established: CI on this branch, Google Chrome (CI's
 browser), macOS, scheduled 2000-case property runs, power loss. Organization authorization is phase 7.
+
+## Phase 5
+
+Verified 27 October 2026 on macOS arm64 with the real DuckDB/IronCalc engines and headless Chrome.
+The contract and limitations are in [FUNCTIONS.md](FUNCTIONS.md).
+
+| Checklist | Behavior and evidence |
+|---|---|
+| 5.01–5.04 | `E/functions.rs::lambda_recalculates_versions_and_reopens`, `ranges_nested_calls_edits_and_undo_use_engine_semantics`: real named LAMBDAs, cell and range arguments, nested calls, hand-computed answers, recalculation and undo. Browser `W/functions.spec.ts` defines, tests and publishes through the editor. |
+| 5.05 | Browser function journey types `=MAR`, accepts Tab completion, verifies signature/documentation, calls the formula and reads its result. Invalid SQL is shown in the editor status. |
+| 5.06 | `dependency_versions_upgrade_and_rollback_atomically`, `workbook_scope_and_recreated_sheets_keep_exact_pins`: publication leaves active versions alone; incompatible single upgrades fail; version maps upgrade/rollback atomically; another workbook is unaffected. Browser journey activates v2 and rolls back v1. |
+| 5.07 | `formula_blanks_errors_dates_and_array_results_are_explicit`, `sql_columns_refresh_and_null_decimal_date_semantics`, `validation_conflicts_and_engine_boundaries_are_atomic`: blank/error handling, exact DECIMAL output, dates, array spill and occupied-cell refusal, name conflicts and execution-engine boundaries. |
+| 5.08 | SQL persistence/validation and column tests cover real macros, query calls, calculated-column invalidation, NULL/DECIMAL/DATE, statement/subquery/settings refusals. Browser SQL editor journey publishes and queries the macro. |
+| 5.09 | Engine tests cover indirect cycles, save/reopen, version changes and XLSX named-LAMBDA round trips. XLSX intentionally omits the Rowfinity registry and SQL macros; imported names cannot silently become registry functions. |
+| 5.11 | `incompatible_runtime_and_missing_pins_refuse_reopen`; runtime `incompatibility_names_the_reason`: exact adapter/DuckDB/IronCalc components, invalid pins, unsupported execution adapters and capability mismatches refuse execution. |
+| 5.T01–5.T02 | All tests above, `invalid_formulas_and_failed_publish_leave_no_changes`, `failed_commit_rolls_back_registry_macros_and_sheet_model` (injected history/commit failures), `storage_v3_migrates_before_function_publication`, `oversized_definitions_and_expanding_dependency_graphs_are_refused`. |
+| 5.10 | Browser journey defines, tests, calls, upgrades, rolls back and reloads a workbook function. Engine range test edits an input and independently checks the recalculated result. |
+| Transport and recovery | `S/functions.rs::publish_retries_once_notifies_other_clients_and_survives_restart`: idempotent retry does not publish twice, observer gets resync, invalid pin leaves history unchanged, process restart keeps the formula/pin. `S/api.rs` exercises every operation/result shape. Browser SQL-disabled test permits formula functions and refuses SQL publication. |
+
+Validation: `cargo test --workspace` passed; the final focused function run passed **14 engine tests**;
+`cargo clippy --workspace --all-targets -- -D warnings` passed; generated protocol drift tests passed;
+`npm run build` passed; `cargo build -p rowfinity-server` passed; the full browser suite passed **44 tests**,
+then all **3 function journeys** passed again against the final rebuilt server.
+
+Limits of this evidence: no certification against Microsoft Excel itself or every function/argument combination;
+no new Linux/Windows run performed locally. The disk-full test in the workspace suite requires
+`ROWFINITY_SMALL_FS` on CI and skips its full-disk scenario on this machine. Current-time/volatile,
+recursive and unsupported formula constructs are refused; Python and shared-space function authorization
+are outside phase 5. The Local provider is not a hostile-code sandbox. Test-preview assertions for arrays
+cover the anchor cell; the engine test separately verifies spill cells and collision handling.

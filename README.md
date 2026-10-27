@@ -118,6 +118,13 @@ Excel syntax (`=SUM(B2:B9)`, `=XLOOKUP(...)`, `=Budget!B4*2`) and are evaluated 
 IronCalc. Typical flow: aggregate 100M rows with SQL, choose *Open in sheet*, then
 model on top of the result.
 
+### User-defined functions
+
+Choose **Functions** in a workbook to define and test reusable sheet formulas or SQL scalar
+expressions. Call `=MARGIN(B2,C2)` in a sheet, or a SQL function in queries and calculated columns.
+Definitions have immutable versions, explicit upgrade/rollback and pinned dependencies.
+See [the function guide](docs/FUNCTIONS.md) for examples, supported expressions and XLSX limitations.
+
 ## Development
 
 ```bash

@@ -341,3 +341,13 @@ button, input, select, textarea { font: inherit; color: inherit; }
 dialog progress, .dialog progress { width: 100%; }
 .kind-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--text); background: var(--panel); cursor: help; }
 .kind-table { border-color: var(--accent); }
+
+.function-dialog { width: min(760px, 95vw); max-height: 90vh; overflow: auto; }
+.function-field { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+.function-field input, .function-field textarea, .function-field select { padding: 8px; color: var(--text); background: var(--bg); border: 1px solid var(--border); }
+.function-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.function-status { white-space: pre-wrap; overflow-wrap: anywhere; }
+.formula-bar { position: relative; }
+.function-completion { position: absolute; z-index: 12; top: 100%; left: 100px; max-width: min(700px, 80vw); padding: 8px; background: var(--bg); color: var(--text); border: 1px solid var(--border); box-shadow: 0 4px 12px #0003; }
+.function-completion .btn { display: block; text-align: left; white-space: normal; margin: 3px 0; }
+.function-completion p { margin: 4px; }

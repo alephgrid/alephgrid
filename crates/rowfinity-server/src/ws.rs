@@ -75,6 +75,10 @@ struct Envelope {
 #[derive(Debug, Deserialize, TS)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
+    Functions,
+    TestFunction { definition: rowfinity_engine::FunctionDefinition },
+    PublishFunction { definition: rowfinity_engine::FunctionDefinition },
+    PinFunctions { pins: std::collections::BTreeMap<String,u32> },
     Tables,
     OpenView { spec: ViewSpec },
     UpdateView { view_id: u64, spec: ViewSpec },
@@ -217,11 +221,11 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SavedViews { .. } | History { .. }
+        Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
-        OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
+        TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } => None,
-        CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
+        PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
     }
@@ -328,6 +332,11 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
                 }
             }
         }
+        Op::TestFunction { definition } => {
+            if definition.kind == rowfinity_engine::FunctionKind::Sql { require_sql(ctx)?; }
+            json!(r.test_function(&definition)?)
+        }
+        Op::Functions => json!(r.functions()?),
         Op::Schema => json!(r.schema()?),
         Op::SavedQueries => json!(r.saved_queries()?),
         Op::QueryVersions { saved } => json!(r.query_versions(&saved)?),
@@ -348,6 +357,14 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
+        Op::PublishFunction { definition } => {
+            if definition.kind == rowfinity_engine::FunctionKind::Sql { require_sql(ctx)?; }
+            (json!(wb.publish_function(definition)?), Some(Event::Resync {}))
+        }
+        Op::PinFunctions { pins } => {
+            if wb.functions()?.iter().any(|f| pins.contains_key(&f.name) && f.versions.iter().any(|v| v.definition.kind == rowfinity_engine::FunctionKind::Sql)) { require_sql(ctx)?; }
+            (json!(wb.pin_functions(&pins)?), Some(Event::Resync {}))
+        }
         Op::Edit { view_id, edits } => {
             let out = wb.edit(view_id, &edits)?;
             let event = if out.rows_appended > 0 {

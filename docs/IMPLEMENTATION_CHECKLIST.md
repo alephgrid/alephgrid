@@ -214,19 +214,21 @@ Build on the existing SQL console. Depends on phases 1–3; shared query permiss
 
 Depends on phases 2–4. This phase covers formula-defined and SQL functions; Python is phase 8.
 
-- [ ] **5.01** Prototype a named IronCalc LAMBDA: define `MARGIN(revenue,cost)` and call `=MARGIN(B2,C2)`.
-- [ ] **5.02** Define a function registry with stable IDs, signature, source, immutable version, scope, documentation, tests and execution adapter.
-- [ ] **5.03** Build the function editor with argument declarations, examples, test inputs and preview results.
-- [ ] **5.04** Register named formulas through the engine; support cell/range arguments and nested formulas without string-substitution evaluation.
-- [ ] **5.05** Add function autocomplete, signature help, documentation and readable errors in the formula editor.
-- [ ] **5.06** Pin workbook function versions; support explicit upgrade and rollback without silently changing other workbooks.
-- [ ] **5.07** Specify blanks/NULL, decimals, dates, errors, array outputs, spill collisions and naming conflicts.
-- [ ] **5.08** Add validated SQL expression functions/macros for SQL queries and calculated table columns; explicitly document which engines support each function type.
-- [ ] **5.09** Verify dependency recalculation, cycles, save/reopen, version changes and unsupported XLSX-export behavior.
-- [ ] **5.11** Bind function dependencies to immutable RuntimeSpec versions; declare which execution adapters support each signature and reject unsupported combinations before execution.
-- [ ] **5.T01** Test 5.01–5.05 and 5.08: define/test/call via UI, nested/range calls, SQL-function registration, malformed definitions, naming conflicts and autocomplete; check outputs against hand-computed or independent results.
-- [ ] **5.T02** Test 5.06–5.11: old-version reproducibility, explicit upgrade/rollback, dependency cycles, precision/null/error/spill semantics, reopen and incompatible-runtime refusal; do not silently replace missing versions.
-- [ ] **5.10 — Gate:** A user can define, test, call and persist their own function from the UI, with correct recalculation after argument edits.
+- [x] **5.01** Prototype a named IronCalc LAMBDA: define `MARGIN(revenue,cost)` and call `=MARGIN(B2,C2)`.
+- [x] **5.02** Define a function registry with stable IDs, signature, source, immutable version, scope, documentation, tests and execution adapter.
+- [x] **5.03** Build the function editor with argument declarations, examples, test inputs and preview results.
+- [x] **5.04** Register named formulas through the engine; support cell/range arguments and nested formulas without string-substitution evaluation.
+- [x] **5.05** Add function autocomplete, signature help, documentation and readable errors in the formula editor.
+- [x] **5.06** Pin workbook function versions; support explicit upgrade and rollback without silently changing other workbooks.
+- [x] **5.07** Specify blanks/NULL, decimals, dates, errors, array outputs, spill collisions and naming conflicts.
+- [x] **5.08** Add validated SQL expression functions/macros for SQL queries and calculated table columns; explicitly document which engines support each function type.
+- [x] **5.09** Verify dependency recalculation, cycles, save/reopen, version changes and unsupported XLSX-export behavior.
+- [x] **5.11** Bind function dependencies to immutable RuntimeSpec versions; declare which execution adapters support each signature and reject unsupported combinations before execution.
+- [x] **5.T01** Test 5.01–5.05 and 5.08: define/test/call via UI, nested/range calls, SQL-function registration, malformed definitions, naming conflicts and autocomplete; check outputs against hand-computed or independent results.
+- [x] **5.T02** Test 5.06–5.11: old-version reproducibility, explicit upgrade/rollback, dependency cycles, precision/null/error/spill semantics, reopen and incompatible-runtime refusal; do not silently replace missing versions.
+- [x] **5.10 — Gate:** A user can define, test, call and persist their own function from the UI, with correct recalculation after argument edits.
+
+Verification (27 October 2026): [function guide](FUNCTIONS.md), engine `tests/functions.rs`, server `tests/functions.rs` and protocol contract coverage, and browser `functions.spec.ts`. See [phase 5 test evidence](TEST_MATRIX.md#phase-5) for results and limitations. Python and space-wide sharing remain later phases.
 
 ## 6. Add analysis tools for users who do not write SQL
 

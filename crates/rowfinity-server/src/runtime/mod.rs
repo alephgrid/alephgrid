@@ -60,6 +60,7 @@ impl RuntimeSpec {
             components: BTreeMap::from([
                 ("duckdb".to_string(), duckdb_version()),
                 ("ironcalc".to_string(), "0.9.1".to_string()),
+                ("functions".to_string(), rowfinity_engine::functions::ADAPTER.to_string()),
             ]),
             capabilities: BTreeSet::from([Capability::Tables, Capability::Sheets, Capability::Sql]),
         }
@@ -289,6 +290,16 @@ pub struct ProviderCapabilities {
 impl ProviderCapabilities {
     /// Why this provider cannot run `spec` under `policy`, if it cannot.
     pub fn incompatibility(&self, spec: &RuntimeSpec, policy: &ComputePolicy) -> Option<String> {
+        // Phase-5 functions require their exact evaluator contract. Legacy specs
+        // without functions still follow the storage migration path.
+        if spec.components.contains_key("functions") {
+            let current = RuntimeSpec::current();
+            for component in ["functions", "duckdb", "ironcalc"] {
+                if spec.components.get(component) != current.components.get(component) {
+                    return Some(format!("this workbook requires a different {component} runtime version"));
+                }
+            }
+        }
         if spec.storage_format > self.max_storage_format {
             return Some(format!(
                 "this workbook needs storage format {}; this server supports up to {}",
@@ -452,6 +463,11 @@ mod tests {
         };
         let spec = RuntimeSpec::current();
         assert_eq!(provider.incompatibility(&spec, &policy), None);
+        for component in ["functions", "duckdb", "ironcalc"] {
+            let mut incompatible = spec.clone();
+            incompatible.components.insert(component.into(), "unsupported".into());
+            assert!(provider.incompatibility(&incompatible, &policy).unwrap().contains(component));
+        }
         let mut newer = spec.clone();
         newer.storage_format = rowfinity_engine::storage::FORMAT + 1;
         let reason = provider.incompatibility(&newer, &policy).unwrap();

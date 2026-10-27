@@ -12,6 +12,9 @@
 //!   columns or formulas; `_rf_queries` / `_rf_query_versions` saved queries with immutable
 //!   versions; `_rf_materialized` how a table made from a query was computed.
 //!
+//! * **4**: immutable function registry and pins in `_rf_meta`, persisted SQL macros
+//!   and named sheet LAMBDAs. Older binaries must not mutate these workbooks.
+//!
 //! Opening an older file keeps a copy of it (`<file>.v<N>.bak`) and migrates it in one
 //! transaction. There is no downgrade: the copy is the only way back. Opening a file
 //! written by a newer format is refused.
@@ -25,7 +28,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -206,6 +209,7 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
         if from < 3 {
             migrate_v2_to_v3(conn)?;
         }
+        if from < 4 { meta_set(conn, "format", "4")?; }
         faults::check("migrate")?;
         Ok(())
     })();

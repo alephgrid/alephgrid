@@ -35,7 +35,7 @@
   search and one `LIMIT 1 OFFSET k` inside a chunk. Inserting takes keys between the neighbours;
   when a gap runs out, only a window around the insert point is re-spread. Nothing renumbers the
   table, so edits addressed by record id stay correct while rows move.
-* Storage format 3 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
+* Storage format 4 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
   (next id, density, structure generation, `data_rev`: the revision that last changed the table's
   rows, columns or formulas), `_rf_history` (one entry per committed change), `_rf_queries` and
   `_rf_query_versions` (saved queries, immutable versions), `_rf_materialized` (how a table made
@@ -242,3 +242,11 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
   not a security boundary between workbooks. See DURABILITY.md for isolation classes.
 * Planned: OIDC login, per-workbook and per-space roles (phase 7). Completing the SQL
   restrictions is not organization authorization.
+
+
+### Workbook functions
+
+`functions.rs` validates expression ASTs, stores immutable versions and active pins in `_rf_meta`,
+and installs SQL macros or IronCalc named LAMBDAs transactionally. The same registry API powers
+the browser editor and protocol clients. Dependencies bind exact versions; runtime components
+must match before reopening or changing pins. See [FUNCTIONS.md](FUNCTIONS.md).

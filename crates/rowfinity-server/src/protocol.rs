@@ -3,6 +3,7 @@
 //! (regenerate with `UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`).
 
 use rowfinity_engine::{
+    FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
     Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
     HistoryEntry, Kind, MaterializedSource, MaterializedTable, ParamType, PreviewColumn, QueryKind, QueryParam, QueryPreview, QueryResult,
     QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
@@ -60,6 +61,10 @@ macro_rules! decls {
 /// The result type of every operation, by op name (TypeScript type expressions).
 /// `tests/api.rs` checks each against a real server reply.
 pub const RESULTS: &[(&str, &str)] = &[
+    ("functions", "WorkbookFunction[]"),
+    ("test_function", "FunctionTestResult[]"),
+    ("publish_function", "WorkbookFunction"),
+    ("pin_functions", "WorkbookFunction[]"),
     ("tables", "TableInfo[]"),
     ("open_view", "ViewInfo"),
     ("update_view", "ViewInfo"),
@@ -125,6 +130,7 @@ pub fn bindings() -> String {
     let mut out = HEADER.to_string();
     decls!(
         &cfg, out,
+        FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
         Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, Imported,
