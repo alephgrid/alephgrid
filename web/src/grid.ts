@@ -9,6 +9,9 @@ export interface Range { r0: number; c0: number; r1: number; c1: number }
 
 export interface GridModel {
   rowCount(): number;
+  frozen?(): number;
+  format?(value: CellValue, column: Column): string;
+  color?(value: CellValue, column: Column): string | undefined;
   columns(): Column[];
   canAppend(): boolean;
   sort(): SortKey[];
@@ -207,7 +210,7 @@ export class Grid {
     const cols = this.model.columns();
     if (this.isSheet() && this.model.cell) return this.model.cell(cell.r, cell.c)?.text ?? "";
     const v = this.model.value(cell.r, cell.c);
-    return v !== undefined && cols[cell.c] ? formatValue(v, cols[cell.c].kind) : "";
+    return v !== undefined && cols[cell.c] ? this.format(v, cols[cell.c]) : "";
   }
 
   /** Keep the accessible active cell and the announcement in step with the canvas. */
@@ -340,8 +343,17 @@ export class Grid {
     for (const w of this.widths) this.colX.push(this.colX[this.colX.length - 1] + w);
   }
 
+  private format(value: CellValue, column: Column): string { return this.model.format?.(value, column) ?? formatValue(value, column.kind); }
+  private frozenCount(): number {
+    const requested = Math.min(this.model.frozen?.() ?? 0, this.widths.length, 8);
+    let n = 0;
+    while (n < requested && this.colX[n + 1] < this.width - this.rowHeaderWidth() - 80) n++;
+    return n;
+  }
+  private frozenWidth(): number { return this.colX[this.frozenCount()] ?? 0; }
+  private columnX(c: number): number { return this.rowHeaderWidth() + this.colX[c] - (c < this.frozenCount() ? 0 : this.scrollX); }
   private colAt(x: number): number {
-    const target = x + this.scrollX - this.rowHeaderWidth();
+    const target = x + (x < this.rowHeaderWidth() + this.frozenWidth() ? 0 : this.scrollX) - this.rowHeaderWidth();
     if (target < 0) return -1;
     let lo = 0, hi = this.widths.length - 1;
     while (lo <= hi) {
@@ -359,7 +371,7 @@ export class Grid {
 
   private cellRect(cell: Cell): { x: number; y: number; w: number; h: number } {
     return {
-      x: this.rowHeaderWidth() + this.colX[cell.c] - this.scrollX,
+      x: this.columnX(cell.c),
       y: HEADER_H + cell.r * ROW_H - this.scrollY,
       w: this.widths[cell.c] ?? 0,
       h: ROW_H,
@@ -398,7 +410,8 @@ export class Grid {
     const rhw = this.rowHeaderWidth();
     if (rect.y < HEADER_H) this.scrollY = cell.r * ROW_H;
     else if (rect.y + ROW_H > this.height) this.scrollY = (cell.r + 1) * ROW_H - this.bodyHeight();
-    if (rect.x < rhw) this.scrollX = this.colX[cell.c];
+    if (cell.c < this.frozenCount()) { /* Frozen cells need no horizontal scrolling. */ }
+    else if (rect.x < rhw + this.frozenWidth()) this.scrollX = this.colX[cell.c] - this.frozenWidth();
     else if (rect.x + rect.w > this.width) this.scrollX = Math.max(0, this.colX[cell.c + 1] - (this.width - rhw));
     this.scrollY = Math.max(0, Math.min(this.maxScrollY(), this.scrollY));
     this.syncScroller();
@@ -440,8 +453,8 @@ export class Grid {
     if (y > HEADER_H) return -1;
     const rhw = this.rowHeaderWidth();
     for (let c = 0; c < this.widths.length; c++) {
-      const edge = rhw + this.colX[c + 1] - this.scrollX;
-      if (Math.abs(x - edge) <= 4) return c;
+      const edge = this.columnX(c) + this.widths[c];
+      if ((c < this.frozenCount() || edge > rhw + this.frozenWidth()) && Math.abs(x - edge) <= 4) return c;
     }
     return -1;
   }
@@ -557,7 +570,7 @@ export class Grid {
       if (this.isSheet() && this.model.cell) text = this.model.cell(r, col)?.text;
       else {
         const v = this.model.value(r, col);
-        if (v !== undefined) text = formatValue(v, cols[col].kind);
+        if (v !== undefined) text = this.format(v, cols[col]);
       }
       if (text) w = Math.max(w, this.ctx.measureText(text).width + 20);
     }
@@ -683,12 +696,15 @@ export class Grid {
     const first = Math.max(0, Math.floor(this.scrollY / ROW_H));
     const last = Math.min(display - 1, Math.floor((this.scrollY + this.bodyHeight()) / ROW_H));
 
-    let c0 = Math.max(0, this.colAt(rhw + 1));
+    let c0 = Math.max(this.frozenCount(), this.colAt(rhw + this.frozenWidth() + 1));
     let c1 = this.colAt(W - 1);
     if (c1 < 0) c1 = cols.length - 1;
     if (!cols.length) { c0 = 0; c1 = -1; }
     if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1), c0, Math.max(c0, c1));
 
+    const frozen = this.frozenCount();
+    if (rowCount > 0 && frozen) this.model.ensure(first, Math.min(last, rowCount - 1), 0, frozen - 1);
+    const visible = [...Array.from({ length: Math.max(0, c1 - c0 + 1) }, (_, i) => c0 + i), ...Array.from({ length: frozen }, (_, i) => i)];
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, W, H);
     const sel = this.selection();
@@ -697,15 +713,16 @@ export class Grid {
     const sheetCells = this.isSheet() ? this.model.cell?.bind(this.model) : undefined;
     ctx.textBaseline = "middle";
     ctx.font = `13px ${colors.ui}`;
-    for (let c = c0; c <= c1; c++) {
+    for (const c of visible) {
       const col = cols[c];
-      const x = rhw + this.colX[c] - this.scrollX;
+      const x = this.columnX(c);
       const w = this.widths[c];
       const numeric = isNumericKind(col.kind);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(Math.max(x, rhw), HEADER_H, w, H - HEADER_H);
+      ctx.rect(Math.max(x, c < frozen ? rhw : rhw + this.frozenWidth()), HEADER_H, Math.max(0, x + w - Math.max(x, c < frozen ? rhw : rhw + this.frozenWidth())), H - HEADER_H);
       ctx.clip();
+      if (c < frozen) { ctx.fillStyle = colors.bg; ctx.fillRect(x, HEADER_H, w, H - HEADER_H); }
       if (col.formula) {
         ctx.fillStyle = colors.formulaBg;
         ctx.fillRect(x, HEADER_H, w, H - HEADER_H);
@@ -735,7 +752,9 @@ export class Grid {
           ctx.fillRect(x + 8, y + 9, Math.min(w - 16, 40 + ((r * 7 + c * 13) % 50)), 6);
           continue;
         }
-        const text = formatValue(v, col.kind);
+        const background = this.model.color?.(v, col);
+        if (background) { ctx.fillStyle = background; ctx.fillRect(x, y, w, ROW_H); }
+        const text = this.format(v, col);
         if (!text) continue;
         ctx.fillStyle = colors.text;
         if (numeric || col.kind === "bool") {
@@ -758,15 +777,35 @@ export class Grid {
       ctx.moveTo(rhw, y);
       ctx.lineTo(W, y);
     }
-    for (let c = c0; c <= c1; c++) {
-      const x = Math.round(rhw + this.colX[c + 1] - this.scrollX) - 0.5;
+    for (const c of visible) {
+      const x = Math.round(this.columnX(c) + this.widths[c]) - 0.5;
       ctx.moveTo(x, HEADER_H);
       ctx.lineTo(x, H);
     }
     ctx.stroke();
 
-    // Selection
-    if (cols.length) {
+    // Clip selection to each pane so scrolling cells cannot highlight frozen cells.
+    if (cols.length && frozen) {
+      const y = HEADER_H + sel.r0 * ROW_H - this.scrollY;
+      const h = (sel.r1 - sel.r0 + 1) * ROW_H;
+      for (const c of visible) {
+        if (c < sel.c0 || c > sel.c1) continue;
+        const x = this.columnX(c), w = this.widths[c];
+        ctx.save(); ctx.beginPath();
+        const left = c < frozen ? rhw : rhw + this.frozenWidth();
+        ctx.rect(left, HEADER_H, W - left, H - HEADER_H); ctx.clip();
+        if (sel.r0 !== sel.r1 || sel.c0 !== sel.c1) { ctx.fillStyle = colors.selFill; ctx.fillRect(x, y, w, h); }
+        ctx.strokeStyle = colors.selBorder; ctx.lineWidth = 2; ctx.beginPath();
+        ctx.moveTo(x, y + 1); ctx.lineTo(x + w, y + 1); ctx.moveTo(x, y + h - 1); ctx.lineTo(x + w, y + h - 1);
+        if (c === sel.c0) { ctx.moveTo(x + 1, y); ctx.lineTo(x + 1, y + h); }
+        if (c === sel.c1) { ctx.moveTo(x + w - 1, y); ctx.lineTo(x + w - 1, y + h); }
+        ctx.stroke(); ctx.restore();
+      }
+      const active = this.cellRect(this.active), left = this.active.c < frozen ? rhw : rhw + this.frozenWidth();
+      ctx.save(); ctx.beginPath(); ctx.rect(left, HEADER_H, W - left, H - HEADER_H); ctx.clip();
+      ctx.strokeStyle = colors.selBorder; ctx.lineWidth = 2; ctx.strokeRect(active.x + 1, active.y + 1, active.w - 2, active.h - 2); ctx.restore();
+    }
+    if (cols.length && !frozen) {
       const a = this.cellRect({ r: sel.r0, c: sel.c0 });
       const b = this.cellRect({ r: sel.r1, c: sel.c1 });
       const sx = a.x, sy = a.y, sw = b.x + b.w - a.x, sh = b.y + b.h - a.y;
@@ -813,10 +852,11 @@ export class Grid {
     const sortBy = new Map(this.model.sort().map((s, i) => [s.column, { ...s, i }]));
     const filtered = new Set(this.model.filters().map((f) => f.column));
     const sheetMode = this.isSheet();
-    for (let c = c0; c <= c1; c++) {
+    for (const c of visible) {
       const col = cols[c];
-      const x = rhw + this.colX[c] - this.scrollX;
+      const x = this.columnX(c);
       const w = this.widths[c];
+      if (c < frozen) { ctx.fillStyle = colors.headerBg; ctx.fillRect(x, 0, w, HEADER_H); }
       if (c >= sel.c0 && c <= sel.c1) {
         ctx.fillStyle = colors.activeHeader;
         ctx.fillRect(x, 0, w, HEADER_H);
@@ -830,7 +870,7 @@ export class Grid {
       }
       ctx.save();
       ctx.beginPath();
-      ctx.rect(Math.max(x, rhw), 0, w - 22, HEADER_H);
+      ctx.rect(Math.max(x, c < frozen ? rhw : rhw + this.frozenWidth()), 0, Math.max(0, x + w - 22 - Math.max(x, c < frozen ? rhw : rhw + this.frozenWidth())), HEADER_H);
       ctx.clip();
       ctx.textAlign = "left";
       ctx.fillStyle = colors.muted;
@@ -854,8 +894,8 @@ export class Grid {
     ctx.beginPath();
     ctx.moveTo(0, HEADER_H - 0.5);
     ctx.lineTo(W, HEADER_H - 0.5);
-    for (let c = c0; c <= c1; c++) {
-      const x = Math.round(rhw + this.colX[c + 1] - this.scrollX) - 0.5;
+    for (const c of visible) {
+      const x = Math.round(this.columnX(c) + this.widths[c]) - 0.5;
       ctx.moveTo(x, 0);
       ctx.lineTo(x, HEADER_H);
     }

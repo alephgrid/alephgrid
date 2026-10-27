@@ -547,3 +547,48 @@ no new Linux/Windows run performed locally. The disk-full test in the workspace 
 recursive and unsupported formula constructs are refused; Python and shared-space function authorization
 are outside phase 5. The Local provider is not a hostile-code sandbox. Test-preview assertions for arrays
 cover the anchor cell; the engine test separately verifies spill cells and collision handling.
+
+## Phase 6
+
+Verified 27 October 2026 on macOS arm64 with real DuckDB and headless Chrome.
+Supported semantics and initial limits are documented in [ANALYSIS.md](ANALYSIS.md).
+
+| Checklist | Behavior and evidence |
+|---|---|
+| 6.01–6.04, 6.T01 | `E/analysis.rs::summary_pivot_profile_and_join_have_independent_oracles` checks hand-computed aggregates, pivot categories, NULLs, duplicates and joins. `empty_sources_skew_and_quoted_identifiers` covers empty inputs, skew, quoting and million-row join cardinality with bounded output. `saved_analysis_refreshes_and_snapshot_is_bounded` checks refresh and rejects oversized snapshots. |
+| 6.05 | `replace_preview_apply_undo_restart_and_conflicts` verifies preview, exact replacement, undo, reopening and stale revisions. `replacement_limits_and_undo_failure_are_atomic` tests row/byte expansion limits and injected undo commit failure. `validation_and_faults_leave_state_unchanged` checks invalid plans and history/commit rollback. |
+| 6.06, 6.T02 | `presentation_persists_and_bounds_are_enforced` verifies persistence and limits. Browser `W/analysis.spec.ts` checks exact decimal/large-integer display, locale and timezone semantics, hidden/frozen columns after reopening, horizontal hit testing and conditional formatting. `schema_drift_is_explicit_and_presentation_keeps_a_visible_column` covers removed fields and saved ID reuse prevention. |
+| 6.07 | Browser journey imports two CSVs, joins, materializes, summarizes, charts, saves and reopens without SQL; editing a source and refreshing changes the result. Missing saved-plan columns remain explicit errors even after another control is edited. Axe checks the analysis dialog; existing keyboard/accessibility journeys cover the grid. |
+| Transport and recovery | `S/analysis.rs::no_code_analysis_and_replacement_work_without_arbitrary_sql` verifies typed operations with arbitrary SQL disabled, mutation retry protection, observer events, saved-plan restart and durable undo. `S/api.rs` covers every new operation/result contract. |
+
+Validation: **231 Rust tests passed** with `CARGO_INCREMENTAL=0 cargo test --workspace -j 1`;
+Clippy with `--all-targets -- -D warnings`, generated protocol drift checks, frontend type checking/bundling
+and server build passed. The final full browser suite passed **49/49 tests**, including all five new analysis tests.
+
+Evidence limits: no new Linux/Windows run, no Microsoft Excel certification, and no exhaustive locale or
+browser matrix. The full-disk fault scenario requires `ROWFINITY_SMALL_FS` and skips that scenario locally.
+The first browser run passed 48/49; the import journey exposed a test readiness race (the tab appears before
+its view opens), now synchronized on loaded rows. An initial Rust link failed because local build artifacts
+filled the disk; clearing generated artifacts and rebuilding with incremental compilation disabled succeeded.
+
+### Phase 6 CI timing regression follow-up (28 October 2026)
+
+CI run 40536789345 exposed two UI races: function activation refreshed the version selector
+while a rollback selection was being made, and table controls were enabled before the view
+finished opening. Version selection is now disabled through mutation/refresh, and table
+controls remain disabled until a view is available. The existing function and saved-view
+journeys hold specific WebSocket replies to exercise these states deterministically.
+Both readiness assertions failed against the old build; after the fixes, frontend type
+checking/bundling, server rebuild and all **49 browser tests passed** locally. No retries or
+longer timeouts were added. Remote CI results must be checked separately.
+
+CI run 40583917349 passed the web build but stopped in the shutdown integration suite
+before E2E ran: workbook creation received connection refused immediately after the TCP
+readiness probe. The helper had released a temporary port before spawning its child,
+allowing parallel tests to race for that port or probe another process. It now launches
+with port 0 and waits for the child's reported bound address; the CLI prints the actual
+bound port. Startup failure is bounded and kills/reaps the child with stderr retained.
+The four shutdown tests passed in three consecutive local runs (12 executions); targeted
+Clippy for the binary and shutdown test passed. The initial sandboxed attempt was unable
+to bind local sockets; verification used authorized local-process execution. Remote Linux
+CI remains the confirmation for the reported environment.

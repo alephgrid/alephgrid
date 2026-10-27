@@ -7,6 +7,23 @@ test.afterAll(async () => server.dispose());
 
 test("define, test, complete, call, upgrade, rollback and reopen a formula function", async ({ page }) => {
   const wb = await server.createWorkbook("Function journey");
+  let pinSent = false;
+  let refreshId = -1;
+  let releaseRefresh: (() => void) | undefined;
+  await page.routeWebSocket(/\/ws\//, ws => {
+    const srv = ws.connectToServer();
+    ws.onMessage(m => {
+      const msg = JSON.parse(String(m));
+      if (msg.op === "pin_functions") pinSent = true;
+      if (pinSent && msg.op === "functions" && refreshId === -1) refreshId = msg.id;
+      srv.send(m);
+    });
+    srv.onMessage(m => {
+      const msg = JSON.parse(String(m));
+      if (msg.id === refreshId && !releaseRefresh) releaseRefresh = () => ws.send(m);
+      else ws.send(m);
+    });
+  });
   await page.goto(`${server.url}/w/${wb}`);
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
   await page.getByRole("button", { name: "Functions", exact: true }).click();
@@ -39,6 +56,10 @@ test("define, test, complete, call, upgrade, rollback and reopen a formula funct
   await dialog.getByRole("combobox", { name: "Function version", exact: true }).selectOption("2");
   await dialog.getByRole("button", { name: "Activate selected version", exact: true }).click();
   await expect.poll(cell).toBe("40");
+  await expect.poll(() => !!releaseRefresh).toBe(true);
+  await expect(dialog.getByRole("combobox", { name: "Function version", exact: true })).toBeDisabled();
+  releaseRefresh!();
+  await expect(dialog.getByRole("combobox", { name: "Function version", exact: true })).toBeEnabled();
   await dialog.getByRole("combobox", { name: "Function version", exact: true }).selectOption("1");
   await dialog.getByRole("button", { name: "Activate selected version", exact: true }).click();
   await expect.poll(cell).toBe("0.4");

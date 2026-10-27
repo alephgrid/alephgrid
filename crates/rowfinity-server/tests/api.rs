@@ -312,6 +312,12 @@ fn conforms<T: DeserializeOwned + Serialize>(op: &str, v: &Value) {
 
 fn check_result(op: &str, ty: &str, v: &Value) {
     match ty {
+        "AnalysisResult" => conforms::<rowfinity_engine::AnalysisResult>(op,v),
+        "SavedAnalysis" => conforms::<rowfinity_engine::SavedAnalysis>(op,v),
+        "SavedAnalysis[]" => conforms::<Vec<rowfinity_engine::SavedAnalysis>>(op,v),
+        "ReplacePreview" => conforms::<rowfinity_engine::ReplacePreview>(op,v),
+        "ReplaceOutcome" => conforms::<rowfinity_engine::ReplaceOutcome>(op,v),
+        "Presentation" => conforms::<rowfinity_engine::Presentation>(op,v),
         "WorkbookFunction" => conforms::<rowfinity_engine::WorkbookFunction>(op, v),
         "WorkbookFunction[]" => conforms::<Vec<rowfinity_engine::WorkbookFunction>>(op, v),
         "FunctionTestResult[]" => conforms::<Vec<rowfinity_engine::FunctionTestResult>>(op, v),
@@ -416,6 +422,16 @@ async fn every_operation_replies_with_its_declared_type() {
         run("sql_change", json!({ "sql": "UPDATE t SET s = 'q' WHERE n = 1" })),
         run("refresh_materialized", json!({ "table": "mat" })),
         run("delete_query", json!({ "saved": "QUERY" })),
+        run("analyze", json!({"spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        run("analyses", json!({})),
+        run("save_analysis", json!({"saved":null,"name":"Profile","spec":{"kind":"profile","table":"t","columns":["s"]},"chart":false})),
+        run("materialize_analysis", json!({"name":"analysis_copy","spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        run("delete_analysis", json!({"analysis":"ANALYSIS"})),
+        run("presentation", json!({"table":"t"})),
+        run("save_presentation", json!({"table":"t","presentation":{"hidden":[],"frozen":1,"formats":{},"rules":[]}})),
+        run("replace_preview", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"}})),
+        run("replace_apply", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"},"revision":"PREVIEW_REV"})),
+        run("replace_undo", json!({"revision":"UNDO_REV"})),
         run("functions", json!({})),
         run("test_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [{"arguments":["2"],"expected":"3"}] } })),
         run("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
@@ -424,7 +440,13 @@ async fn every_operation_replies_with_its_declared_type() {
     ];
     let mut saved_id = String::new();
     let mut query_id = String::new();
+    let mut analysis_id = String::new();
+    let mut preview_revision = Value::Null;
+    let mut undo_revision = Value::Null;
     for (op, mut params) in script {
+        if params["analysis"]=="ANALYSIS" {params["analysis"]=json!(analysis_id);}
+        if params["revision"]=="PREVIEW_REV" {params["revision"]=preview_revision.clone();}
+        if params["revision"]=="UNDO_REV" {params["revision"]=undo_revision.clone();}
         if params["saved"] == "PLACEHOLDER" {
             params["saved"] = json!(saved_id);
         }
@@ -433,6 +455,9 @@ async fn every_operation_replies_with_its_declared_type() {
         }
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
+        if op=="save_analysis" {analysis_id=v["id"].as_str().unwrap().to_string();}
+        if op=="replace_preview" {preview_revision=v["sample"]["revision"].clone();}
+        if op=="replace_apply" {undo_revision=v["undo_revision"].clone();}
         if op == "save_view" {
             saved_id = v["id"].as_str().unwrap().to_string();
         }

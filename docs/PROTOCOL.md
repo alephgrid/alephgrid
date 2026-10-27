@@ -1,4 +1,4 @@
-# WebSocket protocol (v0.5)
+# WebSocket protocol (v0.6)
 
 Connect to `ws(s)://<host>/ws/<workbook-id>` (add `?token=…` when the server uses a
 token). Every frame is a JSON text message.
@@ -249,3 +249,30 @@ after commit. Publishing a subsequent version does not activate it. A pin map is
 dependency must match its recorded version. SQL definitions and SQL pin changes require SQL to be
 enabled; sheet functions remain available when SQL is disabled. See [FUNCTIONS.md](FUNCTIONS.md)
 for input semantics, limits, supported built-ins and export limitations.
+
+## No-code analysis and table presentation (phase 6)
+
+| Operation | Parameters | Result |
+|---|---|---|
+| `analyze` | `spec: AnalysisSpec` | `AnalysisResult` |
+| `analyses` | none | `SavedAnalysis[]` |
+| `save_analysis` | `saved: string \| null`, `name`, `spec`, `chart: boolean` | `SavedAnalysis` |
+| `delete_analysis` | `analysis: string` | `null` |
+| `materialize_analysis` | `name`, `spec` | `TableInfo` |
+| `replace_preview` | `spec: ReplaceSpec` | `ReplacePreview` |
+| `replace_apply` | `spec`, `revision` from preview | `ReplaceOutcome` |
+| `replace_undo` | `revision` from `undo_revision` | `ReplaceOutcome` |
+| `presentation` | `table` | `Presentation` |
+| `save_presentation` | `table`, `presentation` | `Presentation` |
+
+`AnalysisSpec` is a tagged `summary`, `join` or `profile` plan; its generated type is authoritative.
+Analysis and replacement previews are bulk reads. Materialization, replacement and undo are bulk
+writes; metadata changes use the writer queue. All writes use the existing revision/idempotency
+protocol. Plan/presentation changes broadcast `resync`; replacement/undo broadcast `table_changed`;
+materialization broadcasts `tables_changed`. These typed operations work when arbitrary SQL is disabled.
+
+An analysis result holds a bounded `QueryResult` and optional join diagnostics, both read in one
+snapshot. Replacement previews hold an affected-cell count and a bounded sample carrying the
+snapshot revision. Apply requires that exact current revision. Undo requires both the recorded
+undo revision and the current revision to match. Other mutations invalidate undo availability,
+including metadata changes. Limits and exact semantics are documented in [ANALYSIS.md](ANALYSIS.md).

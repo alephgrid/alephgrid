@@ -43,8 +43,11 @@ export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
   const action = (label: string, run: () => Promise<void>) => {
     const button = el("button", { class: "btn", onclick: async () => {
       controls.forEach(b => b.disabled = true);
+      // Refresh replaces the options after a mutation. Do not accept a new selection
+      // that would be silently overwritten before Activate becomes available again.
+      versions.disabled = true;
       try { await run(); } catch (e) { status.textContent = String(e); }
-      finally { controls.forEach(b => b.disabled = false); }
+      finally { controls.forEach(b => b.disabled = false); versions.disabled = false; }
     } }, label); controls.push(button); return button;
   };
   const test = action("Run tests", async () => {

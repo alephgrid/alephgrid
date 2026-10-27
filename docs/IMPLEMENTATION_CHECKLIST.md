@@ -234,15 +234,17 @@ Verification (27 October 2026): [function guide](FUNCTIONS.md), engine `tests/fu
 
 Depends on phases 2–4. These items can proceed alongside phase 5 once dependencies are complete.
 
-- [ ] **6.01** Add a group-by/pivot builder with refresh behavior and bounded output.
-- [ ] **6.02** Add charts backed by server-side aggregates rather than whole-table downloads.
-- [ ] **6.03** Add a join builder with key/type validation and duplicate-match visibility.
-- [ ] **6.04** Add null, duplicate, distinct-count and type profiling.
-- [ ] **6.05** Add find/replace with preview and reversible mutations.
-- [ ] **6.06** Add number/date/locale formats, freeze/hide columns and bounded conditional formatting.
-- [ ] **6.T01** Test 6.01–6.04: pivots/joins/profiling against known datasets with duplicates, skew and NULLs; enforce chart/output bounds and verify source refresh semantics.
-- [ ] **6.T02** Test 6.05–6.06 and the full UI journey: replacement preview/rollback, locale/timezone formatting, keyboard/accessibility, saved presentation and correct reopening.
-- [ ] **6.07 — Gate:** An analyst can import data, join it, summarize it, chart it and reopen the saved analysis without writing SQL.
+- [x] **6.01** Add a group-by/pivot builder with refresh behavior and bounded output.
+- [x] **6.02** Add charts backed by server-side aggregates rather than whole-table downloads.
+- [x] **6.03** Add a join builder with key/type validation and duplicate-match visibility.
+- [x] **6.04** Add null, duplicate, distinct-count and type profiling.
+- [x] **6.05** Add find/replace with preview and reversible mutations.
+- [x] **6.06** Add number/date/locale formats, freeze/hide columns and bounded conditional formatting.
+- [x] **6.T01** Test 6.01–6.04: pivots/joins/profiling against known datasets with duplicates, skew and NULLs; enforce chart/output bounds and verify source refresh semantics.
+- [x] **6.T02** Test 6.05–6.06 and the full UI journey: replacement preview/rollback, locale/timezone formatting, keyboard/accessibility, saved presentation and correct reopening.
+- [x] **6.07 — Gate:** An analyst can import data, join it, summarize it, chart it and reopen the saved analysis without writing SQL.
+
+Verification (27 October 2026): [analysis guide](ANALYSIS.md), engine/server `analysis.rs`, protocol contract tests and browser `analysis.spec.ts`. See [phase 6 test evidence](TEST_MATRIX.md#phase-6): 231 Rust tests and 49 browser tests passed. Initial bounds and supported formats are documented in the guide.
 
 ## 7. Make organizations and spaces safe for teams
 

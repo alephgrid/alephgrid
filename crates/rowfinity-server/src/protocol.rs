@@ -9,6 +9,7 @@ use rowfinity_engine::{
     QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
     Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec,
 };
+use rowfinity_engine::analysis::*;
 use ts_rs::{Config, TS};
 
 use crate::backup::{BackupEntry, BackupManifest};
@@ -61,6 +62,9 @@ macro_rules! decls {
 /// The result type of every operation, by op name (TypeScript type expressions).
 /// `tests/api.rs` checks each against a real server reply.
 pub const RESULTS: &[(&str, &str)] = &[
+    ("analyze", "AnalysisResult"), ("analyses", "SavedAnalysis[]"), ("save_analysis", "SavedAnalysis"),
+    ("delete_analysis", "null"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
+    ("replace_apply", "ReplaceOutcome"), ("replace_undo", "ReplaceOutcome"), ("presentation", "Presentation"), ("save_presentation", "Presentation"),
     ("functions", "WorkbookFunction[]"),
     ("test_function", "FunctionTestResult[]"),
     ("publish_function", "WorkbookFunction"),
@@ -130,6 +134,7 @@ pub fn bindings() -> String {
     let mut out = HEADER.to_string();
     decls!(
         &cfg, out,
+        Aggregate, Pivot, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
         FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
         Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,

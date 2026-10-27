@@ -35,7 +35,7 @@
   search and one `LIMIT 1 OFFSET k` inside a chunk. Inserting takes keys between the neighbours;
   when a gap runs out, only a window around the insert point is re-spread. Nothing renumbers the
   table, so edits addressed by record id stay correct while rows move.
-* Storage format 4 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
+* Storage format 5 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
   (next id, density, structure generation, `data_rev`: the revision that last changed the table's
   rows, columns or formulas), `_rf_history` (one entry per committed change), `_rf_queries` and
   `_rf_query_versions` (saved queries, immutable versions), `_rf_materialized` (how a table made
@@ -250,3 +250,12 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
 and installs SQL macros or IronCalc named LAMBDAs transactionally. The same registry API powers
 the browser editor and protocol clients. Dependencies bind exact versions; runtime components
 must match before reopening or changing pins. See [FUNCTIONS.md](FUNCTIONS.md).
+
+
+### No-code analysis
+
+`analysis.rs` compiles typed summary/pivot, join and profile plans into validated queries and
+uses the same snapshot, computed-column, wire-value and resource-control path as SQL. Saved
+plans and table presentation live in `_rf_meta`; format 5 also stores a bounded, revision-guarded
+replacement undo record. Charts consume aggregate previews; frozen grid panes fetch only their
+small column window alongside the visible scrolling window. See [ANALYSIS.md](ANALYSIS.md).

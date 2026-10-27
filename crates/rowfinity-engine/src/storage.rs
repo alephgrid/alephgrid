@@ -15,6 +15,8 @@
 //! * **4**: immutable function registry and pins in `_rf_meta`, persisted SQL macros
 //!   and named sheet LAMBDAs. Older binaries must not mutate these workbooks.
 //!
+//! * **5**: saved no-code analysis plans, presentation and bounded replacement undo in `_rf_meta`.
+//!
 //! Opening an older file keeps a copy of it (`<file>.v<N>.bak`) and migrates it in one
 //! transaction. There is no downgrade: the copy is the only way back. Opening a file
 //! written by a newer format is refused.
@@ -28,7 +30,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = 5;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -210,6 +212,7 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
             migrate_v2_to_v3(conn)?;
         }
         if from < 4 { meta_set(conn, "format", "4")?; }
+        if from < 5 { meta_set(conn, "format", "5")?; }
         faults::check("migrate")?;
         Ok(())
     })();

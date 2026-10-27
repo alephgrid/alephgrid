@@ -125,6 +125,13 @@ expressions. Call `=MARGIN(B2,C2)` in a sheet, or a SQL function in queries and 
 Definitions have immutable versions, explicit upgrade/rollback and pinned dependencies.
 See [the function guide](docs/FUNCTIONS.md) for examples, supported expressions and XLSX limitations.
 
+### No-code analysis
+
+Use **Analyze** to build and save summaries, pivots, charts, joins and column profiles without
+writing SQL. **Find / replace** previews text changes and offers guarded undo; **Format table**
+saves number/date formats, hidden/frozen columns and conditional rules. Results remain bounded
+and calculations run on the server. See [the analysis guide](docs/ANALYSIS.md) for workflows and limits.
+
 ## Development
 
 ```bash

@@ -6,6 +6,7 @@
 mod common;
 
 use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 use common::*;
@@ -17,18 +18,32 @@ struct Proc {
 }
 
 async fn spawn(data_dir: &std::path::Path, extra: &[&str]) -> Proc {
-    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let mut args = vec!["--data-dir", data_dir.to_str().unwrap(), "--threads", "2"];
-    let port_s = port.to_string();
-    args.extend(["--port", &port_s]);
+    // Let the child reserve its own port. Releasing a probe listener first races
+    // parallel tests and a TCP readiness probe can connect to the wrong child.
+    args.extend(["--port", "0"]);
     args.extend(extra);
-    let child = Command::new(env!("CARGO_BIN_EXE_rowfinity")).args(&args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while tokio::net::TcpStream::connect(addr).await.is_err() {
-        assert!(Instant::now() < deadline, "server did not start");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rowfinity")).args(&args).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut tx = Some(tx);
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(url) = line.split("Rowfinity is running → http://").nth(1) {
+                if let Ok(addr) = url.split('/').next().unwrap_or("").parse::<std::net::SocketAddr>() {
+                    if let Some(tx) = tx.take() { let _ = tx.send(addr); }
+                }
+            }
+        }
+    });
+    let addr = match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(addr)) => addr,
+        other => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("server did not report its bound address: {other:?}");
+        }
+    };
     Proc { child, addr }
 }
 

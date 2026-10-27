@@ -13,8 +13,27 @@ test("save a view, reload, re-apply it, and snapshot it", async ({ page }) => {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Views" }),
   })).id;
   await server.api(`/api/workbooks/${wb}/import?filename=people.csv`, { method: "POST", body: "id,name,amount\n1,Ada,10\n2,Linus,-3\n3,Grace,7\n" });
+  // Keep opening in flight so toolbar readiness is tested independently of speed.
+  let releasePresentation: (() => void) | undefined;
+  let presentationId = -1;
+  await page.routeWebSocket(/\/ws\//, ws => {
+    const srv = ws.connectToServer();
+    ws.onMessage(m => {
+      const msg = JSON.parse(String(m));
+      if (msg.op === "presentation" && presentationId === -1) presentationId = msg.id;
+      srv.send(m);
+    });
+    srv.onMessage(m => {
+      const msg = JSON.parse(String(m));
+      if (msg.id === presentationId && !releasePresentation) releasePresentation = () => ws.send(m);
+      else ws.send(m);
+    });
+  });
   await page.goto(`${server.url}/w/${wb}`);
   await expect(page.getByRole("grid", { name: "Table people" })).toBeVisible();
+  await expect.poll(() => !!releasePresentation).toBe(true);
+  await expect(page.getByRole("button", { name: "Filter", exact: true })).toBeDisabled();
+  releasePresentation!();
 
   // Filter amount >= 0 and hide the id column.
   await page.getByRole("button", { name: "Filter", exact: true }).click();

@@ -7,6 +7,8 @@
 //! * Formula columns are lazily evaluated DuckDB expressions.
 //! * Free-form Excel-style sheets run on IronCalc and live in the same file.
 
+pub mod analysis;
+pub use analysis::*;
 pub mod catalog;
 pub mod faults;
 mod formula;
