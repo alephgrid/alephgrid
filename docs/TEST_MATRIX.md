@@ -581,3 +581,14 @@ journeys hold specific WebSocket replies to exercise these states deterministica
 Both readiness assertions failed against the old build; after the fixes, frontend type
 checking/bundling, server rebuild and all **49 browser tests passed** locally. No retries or
 longer timeouts were added. Remote CI results must be checked separately.
+
+CI run 40583917349 passed the web build but stopped in the shutdown integration suite
+before E2E ran: workbook creation received connection refused immediately after the TCP
+readiness probe. The helper had released a temporary port before spawning its child,
+allowing parallel tests to race for that port or probe another process. It now launches
+with port 0 and waits for the child's reported bound address; the CLI prints the actual
+bound port. Startup failure is bounded and kills/reaps the child with stderr retained.
+The four shutdown tests passed in three consecutive local runs (12 executions); targeted
+Clippy for the binary and shutdown test passed. The initial sandboxed attempt was unable
+to bind local sockets; verification used authorized local-process execution. Remote Linux
+CI remains the confirmation for the reported environment.

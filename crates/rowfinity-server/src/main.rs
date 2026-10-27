@@ -170,9 +170,10 @@ async fn main() -> Result<()> {
     let app = http::router(state.clone(), cli.web_dir.clone());
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse().context("invalid host/port")?;
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
+    let bound_port = listener.local_addr()?.port();
     let shown_host = if cli.host == "0.0.0.0" { "localhost" } else { cli.host.as_str() };
     let token = cli.token.as_ref().map(|t| format!("?token={t}")).unwrap_or_default();
-    println!("\n  Rowfinity is running → http://{shown_host}:{}/{open_path}{token}\n  Data: {}\n", cli.port, cli.data_dir.display());
+    println!("\n  Rowfinity is running → http://{shown_host}:{bound_port}/{open_path}{token}\n  Data: {}\n", cli.data_dir.display());
 
     let stopping = state.clone();
     let (begun_tx, begun_rx) = tokio::sync::oneshot::channel::<()>();
