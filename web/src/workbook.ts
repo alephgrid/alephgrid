@@ -1,3 +1,4 @@
+import { formulaHelp } from "./catalog";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { AnalysisWorkspace, replaceDialog } from "./analysis";
 import { functionCompletion, functionLibrary } from "./functions";
@@ -155,6 +156,7 @@ export class WorkbookScreen {
   private statsSeq = 0;
   private timers = new Set<number>();
   private disposed = false;
+  private closeFormulaHelp: (() => void) | null = null;
   private closeFunctions: (() => void) | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
 
@@ -309,6 +311,7 @@ export class WorkbookScreen {
   dispose(): void {
     this.disposed = true;
     this.closeFunctions?.();
+    this.closeFormulaHelp?.();
     this.disposeFunctionCompletion?.();
     this.sql?.close();
     this.analysis?.close();
@@ -382,6 +385,7 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); }); } }, "Analyze"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
+        el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),

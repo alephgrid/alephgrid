@@ -361,3 +361,15 @@ dialog progress, .dialog progress { width: 100%; }
 .analysis-bar-track::before { content: ""; position: absolute; left: 50%; height: 100%; border-left: 1px solid var(--border); }
 .analysis-bar { position: absolute; height: 100%; background: var(--accent); }
 .presentation-row { display: grid; grid-template-columns: minmax(100px, 1fr) 100px 120px; align-items: center; gap: 10px; padding: 6px; border-bottom: 1px solid var(--border); }
+
+/* The catalog bounds its list independently of the workbook grid. */
+.catalog-dialog { width: min(920px, 94vw); }
+.catalog-dialog > label { display: block; margin: 8px 0; }
+.catalog-dialog > label input, .catalog-dialog > label select { margin-left: 10px; }
+.catalog-columns { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 3fr); gap: 16px; }
+.catalog-list { display: flex; flex-direction: column; gap: 4px; max-height: 48vh; overflow: auto; }
+.catalog-details { min-width: 0; max-height: 48vh; overflow: auto; }
+.catalog-details pre, .catalog-details code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.catalog-details table { border-collapse: collapse; }
+.catalog-details th, .catalog-details td { padding: 4px 12px; text-align: left; border: 1px solid var(--border); }
+@media (max-width: 600px) { .catalog-columns { grid-template-columns: 1fr; } .catalog-list { max-height: 20vh; } }
