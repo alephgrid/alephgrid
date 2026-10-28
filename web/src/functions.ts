@@ -1,4 +1,5 @@
 import { Rpc } from "./api";
+import { builtinFunctions } from "./catalog";
 import { el, openModal } from "./ui";
 import type { FunctionDefinition, FunctionKind, FunctionTest, WorkbookFunction } from "./protocol";
 
@@ -82,7 +83,7 @@ export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
 export function functionCompletion(input: HTMLInputElement, rpc: Rpc, engine: () => FunctionKind): () => void {
   let functions: WorkbookFunction[] = [];
   let disposed = false;
-  let matches: WorkbookFunction[] = [];
+  let matches: { name: string; help: string }[] = [];
   const help = el("div", { class: "function-completion", role: "region", "aria-label": "Function suggestions", hidden: true });
 
   const signature = (f: WorkbookFunction) => {
@@ -91,18 +92,32 @@ export function functionCompletion(input: HTMLInputElement, rpc: Rpc, engine: ()
   };
   const update = () => {
     const text = input.value.slice(0, input.selectionStart ?? input.value.length);
-    const prefix = text.match(/([A-Za-z_][A-Za-z_0-9]*)$/)?.[1]?.toUpperCase();
-    const active = functions.filter(f => f.versions.find(v => v.version === f.pinned)!.definition.kind === engine());
+    // Do not offer functions while entering ordinary text or quoted formula literals.
+    let quote = "";
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quote && c === quote && text[i + 1] === quote) { i++; continue; }
+      if (quote && c === quote) quote = "";
+      else if (!quote && (c === '"' || c === "'")) quote = c;
+    }
+    if ((engine() === "formula" && !text.startsWith("=")) || quote) { matches = []; help.hidden = true; return; }
+    const prefix = text.match(/([A-Za-z_][A-Za-z_0-9.]*)$/)?.[1]?.toUpperCase();
+    const active = functions.filter(f => f.versions.find(v => v.version === f.pinned)!.definition.kind === engine())
+      .map(f => ({ name: f.name, help: signature(f) }));
+    if (engine() === "formula") {
+      const custom = new Set(active.map(f => f.name));
+      active.push(...builtinFunctions.filter(f => !custom.has(f.name)).map(f => ({ name: f.name, help: `${f.signature} — ${f.summary}` })));
+    }
     matches = prefix ? active.filter(f => f.name.startsWith(prefix)).slice(0, 8) : [];
     const call = text.match(/([A-Za-z_][A-Za-z_0-9]*)\([^()]*$/)?.[1]?.toUpperCase();
     const current = active.find(f => f.name === call);
-    const insert = (f: WorkbookFunction) => {
+    const insert = (f: { name: string }) => {
       const end = input.selectionStart ?? input.value.length;
       input.setRangeText(`${f.name}(`, end - (prefix?.length ?? 0), end, "end");
       update(); input.focus();
     };
-    help.replaceChildren(...matches.map(f => el("button", { type: "button", class: "btn", onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => insert(f) }, signature(f))));
-    if (current) help.append(el("p", {}, signature(current)));
+    help.replaceChildren(...matches.map(f => el("button", { type: "button", class: "btn", onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => insert(f) }, f.help)));
+    if (current) help.append(el("p", {}, current.help));
     help.hidden = !matches.length && !current;
   };
   const focus = async () => {

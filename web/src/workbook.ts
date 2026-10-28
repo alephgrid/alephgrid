@@ -1,3 +1,5 @@
+import { formulaHelp } from "./catalog";
+import { applyReferenceLock, referenceInsertion, referenceRanges } from "./references";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { AnalysisWorkspace, replaceDialog } from "./analysis";
 import { functionCompletion, functionLibrary } from "./functions";
@@ -129,6 +131,8 @@ export class WorkbookScreen {
   private chips = el("div", { class: "chips" });
   private cellRef = el("div", { class: "cell-ref" });
   private formulaInput = el("input", { class: "formula-input", spellcheck: false, "aria-label": "Cell value or formula" });
+  private referenceLegend = el("div", { class: "reference-legend", role: "region", "aria-label": "Formula references", hidden: true });
+  private referencePickState: { base: string; start: number; end: number } | null = null;
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
   private statsEl = el("div", { class: "stats" });
   private rowsEl = el("div", { class: "row-count" });
@@ -155,6 +159,7 @@ export class WorkbookScreen {
   private statsSeq = 0;
   private timers = new Set<number>();
   private disposed = false;
+  private closeFormulaHelp: (() => void) | null = null;
   private closeFunctions: (() => void) | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
 
@@ -195,6 +200,7 @@ export class WorkbookScreen {
       },
       {
         selectionChanged: (range, active) => self.onSelection(range, active),
+        referencePick: (range, phase) => self.pickReference(range, phase),
         commitEdits: (edits) => self.commitEdits(edits),
         headerMenu: (c, x, y) => self.headerMenu(c, x, y),
         rowMenu: (r, x, y) => self.rowMenu(r, x, y),
@@ -309,6 +315,7 @@ export class WorkbookScreen {
   dispose(): void {
     this.disposed = true;
     this.closeFunctions?.();
+    this.closeFormulaHelp?.();
     this.disposeFunctionCompletion?.();
     this.sql?.close();
     this.analysis?.close();
@@ -350,9 +357,13 @@ export class WorkbookScreen {
     });
     this.disposeFunctionCompletion = functionCompletion(this.formulaInput, this.rpc, () => this.isSheet() ? "formula" : "sql");
     this.formulaInput.addEventListener("keydown", (e) => {
+      if (e.key === "F4" && this.isSheet() && !e.isComposing) { e.preventDefault(); applyReferenceLock(this.formulaInput); }
       if (e.key === "Enter") { e.preventDefault(); this.commitFormulaBar(); }
       if (e.key === "Escape") { this.onSelection(this.grid.selection(), this.grid.active); this.grid.focus(); }
     });
+    this.formulaInput.addEventListener("input", () => this.updateReferenceHints());
+    this.formulaInput.addEventListener("focus", () => this.updateReferenceHints());
+    this.formulaInput.addEventListener("blur", () => { this.referencePickState = null; this.updateReferenceHints(); });
     this.fileInput = el("input", { type: "file", hidden: true, multiple: true, accept: IMPORT_ACCEPT,
       onchange: (e: Event) => {
         const files = (e.target as HTMLInputElement).files;
@@ -382,12 +393,13 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); }); } }, "Analyze"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
+        el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),
       this.chips,
       this.snapshotEl,
-      el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput),
+      el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput, this.referenceLegend),
       this.gridWrap,
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
@@ -992,6 +1004,33 @@ export class WorkbookScreen {
     } catch (e) {
       toast((e as Error).message, "error");
     }
+  }
+
+  private updateReferenceHints(): void {
+    const ranges = this.isSheet() && document.activeElement === this.formulaInput ? referenceRanges(this.formulaInput.value) : [];
+    this.grid.setReferences(ranges);
+    this.referenceLegend.hidden = !ranges.length;
+    this.referenceLegend.replaceChildren(...ranges.map((r, i) => el("span", { class: `reference-color-${i % 4}` },
+      `${columnLetter(r.c0)}${r.r0 + 1}${r.r0 === r.r1 && r.c0 === r.c1 ? "" : `:${columnLetter(r.c1)}${r.r1 + 1}`}`)));
+  }
+
+  private pickReference(range: Range, phase: "start" | "move" | "end"): boolean {
+    if (!this.isSheet() || document.activeElement !== this.formulaInput) return false;
+    if (phase === "end") { this.referencePickState = null; return true; }
+    if (phase === "start") {
+      const selection = referenceInsertion(this.formulaInput.value, this.formulaInput.selectionStart ?? 0, this.formulaInput.selectionEnd ?? 0);
+      if (!selection) return false;
+      this.referencePickState = { base: this.formulaInput.value, ...selection };
+    }
+    const state = this.referencePickState;
+    if (!state) return false;
+    const a = `${columnLetter(range.c0)}${range.r0 + 1}`;
+    const b = `${columnLetter(range.c1)}${range.r1 + 1}`;
+    const text = a === b ? a : `${a}:${b}`;
+    this.formulaInput.value = state.base.slice(0, state.start) + text + state.base.slice(state.end);
+    this.formulaInput.setSelectionRange(state.start + text.length, state.start + text.length);
+    this.formulaInput.dispatchEvent(new Event("input", { bubbles: true }));
+    return true;
   }
 
   private async commitFormulaBar(): Promise<void> {

@@ -592,3 +592,44 @@ The four shutdown tests passed in three consecutive local runs (12 executions); 
 Clippy for the binary and shutdown test passed. The initial sandboxed attempt was unable
 to bind local sockets; verification used authorized local-process execution. Remote Linux
 CI remains the confirmation for the reported environment.
+
+## Phase F — catalog and P0 baseline (first increment)
+
+The scope is [FORMULA_CATALOG.md](FORMULA_CATALOG.md), not full spreadsheet certification.
+
+| Area | Evidence |
+|---|---|
+| Initial F.01 manifest | `E/catalog.rs::catalog_registry_and_metadata_match_the_pinned_engine`: 562 unique names, pinned dependency/version, exact registry status, table-status boundary and metadata requirements. |
+| F.02 baseline | `catalog_examples_match_independent_expectations`: 44 hand-calculated P0 examples evaluated through real Rowfinity sheets and checked again after reopening. |
+| Lookup boundary cases | `lookup_modes_errors_and_source_changes_have_golden_results`: duplicate reverse selection, missing/default, approximate next-larger, wildcards, index/range errors, recalculation and undo/reopen. |
+| Initial F.03 completion | `W/catalog.spec.ts`: built-in Tab insertion and actual range-based lookup, ordinary/quoted text suppression, persistence and no sheet completion in table context. Existing `functions.spec.ts` covers custom function completion and publishing/version changes. |
+| Search/help UX | `W/catalog.spec.ts`: at most 40 results, paging, filtering, empty states, explicit unverified/unsupported status and axe serious/critical checks. |
+
+Known failure: inline-array XLOOKUP returns `#N/A` instead of the independently expected `20`
+on pinned IronCalc 0.9.1. The desired-result test is retained with an explicit `ignore` reason
+and the limitation is visible in help. It is outside the passing baseline; F.02, F.03 and the
+phase F analyst gate are not complete. The initial browser probe exposed this gap; assertions
+were not changed to certify the incorrect value. The supported browser journey uses ranges.
+
+Validation on 28 October 2026 (macOS arm64): workspace suite **234 passed**; final catalog
+suite **3 passed / 1 explicitly ignored known-gap test**; explicit execution of that ignored
+test reproduced the documented incorrect `#N/A`. All-target Clippy with warnings denied,
+frontend type checking/bundling and server rebuild passed. Final browser suite **52/52 passed**.
+The first completion probe used inline arrays and exposed the engine gap; the final browser
+journey verifies the supported range form. No full Excel/Sheets compatibility or large-table
+formula support is claimed. Linux and the small-filesystem disk-full scenario remain CI checks.
+
+### Phase F reference editor increment
+
+`W/references.spec.ts` checks the four F4 anchor states, multi-token selections, quoted sheet
+names and strings, function-name boundaries (including whitespace before `(`), structured
+reference exclusion and coordinate limits. The browser journey drags A1:A3 into a formula
+for C1, checks that C1 stays the destination, evaluates to 60, checks Escape and reopening,
+and exercises inline F4. Reference labels pass serious/critical axe checks in light/dark modes.
+The initial focused catalog/functions/references run passed all 9 tests. Scope and remaining
+editor limitations are in [FORMULA_EDITOR.md](FORMULA_EDITOR.md). No Rust evaluator or protocol
+behavior changed in this increment; the prior 234-test Rust baseline and known ignored
+array-input XLOOKUP regression remain applicable.
+
+Final editor-increment validation: frontend type checking/bundling and server rebuild passed;
+full browser suite **55/55 passed** on macOS arm64/Chrome. No retries or increased timeouts.

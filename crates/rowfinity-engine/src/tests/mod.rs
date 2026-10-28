@@ -108,3 +108,5 @@ pub(crate) fn fingerprint(wb: &Workbook) -> String {
 mod functions;
 
 mod analysis;
+
+mod catalog;

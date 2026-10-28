@@ -2,6 +2,7 @@
 // so the same code scrolls 100 rows or 1,000,000,000 rows.
 
 import { formatValue, isNumericKind, rawText } from "./format";
+import { applyReferenceLock } from "./references";
 import type { Align, CellValue, Column, Filter, SortKey } from "./types";
 
 export interface Cell { r: number; c: number }
@@ -29,6 +30,7 @@ export interface GridModel {
 }
 
 export interface GridHandlers {
+  referencePick?(range: Range, phase: "start" | "move" | "end"): boolean;
   selectionChanged(range: Range, active: Cell): void;
   commitEdits(edits: { r: number; c: number; value: string | null }[]): Promise<boolean>;
   headerMenu(col: number, clientX: number, clientY: number): void;
@@ -46,6 +48,7 @@ const MAX_SCROLL_PX = 8_000_000;
 const APPEND_ROWS = 40;
 
 interface Palette {
+  references: string[];
   bg: string; grid: string; headerBg: string; headerText: string; text: string; muted: string;
   selFill: string; selBorder: string; activeHeader: string; placeholder: string; formulaBg: string;
   ui: string; mono: string; danger: string;
@@ -55,6 +58,7 @@ function palette(): Palette {
   const s = getComputedStyle(document.documentElement);
   const v = (name: string) => s.getPropertyValue(name).trim();
   return {
+    references: [0, 1, 2, 3].map(i => v(`--reference-${i}`)),
     bg: v("--grid-bg"), grid: v("--grid-line"), headerBg: v("--grid-header-bg"), headerText: v("--text"),
     text: v("--text"), muted: v("--muted"), selFill: v("--sel-fill"), selBorder: v("--accent"),
     activeHeader: v("--grid-header-active"), placeholder: v("--grid-placeholder"), formulaBg: v("--grid-formula-bg"),
@@ -85,6 +89,9 @@ export class Grid {
   private dragging: "cells" | "cols" | "rows" | null = null;
   private resizing: { col: number; startX: number; startW: number } | null = null;
   private editing: Cell | null = null;
+  private referenceAnchor: Cell | null = null;
+  private referencePicked = false;
+  private references: Range[] = [];
   /** Removes every listener this grid added (including window and media-query ones). */
   private abort = new AbortController();
   private observer: ResizeObserver;
@@ -188,6 +195,11 @@ export class Grid {
 
   columnWidths(): number[] {
     return this.widths.slice();
+  }
+
+  setReferences(ranges: Range[]): void {
+    this.references = ranges.slice(0, 128);
+    this.invalidate();
   }
 
   /** The polite live region that announces the active cell. */
@@ -470,8 +482,16 @@ export class Grid {
     // Let clicks on the native scrollbar through.
     if (e.offsetX > this.scroller.clientWidth || e.offsetY > this.scroller.clientHeight) return;
     e.preventDefault();
-    this.focus();
+    this.referencePicked = false;
     const { x, y } = this.point(e);
+    const pickColumn = this.colAt(x), pickRow = this.rowAt(y);
+    if (this.isSheet() && y >= HEADER_H && x >= this.rowHeaderWidth() && pickColumn >= 0
+      && this.handlers.referencePick?.({ r0: pickRow, r1: pickRow, c0: pickColumn, c1: pickColumn }, "start")) {
+      this.referenceAnchor = { r: pickRow, c: pickColumn };
+      this.referencePicked = true;
+      return;
+    }
+    this.focus();
     const handle = this.resizeHandleAt(x, y);
     if (handle >= 0) {
       this.resizing = { col: handle, startX: e.clientX, startW: this.widths[handle] };
@@ -508,6 +528,13 @@ export class Grid {
   }
 
   private onDrag(e: MouseEvent): void {
+    if (this.referenceAnchor) {
+      const { x, y } = this.point(e);
+      const c = this.colAt(Math.min(Math.max(x, this.rowHeaderWidth() + 1), this.width - 1));
+      const r = Math.max(0, this.rowAt(Math.min(Math.max(y, HEADER_H + 1), this.height - 1)));
+      if (c >= 0) this.handlers.referencePick?.({ r0: Math.min(r, this.referenceAnchor.r), r1: Math.max(r, this.referenceAnchor.r), c0: Math.min(c, this.referenceAnchor.c), c1: Math.max(c, this.referenceAnchor.c) }, "move");
+      return;
+    }
     if (this.resizing) {
       const w = Math.max(40, this.resizing.startW + e.clientX - this.resizing.startX);
       this.widths[this.resizing.col] = w;
@@ -526,6 +553,11 @@ export class Grid {
   }
 
   private onMouseUp(): void {
+    if (this.referenceAnchor) {
+      const a = this.referenceAnchor;
+      this.referenceAnchor = null;
+      this.handlers.referencePick?.({ r0: a.r, r1: a.r, c0: a.c, c1: a.c }, "end");
+    }
     if (this.resizing) {
       this.handlers.columnResized(this.resizing.col, this.widths[this.resizing.col]);
       this.resizing = null;
@@ -534,6 +566,7 @@ export class Grid {
   }
 
   private onDoubleClick(e: MouseEvent): void {
+    if (this.referencePicked) return;
     const { x, y } = this.point(e);
     const handle = this.resizeHandleAt(x, y);
     if (handle >= 0) {
@@ -652,7 +685,8 @@ export class Grid {
   private onEditorKey(e: KeyboardEvent): void {
     // Keys the editor handles must not bubble to the grid, which would treat the same
     // Enter as "start editing the next cell".
-    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
+    if (e.key === "F4" && this.isSheet() && !e.isComposing) { e.preventDefault(); e.stopPropagation(); applyReferenceLock(this.editor); }
+    else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); this.commitEditor(e.shiftKey ? -1 : 1, 0); }
     else if (e.key === "Tab") { e.preventDefault(); e.stopPropagation(); this.commitEditor(0, e.shiftKey ? -1 : 1); }
     else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.cancelEditor(); }
     else e.stopPropagation();
@@ -823,6 +857,20 @@ export class Grid {
       const act = this.cellRect(this.active);
       ctx.lineWidth = 2;
       ctx.strokeRect(act.x + 1, act.y + 1, act.w - 2, act.h - 2);
+      ctx.restore();
+    }
+
+    // Reference outlines never fetch cells or change the active edit destination.
+    if (this.isSheet()) {
+      ctx.save(); ctx.beginPath(); ctx.rect(rhw, HEADER_H, W - rhw, H - HEADER_H); ctx.clip();
+      for (const [i, ref] of this.references.entries()) {
+        if (ref.c0 >= cols.length || ref.r1 < first || ref.r0 > last) continue;
+        const a = this.cellRect({ r: ref.r0, c: ref.c0 });
+        const b = this.cellRect({ r: ref.r1, c: Math.min(ref.c1, cols.length - 1) });
+        ctx.strokeStyle = colors.references[i % 4];
+        ctx.lineWidth = 2; ctx.setLineDash([5, 3]);
+        ctx.strokeRect(a.x + 2, a.y + 2, b.x + b.w - a.x - 4, b.y + b.h - a.y - 4);
+      }
       ctx.restore();
     }
 

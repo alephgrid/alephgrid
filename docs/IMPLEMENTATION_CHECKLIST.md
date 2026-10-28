@@ -30,6 +30,7 @@ The chosen direction is **durable workbooks with automatic, policy-managed compu
 |---|---|---|
 | Reliable local product | Phases 1–3, including new local runtime tasks | Verified data integrity, bounded execution and recovery |
 | SQL and reusable functions | Phases 4–5; phase 6 can proceed independently | Complete user workflows and versioned calculations |
+| Familiar analyst workflows | Phase F P0 and F.15 gate | Verified lookups, formulas, table integration and reproducible analysis workflows |
 | Single-node team release | Phase 7 and operational tasks in phase 9 | Authorization, collaboration, quotas, restore and upgrade verified |
 | Python-function release | Phase 8 after phase 7 | Isolated, bounded, versioned code execution verified; do not block a non-Python team release on this |
 | Connected data | Phase 10 | Scoped credentials and reliable refresh |
@@ -245,6 +246,36 @@ Depends on phases 2–4. These items can proceed alongside phase 5 once dependen
 - [x] **6.07 — Gate:** An analyst can import data, join it, summarize it, chart it and reopen the saved analysis without writing SQL.
 
 Verification (27 October 2026): [analysis guide](ANALYSIS.md), engine/server `analysis.rs`, protocol contract tests and browser `analysis.spec.ts`. See [phase 6 test evidence](TEST_MATRIX.md#phase-6): 231 Rust tests and 49 browser tests passed. Initial bounds and supported formats are documented in the guide.
+
+## F. Deliver familiar spreadsheet formulas at analytical scale
+
+New planning work; phase 5 custom functions and phase 6 bounded analysis remain completed within their documented scope. This phase closes built-in compatibility, editor and large-table formula gaps. Read the [562-function matrix](FORMULA_COMPATIBILITY_MATRIX.md), [execution design](SPREADSHEET_COMPETITIVENESS.md) and [keyboard/upstream plan](SPREADSHEET_INTERACTION_PLAN.md). Registry presence is not a completion checkmark.
+
+Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on phases 2–6; team release also requires phases 7/9. S3, Python, MCP and Kubernetes do not block the local analyst gate. P2/deferred catalog rows are backlog proposals, not prerequisites for F.15.
+
+- [ ] **F.01** Maintain versioned function manifest from the comparison matrix: sheet/table support, signatures, argument modes, examples, limitations, evidence and unsupported behavior; generate searchable built-in help.
+  - [x] Initial catalog: 562 registry-checked entries, searchable bounded help, 44 reviewed P0 signatures/examples and pinned-engine drift checks. See [catalog scope](FORMULA_CATALOG.md).
+  - [ ] Complete argument-mode documentation and evidence beyond the initial example baseline; retain explicit unreviewed entries.
+- [ ] **F.02** Certify P0 sheet functions, especially VLOOKUP/XLOOKUP/HLOOKUP, INDEX/MATCH/XMATCH, conditional aggregates, logic/error handling, text/date/math. Reuse pinned IronCalc and fix verified gaps rather than reimplementing existing functions.
+- [ ] **F.03** Deliver built-in autocomplete, argument help, range picking, colored references, F4 locking, named ranges and meaningful formula error locations; preserve custom-function behavior.
+  - [x] Initial built-in formula-bar completion and signature help for the 44 reviewed P0 entries, preserving workbook custom functions. Other F.03 editor features remain pending.
+  - [x] A1 reference locking with F4 in both editors; same-sheet formula-bar range picking and bounded colored reference hints. See [editor scope](FORMULA_EDITOR.md); cross-sheet picking, named ranges and richer errors remain pending.
+- [ ] **F.04** Add a context-aware command/shortcut registry, fill down/right, formula-aware copy/move and paste-special. Audit existing keys; test OS/browser conflicts, keyboard layouts, IME and assistive technology.
+- [ ] **F.05** Specify typed formula AST, lazy table references, row context, stable IDs/order, tagged errors, blank/NULL/coercion and precision rules. Refuse unsupported plans; no regex SQL translation or full-table cell materialization.
+- [ ] **F.06** Implement exact table XLOOKUP/VLOOKUP and multi-key lookup through batched plans with deterministic duplicate selection, missing-key handling and one output per input; no per-cell SQL queries.
+- [ ] **F.07** Add approximate/wildcard/search modes only after semantic validation; evaluate ASOF/ordered plans, validate sort requirements and document rejected modes.
+- [ ] **F.08** Add table SUMIFS/COUNTIFS/AVERAGEIFS and an allowlisted spreadsheet-style calculated-column subset with explicit error/criteria semantics and shared scans.
+- [ ] **F.09** Add cross-engine dependencies, cycle detection, snapshot-consistent recalculation, cancellation, generation-based invalidation and atomic derived updates; keep last committed results visibly stale on failure.
+- [ ] **F.10** Verify P1 dynamic arrays, LET/LAMBDA and named ranges; add bounded spill/table-result routing, collision checks and source-refresh semantics. Decide volatile epoch/seed policy without silently relaxing UDF determinism.
+- [ ] **F.11** Extend phase 6 pivots with multiple measures, totals/subtotals, calculated measures and bounded drill-down; add line/scatter charts, shared slicers and persisted dashboard layouts with explicit limits.
+- [ ] **F.12** Add validation/dropdowns, deduplication, split/trim/type-conversion previews and formula inspection; use atomic/reversible mutations or derived result tables.
+- [ ] **F.13** Add XLSX compatibility reports for unsupported formulas, arrays, styles and table references; never silently replace a live formula with a value. Publish reproducible sample workbooks.
+- [ ] **F.14** Triage missing pure functions and defects against current IronCalc; prepare focused upstream proposals/tests. Track temporary patches, pinned upgrades and removal conditions; keep connectors/UI/DuckDB integration in Rowfinity.
+- [ ] **F.T01** Test F.01–F.04: independent golden values per function/mode, missing/duplicate keys, first/last matches, wildcard escapes, mixed types, blanks/errors, unequal ranges, Unicode, absolute/mixed references, keyboard-only formula entry and undo/reopen.
+- [ ] **F.T02** Test F.05–F.09: independent small reference evaluator versus batched plans, duplicate/cardinality invariants, stable ordering, cycles, source rename/delete/reorder, cross-engine errors, concurrent source edits, cancellation/fault rollback and stale-cache rejection.
+- [ ] **F.T03** Test F.10–F.13: spill collision/size refusal, dynamic arrays, pivot/filter totals, chart bounds, validation bypass attempts, XLSX provenance fixtures and explicit incompatibility reports; include round-trip and real-browser journeys.
+- [ ] **F.T04** Benchmark 100K/1M/10M-row lookup/aggregate workflows with skew, NULLs, source edits and memory spill; publish cold/warm latency, peak memory, scanned bytes, temporary disk and query counts. Set measured regression budgets; prohibit per-row query growth and full-data browser transfer.
+- [ ] **F.15 — Analyst gate:** Import orders/customers, enrich via XLOOKUP, compute conditional totals, build/filter a pivot and chart, refresh changed data, reopen and export with compatibility notes without SQL. All P0 functions and relevant F.T01–F.T04 evidence must pass; report remaining modes and P1/P2 gaps explicitly.
 
 ## 7. Make organizations and spaces safe for teams
 
