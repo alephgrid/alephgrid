@@ -62,3 +62,5 @@ It is not evidence of supported behavior and must not be removed just to obtain 
 [Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338) is related; test current
 upstream before deciding whether to extend that report or propose a separate fix. No issue or
 upstream PR was sent as part of this increment. F.02 remains incomplete.
+
+The next editor increment adds [F4 reference locking, same-sheet range picking and reference hints](FORMULA_EDITOR.md). Broader F.03 capabilities remain pending.

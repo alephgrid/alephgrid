@@ -1,4 +1,5 @@
 :root {
+  --reference-0: #1d4ed8; --reference-1: #a21caf; --reference-2: #047857; --reference-3: #92400e;
   --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --bg: #ffffff;
@@ -24,6 +25,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --reference-0: #93c5fd; --reference-1: #f0abfc; --reference-2: #6ee7b7; --reference-3: #fcd34d;
     --bg: #0f1216;
     --panel: #161a20;
     --border: #2a3039;
@@ -373,3 +375,8 @@ dialog progress, .dialog progress { width: 100%; }
 .catalog-details table { border-collapse: collapse; }
 .catalog-details th, .catalog-details td { padding: 4px 12px; text-align: left; border: 1px solid var(--border); }
 @media (max-width: 600px) { .catalog-columns { grid-template-columns: 1fr; } .catalog-list { max-height: 20vh; } }
+.reference-legend { display: flex; gap: 12px; flex-shrink: 1; max-width: 35%; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; max-height: 24px; overflow: auto; }
+.reference-legend[hidden] { display: none; }
+.reference-legend span { border-bottom: 2px dashed currentColor; }
+.reference-color-0 { color: var(--reference-0); } .reference-color-1 { color: var(--reference-1); }
+.reference-color-2 { color: var(--reference-2); } .reference-color-3 { color: var(--reference-3); }

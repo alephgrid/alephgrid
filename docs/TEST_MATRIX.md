@@ -618,3 +618,18 @@ frontend type checking/bundling and server rebuild passed. Final browser suite *
 The first completion probe used inline arrays and exposed the engine gap; the final browser
 journey verifies the supported range form. No full Excel/Sheets compatibility or large-table
 formula support is claimed. Linux and the small-filesystem disk-full scenario remain CI checks.
+
+### Phase F reference editor increment
+
+`W/references.spec.ts` checks the four F4 anchor states, multi-token selections, quoted sheet
+names and strings, function-name boundaries (including whitespace before `(`), structured
+reference exclusion and coordinate limits. The browser journey drags A1:A3 into a formula
+for C1, checks that C1 stays the destination, evaluates to 60, checks Escape and reopening,
+and exercises inline F4. Reference labels pass serious/critical axe checks in light/dark modes.
+The initial focused catalog/functions/references run passed all 9 tests. Scope and remaining
+editor limitations are in [FORMULA_EDITOR.md](FORMULA_EDITOR.md). No Rust evaluator or protocol
+behavior changed in this increment; the prior 234-test Rust baseline and known ignored
+array-input XLOOKUP regression remain applicable.
+
+Final editor-increment validation: frontend type checking/bundling and server rebuild passed;
+full browser suite **55/55 passed** on macOS arm64/Chrome. No retries or increased timeouts.
