@@ -124,6 +124,8 @@ Choose **Formula help** to search built-in availability, signatures and tested e
 suggests 44 reviewed sheet functions, including `XLOOKUP`, `VLOOKUP` and `SUMIFS`.
 See the [catalog scope](docs/FORMULA_CATALOG.md): registry recognition is distinct from full compatibility,
 and spreadsheet-style formulas over DuckDB tables remain planned.
+Formula help also shows mode-level evidence: 115 passing cases and six explicitly documented
+[compatibility gaps](docs/FORMULA_GAPS.md), with reproducible inputs and expected results.
 
 Choose **Functions** in a workbook to define and test reusable sheet formulas or SQL scalar
 expressions. Call `=MARGIN(B2,C2)` in a sheet, or a SQL function in queries and calculated columns.

@@ -257,6 +257,8 @@ Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on p
   - [x] Initial catalog: 562 registry-checked entries, searchable bounded help, 44 reviewed P0 signatures/examples and pinned-engine drift checks. See [catalog scope](FORMULA_CATALOG.md).
   - [ ] Complete argument-mode documentation and evidence beyond the initial example baseline; retain explicit unreviewed entries.
 - [ ] **F.02** Certify P0 sheet functions, especially VLOOKUP/XLOOKUP/HLOOKUP, INDEX/MATCH/XMATCH, conditional aggregates, logic/error handling, text/date/math. Reuse pinned IronCalc and fix verified gaps rather than reimplementing existing functions.
+  - [x] Add 121 mode-level golden cases across all 44 P0 functions, with reopen checks and searchable evidence: 115 pass, six remain explicit known gaps. See [reproducers](FORMULA_GAPS.md).
+  - [ ] Resolve the six pinned-engine gaps and finish the broader coercion/argument-mode matrix before claiming P0 certification.
 - [ ] **F.03** Deliver built-in autocomplete, argument help, range picking, colored references, F4 locking, named ranges and meaningful formula error locations; preserve custom-function behavior.
   - [x] Initial built-in formula-bar completion and signature help for the 44 reviewed P0 entries, preserving workbook custom functions. Other F.03 editor features remain pending.
   - [x] A1 reference locking with F4 in both editors; same-sheet formula-bar range picking and bounded colored reference hints. See [editor scope](FORMULA_EDITOR.md); cross-sheet picking, named ranges and richer errors remain pending.

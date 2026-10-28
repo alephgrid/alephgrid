@@ -33,6 +33,16 @@ export function formulaHelp(): () => void {
       details.append(fixture, ...f.examples.map(e => el("p", {}, el("code", {}, e.formula), " → ", el("strong", {}, e.expected))),
         el("p", {}, "Evidence: tested example, including workbook reopening. This is a baseline, not verification of every argument mode."));
     } else details.append(el("p", {}, "No Rowfinity calculation example is certified by this catalog entry."));
+    if (f.verification_cases.length) {
+      const verified = f.verification_cases.filter(c => c.status === "verified").length;
+      const evidence = el("details", {}, el("summary", {}, `Mode evidence: ${verified} verified cases, ${f.verification_cases.length - verified} known gaps`),
+        el("p", {}, "Uses the example inputs above. Expected results are independent golden values; known gaps are not passing evidence. Unlisted inputs and modes remain uncertified."));
+      for (const c of f.verification_cases) evidence.append(el("p", {},
+        el("strong", {}, `${c.status === "verified" ? "Verified case" : "Known gap"}: ${c.mode}`),
+        " · ", el("code", {}, c.formula), " → expected ", el("code", {}, JSON.stringify(c.expected)),
+        c.note ? ` · ${c.note}` : ""));
+      details.append(evidence);
+    }
     details.append(el("details", {}, el("summary", {}, "Implementation plan"), el("p", {}, f.implementation), el("p", {}, f.upstream)));
   };
   const previous = el("button", { class: "btn", onclick: () => { offset = Math.max(0, offset - size); render(); } }, "Previous formulas");

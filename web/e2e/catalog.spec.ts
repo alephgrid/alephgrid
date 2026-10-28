@@ -23,8 +23,17 @@ test("formula help searches a bounded catalog and distinguishes registry evidenc
   await expect(details).toContainText("DuckDB table formulas: not supported");
   await expect(details).toContainText("=XLOOKUP(2,A1:A4,B1:B4)");
   await expect(details).toContainText("tested example");
+  await details.getByText("Mode evidence: 9 verified cases, 1 known gaps", { exact: true }).click();
+  await expect(details.getByText("Known gap: inline arrays", { exact: true })).toBeVisible();
+  await expect(details.getByText("Verified case: last duplicate", { exact: true })).toBeVisible();
+  await expect(details).toContainText("IronCalc 0.9.1 returns #N/A; desired result retained");
   const axe = await new AxeBuilder({ page }).include('.catalog-dialog').analyze();
   expect(axe.violations.filter(v => v.impact === "serious" || v.impact === "critical")).toEqual([]);
+  await search.fill("SUMIFS");
+  await details.getByText("Mode evidence: 2 verified cases, 1 known gaps", { exact: true }).click();
+  await expect(details.getByText("Known gap: unequal ranges", { exact: true })).toBeVisible();
+  await expect(details).toContainText("IronCalc 0.9.1 returns 50");
+  await expect(details).toContainText('expected "#VALUE!"');
   await search.fill("REGEXMATCH");
   await dialog.getByLabel("Formula availability").selectOption("not_registered");
   await expect(details).toContainText("not registered under this name");

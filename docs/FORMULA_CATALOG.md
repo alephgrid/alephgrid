@@ -64,3 +64,31 @@ upstream before deciding whether to extend that report or propose a separate fix
 upstream PR was sent as part of this increment. F.02 remains incomplete.
 
 The next editor increment adds [F4 reference locking, same-sheet range picking and reference hints](FORMULA_EDITOR.md). Broader F.03 capabilities remain pending.
+
+## Mode-level certification increment (F.02)
+
+Catalog schema 2 adds `verification_cases` to each entry. Each case has a unique ID,
+mode description, formula, independently calculated expected display text, status
+(`verified` or `known_gap`) and a limitation note. The existing A1:C4 fixture applies;
+A5:A6 are empty. Empty expected strings mean an empty displayed result, not an absent
+formula. The fixture occupies columns A–C and test formulas occupy column D.
+
+The 121 cases span all 44 P0 functions. They cover exact/approximate lookups,
+first/last duplicate matches, sorted binary-search examples, missing values and
+invalid ranges; conditional aggregate criteria; error handling and lazy IF branches;
+text/empty-string/Unicode BMP cases; signed rounding; leap days and month/year rollover.
+Tests evaluate the actual sheet adapter and repeat assertions after reopening the
+file-backed workbook. The original 44 examples and source-edit/undo tests remain.
+
+Formula help exposes the exact cases in an expandable **Mode evidence** section,
+including expected results and known gaps. A passing case certifies that input only.
+In particular, the binary-search cases use correctly sorted input and unique search
+keys; they do not promise duplicate tie behavior or correctness on unsorted input.
+BMP examples do not certify emoji/grapheme handling. Locale/date-system parity,
+complete coercion matrices, all optional arguments and broad performance certification
+remain future work. F.02 and F.T01 remain unchecked overall.
+
+Verification found **115 passing cases and six known gaps** in the 121-case suite.
+Five gaps are new; inline-array XLOOKUP was already tracked. See the
+[minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
+receive a verified label; each has a separately runnable desired-result regression.
