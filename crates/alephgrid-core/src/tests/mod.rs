@@ -12,6 +12,7 @@ mod links;
 mod tablecells;
 mod results;
 mod reports;
+mod tools;
 mod precision;
 mod props;
 mod sheets;

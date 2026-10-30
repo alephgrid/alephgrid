@@ -10,6 +10,7 @@ use alephgrid_core::{
     Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec,
 };
 use alephgrid_core::analysis::*;
+use alephgrid_core::tools::{FormulaInspection, Rule, Transform, TransformPreview, Validation, ValidationReport};
 use alephgrid_core::reports::{Calculated, ChartKind, Dashboard, DashboardResult, Measure, Slicer, Tile, TileResult};
 use ts_rs::{Config, TS};
 
@@ -65,7 +66,8 @@ macro_rules! decls {
 pub const RESULTS: &[(&str, &str)] = &[
     ("analyze", "AnalysisResult"), ("analyses", "SavedAnalysis[]"), ("save_analysis", "SavedAnalysis"),
     ("delete_analysis", "null"), ("dashboards", "Dashboard[]"), ("dashboard", "DashboardResult"), ("save_dashboard", "Dashboard"),
-    ("delete_dashboard", "null"), ("drill", "ViewSpec"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
+    ("delete_dashboard", "null"), ("validations", "Validation[]"), ("set_validations", "ValidationReport"),
+    ("preview_transform", "TransformPreview"), ("apply_transform", "TableInfo"), ("inspect_formula", "FormulaInspection"), ("drill", "ViewSpec"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
     ("replace_apply", "ReplaceOutcome"), ("replace_undo", "ReplaceOutcome"), ("presentation", "Presentation"), ("save_presentation", "Presentation"),
     ("functions", "WorkbookFunction[]"),
     ("test_function", "FunctionTestResult[]"),
@@ -147,7 +149,7 @@ pub fn bindings() -> String {
     let mut out = HEADER.to_string();
     decls!(
         &cfg, out,
-        Aggregate, Pivot, Measure, Calculated, ChartKind, Slicer, Tile, Dashboard, TileResult, DashboardResult, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
+        Rule, Validation, ValidationReport, Transform, TransformPreview, FormulaInspection, Aggregate, Pivot, Measure, Calculated, ChartKind, Slicer, Tile, Dashboard, TileResult, DashboardResult, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
         FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,

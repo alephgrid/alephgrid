@@ -294,8 +294,12 @@ impl Workbook {
         self.settled.clear();
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         self.txn_depth = 1;
+        // SQL changes may not add validation violations (F.12); edits are checked per value.
+        let before = if m.op == "sql_change" { crate::tools::all_violations(&self.conn).ok() } else { None };
         // Table cells follow whatever the change did to the tables they read.
-        let result = f(self).and_then(|out| self.sync_links().map(|_| out)).and_then(|out| {
+        let result = f(self)
+            .and_then(|out| match &before { Some(b) => crate::tools::refuse_new_violations(&self.conn, b).map(|_| out), None => Ok(out) })
+            .and_then(|out| self.sync_links().map(|_| out)).and_then(|out| {
             let encoded = encode(&out);
             let rev = storage::record(&self.conn, m.id, m.op, m.actor, &m.summary, encoded.as_deref().unwrap_or(""))?;
             faults::check("commit")?;
@@ -1133,13 +1137,17 @@ impl Workbook {
             _ => 0,
         };
 
-        // Validate every value before touching the table.
+        // Validate every value before touching the table, rules (F.12) included.
+        let rules = crate::tools::validations(&self.conn, &table)?;
         let mut by_column: HashMap<&str, Vec<(Target, Option<&str>)>> = HashMap::new();
         for (t, column, value) in &cells {
             by_column.entry(column).or_default().push((*t, *value));
         }
         for (column, values) in &by_column {
             let col = &by_name[*column];
+            for (_, v) in values {
+                crate::tools::check_value(&rules, column, *v)?;
+            }
             for value in values.iter().filter_map(|(_, v)| *v) {
                 crate::wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;
             }

@@ -141,3 +141,29 @@ Tests: `tests::reports` (3: measures, calculated measures, totals and subtotals,
 refusals; drill-down; dashboards, slicers, limits, collisions, deleted analyses, reopen), server
 `every_operation_replies_with_its_declared_type`, `e2e/analysis.spec.ts` (report with totals and
 a line chart, drill-down into the grid, a sliced dashboard).
+
+## Data tools (F.12)
+
+**Validation.** A table's stored columns can carry rules (`set_validations`): one of a list
+(the grid's editor offers the values as a dropdown), a number between bounds, or not blank;
+at most 32 rules per table, 500 list values. Every write path keeps them: edits (typing,
+pasting, appending rows by typing below the last one) are refused per value with what the rule
+allows, and a SQL change that would add violations is refused and rolled back (one that keeps
+them, or fixes earlier ones, goes through). Existing values are not rewritten; saving rules
+reports how many rows break each one. Rules are stored in `_rf_meta` and survive reopening.
+Formula columns are validated through the columns they read.
+
+**Clean-up into a new table.** Deduplicate by key columns (first row kept, in row order), trim
+spaces (optionally inner runs), split a column by a delimiter into up to 16 new columns, or
+convert a column to BIGINT, DOUBLE, DATE, BOOLEAN or VARCHAR (values that do not convert become
+blank). Each one is previewed first (the first 50 rows, the row count, and how many rows it
+drops, changes or fails to convert) and applied as a **new table**, so the source is never
+modified and undoing means deleting the new table.
+
+**Formula inspection.** For a formula column: the columns, tables and sheet cells it reads, the
+formula columns and sheet cells that read it, how it runs (row expression, lookup join, aggregate
+join, position join, SQL expression), and its error cells by code.
+
+Tests: `tests::tools` (3: rules on every write path including SQL bypass attempts and reopen;
+transform previews and derived tables leaving the source unchanged; inspection), server op
+coverage, `e2e/tools.spec.ts` (rule, dropdown, refused value, dedupe table, inspection).

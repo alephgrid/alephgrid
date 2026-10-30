@@ -6,6 +6,8 @@ import { workbookCommands } from "./workbookcommands";
 import type { PasteMode } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { AnalysisWorkspace, dashboardsDialog, replaceDialog } from "./analysis";
+import { dataToolsDialog } from "./tools";
+import type { Validation } from "./protocol";
 import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
@@ -148,6 +150,9 @@ export class WorkbookScreen {
   private cellNoteKey = "";
   private closeNames: (() => void) | null = null;
   private closeDashboards: (() => void) | null = null;
+  private closeTools: (() => void) | null = null;
+  /** Validation rules of the open table (F.12). */
+  private rules: Validation[] = [];
   private commands = new CommandRegistry();
   /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
    *  (formulas, formats) rather than the displayed values. */
@@ -212,6 +217,7 @@ export class WorkbookScreen {
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
         columns: () => (this.isSheet() ? this.sheetCols : this.view?.columns ?? []),
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
+        choices: (column: string) => this.isSheet() ? [] : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
         sort: () => (this.isSheet() ? [] : this.spec.sort),
         filters: () => (this.isSheet() ? [] : this.spec.filters),
         value: (r, c) => this.cache.value(r, c),
@@ -433,6 +439,7 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
           async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); } }, "Analyze"),
         el("button", { class: "btn", onclick: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); } }, "Dashboards"),
+        el("button", { class: "btn", onclick: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); } }, "Data tools"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
@@ -806,6 +813,7 @@ export class WorkbookScreen {
     this.grid.setColumns(info.columns.map((c) => saved[c.name] ?? defaultWidth(c)));
     this.rowsEl.textContent = `${formatCount(info.row_count)} rows`;
     this.renderStale(info);
+    void this.rpc.call("validations", { table: info.spec.table }).then(r => { this.rules = r; }).catch(() => { this.rules = []; });
     this.setKind("table");
     this.renderChips();
     this.grid.invalidate();
