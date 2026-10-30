@@ -48,6 +48,28 @@ pub struct Column {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub formula: Option<String>,
+    /// `sheet` for a formula written in spreadsheet syntax; absent for DuckDB SQL formulas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub formula_language: Option<FormulaLanguage>,
+}
+
+/// The language of a formula column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FormulaLanguage {
+    #[default]
+    Sql,
+    Sheet,
+}
+
+/// An error value in a fetched block: `row` and `column` index `rows` (column relative to
+/// `column_start`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CellErrorMark {
+    pub row: u32,
+    pub column: u32,
+    pub code: String,
 }
 
 impl Column {
@@ -152,6 +174,10 @@ pub struct RowBlock {
     /// rest from `row_start + rows.len()`.
     #[serde(default)]
     pub truncated: bool,
+    /// Cells of spreadsheet-formula columns that hold an error (their value is `null`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<CellErrorMark>>")]
+    pub errors: Vec<CellErrorMark>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]

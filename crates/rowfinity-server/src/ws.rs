@@ -107,7 +107,8 @@ pub enum Op {
     DeleteRows { view_id: u64, start: u64, count: u64 },
     Stats { view_id: u64, column: String, start: u64, end: u64 },
     AddColumn { table: String, name: String, sql_type: String },
-    AddFormulaColumn { table: String, name: String, formula: String },
+    /// `language` is `sql` (a DuckDB expression, the default) or `sheet` (spreadsheet syntax).
+    AddFormulaColumn { table: String, name: String, formula: String, #[serde(default)] #[ts(optional, as = "Option<rowfinity_engine::FormulaLanguage>")] language: rowfinity_engine::FormulaLanguage },
     UpdateFormula { table: String, name: String, formula: String },
     DropColumn { table: String, name: String },
     RenameColumn { table: String, name: String, new_name: String },
@@ -438,8 +439,8 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             wb.add_column(&table, &name, &sql_type)?;
             (Value::Null, changed(table))
         }
-        Op::AddFormulaColumn { table, name, formula } => {
-            wb.add_formula_column(&table, &name, &formula)?;
+        Op::AddFormulaColumn { table, name, formula, language } => {
+            wb.add_formula_column_as(&table, &name, &formula, language)?;
             (Value::Null, changed(table))
         }
         Op::UpdateFormula { table, name, formula } => {

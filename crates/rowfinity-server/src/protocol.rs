@@ -4,7 +4,7 @@
 
 use rowfinity_engine::{
     FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
-    Align, CellEdit, Column, ColumnType, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
+    Align, CellEdit, CellErrorMark, Column, ColumnType, FormulaLanguage, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
     HistoryEntry, Kind, MaterializedSource, MaterializedTable, ParamType, PreviewColumn, QueryKind, QueryParam, QueryPreview, QueryResult,
     QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
     Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec,
@@ -145,7 +145,7 @@ pub fn bindings() -> String {
         &cfg, out,
         Aggregate, Pivot, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
         FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
-        Kind, Column, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
+        Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
         HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,

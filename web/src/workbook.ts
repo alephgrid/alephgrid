@@ -1648,15 +1648,15 @@ export class WorkbookScreen {
     const example = this.view.columns.find((c) => isNumericKind(c.kind))?.name ?? this.view.columns[0]?.name ?? "column";
     const v = await formDialog("Add column", [
       { name: "name", label: "Name", placeholder: "new_column" },
-      { name: "type", label: "Type", type: "select", value: preset ?? "formula", options: COLUMN_TYPES },
-      { name: "formula", label: "Formula (for formula columns)", mono: true, placeholder: `=[${example}] * 2`,
-        hint: "Any DuckDB expression. [Column] refers to a column, e.g. =round([fare_usd] / [distance_mi], 3), =upper([origin]) || '-' || [dest], =CASE WHEN [dep_delay_min] > 15 THEN 'late' ELSE 'on time' END" },
+      { name: "type", label: "Type", type: "select", value: preset ?? "sheet", options: [{ value: "sheet", label: "Spreadsheet formula (computed)" }, ...COLUMN_TYPES.map((t) => t.value === "formula" ? { ...t, label: "SQL formula (computed)" } : t)] },
+      { name: "formula", label: "Formula (for formula columns)", mono: true, placeholder: `=IF([@${example}] > 100, "large", "small")`,
+        hint: "Spreadsheet formula: [@Column] is this row's value, e.g. =IFERROR([@revenue]/[@units], \"\"), =ROUND([@price]*1.2, 2). SQL formula: any DuckDB expression, e.g. =upper([origin]) || '-' || [dest]." },
     ], "Add column", async (vals) => {
       if (!vals.name.trim()) return "Give the column a name";
       try {
-        if (vals.type === "formula") {
+        if (vals.type === "formula" || vals.type === "sheet") {
           if (!vals.formula.trim()) return "Write a formula";
-          await this.rpc.call("add_formula_column", { table: this.spec.table, name: vals.name.trim(), formula: vals.formula });
+          await this.rpc.call("add_formula_column", { table: this.spec.table, name: vals.name.trim(), formula: vals.formula, language: vals.type === "sheet" ? "sheet" : "sql" });
         } else {
           await this.rpc.call("add_column", { table: this.spec.table, name: vals.name.trim(), sql_type: vals.type });
         }

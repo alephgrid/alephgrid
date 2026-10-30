@@ -24,7 +24,14 @@ use crate::wire::{self, Codec};
 
 /// Internal columns never shown to users.
 pub(crate) fn is_internal(name: &str) -> bool {
-    name == ID || name == ORD
+    name == ID || name == ORD || name.starts_with(ERROR_PREFIX)
+}
+
+/// The hidden column holding the error codes of spreadsheet-formula column `name`.
+pub(crate) const ERROR_PREFIX: &str = "_rf_e_";
+
+pub(crate) fn error_column(name: &str) -> String {
+    format!("{ERROR_PREFIX}{name}")
 }
 
 /// Rowfinity's own tables (`_rf_meta`, `_rf_history`, …), in any letter case.
@@ -92,12 +99,41 @@ impl Db<'_> {
             .collect::<Result<_, _>>()?)
     }
 
-    /// `SELECT _rf_id, _rf_ord, <data columns>, <formula columns> FROM table`.
+    /// Formula columns written in spreadsheet syntax (`language = 'sheet'`).
+    pub fn sheet_formulas(&self, table: &str) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .conn
+            .prepare(&format!("SELECT name FROM _rf_columns WHERE table_name = {} AND language = 'sheet'", lit(table)))?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// `SELECT _rf_id, _rf_ord, <data columns>, <formula columns> FROM table`. A spreadsheet
+    /// formula column adds its value and a hidden `_rf_e_<name>` error column.
     pub fn base_select(&self, table: &str) -> Result<String> {
         // Qualified, so a CTE that shadows the table (see `expand_query`) can read it.
         let mut select = format!("SELECT * FROM main.{}", ident(table));
-        for (name, formula) in self.formulas(table)? {
-            select = format!("SELECT *, ({}) AS {} FROM ({select})", formula_to_sql(&formula), ident(&name));
+        let sheet = self.sheet_formulas(table)?;
+        for (i, (name, formula)) in self.formulas(table)?.into_iter().enumerate() {
+            if !sheet.contains(&name) {
+                select = format!("SELECT *, ({}) AS {} FROM ({select})", formula_to_sql(&formula), ident(&name));
+                continue;
+            }
+            let described = self.describe(&select)?;
+            let errors: Vec<(String, String)> = described
+                .iter()
+                .filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone())))
+                .collect();
+            let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
+            let c = crate::table_formula::compile_with_errors(&formula, &columns, &errors, &format!("_rf_t{i}_"))
+                .map_err(|e| anyhow!("formula error in {name:?}: {e}"))?;
+            let steps: String = c.steps.iter().map(|(a, s)| format!(", {s} AS {}", ident(a))).collect();
+            let temps = c.steps.iter().map(|(a, _)| ident(a)).collect::<Vec<_>>().join(", ");
+            let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
+            select = format!(
+                "SELECT *{exclude}, {} AS {}, {} AS {} FROM (SELECT *{steps} FROM ({select}))",
+                c.value, ident(&name), c.error, ident(&error_column(&name))
+            );
         }
         Ok(select)
     }
@@ -110,7 +146,7 @@ impl Db<'_> {
             .collect::<Result<_, _>>()?;
         Ok(cols
             .into_iter()
-            .map(|(name, sql_type)| Column { kind: Kind::from_sql_type(&sql_type), name, sql_type, formula: None })
+            .map(|(name, sql_type)| Column { kind: Kind::from_sql_type(&sql_type), name, sql_type, formula: None, formula_language: None })
             .collect())
     }
 
@@ -119,10 +155,14 @@ impl Db<'_> {
             bail!(NotAllowed(format!("{table} is internal to Rowfinity")));
         }
         let formulas: HashMap<String, String> = self.formulas(table)?.into_iter().collect();
+        let sheet = self.sheet_formulas(table)?;
         let mut cols = self.describe(&self.base_select(table)?)?;
         cols.retain(|c| !is_internal(&c.name));
         for c in &mut cols {
             c.formula = formulas.get(&c.name).cloned();
+            if sheet.contains(&c.name) {
+                c.formula_language = Some(FormulaLanguage::Sheet);
+            }
         }
         Ok(cols)
     }
@@ -302,12 +342,16 @@ impl Db<'_> {
             let cols = &m.columns[c0 as usize..c1 as usize];
             let rows_allowed = limits::fetch_rows(row_count, cols.len());
             let end = row_start.saturating_add(rows_allowed).min(m.row_count);
-            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false };
+            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false, errors: vec![] };
             if row_start >= end {
                 return Ok(empty);
             }
-            let projection: Vec<String> = cols.iter().map(|c| wire::projection(c, &ident(&c.name))).collect();
+            let mut projection: Vec<String> = cols.iter().map(|c| wire::projection(c, &ident(&c.name))).collect();
             let codecs: Vec<Codec> = cols.iter().map(|c| wire::codec(&c.sql_type)).collect();
+            // Error codes of visible spreadsheet-formula columns, read in the same scan.
+            let sheet = self.sheet_formulas(&m.spec.table)?;
+            let error_cols: Vec<u32> = cols.iter().enumerate().filter(|(_, c)| sheet.contains(&c.name)).map(|(i, _)| i as u32).collect();
+            projection.extend(error_cols.iter().map(|&i| ident(&error_column(&cols[i as usize].name))));
             let projection = if projection.is_empty() { String::new() } else { format!(", {}", projection.join(", ")) };
             let base = self.base_select(&m.spec.table)?;
             // Identity views: one ordered range scan. Permutations: ids first, then rows by id.
@@ -325,12 +369,18 @@ impl Db<'_> {
             let mut stmt = self.conn.prepare(&sql)?;
             let mut rows = stmt.query([])?;
             let mut by_id: HashMap<i64, Vec<Value>> = HashMap::new();
+            let mut errors_by_id: HashMap<i64, Vec<(u32, String)>> = HashMap::new();
             let mut in_order: Vec<i64> = Vec::new();
             while let Some(row) = rows.next()? {
                 let rid: i64 = row.get(0)?;
                 let mut values = Vec::with_capacity(cols.len());
                 for (i, codec) in codecs.iter().enumerate() {
                     values.push(wire::decode(*codec, row.get_ref(i + 1)?));
+                }
+                for (k, &col) in error_cols.iter().enumerate() {
+                    if let Some(code) = row.get::<_, Option<String>>(cols.len() + 1 + k)? {
+                        errors_by_id.entry(rid).or_default().push((col, code));
+                    }
                 }
                 by_id.insert(rid, values);
                 in_order.push(rid);
@@ -341,6 +391,7 @@ impl Db<'_> {
             }
             let mut out = Vec::with_capacity(ids.len());
             let mut out_ids = Vec::with_capacity(ids.len());
+            let mut errors = Vec::new();
             let mut bytes = 0usize;
             for rid in &ids {
                 let values = by_id.remove(rid).ok_or_else(|| anyhow!("record {rid} vanished during the read"))?;
@@ -349,11 +400,14 @@ impl Db<'_> {
                     break;
                 }
                 bytes += size;
+                for (column, code) in errors_by_id.remove(rid).unwrap_or_default() {
+                    errors.push(CellErrorMark { row: out.len() as u32, column, code });
+                }
                 out.push(values);
                 out_ids.push(*rid);
             }
             let truncated = out.len() < ids.len();
-            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated })
+            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated, errors })
         })
     }
 
@@ -493,7 +547,7 @@ impl Db<'_> {
         let mut out = Vec::new();
         while let Some(r) = rows.next()? {
             let (name, sql_type): (String, String) = (r.get(0)?, r.get(1)?);
-            out.push(Column { kind: Kind::from_sql_type(&sql_type), name, sql_type, formula: None });
+            out.push(Column { kind: Kind::from_sql_type(&sql_type), name, sql_type, formula: None, formula_language: None });
         }
         Ok(out)
     }

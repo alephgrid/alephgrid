@@ -86,6 +86,8 @@ struct V {
 
 struct Compiler<'a> {
     columns: &'a [(String, String)],
+    /// Columns that carry an error code in a companion column (other spreadsheet formulas).
+    errors: &'a [(String, String)],
     steps: Vec<(String, String)>,
     prefix: String,
     refs: BTreeSet<String>,
@@ -238,7 +240,8 @@ impl Compiler<'_> {
             return fail(format!("column {actual:?} has type {sql_type}, which table formulas cannot use yet"), span);
         };
         self.refs.insert(actual.clone());
-        Ok(V { v: ident(actual), e: None, ty, is_ref: true, empty_text: false, span })
+        let e = self.errors.iter().find(|(c, _)| c == actual).map(|(_, err)| ident(err));
+        Ok(V { v: ident(actual), e, ty, is_ref: true, empty_text: false, span })
     }
 
     fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Result<V, FormulaError> {
@@ -751,8 +754,14 @@ fn number_text(n: &str) -> String {
 /// Compile `formula` for a table with `columns` (name, DuckDB type). Step aliases start
 /// with `prefix`, which must not collide with column names.
 pub fn compile(formula: &str, columns: &[(String, String)], prefix: &str) -> Result<Compiled, FormulaError> {
+    compile_with_errors(formula, columns, &[], prefix)
+}
+
+/// Like [`compile`]; `errors` pairs a column with the column holding its error codes, so
+/// errors of one formula column propagate into formulas that read it.
+pub fn compile_with_errors(formula: &str, columns: &[(String, String)], errors: &[(String, String)], prefix: &str) -> Result<Compiled, FormulaError> {
     let ast = parse(formula)?;
-    let mut c = Compiler { columns, steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
+    let mut c = Compiler { columns, errors, steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
     let top = c.expr(&ast)?;
     let ty = match top.ty {
         Ty::Blank => return fail("the formula always returns an empty value", top.span),
@@ -780,4 +789,25 @@ pub fn referenced_columns(formula: &str) -> Result<Vec<(String, Span)>, FormulaE
     let mut out = Vec::new();
     walk(&parse(formula)?, &mut out);
     Ok(out)
+}
+
+/// Rewrite references to column `old` as `new`, keeping the rest of the formula as typed.
+/// `None` when the formula does not refer to `old`.
+pub fn rename_column(formula: &str, old: &str, new: &str) -> Result<Option<String>, FormulaError> {
+    let chars: Vec<char> = formula.chars().collect();
+    let mut hits: Vec<Span> = referenced_columns(formula)?.into_iter().filter(|(n, _)| n.eq_ignore_ascii_case(old)).map(|(_, s)| s).collect();
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    let escaped: String = new.chars().flat_map(|c| if "[]#'".contains(c) { vec!['\'', c] } else { vec![c] }).collect();
+    let plain = new.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    hits.sort_by_key(|s| std::cmp::Reverse(s.start));
+    let mut out = chars.clone();
+    for s in hits {
+        let this_row = chars.get(s.start + 1) == Some(&'@');
+        let inner = if plain { escaped.clone() } else { format!("[{escaped}]") };
+        let text = format!("[{}{inner}]", if this_row { "@" } else { "" });
+        out.splice(s.start..s.end, text.chars());
+    }
+    Ok(Some(out.into_iter().collect()))
 }

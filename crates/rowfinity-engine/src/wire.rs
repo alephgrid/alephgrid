@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     fn col(sql_type: &str) -> Column {
-        Column { name: "c".into(), sql_type: sql_type.into(), kind: Kind::from_sql_type(sql_type), formula: None }
+        Column { name: "c".into(), sql_type: sql_type.into(), kind: Kind::from_sql_type(sql_type), formula: None, formula_language: None }
     }
 
     #[test]

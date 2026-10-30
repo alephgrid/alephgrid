@@ -119,6 +119,25 @@ Lookups (`XLOOKUP`, `VLOOKUP`, `XMATCH`) over whole columns are F.06; conditiona
 (`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`) are F.08; recalculation and dependencies across tables and
 sheets are F.09.
 
+## Storage, reads and editing
+
+Storage format 6 adds `language` (`sql` or `sheet`) to `_rf_columns`; opening an older
+workbook migrates it in one transaction after the usual `.v<N>.bak` copy, and every existing
+formula column stays `sql`. A Rowfinity build that only knows format 5 refuses format-6 files.
+
+A `sheet` column adds two columns to the table's base relation: its typed value and a hidden
+`_rf_e_<name>` error column (names starting with `_rf_e_` are reserved). Formulas are layered
+in column order, so a formula may read earlier formula columns; it then receives their
+errors too. Fetched row blocks list error cells separately (`errors: [{row, column, code}]`)
+while the value stays `null`, so sorting, filters and statistics treat errors like blanks and
+the grid shows the code. Renaming a column rewrites `[@old]`/`[old]` references in spreadsheet
+formulas (other text is kept); deleting a column that a formula reads is refused; a formula
+cannot read its own column. **Add column** offers *Spreadsheet formula* (the default) and *SQL
+formula*; the formula bar edits either kind in its own language.
+
+Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output), and
+formulas reading other tables (F.06/F.08) or sheet cells (F.09).
+
 ## Row identity and order
 
 Rows keep their record id (`_rf_id`) and persisted order key (`_rf_ord`) across edits. A

@@ -30,7 +30,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -99,7 +99,7 @@ pub fn user_tables(conn: &Connection) -> Result<Vec<String>> {
 }
 
 const BASE_SCHEMA: &str = "
-    CREATE TABLE IF NOT EXISTS _rf_columns (table_name VARCHAR, name VARCHAR, formula VARCHAR, position INTEGER);
+    CREATE TABLE IF NOT EXISTS _rf_columns (table_name VARCHAR, name VARCHAR, formula VARCHAR, position INTEGER, language VARCHAR NOT NULL DEFAULT 'sql');
     CREATE TABLE IF NOT EXISTS _rf_sheets (data BLOB);
     CREATE TABLE IF NOT EXISTS _rf_views (
         id VARCHAR PRIMARY KEY, name VARCHAR, table_name VARCHAR, spec VARCHAR, widths VARCHAR, updated_at BIGINT
@@ -213,6 +213,18 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
         }
         if from < 4 { meta_set(conn, "format", "4")?; }
         if from < 5 { meta_set(conn, "format", "5")?; }
+        if from < 6 {
+            // Formula columns record their language: DuckDB SQL (all older ones) or spreadsheet syntax.
+            let has: i64 = conn.query_row(
+                "SELECT count(*) FROM duckdb_columns() WHERE table_name = '_rf_columns' AND column_name = 'language' AND database_name = current_database()",
+                [],
+                |r| r.get(0),
+            )?;
+            if has == 0 {
+                conn.execute_batch("ALTER TABLE _rf_columns ADD COLUMN language VARCHAR NOT NULL DEFAULT 'sql';")?;
+            }
+            meta_set(conn, "format", "6")?;
+        }
         faults::check("migrate")?;
         Ok(())
     })();
