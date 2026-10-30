@@ -18,7 +18,8 @@ export function formulaHelp(): () => void {
   const support = el("select", { "aria-label": "Formula availability" },
     el("option", { value: "all" }, "All catalog entries"),
     el("option", { value: "registered" }, "Registered in IronCalc"),
-    el("option", { value: "not_registered" }, "Not registered"));
+    el("option", { value: "not_registered" }, "Not registered"),
+    el("option", { value: "table" }, "Supported in table formulas"));
   const list = el("div", { class: "catalog-list", "aria-label": "Matching formulas", role: "region" });
   const details = el("section", { class: "catalog-details", "aria-label": "Formula details" });
   const count = el("p", { role: "status" });
@@ -27,7 +28,9 @@ export function formulaHelp(): () => void {
   const show = (f: typeof data.functions[number]) => {
     details.replaceChildren(el("h3", {}, f.name), el("p", {}, f.summary),
       el("p", {}, f.sheet_status === "registered" ? "Sheet engine: registered. Full compatibility is not certified." : "Sheet engine: not registered under this name."),
-      el("p", {}, "DuckDB table formulas: not supported through this spreadsheet syntax."),
+      el("p", {}, "table_modes" in f && f.table_status === "supported"
+        ? `Table formulas: supported. ${f.table_modes} Tests: ${(f.table_evidence ?? []).join(", ")}.`
+        : "Table formulas: not supported."),
       el("pre", {}, f.signature ?? "Signature not yet reviewed."),
       el("p", {}, f.argument_modes),
       ...f.limitations.map(s => el("p", {}, s)));
@@ -66,7 +69,7 @@ export function formulaHelp(): () => void {
   const next = el("button", { class: "btn", onclick: () => { offset += size; render(); } }, "Next formulas");
   const render = () => {
     const q = search.value.trim().toLowerCase();
-    const matches = data.functions.filter(f => (support.value === "all" || f.sheet_status === support.value)
+    const matches = data.functions.filter(f => (support.value === "all" || f.sheet_status === support.value || (support.value === "table" && f.table_status === "supported"))
       && `${f.name} ${f.category} ${f.summary}`.toLowerCase().includes(q));
     const visible = matches.slice(offset, offset + size);
     count.textContent = `${matches.length} matching formulas${visible.length ? ` · showing ${offset + 1}–${offset + visible.length}` : ""}`;

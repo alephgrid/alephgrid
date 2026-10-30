@@ -395,7 +395,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::SheetFetch { sheet, row_start, row_count, column_count } => json!(r.sheets().fetch(sheet, row_start, row_count, column_count)?),
         Op::SheetNames => json!(r.sheets().names()),
         Op::SheetCellDetail { sheet, row, column } => json!(r.sheets().cell_detail(sheet, row, column)?),
-        Op::SheetCheckFormula { sheet, row, column, formula } => json!(r.sheets().check_formula(sheet, row, column, &formula)?),
+        Op::SheetCheckFormula { sheet, row, column, formula } => json!(r.check_sheet_formula(sheet, row, column, &formula)?),
         Op::SavedViews { table } => json!(r.saved_views(Some(table.as_str()).filter(|t| !t.is_empty()))?),
         Op::History { after, limit } => json!(r.history(after, limit.min(1000))?),
         other => bail!("{} is not a read", op_name(&other)),
@@ -479,7 +479,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             (Value::Null, tables())
         }
         Op::SheetSet { sheet, inputs } => {
-            wb.with_sheets(|s| s.set(sheet, &inputs))?;
+            wb.set_sheet_cells(sheet, &inputs)?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetUndo | Op::SheetRedo => {
@@ -940,10 +940,11 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                             Vec::new()
                         })
                     };
-                    Ok((committed, event, derived))
+                    let sheets = !committed.replayed && wb.changed_table_cells();
+                    Ok((committed, event, derived, sheets))
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
-                    Ok((c, event, derived)) => {
+                    Ok((c, event, derived, sheets)) => {
                         if let Some(ev) = event.filter(|_| !c.replayed) {
                             let ev = with_revision(ev, c.revision);
                             let structural = ev.changes_structure();
@@ -961,6 +962,10 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                                     Event::CellsChanged { table, origin: 0, revision: c.revision }
                                 };
                                 let _ = handle.events.send(ev);
+                            }
+                            // Sheet cells that read the changed tables have new values.
+                            if sheets && !resync {
+                                let _ = handle.events.send(Event::SheetChanged { sheet: None, origin: 0, revision: c.revision });
                             }
                             let h = handle.clone();
                             tokio::task::spawn_blocking(move || {

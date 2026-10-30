@@ -664,7 +664,7 @@ async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> Api
     let path = scratch.join("sheets.xlsx");
     let p = path.clone();
     let written = h
-        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| r.sheets().export_xlsx(&p))))
+        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| r.sheets().export_xlsx(&p).map(|_| ()))))
         .await
         .map_err(ApiError::from);
     let opened = match written {

@@ -24,8 +24,14 @@ There is no second manually maintained runtime catalog.
 - The formula bar offers the 44 reviewed built-ins when editing a sheet. Tab accepts a
   suggestion; argument help appears after the opening parenthesis. Workbook functions remain
   available. Ordinary sheet text and quoted literals/references do not trigger suggestions.
-- Sheet built-ins are not offered as SQL/table expressions. Table formula compilation is future
-  phase F work. Existing DuckDB SQL functions and custom functions remain separate capabilities.
+- Sheet built-ins are not offered as SQL expressions; DuckDB SQL functions and custom functions
+  remain separate capabilities.
+- **Table support** (schema 4): `table_status` is `supported` for the 49 functions spreadsheet
+  table formulas compile ([table formulas](TABLE_FORMULAS.md)), each with `table_modes` (what is
+  supported, e.g. exact-match XLOOKUP only, whole columns for SUMIFS) and `table_evidence`, the
+  differential or golden tests that exercise it. A catalog test checks both directions: every
+  cited test exists and uses the function, and `supported` matches exactly the names the
+  compiler accepts. The help shows the modes and tests, and can list only supported functions.
 
 **This is not complete P0 certification.** A registry entry does not certify every argument mode
 or Excel/Google Sheets parity. An example proves only its specified case. Unreviewed signatures

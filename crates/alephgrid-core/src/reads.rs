@@ -440,6 +440,58 @@ impl Db<'_> {
         Ok(())
     }
 
+    /// The value of the table formula of a sheet cell that reads tables (a table cell):
+    /// the formula compiled over a relation of one row with no columns, so it can read
+    /// whole table columns and sheet cells but not `[@column]`. `Ok(Err(..))` for a formula
+    /// that does not compile, with where; `live` as in [`TableRelations`].
+    pub fn table_cell_value(&self, formula: &str, live: bool) -> Result<std::result::Result<crate::table_formula::CellValue, crate::table_formula::FormulaError>> {
+        use crate::table_formula::{CellValue, FormulaError, Reference, Ty};
+        if let Ok(refs) = crate::table_formula::references(formula) {
+            if let Some(Reference::Own { column, span }) = refs.into_iter().find(|r| matches!(r, Reference::Own { .. })) {
+                return Ok(Err(FormulaError {
+                    message: format!("[@{column}] reads a row of a table, and a sheet cell has no row; read whole columns instead, e.g. SUMIFS(orders[amount], orders[{column}], \"x\")"),
+                    span,
+                }));
+            }
+        }
+        let own = "SELECT 0::BIGINT AS _rf_id, 0::BIGINT AS _rf_ord";
+        let build = Build::new();
+        let relations = TableRelations { db: self, own: "", own_select: own.into(), build: &build, live };
+        let mut c = match crate::table_formula::compile_full(formula, &[], &[], &relations, "_rf_c_") {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
+        if c.tables.is_empty() {
+            return Ok(Err(FormulaError { message: "this formula reads no table; the sheet can compute it".into(), span: crate::table_formula::Span { start: 0, end: formula.chars().count() } }));
+        }
+        for stage in &mut c.stages {
+            if let crate::table_formula::Stage::Join { sql, reads, .. } = stage {
+                if let Some(cached) = self.cached_lookup(sql, reads)? {
+                    *sql = format!("SELECT k, v, e FROM {cached}");
+                }
+            }
+        }
+        let value = match c.ty {
+            // Dates reach the sheet as serial numbers, as the sheet engine stores them.
+            Ty::Date => format!("CAST(date_diff('day', DATE '1899-12-30', {}) AS DOUBLE)", c.value),
+            Ty::Bool => format!("CASE WHEN {} THEN 1.0 ELSE 0.0 END", c.value),
+            Ty::Text => format!("CAST({} AS VARCHAR)", c.value),
+            Ty::Number | Ty::Blank => format!("CAST({} AS DOUBLE)", c.value),
+        };
+        let sql = format!("SELECT {value}, {} FROM ({})", c.error, c.wrap(own));
+        let (num, text, error): (Option<f64>, Option<String>, Option<String>) = self.conn.query_row(
+            &format!("SELECT CASE WHEN typeof(v) = 'VARCHAR' THEN NULL ELSE TRY_CAST(v AS DOUBLE) END, CASE WHEN typeof(v) = 'VARCHAR' THEN CAST(v AS VARCHAR) END, e FROM ({sql}) t(v, e)"),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        Ok(Ok(match (error, c.ty) {
+            (Some(e), _) => CellValue::Error(e),
+            (None, Ty::Text) => text.map(CellValue::Text).unwrap_or(CellValue::Blank),
+            (None, Ty::Bool) => num.map(|n| CellValue::Bool(n != 0.0)).unwrap_or(CellValue::Blank),
+            (None, _) => num.map(CellValue::Number).unwrap_or(CellValue::Blank),
+        }))
+    }
+
     pub fn describe(&self, select: &str) -> Result<Vec<Column>> {
         let cols: Vec<(String, String)> = self
             .conn

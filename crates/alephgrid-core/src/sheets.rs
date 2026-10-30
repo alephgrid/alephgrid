@@ -16,7 +16,8 @@ use ts_rs::TS;
 
 mod editing;
 mod links;
-pub use links::{Anchor, LINK_SHEET};
+pub use links::{Anchor, SlotCell, LINK_SHEET};
+pub(crate) use links::{slot_input, slot_of};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
 
 const LANG: &str = "en";
@@ -75,6 +76,9 @@ pub struct Sheets {
     /// Bumped whenever the model is about to change (after validation), so a caller can
     /// tell a rejected request from a failure part-way through a change.
     changes: u64,
+    /// Formulas of the table cells (F.09), by result slot: shown in place of the
+    /// `=_rf_links!$B$n` reference the sheet engine holds for them.
+    table_cells: std::collections::HashMap<u32, String>,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -90,7 +94,7 @@ impl Sheets {
             Some(b) => Some(UserModel::from_bytes(&b, LANG).map_err(|e| anyhow!("corrupt sheet data: {e}"))?),
             None => None,
         };
-        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0 })
+        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0, table_cells: Default::default() })
     }
 
     /// Record that the last user operation added `entries` IronCalc history entries.
@@ -285,7 +289,7 @@ impl Sheets {
                 }
                 let (row, col) = (r as i32 + 1, c);
                 let display = m.get_formatted_cell_value(index, row, col).unwrap_or_default();
-                let input = m.get_cell_content(index, row, col).unwrap_or_default();
+                let input = self.shown_input(index, m.get_cell_content(index, row, col).unwrap_or_default());
                 if display.is_empty() && input.is_empty() {
                     continue;
                 }
@@ -321,6 +325,10 @@ impl Sheets {
         for i in inputs {
             if i.row >= MAX_ROWS || i.column >= MAX_COLUMNS {
                 bail!("cell row {} column {} is outside the sheet ({MAX_ROWS} rows × {MAX_COLUMNS} columns)", i.row + 1, i.column + 1);
+            }
+            // Table cells hold exactly a slot reference; nothing else may read the link sheet.
+            if i.value.starts_with('=') && links::slot_of(&i.value).is_none() && links::mentions_link_sheet(&i.value) {
+                bail!("{}{}: {LINK_SHEET} is reserved for Alephgrid's own use", column_name(i.column), i.row + 1);
             }
         }
         let m = self.model_mut()?;
@@ -499,21 +507,39 @@ impl Sheets {
         scratch.import_xlsx(path)
     }
 
-    /// Without the internal link sheet: nothing in the sheets refers to it.
-    pub fn export_xlsx(&self, path: &std::path::Path) -> Result<()> {
+    /// Without the internal link sheet. Table cells (F.09), which other spreadsheets cannot
+    /// compute, are written as their current values; each one is listed in the returned
+    /// notes, so the replacement is never silent.
+    pub fn export_xlsx(&self, path: &std::path::Path) -> Result<Vec<String>> {
         let file = std::fs::File::create(path)?;
         let m = self.model()?;
         let hidden = m.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET && p.state != "visible");
+        let mut notes = Vec::new();
         match hidden {
             None => ironcalc::export::save_xlsx_to_writer(m.get_model(), file),
             Some(i) => {
                 let mut copy = UserModel::from_bytes(&m.to_bytes(), LANG).map_err(|e| anyhow!(e))?;
+                for placed in self.slot_cells() {
+                    let Some((index, _)) = self.visible_sheet(&placed.cell.sheet) else { continue };
+                    let (row, column) = (placed.cell.row as i32, placed.cell.column as i32);
+                    let shown = m.get_formatted_cell_value(index, row, column).unwrap_or_default();
+                    let value = match (m.get_cell_type(index, row, column), m.get_model().get_cell_value_by_index(index, row, column)) {
+                        (Ok(CellType::ErrorValue), _) => shown.clone(),
+                        (_, Ok(CellValue::Number(n))) => format!("{n}"),
+                        (_, Ok(CellValue::Boolean(b))) => if b { "TRUE".into() } else { "FALSE".into() },
+                        (_, Ok(CellValue::String(t))) => format!("'{t}"),
+                        _ => String::new(),
+                    };
+                    copy.set_user_input(index, row, column, &value).map_err(|e| anyhow!(e))?;
+                    let formula = self.shown_input(index, m.get_cell_content(index, row, column).unwrap_or_default());
+                    notes.push(format!("{}: the table formula {formula} is exported as its value {shown:?}; other spreadsheets cannot read Alephgrid tables", placed.cell.text((false, false))));
+                }
                 copy.delete_sheet(i as u32).map_err(|e| anyhow!(e))?;
                 ironcalc::export::save_xlsx_to_writer(copy.get_model(), file)
             }
         }
         .map_err(|e| anyhow!("could not write xlsx: {e}"))?;
-        Ok(())
+        Ok(notes)
     }
 
     /// The used range as typed table columns (first row = header). Reads every row,

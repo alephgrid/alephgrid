@@ -113,7 +113,7 @@ stands for an error. Error cells read back with their code and show it in the gr
 |---|---|
 | Logic | `IF` (else branch required unless the result is logical), `IFS`, `IFERROR`, `IFNA`, `AND`, `OR`, `NOT` |
 | Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA` |
-| Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `SUM`, `MIN`, `MAX`, `AVERAGE` (row values only) |
+| Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `SUM`, `MIN`, `MAX`, `AVERAGE` (row values, or whole columns), `COUNT`, `COUNTA` (whole columns) |
 | Text | `LEFT`, `RIGHT`, `MID`, `LEN`, `TRIM`, `UPPER`, `LOWER`, `SUBSTITUTE`, `CONCAT` |
 | Date | `DATE`, `YEAR`, `MONTH`, `DAY`, `EDATE`, `EOMONTH` |
 
@@ -132,11 +132,13 @@ Conditional aggregates are described below; formulas reading sheet cells under
 =COUNTIFS(Orders[customer_id], [@id], Orders[amount], ">100")
 =AVERAGEIFS(Orders[amount], Orders[channel], "w*", Orders[day], ">="&[@start])
 =SUMIF(Orders[customer_id], [@id], Orders[amount])      COUNTIF, AVERAGEIF likewise
+=MINIFS(Orders[amount], Orders[customer_id], [@id])     MAXIFS likewise
+=SUM(Orders[amount])      AVERAGE, MIN, MAX, COUNT, COUNTA of whole columns likewise
 ```
 
 All ranges are whole columns of one table (another table, or the formula's own stored
-columns). The result is a Number: `SUMIFS` and `COUNTIFS` give 0 when nothing matches,
-`AVERAGEIFS` gives `#DIV/0!`. Only number and date cells are summed or averaged (text and
+columns). The result is a Number: `SUMIFS`, `COUNTIFS`, `MINIFS` and `MAXIFS` give 0 when
+nothing matches, `AVERAGEIFS` gives `#DIV/0!`. Only number and date cells are summed or averaged (text and
 logical cells are skipped); an error cell in the aggregated column of a matching row makes the
 result that error (the first in row order).
 
@@ -168,8 +170,16 @@ Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): a
 customers with equality `SUMIFS` and `COUNTIFS` columns takes 45–57 ms; with a text criterion
 taken from each row, 347 ms (not cached).
 
-Not available yet, refused with a message: `COUNT`, `COUNTA`, `MINIFS`, `MAXIFS`, ranges from
-different tables, and array criteria.
+**Whole columns.** `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT` and `COUNTA` take whole columns of
+one table (`SUM(Orders[amount])`, `MAX(Orders[a], Orders[b])`) and give the same value on every
+row, computed in one scan (one aggregate relation joined to the rows). As with ranges in sheets,
+text and logical cells are skipped; `COUNTA` counts every non-blank cell, `""` and errors
+included; the first error in argument, then row, order is the result, except for `COUNT` and
+`COUNTA`. An empty table gives 0 (`AVERAGE`: `#DIV/0!`). Whole columns and row values cannot be
+mixed in one call (`SUM(Orders[a], [@b])` is refused; write `SUM(Orders[a]) + [@b]`).
+Differential-tested against sheet ranges (20 formulas), with hand-checked values.
+
+Not available yet, refused with a message: ranges from different tables, and array criteria.
 
 ## Lookups (F.06)
 
@@ -305,9 +315,58 @@ read them through lookups or conditional aggregates, so those refresh too. Saved
 and live queries count the tables formulas read as sources, so a snapshot made from orders goes
 stale when a customer it looked up changes.
 
-Not yet: sheet cells reading tables (a sheet formula such as `=SUMIFS(orders[amount], …)`),
-and with it circular references between sheets and tables; stored formula results with
-cancellable, atomic recalculation (sorting by a lookup column still evaluates every row).
+## Sheet cells that read tables (F.09)
+
+A sheet cell can compute over tables with the same formulas:
+
+```text
+=SUMIFS(orders[amount], orders[region], A1)
+=XLOOKUP(Settings!B2, customers[id], customers[name], "unknown")
+=SUM(orders[amount]) * 1.2
+```
+
+The sheet engine cannot read tables, so when it reports a name it does not know before `[`
+(IronCalc's "Table not found"), Alephgrid compiles the whole formula as a table formula over a
+row of nothing: whole columns, lookups, aggregates and sheet cells (on the same sheet, `A1`
+needs no sheet name), but not `[@column]`, and not sheet ranges (`SUM(B1:B3)`) mixed in. A
+formula that does not compile is refused with the place it goes wrong, before it is saved and
+in the formula bar's check. Other formulas stay sheet formulas.
+
+Such a *table cell* keeps its formula in `_rf_table_cells` with a result slot; the sheet engine
+holds `=_rf_links!$B$<slot>`, a reference to the slot's value in the hidden link sheet, so
+other sheet formulas read it like any cell (`=B1*2`). The formula bar and the grid show the
+table formula instead (same-sheet cells without the sheet name). Moving, copying or undoing the
+cell moves, copies or undoes that reference; slots are never reused, so redo finds the formula
+again. A copy refers to the same formula: the cells it reads are not shifted. Values reach the
+sheet with sheet types: numbers, text, logical values, errors, dates as serial numbers, and an
+empty result as an empty cell (which reads as 0, as an empty lookup result does in sheets).
+
+**Atomic recalculation.** Table cells are recomputed inside the transaction of every change
+that could alter them: a change to a table they read (or that a table they read looks up), to
+a sheet cell they read, or to their formula. A table cell's new value can change sheet cells
+that table formulas read, so recalculation runs in rounds until nothing changes (bounded by the
+number of table cells). If any step fails, the whole change is rolled back: tables, sheets and
+values stay as they were committed. After a change that altered table cells the server tells
+every session to refetch the sheets (`sheet_changed`, `sheet: null`, `origin: 0`).
+
+**Circular references across sheets and tables** are refused, with the cells involved:
+`Report!B1` reading `orders`, whose formula reads `Settings!B1`, which is `=Report!B1/1000`,
+gives "circular reference: Report!B1 depends on its own value through the tables and sheet
+cells its formula reads"; two table cells give their path (`Report!B2 → Report!B3 →
+Report!B2`). The check follows table formulas, lookups between tables, and the sheet engine's
+references, ranges, defined names and spilled arrays (at most 200,000 cells). References built
+while evaluating (`INDIRECT`, `OFFSET`) cannot be followed statically; a loop through them
+stops at the round limit with an error and the change is rolled back.
+
+**Dependencies.** Renaming a table or column rewrites table cells too; deleting a table, a
+column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`).
+
+**Export.** XLSX files cannot hold table formulas. A table cell is exported as its current
+value, and the export returns one note per such cell ("Report!B1: the table formula … is
+exported as its value "80" …"). Showing these notes in the download is F.13.
+
+Not yet: stored formula results with cancellable, atomic recalculation (sorting by a lookup
+column still evaluates every row).
 
 ## Row identity and order
 

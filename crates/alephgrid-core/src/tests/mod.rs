@@ -9,6 +9,7 @@ mod formulas;
 mod import;
 mod integrity;
 mod links;
+mod tablecells;
 mod precision;
 mod props;
 mod sheets;

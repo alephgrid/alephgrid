@@ -70,3 +70,37 @@ test("a table formula reads a sheet cell and follows its edits", async ({ page }
   await expect.poll(() => shown(page, 1, 2)).toContain("100");
   ws.close();
 });
+
+test("a sheet cell reads a table and follows its edits", async ({ page }) => {
+  const wb = await server.createWorkbook("Table cells"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "orders", sql: "SELECT * FROM (VALUES (1, 'West', 100.0), (2, 'East', 50.0), (3, 'West', 25.0)) v(id, region, amount)" });
+  await ws.call("sheet_create", { name: "Report" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "West" }] });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /Report/ }).click();
+  await expect(page.getByRole("grid", { name: /^Sheet / })).toHaveAttribute("aria-colcount", /\d+/);
+  const bar = page.getByRole("textbox", { name: "Cell value or formula", exact: true });
+  // B1: typed in the formula bar, reading the criterion in A1.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await bar.fill("=SUMIFS(orders[amount], orders[region], A1)");
+  await bar.press("Enter");
+  // 100 + 25.
+  await expect.poll(() => shown(page, 0, 1)).toContain("125");
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await expect(bar).toHaveValue("=SUMIFS(orders[amount], orders[region], A1)");
+  // Another session edits the table: the sheet shows the new total by itself.
+  const view = await ws.call("open_view", { spec: { table: "orders", sort: [], filters: [] } });
+  await ws.call("edit", { view_id: view.view_id, edits: [{ row: 2, column: "amount", value: "75" }] });
+  await expect.poll(() => shown(page, 0, 1)).toContain("175");
+  // A formula the table engine cannot compute is refused where it goes wrong.
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await bar.fill("=SUMIFS(orders[nope], orders[region], A1)");
+  await bar.press("Enter");
+  await expect(page.locator("body")).toContainText("no column named \"nope\"");
+  ws.close();
+});

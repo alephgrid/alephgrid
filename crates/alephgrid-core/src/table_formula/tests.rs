@@ -447,6 +447,10 @@ fn conditional_aggregates_agree_with_the_sheet_engine() {
         "=COUNTIFS(ag[kt],\"a~*b\")", "=COUNTIFS(ag[kt],\"<>a*\")", "=COUNTIFS(ag[kt],\"?\")", "=COUNTIFS(ag[kt],\"true\")", "=COUNTIFS(ag[kb],\"<>TRUE\")",
         "=COUNTIFS(ag[kd],\"<7/31/2023\")", "=COUNTIFS(ag[kd],\">=2000-01-01\")", "=COUNTIFS(ag[kd],\"=Feb/29/2024\")", "=COUNTIFS(ag[kn],\">=\"&\"1\")",
         "=AVERAGEIF(ag[kn],\">0\")", "=COUNTIFS(ag[kn],\"<\")", "=COUNTIFS(ag[kn],\"<>2\",ag[kt],\"<>\")", "=SUMIFS(ag[r],ag[kt],\"*\",ag[kn],\">\"&[@i])",
+        // F.08 remainder: MINIFS/MAXIFS and whole-column aggregates.
+        "=MINIFS(ag[r],ag[kn],\">\"&[@i])", "=MAXIFS(ag[r],ag[kt],[@s])", "=MINIFS(ag[kd],ag[kb],[@b])", "=MAXIFS(ag[r],ag[kn],\">99\")", "=MAXIFS(ag[kt],ag[kn],\">0\")",
+        "=SUM(ag[r])", "=SUM(ag[kn],ag[r])", "=SUM(ag[kt])", "=AVERAGE(ag[r])", "=AVERAGE(ag[kt])", "=MIN(ag[kn])", "=MAX(ag[kd])", "=MIN(ag[kt],ag[kb])",
+        "=COUNT(ag[kn])", "=COUNT(ag[kt])", "=COUNT(ag[kd],ag[kb])", "=COUNTA(ag[kt])", "=COUNTA(ag[r],ag[kb])", "=SUM(ag[r])-[@n]", "=MAX(ag[kn])*[@i]",
     ] {
         let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
         let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM t"));
@@ -534,6 +538,18 @@ fn conditional_aggregates_by_hand() {
         ("=AVERAGEIFS(ag[r],ag[kn],99)", "#DIV/0!"),
         ("=COUNTIFS(ag[kd],\">=2000-01-01\")", "4.0"),
         ("=SUMIFS(ag[r],ag[kn],2,ag[kb],TRUE)", "10.0"),
+        ("=MINIFS(ag[r],ag[kn],\">0\")", "1.0"),   // 10, 20, 1, 2
+        ("=MAXIFS(ag[r],ag[kn],\">0\")", "20.0"),
+        ("=MAXIFS(ag[r],ag[kn],99)", "0.0"),         // nothing matches
+        ("=SUM(ag[r])", "45.5"),                     // 10 + 20 + 5 + 7.5 + 1 + 2
+        ("=AVERAGE(ag[r])", "7.583333333333333"),    // 45.5 / 6
+        ("=MIN(ag[kn])", "-2.5"),
+        ("=MAX(ag[kn],ag[r])", "20.0"),
+        ("=COUNT(ag[kn])", "6.0"),
+        ("=COUNT(ag[kt])", "0.0"),                   // text, numeric text included, is not counted
+        ("=COUNTA(ag[kt])", "6.0"),                  // every non-blank cell, "" included
+        ("=COUNTA(ag[kb])", "5.0"),
+        ("=AVERAGE(ag[kt])", "#DIV/0!"),
     ] {
         assert_eq!(run(f), want, "{f}");
     }

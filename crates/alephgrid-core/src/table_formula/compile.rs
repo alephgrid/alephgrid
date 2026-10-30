@@ -665,6 +665,9 @@ impl Compiler<'_> {
                 let e = first_error([a.e.clone(), xe, b.e.clone(), ye, Some(format!("CASE WHEN {y} = 0 THEN '#DIV/0!' WHEN NOT isfinite({r}) THEN '#NUM!' END"))]);
                 Ok(self.make(r, e, Ty::Number, span))
             }
+            "SUM" | "MIN" | "MAX" | "AVERAGE" | "COUNT" | "COUNTA" if args.iter().any(|a| matches!(a.kind, ExprKind::TableColumn { .. })) => {
+                self.whole_columns(&name_upper, args, span)
+            }
             "SUM" | "MIN" | "MAX" | "AVERAGE" => {
                 Self::arity(&name_upper, args, 1, 255, span)?;
                 let mut nums = Vec::new(); // (value or NULL when skipped)
@@ -844,9 +847,9 @@ impl Compiler<'_> {
                 format!("{name_upper} over table columns is not available yet (planned: exact lookups through batched joins)"),
                 span,
             ),
-            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" => self.conditional(&name_upper, args, span),
+            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => self.conditional(&name_upper, args, span),
             "COUNT" | "COUNTA" => fail(
-                format!("{name_upper} over table columns is not available yet; COUNTIFS counts rows that match criteria"),
+                format!("{name_upper} counts whole columns here, e.g. {name_upper}(Orders[amount]); COUNTIFS counts rows that match criteria"),
                 span,
             ),
             _ => fail(format!("{name_upper} is not available in table formulas; see the list in TABLE_FORMULAS.md"), span),
@@ -1141,8 +1144,63 @@ pub enum Reference {
     Cell { cell: CellRef, fixed: (bool, bool), span: Span },
 }
 
+/// A sheet cell's table formula with its bare cells (`A1`) qualified by their sheet
+/// (`Report!A1`), as stored, and a map from positions in it back to positions in `formula`.
+pub fn qualify_cells(formula: &str, sheet: &str) -> Result<(String, impl Fn(usize) -> usize), FormulaError> {
+    let chars: Vec<char> = formula.chars().collect();
+    let mut edits = Vec::new();
+    for r in references_of(&super::parse::parse_in(formula, Some(sheet))?) {
+        if let Reference::Cell { cell, fixed, span } = r {
+            if !chars[span.start..span.end].contains(&'!') {
+                edits.push((span, cell.text(fixed)));
+            }
+        }
+    }
+    // (end of the edit in the new text, characters it added), in order.
+    let mut shifts: Vec<(usize, Span, isize)> = Vec::new();
+    let mut sorted = edits.clone();
+    sorted.sort_by_key(|(s, _)| s.start);
+    let mut added = 0isize;
+    for (span, text) in &sorted {
+        let n = text.chars().count() as isize - (span.end - span.start) as isize;
+        let new_start = (span.start as isize + added) as usize;
+        added += n;
+        shifts.push((new_start, *span, added));
+    }
+    let back = move |p: usize| -> usize {
+        let mut out = p as isize;
+        for (new_start, span, total) in shifts.iter().rev() {
+            if p >= *new_start {
+                // Inside a rewritten cell: its start; after it: undo every shift so far.
+                let new_end = (span.end as isize + total) as usize;
+                out = if p < new_end { span.start as isize } else { p as isize - total };
+                break;
+            }
+        }
+        out.max(0) as usize
+    };
+    Ok((splice(formula, edits), back))
+}
+
+/// A stored sheet-cell table formula as shown on sheet `home`: cells on that sheet without
+/// their sheet name. The formula unchanged if it does not parse.
+pub fn unqualify_cells(formula: &str, home: &str) -> String {
+    let Ok(refs) = references(formula) else { return formula.to_string() };
+    let edits = refs.into_iter().filter_map(|r| match r {
+        Reference::Cell { cell, fixed, span } if cell.sheet.to_lowercase() == home.to_lowercase() => {
+            Some((span, format!("{}{}{}{}", if fixed.0 { "$" } else { "" }, super::column_letters(cell.column), if fixed.1 { "$" } else { "" }, cell.row)))
+        }
+        _ => None,
+    }).collect();
+    splice(formula, edits)
+}
+
 /// Everything a formula reads, without compiling it.
 pub fn references(formula: &str) -> Result<Vec<Reference>, FormulaError> {
+    Ok(references_of(&parse(formula)?))
+}
+
+fn references_of(ast: &Expr) -> Vec<Reference> {
     fn walk(e: &Expr, out: &mut Vec<Reference>) {
         match &e.kind {
             ExprKind::Column { name, .. } => out.push(Reference::Own { column: name.clone(), span: e.span }),
@@ -1172,8 +1230,8 @@ pub fn references(formula: &str) -> Result<Vec<Reference>, FormulaError> {
         }
     }
     let mut out = Vec::new();
-    walk(&parse(formula)?, &mut out);
-    Ok(out)
+    walk(ast, &mut out);
+    out
 }
 
 /// Columns of its own table a formula reads (for rename/delete dependency checks).

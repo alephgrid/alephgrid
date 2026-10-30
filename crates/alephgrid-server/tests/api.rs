@@ -525,3 +525,38 @@ async fn sheet_cells_read_by_tables_notify_their_readers() {
     b.close().await;
     server.stop().await;
 }
+
+/// F.09: a sheet cell that reads a table is recomputed in the same change as the table, and
+/// every session is told to refetch the sheets.
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_cells_that_read_tables_follow_table_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("tablecells").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT * FROM (VALUES (1, 2.0), (2, 1.0)) v(id, amount)" })).await;
+    a.ok("sheet_create", json!({ "name": "Report" })).await;
+    let problem = a.ok("sheet_check_formula", json!({ "sheet": 0, "row": 0, "column": 1, "formula": "=SUM(orders[nope])" })).await;
+    assert_eq!(problem["position"], json!(5), "{problem}");
+    a.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 1, "value": "=SUM(orders[amount])" }] })).await;
+    let cell = |block: &Value| block["rows"][0][1].clone();
+    assert_eq!(cell(&a.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await), json!(["3", "right", "=SUM(orders[amount])"]));
+    let v = b.ok("open_view", json!({ "spec": { "table": "orders" } })).await["view_id"].as_u64().unwrap();
+    let id = b.send("edit", json!({ "view_id": v, "edits": [{ "row": 0, "column": "amount", "value": "5" }] })).await;
+    let rev = b.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        loop {
+            // Entering the table cell itself was announced at an earlier revision.
+            let e = ws.event("sheet_changed").await.unwrap();
+            if e["revision"] == rev {
+                assert_eq!((e["sheet"].clone(), e["origin"].clone()), (Value::Null, json!(0)), "{e}");
+                break;
+            }
+        }
+    }
+    assert_eq!(cell(&a.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await), json!(["6", "right", "=SUM(orders[amount])"]));
+    a.close().await;
+    b.close().await;
+    server.stop().await;
+}

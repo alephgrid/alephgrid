@@ -197,6 +197,8 @@ struct Lexer<'a> {
     chars: Vec<char>,
     pos: usize,
     _text: &'a str,
+    /// The sheet a bare cell such as `A1` is on, when the formula belongs to a sheet cell.
+    home: Option<String>,
 }
 
 impl<'a> Lexer<'a> {
@@ -247,6 +249,9 @@ impl<'a> Lexer<'a> {
                 if self.peek(0) == Some('!') {
                     self.pos += 1;
                     self.cell(name, start)?
+                } else if let Some(home) = self.home.clone().filter(|_| looks_like_cell(&name) && !matches!(self.peek(0), Some('(' | '['))) {
+                    self.pos = start;
+                    self.cell(home, start)?
                 } else {
                     Tok::Ident(name)
                 }
@@ -273,6 +278,10 @@ impl<'a> Lexer<'a> {
             }
             ':' => return err("ranges such as A1:B4 are not available in table formulas; use Table[column]", start, start + 1),
             '{' => return err("array constants are not available in table formulas", start, start + 1),
+            '$' if self.home.is_some() => {
+                let home = self.home.clone().unwrap_or_default();
+                self.cell(home, start)?
+            }
             '$' => return err("a sheet cell needs its sheet name, e.g. Sheet1!$A$1; refer to columns with [@column]", start, start + 1),
             '!' => return err("a sheet name is missing before !, e.g. Sheet1!A1", start, start + 1),
             ';' => return err("separate arguments with commas", start, start + 1),
@@ -439,8 +448,14 @@ pub struct Parser<'a> {
 
 /// Parse a formula as typed (a leading `=` is optional).
 pub fn parse(formula: &str) -> ParseResult<Expr> {
+    parse_in(formula, None)
+}
+
+/// Like [`parse`], for a formula of a sheet cell on sheet `home`: bare cells (`A1`, `$B$2`)
+/// are on that sheet.
+pub fn parse_in(formula: &str, home: Option<&str>) -> ParseResult<Expr> {
     let chars: Vec<char> = formula.chars().collect();
-    let mut lexer = Lexer { chars, pos: 0, _text: formula };
+    let mut lexer = Lexer { chars, pos: 0, _text: formula, home: home.map(str::to_string) };
     lexer.skip_space();
     if lexer.peek(0) == Some('=') { lexer.pos += 1; }
     let mut p = Parser { lexer, tok: Tok::End, span: Span { start: 0, end: 0 } };

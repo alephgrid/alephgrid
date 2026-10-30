@@ -6,10 +6,37 @@ fn catalog() -> Value {
     serde_json::from_str(include_str!("../../data/function_catalog.json")).unwrap()
 }
 
+/// The table-formula differential and golden tests, by name, with the formula corpora
+/// they use appended to their bodies.
+fn table_tests() -> Vec<(String, String)> {
+    let src = include_str!("../table_formula/tests.rs");
+    let corpus = |name: &str| src.split(&format!("const {name}: &[&str] = &[")).nth(1).and_then(|r| r.split("\n];").next()).unwrap_or("").to_string();
+    let mut out = Vec::new();
+    for part in src.split("#[test]\nfn ").skip(1) {
+        let name = part.split('(').next().unwrap().to_string();
+        let mut body = part.split("\n}\n").next().unwrap().to_string();
+        for c in ["CORPUS"] {
+            if body.contains(c) { body.push_str(&corpus(c)); }
+        }
+        out.push((name, body));
+    }
+    out
+}
+
+/// Whether the table-formula compiler accepts the function at all (it may still refuse a
+/// mode or argument): anything but its refusal of the name.
+fn compiles_in_tables(name: &str) -> bool {
+    let cols = [("n".to_string(), "DOUBLE".to_string())];
+    match crate::table_formula::compile(&format!("={name}([@n])"), &cols, "_rf_p_") {
+        Ok(_) => true,
+        Err(e) => !(e.message.contains("is not available in table formulas") || e.message.contains("not available yet") || e.message.contains("changes on every calculation")),
+    }
+}
+
 #[test]
 fn catalog_registry_and_metadata_match_the_pinned_engine() {
     let c = catalog();
-    assert_eq!(c["schema_version"], 3);
+    assert_eq!(c["schema_version"], 4);
     assert_eq!(c["engine"], "ironcalc-0.9.1");
     assert_eq!(c["engine_patch"], "alephgrid-compat-1");
     let lock = include_str!("../../../../Cargo.lock");
@@ -23,7 +50,18 @@ fn catalog_registry_and_metadata_match_the_pinned_engine() {
         let name = f["name"].as_str().unwrap();
         assert!(names.insert(name), "duplicate {name}");
         assert_eq!(lang.functions.lookup(name).is_some(), f["sheet_status"] == "registered", "registry drift: {name}");
-        assert_eq!(f["table_status"], "not_supported", "table support needs separate evidence");
+        if f["table_status"] == "supported" {
+            // Each cited test exists and exercises the function in a table formula.
+            let evidence = f["table_evidence"].as_array().unwrap();
+            assert!(!evidence.is_empty() && !f["table_modes"].as_str().unwrap().is_empty(), "{name}");
+            for t in evidence {
+                let t = t.as_str().unwrap();
+                assert!(table_tests().iter().any(|(n, body)| n == t && body.contains(&format!("{name}("))), "{name}: {t}");
+            }
+        } else {
+            assert_eq!(f["table_status"], "not_supported", "{name}");
+        }
+        assert_eq!(f["table_status"] == "supported", compiles_in_tables(name), "table status drift: {name}");
         assert!(!f["limitations"].as_array().unwrap().is_empty());
         assert!(!f["implementation"].as_str().unwrap().is_empty());
         if f["priority"] == "P0" {
