@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod editing;
+mod links;
+pub use links::{Anchor, LINK_SHEET};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
 
 const LANG: &str = "en";
@@ -154,9 +156,10 @@ impl Sheets {
         self.changes
     }
 
+    /// Only visible sheets can be addressed; the link sheet (see `links.rs`) is internal.
     fn check_index(&self, index: u32) -> Result<()> {
-        let n = self.model()?.get_worksheets_properties().len() as u32;
-        if index >= n {
+        let visible = self.model()?.get_worksheets_properties().get(index as usize).is_some_and(|p| p.state == "visible");
+        if !visible {
             bail!("unknown sheet {index}");
         }
         Ok(())
@@ -249,7 +252,7 @@ impl Sheets {
 
     pub fn delete(&mut self, index: u32) -> Result<()> {
         self.check_index(index)?;
-        if self.model()?.get_worksheets_properties().len() == 1 {
+        if self.list().len() == 1 {
             // IronCalc needs at least one worksheet; drop the whole model instead.
             self.changes += 1;
             self.model = None;
@@ -496,10 +499,20 @@ impl Sheets {
         scratch.import_xlsx(path)
     }
 
+    /// Without the internal link sheet: nothing in the sheets refers to it.
     pub fn export_xlsx(&self, path: &std::path::Path) -> Result<()> {
         let file = std::fs::File::create(path)?;
-        ironcalc::export::save_xlsx_to_writer(self.model()?.get_model(), file)
-            .map_err(|e| anyhow!("could not write xlsx: {e}"))?;
+        let m = self.model()?;
+        let hidden = m.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET && p.state != "visible");
+        match hidden {
+            None => ironcalc::export::save_xlsx_to_writer(m.get_model(), file),
+            Some(i) => {
+                let mut copy = UserModel::from_bytes(&m.to_bytes(), LANG).map_err(|e| anyhow!(e))?;
+                copy.delete_sheet(i as u32).map_err(|e| anyhow!(e))?;
+                ironcalc::export::save_xlsx_to_writer(copy.get_model(), file)
+            }
+        }
+        .map_err(|e| anyhow!("could not write xlsx: {e}"))?;
         Ok(())
     }
 

@@ -475,7 +475,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             (Value::Null, tables())
         }
         Op::SheetDelete { sheet } => {
-            wb.with_sheets(|s| s.delete(sheet))?;
+            wb.delete_sheet(sheet)?;
             (Value::Null, tables())
         }
         Op::SheetSet { sheet, inputs } => {
@@ -930,14 +930,38 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                             Ok(value)
                         },
                     )?;
-                    Ok((committed, event))
+                    // Tables whose values changed through formulas that read what changed
+                    // (another table's rows, sheet cells) get their own refresh event.
+                    let derived: Vec<(String, bool)> = if committed.replayed || event.is_none() {
+                        Vec::new()
+                    } else {
+                        wb.changed_tables(committed.revision).unwrap_or_else(|e| {
+                            tracing::warn!("finding tables changed by revision {}: {e:#}", committed.revision);
+                            Vec::new()
+                        })
+                    };
+                    Ok((committed, event, derived))
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
-                    Ok((c, event)) => {
+                    Ok((c, event, derived)) => {
                         if let Some(ev) = event.filter(|_| !c.replayed) {
                             let ev = with_revision(ev, c.revision);
                             let structural = ev.changes_structure();
+                            let primary = match &ev {
+                                Event::CellsChanged { table, .. } | Event::TableChanged { table, .. } => Some(table.clone()),
+                                _ => None,
+                            };
+                            let resync = matches!(ev, Event::Resync {});
                             let _ = handle.events.send(ev);
+                            // Origin 0: no session has applied these changes itself.
+                            for (table, restructured) in derived.into_iter().filter(|(t, r)| !resync && (*r || primary.as_ref() != Some(t))) {
+                                let ev = if restructured || structural {
+                                    Event::TableChanged { table, origin: 0, revision: c.revision }
+                                } else {
+                                    Event::CellsChanged { table, origin: 0, revision: c.revision }
+                                };
+                                let _ = handle.events.send(ev);
+                            }
                             let h = handle.clone();
                             tokio::task::spawn_blocking(move || {
                                 let result = if structural { h.refresh_summary() } else { h.touch(false) };

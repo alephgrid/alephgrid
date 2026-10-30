@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use super::parse::{parse, BinaryOp, ErrorCode, Expr, ExprKind, FormulaError, Span, UnaryOp};
+use super::parse::{parse, BinaryOp, CellRef, ErrorCode, Expr, ExprKind, FormulaError, Span, UnaryOp};
 use crate::sql::{ident, lit};
 
 mod aggregate;
@@ -71,9 +71,24 @@ pub struct Relation {
     pub reads: Vec<String>,
 }
 
-/// Resolves table names in `Table[column]` references.
+/// The value of a sheet cell a formula reads, as the sheet engine computed it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellValue {
+    Blank,
+    Number(f64),
+    Text(String),
+    Bool(bool),
+    /// An error value as the sheet shows it: `#DIV/0!`, `#REF!`, …
+    Error(String),
+}
+
+/// Resolves table names in `Table[column]` references, and sheet cells.
 pub trait Relations {
     fn relation(&self, table: &str) -> Result<Option<Relation>, String>;
+    /// The value of a sheet cell, or `None` when there is no such sheet.
+    fn cell(&self, _cell: &CellRef) -> Result<Option<CellValue>, String> {
+        Ok(None)
+    }
 }
 
 struct NoRelations;
@@ -298,6 +313,7 @@ impl Compiler<'_> {
             ExprKind::Error(code) => Ok(V { v: "NULL".into(), e: Some(err_lit(*code)), ty: Ty::Number, is_ref: false, empty_text: false, span }),
             ExprKind::Empty => Ok(V { v: "NULL".into(), e: None, ty: Ty::Blank, is_ref: false, empty_text: false, span }),
             ExprKind::Column { name, .. } => self.column(name, span),
+            ExprKind::Cell { cell, .. } => self.cell(cell, span),
             ExprKind::TableColumn { table, column } => fail(
                 format!("{table}[{column}] is a whole column; use it inside a lookup or conditional aggregate, or [@{column}] for this row"),
                 span,
@@ -331,6 +347,22 @@ impl Compiler<'_> {
         self.refs.insert(actual.clone());
         let e = self.errors.iter().find(|(c, _)| c == actual).map(|(_, err)| ident(err));
         Ok(V { v: ident(actual), e, ty, is_ref: true, empty_text: false, span })
+    }
+
+    /// A sheet cell's value as of this evaluation, used like a referenced cell: blank is a
+    /// NULL value, as an empty column value is.
+    fn cell(&mut self, cell: &CellRef, span: Span) -> Result<V, FormulaError> {
+        let Some(value) = self.relations.cell(cell).map_err(|message| FormulaError { message, span })? else {
+            return fail(format!("there is no sheet named {:?}", cell.sheet), span);
+        };
+        let (v, e, ty) = match value {
+            CellValue::Blank => ("CAST(NULL AS DOUBLE)".to_string(), None, Ty::Number),
+            CellValue::Number(n) => (num_lit(n), None, Ty::Number),
+            CellValue::Text(t) => (lit(&t), None, Ty::Text),
+            CellValue::Bool(b) => (if b { "TRUE" } else { "FALSE" }.to_string(), None, Ty::Bool),
+            CellValue::Error(code) => ("CAST(NULL AS DOUBLE)".to_string(), Some(lit(&code)), Ty::Number),
+        };
+        Ok(V { v, e, ty, is_ref: true, empty_text: false, span })
     }
 
     fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Result<V, FormulaError> {
@@ -1105,6 +1137,8 @@ pub enum Reference {
     /// A whole table (`T`, `T[#Data]`) and the column numbers (from 1) a VLOOKUP reads:
     /// its first column and the returned one.
     Table { table: String, positions: Vec<usize>, span: Span },
+    /// A sheet cell, with its `$` markers as typed.
+    Cell { cell: CellRef, fixed: (bool, bool), span: Span },
 }
 
 /// Everything a formula reads, without compiling it.
@@ -1114,6 +1148,7 @@ pub fn references(formula: &str) -> Result<Vec<Reference>, FormulaError> {
             ExprKind::Column { name, .. } => out.push(Reference::Own { column: name.clone(), span: e.span }),
             ExprKind::TableColumn { table, column } => out.push(Reference::Column { table: table.clone(), column: column.clone(), span: e.span }),
             ExprKind::Table { table } => out.push(Reference::Table { table: table.clone(), positions: Vec::new(), span: e.span }),
+            ExprKind::Cell { cell, fixed } => out.push(Reference::Cell { cell: cell.clone(), fixed: *fixed, span: e.span }),
             ExprKind::Unary { expr, .. } => walk(expr, out),
             ExprKind::Binary { left, right, .. } => { walk(left, out); walk(right, out); }
             ExprKind::Call { name, args } => {
@@ -1190,6 +1225,19 @@ pub fn rename_table(formula: &str, old: &str, new: &str) -> Result<Option<String
             let n = table.chars().count();
             Some((Span { start: span.start, end: span.start + n }, new.to_string()))
         }
+        _ => None,
+    }).collect();
+    Ok((!edits.is_empty()).then(|| splice(formula, edits)))
+}
+
+/// Rewrite sheet cell references: `map` gives a cell's new place (`Some(None)` when it is
+/// gone, written `#REF!`) or `None` to keep it. `None` when nothing changes.
+pub fn rewrite_cells(formula: &str, map: impl Fn(&CellRef) -> Option<Option<CellRef>>) -> Result<Option<String>, FormulaError> {
+    let edits: Vec<(Span, String)> = references(formula)?.into_iter().filter_map(|r| match r {
+        Reference::Cell { cell, fixed, span } => match map(&cell)? {
+            Some(to) => (to != cell).then(|| (span, to.text(fixed))),
+            None => Some((span, "#REF!".to_string())),
+        },
         _ => None,
     }).collect();
     Ok((!edits.is_empty()).then(|| splice(formula, edits)))

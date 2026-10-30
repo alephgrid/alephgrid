@@ -16,6 +16,7 @@ pub mod functions;
 pub use functions::{FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction};
 pub mod import;
 pub mod limits;
+mod links;
 pub mod model;
 mod queries;
 mod reads;

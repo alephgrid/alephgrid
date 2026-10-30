@@ -123,6 +123,12 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
   limit is refused (`too_large`) unless the request agrees to copy only the first rows.
   `sheet_to_table` reads every used row and infers each column's type from the cell
   values (numbers, dates, booleans, otherwise displayed text).
+* Table formulas can read single sheet cells (`Settings!$B$1`). Each cell read has an anchor
+  formula in a very hidden sheet (`_rf_links`, outside the undo history), so the sheet engine
+  moves it with its cell; after every sheet or formula change the workbook rewrites table
+  formulas to match and saves the cells' values in `_rf_links` in the same transaction. Table
+  reads use those saved values, never the live model, so they stay snapshot-consistent. See
+  [sheet cells](TABLE_FORMULAS.md#sheet-cells-f09).
 * `.xlsx` import and export use the `ironcalc` crate's reader and writer. Importing
   into an empty workbook adopts the model with its styles; otherwise cell inputs
   are copied into new sheets.

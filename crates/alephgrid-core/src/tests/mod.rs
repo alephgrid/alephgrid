@@ -8,6 +8,7 @@ mod capabilities;
 mod formulas;
 mod import;
 mod integrity;
+mod links;
 mod precision;
 mod props;
 mod sheets;

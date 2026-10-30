@@ -2,7 +2,7 @@
 use super::*;
 use super::compile::compile_full;
 use duckdb::Connection;
-use ironcalc::base::{cell::CellValue, types::CellType, Model};
+use ironcalc::base::{cell::CellValue as SheetValue, types::CellType, Model};
 
 const COLUMNS: [(&str, &str); 5] = [("n", "DOUBLE"), ("i", "BIGINT"), ("s", "VARCHAR"), ("b", "BOOLEAN"), ("d", "DATE")];
 
@@ -89,7 +89,13 @@ fn run(conn: &Connection, formula: &str) -> (Ty, Vec<Out>) {
 
 /// The same formula in IronCalc, one row per sheet row; columns A..E hold n, i, s, b, d.
 fn ironcalc(rows: &[Row], formula: &str) -> Vec<Out> {
+    ironcalc_in(rows, formula, |_| {})
+}
+
+/// [`ironcalc`], after `prepare` has set up other sheets of the model.
+fn ironcalc_in(rows: &[Row], formula: &str, prepare: impl FnOnce(&mut Model)) -> Vec<Out> {
     let mut m = Model::new_empty("diff", "en", "UTC", "en").unwrap();
+    prepare(&mut m);
     let cell_formula = |r: usize| {
         let row = r + 1;
         formula.replace("[@n]", &format!("A{row}")).replace("[@i]", &format!("B{row}")).replace("[@s]", &format!("C{row}"))
@@ -112,10 +118,10 @@ fn ironcalc(rows: &[Row], formula: &str) -> Vec<Out> {
                 return Out::Error(m.get_formatted_cell_value(0, rr, 6).unwrap());
             }
             match m.get_cell_value_by_index(0, rr, 6).unwrap() {
-                CellValue::None => Out::Blank,
-                CellValue::Number(n) => Out::Number(n),
-                CellValue::String(s) => Out::Text(s),
-                CellValue::Boolean(b) => Out::Bool(b),
+                SheetValue::None => Out::Blank,
+                SheetValue::Number(n) => Out::Number(n),
+                SheetValue::String(s) => Out::Text(s),
+                SheetValue::Boolean(b) => Out::Bool(b),
             }
         })
         .collect()
@@ -371,10 +377,10 @@ fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, 
             Out::Error(m.get_formatted_cell_value(0, rr, 6).unwrap())
         } else {
             match m.get_cell_value_by_index(0, rr, 6).unwrap() {
-                CellValue::None => Out::Blank,
-                CellValue::Number(n) => Out::Number(n),
-                CellValue::String(s) => Out::Text(s),
-                CellValue::Boolean(b) => Out::Bool(b),
+                SheetValue::None => Out::Blank,
+                SheetValue::Number(n) => Out::Number(n),
+                SheetValue::String(s) => Out::Text(s),
+                SheetValue::Boolean(b) => Out::Bool(b),
             }
         });
     }
@@ -488,10 +494,10 @@ fn ironcalc_aggregates(rows: &[Row], formula: &str) -> Vec<Out> {
             Out::Error(m.get_formatted_cell_value(0, rr, 6).unwrap())
         } else {
             match m.get_cell_value_by_index(0, rr, 6).unwrap() {
-                CellValue::None => Out::Blank,
-                CellValue::Number(n) => Out::Number(n),
-                CellValue::String(s) => Out::Text(s),
-                CellValue::Boolean(b) => Out::Bool(b),
+                SheetValue::None => Out::Blank,
+                SheetValue::Number(n) => Out::Number(n),
+                SheetValue::String(s) => Out::Text(s),
+                SheetValue::Boolean(b) => Out::Bool(b),
             }
         }
     }).collect()
@@ -531,4 +537,119 @@ fn conditional_aggregates_by_hand() {
     ] {
         assert_eq!(run(f), want, "{f}");
     }
+}
+
+// ---------------------------------------------------------------- F.09 sheet cells
+
+/// Sheet `P`, column A: a number, numeric text, text, TRUE, an error, a blank cell and `=""`.
+const P_CELLS: [&str; 7] = ["0.25", "'12", "abc", "TRUE", "=1/0", "", "=\"\""];
+
+fn p_sheet(m: &mut Model) {
+    m.new_sheet();
+    m.rename_sheet_by_index(1, "P").unwrap();
+    for (r, input) in P_CELLS.iter().enumerate() {
+        if !input.is_empty() {
+            m.set_user_input(1, r as i32 + 1, 1, input.to_string()).unwrap();
+        }
+    }
+    m.evaluate();
+}
+
+/// The table side reads P's cells as the sheet engine computed them (the product reads them
+/// the same way, through `Sheets::cell_value`).
+struct Cells(Vec<(CellRef, CellValue)>);
+impl Relations for Cells {
+    fn relation(&self, _: &str) -> Result<Option<Relation>, String> {
+        Ok(None)
+    }
+    fn cell(&self, cell: &CellRef) -> Result<Option<CellValue>, String> {
+        Ok(self.0.iter().find(|(c, _)| c.same(cell)).map(|(_, v)| v.clone()).or_else(|| cell.sheet.eq_ignore_ascii_case("P").then_some(CellValue::Blank)))
+    }
+}
+
+fn p_values() -> Cells {
+    let mut s = crate::sheets::Sheets::from_bytes(None).unwrap();
+    s.create("Data").unwrap();
+    s.create("P").unwrap();
+    let inputs: Vec<crate::SheetInput> = P_CELLS.iter().enumerate().filter(|(_, v)| !v.is_empty())
+        .map(|(r, v)| crate::SheetInput { row: r as u32, column: 0, value: v.to_string() }).collect();
+    s.set(1, &inputs).unwrap();
+    Cells((1..=P_CELLS.len() as u32).map(|row| {
+        let c = CellRef { sheet: "P".into(), row, column: 1 };
+        let v = s.cell_value(&c).unwrap();
+        (c, v)
+    }).collect())
+}
+
+/// Formulas reading single sheet cells agree with the same formulas in a sheet, for every kind
+/// of cell value.
+#[test]
+fn sheet_cells_agree_with_the_sheet_engine() {
+    let rows = rows();
+    let conn = Connection::open_in_memory().unwrap();
+    table(&conn, &rows);
+    let cells = p_values();
+    assert_eq!(cells.0.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), [
+        CellValue::Number(0.25), CellValue::Text("12".into()), CellValue::Text("abc".into()), CellValue::Bool(true),
+        CellValue::Error("#DIV/0!".into()), CellValue::Blank, CellValue::Text(String::new()),
+    ]);
+    let mut formulas: Vec<String> = Vec::new();
+    for a in 1..=7 {
+        for f in ["=[@n]+P!A{a}", "=[@s]&P!$A${a}", "=IF(P!A{a},1,2)", "=P!A{a}=\"\"", "=P!A{a}=0", "=ISBLANK(P!A{a})", "=ISTEXT(P!A{a})",
+                  "=SUM([@n],P!A{a})", "=IFERROR(P!A{a}*2,-1)", "=P!A{a}=[@s]", "=LEN(P!A{a})", "=MAX([@i],P!A{a})", "=AND([@b],P!A{a})", "=[@d]+P!A{a}"] {
+            formulas.push(f.replace("{a}", &a.to_string()));
+        }
+    }
+    formulas.push("=P!A1*P!A2+P!A9".into());
+    let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let mut failures = Vec::new();
+    for f in &formulas {
+        let c = compile_full(f, &cols, &[], &cells, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
+        let value = match c.ty {
+            Ty::Date => format!("CAST(date_diff('day', DATE '1899-12-30', {}) AS VARCHAR)", c.value),
+            _ => format!("CAST({} AS VARCHAR)", c.value),
+        };
+        let sql = format!("SELECT {value}, {} FROM ({}) ORDER BY k", c.error, c.wrap("SELECT * FROM t"));
+        let ours: Vec<Out> = conn.prepare(&sql).unwrap_or_else(|e| panic!("{f}: {e}\n{sql}")).query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
+            .unwrap().map(|r| match r.unwrap() {
+                (_, Some(e)) => Out::Error(e),
+                (None, None) => Out::Blank,
+                (Some(s), None) => match c.ty {
+                    Ty::Number | Ty::Date => Out::Number(s.parse().unwrap()),
+                    Ty::Bool => Out::Bool(s == "true"),
+                    _ => Out::Text(s),
+                },
+            }).collect();
+        let theirs = ironcalc_in(&rows, f, p_sheet);
+        for (k, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+            // Documented differences (docs/TABLE_FORMULAS.md, "Types and values" and "Errors"):
+            // a Date holds whole days, so a fraction added to it is dropped and a result
+            // before the first day is #NUM!; AND/OR return an error argument even after a
+            // deciding FALSE/TRUE, where IronCalc stops at the deciding value.
+            let documented = match (c.ty, a, b) {
+                (Ty::Date, Out::Number(x), Out::Number(y)) => *x == y.floor(),
+                (Ty::Date, Out::Error(e), Out::Number(y)) => e == "#NUM!" && *y < 1.0,
+                (_, Out::Error(_), Out::Bool(false)) => f.starts_with("=AND("),
+                _ => false,
+            };
+            if !same(a, b) && !documented { failures.push(format!("{f} row {k} {:?}: table {a:?}, sheet {b:?}", rows[k])); }
+        }
+    }
+    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+fn sheet_cells_are_refused_without_a_sheet_and_rewritten_in_place() {
+    let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let e = compile_full("=[@n]*Nope!A1", &cols, &[], &Cells(vec![]), "_rf_t_").unwrap_err();
+    assert!(e.message.contains("no sheet named \"Nope\""), "{e}");
+    assert_eq!(e.span.start, 6);
+    let f = "=[@n]*P!$B$2 + 'P'!b2 - p!C3";
+    let at = |sheet: &str, row: u32, column: u32| CellRef { sheet: sheet.into(), row, column };
+    let moved = rewrite_cells(f, |c| c.same(&at("P", 2, 2)).then(|| Some(at("Q 1", 3, 2)))).unwrap().unwrap();
+    assert_eq!(moved, "=[@n]*'Q 1'!$B$3 + 'Q 1'!B3 - p!C3");
+    assert_eq!(rewrite_cells(f, |c| c.same(&at("p", 3, 3)).then_some(None)).unwrap().unwrap(), "=[@n]*P!$B$2 + 'P'!b2 - #REF!");
+    assert_eq!(rewrite_cells(f, |_| None).unwrap(), None);
+    let refs: Vec<CellRef> = references(f).unwrap().into_iter().filter_map(|r| match r { Reference::Cell { cell, .. } => Some(cell), _ => None }).collect();
+    assert_eq!(refs, [at("P", 2, 2), at("P", 2, 2), at("p", 3, 3)]);
 }

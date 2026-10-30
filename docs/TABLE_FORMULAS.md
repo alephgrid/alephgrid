@@ -64,6 +64,10 @@ values are converted to `DOUBLE` when used: integers beyond ±2^53 and decimals 
 15–17 significant digits lose precision in a table formula (the source column is unchanged).
 A result that is not finite (overflow) is `#NUM!`.
 
+**Dates hold whole days.** A Date plus a fraction keeps the date and drops the fraction, where a
+sheet would keep a time of day (`[@d] + 0.25`); a Date result before the first day (a blank
+date plus a fraction below 1) is `#NUM!`.
+
 **Blank.** A `NULL` source value is blank. Blank is `0` in arithmetic, `""` in text, `FALSE` as
 a condition, and equal to both `0` and `""` in comparisons. A formula whose whole result is
 blank (`=[@note]` on an empty note) stays blank: Alephgrid keeps `NULL` distinct from `0`,
@@ -98,7 +102,9 @@ Each value carries an error code or none. Operators return the first error of th
 operands, left to right, before their own (`#DIV/0!` for division by zero, `#VALUE!` for text
 that is not a number, `#NUM!` for non-finite results and invalid powers). `IF` and `IFS`
 evaluate only the chosen branch; `IFERROR` replaces any error, `IFNA` only `#N/A`;
-`ISERROR`, `ISERR` and `ISNA` inspect errors without propagating them. SQL `NULL` never
+`ISERROR`, `ISERR` and `ISNA` inspect errors without propagating them. `AND` and `OR` return an
+error argument even after a deciding `FALSE` (`AND`) or `TRUE` (`OR`); IronCalc sheets stop at
+the deciding value (see [gaps](FORMULA_GAPS.md#and-and-or-with-an-error-after-the-deciding-value)). SQL `NULL` never
 stands for an error. Error cells read back with their code and show it in the grid.
 
 ## Functions (first increment)
@@ -116,8 +122,8 @@ blank values are skipped as a sheet skips them in referenced cells, while typed 
 converted. Volatile functions (`TODAY`, `NOW`, `RAND`) are refused until F.10 defines a
 calculation epoch.
 
-Conditional aggregates are described below; recalculation and dependencies with sheets are
-F.09.
+Conditional aggregates are described below; formulas reading sheet cells under
+[Sheet cells](#sheet-cells-f09).
 
 ## Conditional aggregates (F.08)
 
@@ -255,8 +261,53 @@ formulas (other text is kept); deleting a column that a formula reads is refused
 cannot read its own column. **Add column** offers *Spreadsheet formula* (the default) and *SQL
 formula*; the formula bar edits either kind in its own language.
 
-Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output), and
-formulas reading sheet cells (F.09).
+Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output).
+
+## Sheet cells (F.09)
+
+A table formula can read single sheet cells, typically parameters kept in a sheet:
+
+```text
+=[@amount] * (1 + Settings!$B$1)
+=[@amount] * 'FX rates'!C4
+=IF(Settings!B3 = "", "none", Settings!B3)
+```
+
+The sheet name is required (`A1` alone is refused) and is quoted like in sheets when it is not
+a plain name. `$` markers are kept but change nothing: a table formula is not copied between
+cells. Ranges (`Settings!A1:B4`), whole columns and named ranges are refused. A cell is read
+like a referenced cell: its computed value with its type (a number, text, logical or error;
+dates are numbers, as in sheets), and an empty cell is blank, as an empty column value is.
+Because the value has one type at a time, a cell changing from a number to text changes the
+column's type.
+
+**Snapshot reads.** Table reads never consult the live sheet model. Every committed change
+that touches sheets, or the formulas that read them, also saves the value of every cell table
+formulas read (`_rf_links`, storage format 7) in the same transaction. A read takes those values
+from its own snapshot, so a page of rows and the cell values it was computed with always
+belong to the same revision, on every connection.
+
+**References follow their cells.** Each cell read has an anchor: a formula pointing at it in
+a very hidden sheet, written outside the undo history. The sheet engine moves anchors as it
+moves any formula: inserted and deleted rows and columns, cut-and-paste moves, sheet renames,
+and undo or redo of those. After each change the table formulas are rewritten to match
+(`Settings!$B$1` becomes `Settings!$B$2` after a row is inserted above it, `'Plan 2026'!$B$1`
+after a rename), and a deleted cell becomes `#REF!`, as in sheets. As in IronCalc, undoing the
+deletion does not bring the reference back. Deleting a sheet whose cells table formulas read is
+refused with the columns that read it. The hidden sheet is not listed, cannot be addressed, and
+is left out of XLSX exports.
+
+**What a change reaches.** A sheet change that gives a read cell a new value changes the data
+revision of the tables whose formulas read it; a new value type also changes their structure,
+so their views are rebuilt. Unrelated sheet edits change no table. The server then tells every
+session (the editing one included, `origin: 0`) which tables changed this way, and which tables
+read them through lookups or conditional aggregates, so those refresh too. Saved query results
+and live queries count the tables formulas read as sources, so a snapshot made from orders goes
+stale when a customer it looked up changes.
+
+Not yet: sheet cells reading tables (a sheet formula such as `=SUMIFS(orders[amount], …)`),
+and with it circular references between sheets and tables; stored formula results with
+cancellable, atomic recalculation (sorting by a lookup column still evaluates every row).
 
 ## Row identity and order
 

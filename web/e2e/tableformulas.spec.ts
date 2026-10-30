@@ -39,3 +39,34 @@ test("a spreadsheet formula column computes over the table and shows errors", as
   expect(block.errors).toEqual([{ row: 1, column: 3, code: "#DIV/0!" }]);
   ws.close();
 });
+
+test("a table formula reads a sheet cell and follows its edits", async ({ page }) => {
+  const wb = await server.createWorkbook("Sheet links"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "orders", sql: "SELECT * FROM (VALUES (1, 100.0), (2, 50.0)) v(id, amount)" });
+  await ws.call("sheet_create", { name: "Settings" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 1, value: "0.1" }] });
+  await ws.call("add_formula_column", { table: "orders", name: "gross", formula: "=[@amount]*(1+Settings!$B$1)", language: "sheet" });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /orders/ }).click();
+  await expect(page.getByRole("grid", { name: "Table orders" })).toBeVisible();
+  await expect.poll(() => shown(page, 0, 2)).toContain("110");
+  // Another session edits the cell: the open table refreshes by itself.
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 1, value: "0.5" }] });
+  await expect.poll(() => shown(page, 0, 2)).toContain("150");
+  // Edited here, in the sheet: back in the table, the new value shows.
+  await page.getByRole("tab", { name: /Settings/ }).click();
+  await expect(page.getByRole("grid", { name: /^Sheet / })).toHaveAttribute("aria-colcount", /\d+/);
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.type("1");
+  await page.keyboard.press("Enter");
+  await page.getByRole("tab", { name: /orders/ }).click();
+  await expect.poll(() => shown(page, 1, 2)).toContain("100");
+  // A row inserted above the cell: the formula follows it.
+  await ws.call("sheet_insert_rows", { sheet: 0, at: 0, count: 1 });
+  const view = await ws.call("open_view", { spec: { table: "orders", sort: [], filters: [] } });
+  expect(view.columns.find((c) => c.name === "gross")?.formula).toBe("=[@amount]*(1+Settings!$B$2)");
+  await expect.poll(() => shown(page, 1, 2)).toContain("100");
+  ws.close();
+});

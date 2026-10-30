@@ -489,3 +489,39 @@ async fn every_operation_replies_with_its_declared_type() {
     ws.close().await;
     server.stop().await;
 }
+
+/// F.09: a sheet edit reaches the tables whose formulas read the cell, and the tables that
+/// look those up; every session hears about it, the one that edited the sheet included.
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_cells_read_by_tables_notify_their_readers() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("links").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    a.ok("create_table_from_query", json!({ "name": "customers", "sql": "SELECT * FROM (VALUES (1, 'Ann')) v(id, name)" })).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT * FROM (VALUES (10, 1)) v(id, cid)" })).await;
+    a.ok("sheet_create", json!({ "name": "Settings" })).await;
+    a.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": " (vip)" }] })).await;
+    a.ok("add_formula_column", json!({ "table": "customers", "name": "label", "formula": "=[@name]&Settings!A1", "language": "sheet" })).await;
+    a.ok("add_formula_column", json!({ "table": "orders", "name": "who", "formula": "=XLOOKUP([@cid],customers[id],customers[label])", "language": "sheet" })).await;
+    let id = a.send("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": " (gold)" }] })).await;
+    let rev = a.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        let mut tables = Vec::new();
+        for _ in 0..2 {
+            let e = ws.event("cells_changed").await.unwrap();
+            assert_eq!((e["origin"].clone(), e["revision"].clone()), (json!(0), rev.clone()), "{e}");
+            tables.push(e["table"].as_str().unwrap().to_string());
+        }
+        tables.sort();
+        assert_eq!(tables, ["customers", "orders"]);
+    }
+    let v = b.ok("open_view", json!({ "spec": { "table": "orders" } })).await["view_id"].as_u64().unwrap();
+    assert_eq!(b.ok("fetch", json!({ "view_id": v, "row_start": 0, "row_count": 1 })).await["rows"], json!([[10, 1, "Ann (gold)"]]));
+    let err = a.call("sheet_delete", json!({ "sheet": 0 })).await.unwrap_err();
+    assert!(err.contains("read by formula column"), "{err}");
+    a.close().await;
+    b.close().await;
+    server.stop().await;
+}

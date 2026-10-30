@@ -98,6 +98,9 @@ struct TableRelations<'a, 'b> {
     own: &'a str,
     own_select: String,
     build: &'a Build,
+    /// Checking a formula about to be saved: sheet cells no formula read before come from
+    /// the live sheet model (saving the formula links them). Reads use saved values only.
+    live: bool,
 }
 
 impl crate::table_formula::Relations for TableRelations<'_, '_> {
@@ -113,6 +116,16 @@ impl crate::table_formula::Relations for TableRelations<'_, '_> {
         let errors = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
         let columns = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
         Ok(Some(crate::table_formula::Relation { sql, columns, errors, reads }))
+    }
+
+    fn cell(&self, cell: &crate::table_formula::CellRef) -> std::result::Result<Option<crate::table_formula::CellValue>, String> {
+        if let Some(v) = storage::link_value(self.db.conn, cell).map_err(|e| e.to_string())? {
+            return Ok(Some(v));
+        }
+        if !self.live {
+            return Ok(None);
+        }
+        Ok(self.db.shared.sheets.lock().unwrap_or_else(|e| e.into_inner()).cell_value(cell))
     }
 }
 
@@ -238,6 +251,33 @@ impl Db<'_> {
         Ok(Graph { deps })
     }
 
+    /// For each table (lowercase), the other tables whose formulas read it directly. Only
+    /// spreadsheet formulas read other tables; one query, no table is described.
+    pub(crate) fn table_readers(&self) -> Result<HashMap<String, Vec<String>>> {
+        use crate::table_formula::Reference;
+        let rows: Vec<(String, String)> = self
+            .conn
+            .prepare("SELECT table_name, formula FROM _rf_columns WHERE language = 'sheet'")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for (reader, formula) in rows {
+            let reader = reader.to_lowercase();
+            let Ok(refs) = crate::table_formula::references(&formula) else { continue };
+            for r in refs {
+                let (Reference::Column { table, .. } | Reference::Table { table, .. }) = r else { continue };
+                let read = table.to_lowercase();
+                if read != reader {
+                    let list = out.entry(read).or_default();
+                    if !list.contains(&reader) {
+                        list.push(reader.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// The columns a spreadsheet formula of `table` reads, as graph nodes.
     fn sheet_deps(&self, table: &str, formula: &str, layouts: &HashMap<String, Layout>) -> Result<Vec<Node>> {
         use crate::table_formula::Reference;
@@ -253,6 +293,8 @@ impl Db<'_> {
                         out.extend(positions.iter().filter_map(|p| order.get(p - 1)).map(|c| (t.clone(), c.to_lowercase())));
                     }
                 }
+                // Sheet cells read nothing from tables (sheets cannot read tables yet).
+                Reference::Cell { .. } => {}
             }
         }
         Ok(out)
@@ -339,7 +381,7 @@ impl Db<'_> {
                 .filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone())))
                 .collect();
             let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-            let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build };
+            let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build, live: false };
             build.in_progress.borrow_mut().push(node);
             let compiled = crate::table_formula::compile_full(&formula, &columns, &errors, &relations, &format!("_rf_t{i}_"));
             build.in_progress.borrow_mut().pop();
@@ -380,7 +422,7 @@ impl Db<'_> {
         let target = (table.to_lowercase(), column.to_lowercase());
         let build = Build::new();
         build.in_progress.borrow_mut().push(target.clone());
-        let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build: &build };
+        let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build: &build, live: true };
         let c = crate::table_formula::compile_full(formula, &columns, &errors, &relations, "_rf_check_").map_err(|e| anyhow!("formula error: {e}"))?;
         // Circular references across tables, with the path in the message.
         let graph = match build.graph.into_inner() { Some(g) => g, None => self.graph()? };
@@ -753,12 +795,24 @@ impl Db<'_> {
     pub fn expand_query(&self, q: &CheckedSelect) -> Result<Expanded> {
         let sql = q.sql.as_str();
         let mut ctes = Vec::new();
+        // Tables that formula columns read (lookups) are sources too: the result depends on them.
+        let mut sources = q.sources.clone();
+        let tables = storage::user_tables(self.conn)?;
         for name in &q.sources {
             if !self.formulas(name)?.is_empty() {
-                ctes.push((name.clone(), format!("{} AS ({})", ident(name), self.base_select(name)?)));
+                let (select, reads) = self.base_select_tracked(name, &Build::new())?;
+                for r in reads {
+                    if let Some(t) = tables.iter().find(|t| t.to_lowercase() == r) {
+                        if !sources.contains(t) {
+                            sources.push(t.clone());
+                        }
+                    }
+                }
+                ctes.push((name.clone(), format!("{} AS ({select})", ident(name))));
             }
         }
-        let plain = Expanded { sql: sql.to_string(), lines_before: 0, sources: q.sources.clone() };
+        sources.sort();
+        let plain = Expanded { sql: sql.to_string(), lines_before: 0, sources };
         if ctes.is_empty() {
             return Ok(plain);
         }

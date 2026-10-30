@@ -94,6 +94,53 @@ impl BinaryOp {
     }
 }
 
+/// One sheet cell, as a table formula reads it: `Sheet1!B2`, `'Q1 plan'!$B$2`. Rows and
+/// columns count from 1; sheet names compare case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CellRef {
+    pub sheet: String,
+    pub row: u32,
+    pub column: u32,
+}
+
+/// Excel's grid: what a sheet cell reference may address.
+pub const MAX_SHEET_ROW: u32 = 1_048_576;
+pub const MAX_SHEET_COLUMN: u32 = 16_384;
+
+impl CellRef {
+    /// The reference as typed in a formula, quoting the sheet name where needed and keeping
+    /// `$` markers: `(column fixed, row fixed)`.
+    pub fn text(&self, fixed: (bool, bool)) -> String {
+        format!("{}!{}{}{}{}", sheet_name_text(&self.sheet), if fixed.0 { "$" } else { "" }, column_letters(self.column), if fixed.1 { "$" } else { "" }, self.row)
+    }
+
+    pub fn same(&self, other: &CellRef) -> bool {
+        self.row == other.row && self.column == other.column && self.sheet.to_lowercase() == other.sheet.to_lowercase()
+    }
+}
+
+/// `A`, `Z`, `AA`, … for a column number from 1.
+pub fn column_letters(mut column: u32) -> String {
+    let mut out = Vec::new();
+    while column > 0 {
+        let d = (column - 1) % 26;
+        out.push((b'A' + d as u8) as char);
+        column = (column - 1) / 26;
+    }
+    out.into_iter().rev().collect()
+}
+
+/// A sheet name as written before `!`: bare when it reads as a plain name, else quoted.
+pub fn sheet_name_text(name: &str) -> String {
+    let mut chars = name.chars();
+    let plain = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && !looks_like_cell(name)
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE");
+    if plain { name.to_string() } else { format!("'{}'", name.replace('\'', "''")) }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     Number(f64),
@@ -107,6 +154,8 @@ pub enum ExprKind {
     TableColumn { table: String, column: String },
     /// A whole table's data rows: `Customers`, `Customers[]` or `Customers[#Data]`.
     Table { table: String },
+    /// A single sheet cell; `fixed` records the `$` markers as typed (column, row).
+    Cell { cell: CellRef, fixed: (bool, bool) },
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
     Call { name: String, args: Vec<Expr> },
@@ -126,6 +175,7 @@ enum Tok {
     Text(String),
     Ident(String),
     Error(ErrorCode),
+    Cell(CellRef, (bool, bool)),
     /// `[...]` after a table name or alone: the raw bracket contents, parsed later.
     Brackets(Vec<BracketItem>),
     Op(&'static str),
@@ -193,15 +243,73 @@ impl<'a> Lexer<'a> {
                 while self.peek(0).is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '\\') {
                     self.pos += 1;
                 }
-                Tok::Ident(self.chars[start..self.pos].iter().collect())
+                let name: String = self.chars[start..self.pos].iter().collect();
+                if self.peek(0) == Some('!') {
+                    self.pos += 1;
+                    self.cell(name, start)?
+                } else {
+                    Tok::Ident(name)
+                }
+            }
+            '\'' => {
+                self.pos += 1;
+                let mut name = String::new();
+                loop {
+                    match self.peek(0) {
+                        None => return err("this sheet name has no closing quote", start, self.pos),
+                        Some('\'') if self.peek(1) == Some('\'') => { name.push('\''); self.pos += 2; }
+                        Some('\'') => { self.pos += 1; break; }
+                        Some(c) => { name.push(c); self.pos += 1; }
+                    }
+                }
+                if self.peek(0) != Some('!') {
+                    return err("a quoted sheet name must be followed by ! and a cell, e.g. 'Q1 plan'!B2", start, self.pos);
+                }
+                self.pos += 1;
+                if name.is_empty() {
+                    return err("empty sheet name", start, self.pos);
+                }
+                self.cell(name, start)?
             }
             ':' => return err("ranges such as A1:B4 are not available in table formulas; use Table[column]", start, start + 1),
             '{' => return err("array constants are not available in table formulas", start, start + 1),
-            '!' | '$' | '\'' => return err("sheet cell references are not available in table formulas; refer to columns with [@column]", start, start + 1),
+            '$' => return err("a sheet cell needs its sheet name, e.g. Sheet1!$A$1; refer to columns with [@column]", start, start + 1),
+            '!' => return err("a sheet name is missing before !, e.g. Sheet1!A1", start, start + 1),
             ';' => return err("separate arguments with commas", start, start + 1),
             other => return err(format!("unexpected character {other:?}"), start, start + 1),
         };
         Ok((tok, Span { start, end: self.pos }))
+    }
+
+    /// The cell after `Sheet!`: `B2`, `$B$2`. Ranges are refused.
+    fn cell(&mut self, sheet: String, start: usize) -> ParseResult<Tok> {
+        let at = self.pos;
+        let fixed_column = self.peek(0) == Some('$');
+        if fixed_column { self.pos += 1; }
+        let letters_at = self.pos;
+        while self.peek(0).is_some_and(|c| c.is_ascii_alphabetic()) { self.pos += 1; }
+        let letters: String = self.chars[letters_at..self.pos].iter().collect::<String>().to_ascii_uppercase();
+        let fixed_row = self.peek(0) == Some('$');
+        if fixed_row { self.pos += 1; }
+        let digits_at = self.pos;
+        while self.peek(0).is_some_and(|c| c.is_ascii_digit()) { self.pos += 1; }
+        let digits: String = self.chars[digits_at..self.pos].iter().collect();
+        let bad = || err("expected a cell such as A1 or $B$2 after the sheet name", at, at + 1);
+        if letters.is_empty() || letters.len() > 3 || digits.is_empty() || self.peek(0).is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return bad();
+        }
+        let column = letters.bytes().fold(0u32, |n, b| n * 26 + (b - b'A' + 1) as u32);
+        let row: u32 = digits.parse().unwrap_or(0);
+        if column > MAX_SHEET_COLUMN || row == 0 || row > MAX_SHEET_ROW {
+            return err(format!("{letters}{digits} is outside the sheet"), at, self.pos);
+        }
+        let end = self.pos;
+        self.skip_space();
+        if self.peek(0) == Some(':') {
+            return err("table formulas read single sheet cells; ranges such as Sheet1!A1:B4 are not available", start, self.pos + 1);
+        }
+        self.pos = end;
+        Ok(Tok::Cell(CellRef { sheet, row, column }, (fixed_column, fixed_row)))
     }
 
     fn number(&mut self) -> ParseResult<Tok> {
@@ -443,6 +551,7 @@ impl Parser<'_> {
             Tok::Number(n) => done(self, ExprKind::Number(n)),
             Tok::Text(s) => done(self, ExprKind::Text(s)),
             Tok::Error(e) => done(self, ExprKind::Error(e)),
+            Tok::Cell(cell, fixed) => done(self, ExprKind::Cell { cell, fixed }),
             Tok::Brackets(items) => {
                 self.advance()?;
                 let kind = this_table_reference(items, span)?;
@@ -471,7 +580,7 @@ impl Parser<'_> {
                     }
                     _ if name.eq_ignore_ascii_case("TRUE") => Ok(Expr { kind: ExprKind::Bool(true), span }),
                     _ if name.eq_ignore_ascii_case("FALSE") => Ok(Expr { kind: ExprKind::Bool(false), span }),
-                    _ if looks_like_cell(&name) => err(format!("{name} is a sheet cell reference; table formulas refer to columns with [@column]"), span.start, span.end),
+                    _ if looks_like_cell(&name) => err(format!("{name} needs its sheet name, e.g. Sheet1!{name}; refer to columns with [@column]"), span.start, span.end),
                     // A bare name is a table, as in spreadsheets; binding explains other uses.
                     _ => Ok(Expr { kind: ExprKind::Table { table: name }, span }),
                 }
@@ -561,6 +670,7 @@ mod tests {
             ExprKind::Column { name, this_row } => format!("[{}{name}]", if *this_row { "@" } else { "" }),
             ExprKind::TableColumn { table, column } => format!("{table}[{column}]"),
             ExprKind::Table { table } => format!("{table}[#Data]"),
+            ExprKind::Cell { cell, fixed } => format!("<{}>", cell.text(*fixed)),
             ExprKind::Unary { op, expr } => format!("({op:?} {})", shape(expr)),
             ExprKind::Binary { op, left, right } => format!("({op:?} {} {})", shape(left), shape(right)),
             ExprKind::Call { name, args } => format!("{}({})", name.replace('\u{0}', ""), args.iter().map(shape).collect::<Vec<_>>().join(",")),
@@ -605,6 +715,29 @@ mod tests {
         // A bare name is a whole table, as in spreadsheets; so is Table[#Data].
         assert_eq!(p("=VLOOKUP(1,Customers,2,FALSE)"), "VLOOKUP(1,Customers[#Data],2,false)");
         assert_eq!(p("=Customers[#Data]"), "Customers[#Data]");
+        // Single sheet cells, with their sheet; `$` markers are kept for rewriting.
+        assert_eq!(p("=[@a]*Settings!B2"), "(Mul [@a] <Settings!B2>)");
+        assert_eq!(p("=settings!$b$2"), "<settings!$B$2>");
+        assert_eq!(p("=Sheet1!A$7+Sheet1!$XFD1048576"), "(Add <Sheet1!A$7> <Sheet1!$XFD1048576>)");
+        assert_eq!(p("='Q1 plan'!C3"), "<'Q1 plan'!C3>");
+        assert_eq!(p("='It''s'!C3"), "<'It''s'!C3>");
+        assert_eq!(p("='A1'!C3"), "<'A1'!C3>");
+        assert_eq!(p("='Sheet1'!C3"), "<Sheet1!C3>");
+    }
+
+    #[test]
+    fn cell_text_round_trips() {
+        for (sheet, plain) in [("Sheet1", true), ("Q1 plan", false), ("It's", false), ("A1", false), ("true", false), ("1st", false), ("Prix_é", true), ("Prix €", false), ("a.b", true)] {
+            let cell = CellRef { sheet: sheet.into(), row: 12, column: 28 };
+            let text = cell.text((true, false));
+            assert_eq!(!text.starts_with('\''), plain, "{text}");
+            let ExprKind::Cell { cell: back, fixed } = parse(&format!("={text}")).unwrap().kind else { panic!("{text}") };
+            assert_eq!((back, fixed), (cell, (true, false)), "{text}");
+        }
+        assert_eq!(column_letters(1), "A");
+        assert_eq!(column_letters(26), "Z");
+        assert_eq!(column_letters(27), "AA");
+        assert_eq!(column_letters(16_384), "XFD");
     }
 
     #[test]
@@ -612,10 +745,24 @@ mod tests {
         let e = |s: &str| parse(s).unwrap_err();
         assert_eq!(e("=1+").span.start, 3);
         assert_eq!(e("=1 2").span.start, 3);
-        assert!(e("=A1+1").message.contains("sheet cell reference"));
+        assert!(e("=A1+1").message.contains("Sheet1!A1"));
         assert!(e("=SUM(A1:A3)").message.contains("ranges"));
         assert!(e("=[@a]:[@b]").message.contains("ranges"));
-        assert!(e("=Sheet1!A1").message.contains("sheet cell references"));
+        assert!(e("=Sheet1!A1:B2").message.contains("single sheet cells"));
+        assert!(e("=Sheet1!A1 : B2").message.contains("single sheet cells"));
+        assert!(e("=$A$1").message.contains("sheet name"));
+        assert!(e("=!A1").message.contains("sheet name is missing"));
+        assert!(e("=Sheet1!").message.contains("expected a cell"));
+        assert!(e("=Sheet1!A").message.contains("expected a cell"));
+        assert!(e("=Sheet1!1").message.contains("expected a cell"));
+        assert!(e("=Sheet1!A1B").message.contains("expected a cell"));
+        assert!(e("=Sheet1!ABCD1").message.contains("expected a cell"));
+        assert!(e("=Sheet1!XFE1").message.contains("outside the sheet"));
+        assert!(e("=Sheet1!A0").message.contains("outside the sheet"));
+        assert!(e("=Sheet1!A1048577").message.contains("outside the sheet"));
+        assert!(e("='Q1").message.contains("no closing quote"));
+        assert!(e("='Q1'+1").message.contains("followed by !"));
+        assert!(e("=''!A1").message.contains("empty sheet name"));
         assert!(e("=\"open").message.contains("closing quote"));
         assert!(e("=[@a").message.contains("closing ]"));
         assert!(e("=T[[#Headers],[a]]").message.contains("#Headers"));

@@ -93,3 +93,14 @@ already returns 0, and no engine change was made.
 The test guards these gaps in both directions: a gap that starts matching its expected
 value fails the suite until it is reviewed and relabelled `verified`, and the gap set is
 listed explicitly. No ignored tests are used for them.
+
+## AND and OR with an error after the deciding value
+
+Found by the F.09 sheet-cell comparison (`table_formula::tests::sheet_cells_agree_with_the_sheet_engine`).
+`=AND(FALSE, P!A5)` where `P!A5` is `=1/0`: IronCalc returns `FALSE`, because it stops at the
+first `FALSE` (`logical_nary`, `short_circuit_value`); table formulas return `#DIV/0!`, because
+they evaluate every argument and return the first error. `OR` stops at the first `TRUE` the same
+way. Which one Excel does has not been verified here; Excel is generally described as not
+short-circuiting `AND`/`OR`, which would make IronCalc the one to change. Until it is checked
+against Excel (F.14), the difference is documented in [table formulas](TABLE_FORMULAS.md#errors)
+and is the only `AND`/`OR` case the comparison accepts.

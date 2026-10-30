@@ -599,6 +599,28 @@ impl<'a> UserModel<'a> {
         self.model.get_cell_type(sheet, row, column)
     }
 
+    /// Alephgrid patch: the index of a very hidden sheet named `name` that the host keeps
+    /// for its own bookkeeping, appended if missing. Neither this nor
+    /// [UserModel::set_unrecorded_input] enters the undo history, so undoing a user's change
+    /// never undoes the host's bookkeeping.
+    pub fn ensure_unrecorded_sheet(&mut self, name: &str) -> Result<u32, String> {
+        if let Some(index) = self.model.get_sheet_index_by_name(name) {
+            return Ok(index);
+        }
+        let index = self.model.workbook.worksheets.len() as u32;
+        self.model.insert_sheet(name, index, None)?;
+        self.model.set_sheet_state(index, SheetState::VeryHidden)?;
+        Ok(index)
+    }
+
+    /// Alephgrid patch: sets a cell's input (an empty value clears it) without recording it
+    /// in the undo history. See [UserModel::ensure_unrecorded_sheet].
+    pub fn set_unrecorded_input(&mut self, sheet: u32, row: i32, column: i32, value: &str) -> Result<(), String> {
+        self.model.set_user_input(sheet, row, column, value.to_string())?;
+        self.evaluate_if_not_paused();
+        Ok(())
+    }
+
     /// Adds new sheet
     ///
     /// See also:

@@ -30,9 +30,15 @@ Changes:
   builds too; an upstream `debug_assert!` panicked there. Alephgrid re-enters such cells
   after a name change so they spill as if typed now. Added 30 October 2026.
 
+- `UserModel::ensure_unrecorded_sheet` and `UserModel::set_unrecorded_input` create a very
+  hidden sheet and write its cells without entering the undo history. Alephgrid keeps anchors
+  for the sheet cells table formulas read there (F.09), so the engine moves them with their
+  cells while undoing a user's change never undoes that bookkeeping. Additions only; no
+  existing behavior changes. Added 30 October 2026 (F.09).
+
 Upstream test suite (`cargo test --lib` in a copy of this directory with the repository's
 rust-toolchain.toml): original 0.9.1 passes 2765 (8 ignored); patched passes 2765 after the
-two test updates above.
+two test updates above (rerun 30 October 2026 with the F.09 additions: 2765 pass).
 
 Regression evidence lives in alephgrid-core tests::catalog. Keep the upstream
 source diff small; do not format or change unrelated dependency code.

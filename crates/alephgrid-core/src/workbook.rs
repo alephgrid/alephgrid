@@ -37,8 +37,11 @@ pub struct Workbook {
     txn_depth: u32,
     /// Bumped whenever a sheet change was attempted inside the current transaction, so a
     /// rollback knows to reload the sheet model from the file.
-    sheet_epoch: u64,
+    pub(crate) sheet_epoch: u64,
     pub(crate) after_commit: Vec<AfterCommit>,
+    /// Tables changed during the last mutation because of sheet cells they read (see
+    /// `links.rs`), and whether their columns changed (type or formula text) too.
+    pub(crate) linked: std::collections::BTreeMap<String, bool>,
     report: OpenReport,
 }
 
@@ -132,7 +135,7 @@ impl Workbook {
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         crate::functions::check_runtime(&conn, &crate::functions::list(&conn)?)?;
         let sheets = Sheets::from_bytes(bytes)?;
-        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], report })
+        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), report })
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -265,6 +268,7 @@ impl Workbook {
         }
         let epoch = self.sheet_epoch;
         self.after_commit.clear();
+        self.linked.clear();
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         self.txn_depth = 1;
         let result = f(self).and_then(|out| {
@@ -558,6 +562,7 @@ impl Workbook {
                 lit(table)
             ))?;
             storage::forget_table(&wb.conn, table)?;
+            wb.sync_links()?;
             wb.after_commit.push(AfterCommit::ForgetTable(table.to_string()));
             Ok(())
         })
@@ -641,6 +646,7 @@ impl Workbook {
                 "INSERT INTO _rf_columns (table_name, name, formula, position, language) VALUES (?, ?, ?, (SELECT coalesce(max(position) + 1, 0) FROM _rf_columns WHERE table_name = ?), ?)",
                 duckdb::params![table, name, formula, table, language],
             )?;
+            wb.sync_links()?;
             wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
         })
@@ -689,13 +695,14 @@ impl Workbook {
                 "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
                 duckdb::params![formula, table, name],
             )?;
+            wb.sync_links()?;
             wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
         })
     }
 
     /// Every spreadsheet formula in the workbook as (table, column, formula).
-    fn all_sheet_formulas(&self) -> Result<Vec<(String, String, String)>> {
+    pub(crate) fn all_sheet_formulas(&self) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
         for t in storage::user_tables(&self.conn)? {
             let sheet = self.db().sheet_formulas(&t)?;
@@ -780,6 +787,7 @@ impl Workbook {
             })?;
             if is_formula {
                 wb.conn.execute("DELETE FROM _rf_columns WHERE table_name = ? AND name = ?", duckdb::params![table, name])?;
+                wb.sync_links()?;
             } else {
                 wb.conn.execute_batch(&format!("ALTER TABLE {} DROP COLUMN {};", ident(table), ident(name)))?;
             }
@@ -1388,6 +1396,7 @@ impl Workbook {
                     }
                 }
                 wb.save_sheets()?;
+                wb.sync_links()?;
             }
             Ok(out)
         })
@@ -1399,7 +1408,7 @@ impl Workbook {
     }
 
     /// Write the model (inside the caller's transaction).
-    fn save_sheets(&self) -> Result<()> {
+    pub(crate) fn save_sheets(&self) -> Result<()> {
         let bytes = self.sheets().to_bytes();
         self.conn.execute_batch("DELETE FROM _rf_sheets;")?;
         if let Some(bytes) = bytes {

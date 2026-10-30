@@ -17,6 +17,11 @@
 //!
 //! * **5**: saved no-code analysis plans, presentation and bounded replacement undo in `_rf_meta`.
 //!
+//! * **6**: `_rf_columns.language` (`sql` or `sheet`).
+//!
+//! * **7** (F.09): `_rf_links`, the sheet cells table formulas read, with the place of each
+//!   one's anchor in the hidden link sheet and its value as of the last sheet change.
+//!
 //! Opening an older file keeps a copy of it (`<file>.v<N>.bak`) and migrates it in one
 //! transaction. There is no downgrade: the copy is the only way back. Opening a file
 //! written by a newer format is refused.
@@ -30,7 +35,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -132,6 +137,16 @@ const V3_SCHEMA: &str = "
         sources VARCHAR NOT NULL, revision BIGINT NOT NULL, own_rev BIGINT NOT NULL, refreshed_at BIGINT NOT NULL
     );";
 
+/// Added in format 7. One row per sheet cell that table formulas read: `anchor` is its row
+/// in the hidden link sheet (see `sheets/links.rs`), `row`/`col` count from 1, and the value
+/// is the cell's as of the transaction that last saved the sheets: `kind` is `blank`,
+/// `number` (`num`), `text`, `bool` or `error` (`text` holds the value or the error code).
+const V7_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS _rf_links (
+        anchor INTEGER NOT NULL, sheet VARCHAR NOT NULL, row INTEGER NOT NULL, col INTEGER NOT NULL,
+        kind VARCHAR NOT NULL, num DOUBLE, text VARCHAR
+    );";
+
 /// Bring a database at `path` to [`FORMAT`], copying it first when it is migrated.
 /// Returns the open connection.
 pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {
@@ -193,7 +208,7 @@ pub fn sync_dir(dir: &Path) {
 
 fn create_fresh(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
-        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA}
+        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA} {V7_SCHEMA}
          ALTER TABLE _rf_tables ADD COLUMN data_rev BIGINT NOT NULL DEFAULT 0;
          INSERT INTO _rf_meta VALUES ('format', '{FORMAT}'), ('revision', '0');
          COMMIT;"
@@ -224,6 +239,10 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
                 conn.execute_batch("ALTER TABLE _rf_columns ADD COLUMN language VARCHAR NOT NULL DEFAULT 'sql';")?;
             }
             meta_set(conn, "format", "6")?;
+        }
+        if from < 7 {
+            conn.execute_batch(V7_SCHEMA)?;
+            meta_set(conn, "format", "7")?;
         }
         faults::check("migrate")?;
         Ok(())
@@ -325,6 +344,62 @@ pub fn data_revisions(conn: &Connection) -> Result<std::collections::HashMap<Str
         .prepare("SELECT table_name, data_rev FROM _rf_tables")?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?
         .collect::<Result<_, _>>()?)
+}
+
+/// A sheet cell table formulas read, with its value as last saved (see [`V7_SCHEMA`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub anchor: u32,
+    pub cell: crate::table_formula::CellRef,
+    pub value: crate::table_formula::CellValue,
+}
+
+pub fn links(conn: &Connection) -> Result<Vec<Link>> {
+    use crate::table_formula::{CellRef, CellValue};
+    let mut stmt = conn.prepare("SELECT anchor, sheet, row, col, kind, num, text FROM _rf_links ORDER BY anchor")?;
+    let rows = stmt.query_map([], |r| {
+        let kind: String = r.get(4)?;
+        let num: Option<f64> = r.get(5)?;
+        let text: Option<String> = r.get(6)?;
+        let value = match kind.as_str() {
+            "number" => CellValue::Number(num.unwrap_or(0.0)),
+            "text" => CellValue::Text(text.unwrap_or_default()),
+            "bool" => CellValue::Bool(num.unwrap_or(0.0) != 0.0),
+            "error" => CellValue::Error(text.unwrap_or_else(|| "#REF!".into())),
+            _ => CellValue::Blank,
+        };
+        Ok(Link {
+            anchor: r.get::<_, i32>(0)? as u32,
+            cell: CellRef { sheet: r.get(1)?, row: r.get::<_, i32>(2)? as u32, column: r.get::<_, i32>(3)? as u32 },
+            value,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The saved value of one linked cell (sheet names compare case-insensitively), in the
+/// caller's snapshot. `None` when no formula reads it.
+pub fn link_value(conn: &Connection, cell: &crate::table_formula::CellRef) -> Result<Option<crate::table_formula::CellValue>> {
+    // Few rows; compare names as the sheet engine does (Unicode, case-insensitive).
+    Ok(links(conn)?.into_iter().find(|l| l.cell.same(cell)).map(|l| l.value))
+}
+
+/// Replace every link row (inside the caller's transaction).
+pub fn set_links(conn: &Connection, links: &[Link]) -> Result<()> {
+    use crate::table_formula::CellValue;
+    conn.execute_batch("DELETE FROM _rf_links;")?;
+    let mut stmt = conn.prepare("INSERT INTO _rf_links VALUES (?, ?, ?, ?, ?, ?, ?)")?;
+    for l in links {
+        let (kind, num, text): (&str, Option<f64>, Option<&str>) = match &l.value {
+            CellValue::Blank => ("blank", None, None),
+            CellValue::Number(n) => ("number", Some(*n), None),
+            CellValue::Text(t) => ("text", None, Some(t)),
+            CellValue::Bool(b) => ("bool", Some(if *b { 1.0 } else { 0.0 }), None),
+            CellValue::Error(e) => ("error", None, Some(e)),
+        };
+        stmt.execute(duckdb::params![l.anchor as i32, l.cell.sheet, l.cell.row as i32, l.cell.column as i32, kind, num, text])?;
+    }
+    Ok(())
 }
 
 /// Record a structural change: new id counter and density, generation + 1.
