@@ -341,7 +341,7 @@ impl Workbook {
                 bail!("workbook function limit reached");
             }
             if !items.iter().any(|f| f.name == definition.name) && wb.sheets().has_function_name(&definition.name) {
-                bail!("name conflicts with an existing imported sheet name definition");
+                bail!("name conflicts with an existing named range or imported sheet name definition");
             }
             let dependencies = validate(&wb.conn, &definition, &items)?;
             if wb.test_function(&definition)?.iter().any(|t| !t.passed) {

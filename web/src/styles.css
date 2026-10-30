@@ -380,3 +380,14 @@ dialog progress, .dialog progress { width: 100%; }
 .reference-legend span { border-bottom: 2px dashed currentColor; }
 .reference-color-0 { color: var(--reference-0); } .reference-color-1 { color: var(--reference-1); }
 .reference-color-2 { color: var(--reference-2); } .reference-color-3 { color: var(--reference-3); }
+
+/* Formula problems, error origins and named ranges (phase F). */
+.formula-problem { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--danger); border-bottom: 1px solid var(--border); }
+.cell-note { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.cell-note .btn-small { padding: 0 6px; font-size: 12px; }
+.names-table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+.names-table th, .names-table td { padding: 4px 8px; text-align: left; border: 1px solid var(--border); vertical-align: top; }
+.names-table code { overflow-wrap: anywhere; }
+.form-error { color: var(--danger); }
+.form-error:empty { display: none; }
+.function-completion.help-only { pointer-events: none; }

@@ -16,6 +16,21 @@ Changes:
 - LEFT, RIGHT and MID convert numeric text and logical count/position arguments, as
   their other numeric arguments already did (`self.text_number`). The text argument is
   still checked first, so its error wins. Added 30 October 2026 (coercion matrix).
+- The parser rejects input left after a complete expression (`=1 2`, `=1+2)`,
+  `SIN(x)(3)`) instead of silently dropping it; such cells keep their text and show
+  #ERROR!. A missing final `)` is still completed. Unexpected-token errors report where
+  the token starts instead of position 0. Two upstream parser tests that pinned the old
+  behavior are updated (`test_parser_bad_formula_3`, `sin_is_not_immediately_invocable`).
+  Added 30 October 2026 (F.03 error locations).
+
+- A scalar formula whose result becomes a multi-cell array (a name redefined as a range
+  after the formula was entered) shows #VALUE! "Array result in scalar context" in debug
+  builds too; an upstream `debug_assert!` panicked there. Rowfinity re-enters such cells
+  after a name change so they spill as if typed now. Added 30 October 2026.
+
+Upstream test suite (`cargo test --lib` in a copy of this directory with the repository's
+rust-toolchain.toml): original 0.9.1 passes 2765 (8 ignored); patched passes 2765 after the
+two test updates above.
 
 Regression evidence lives in rowfinity-engine tests::catalog. Keep the upstream
 source diff small; do not format or change unrelated dependency code.

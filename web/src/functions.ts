@@ -119,6 +119,8 @@ export function functionCompletion(input: HTMLInputElement, rpc: Rpc, engine: ()
     help.replaceChildren(...matches.map(f => el("button", { type: "button", class: "btn", onmousedown: (e: MouseEvent) => e.preventDefault(), onclick: () => insert(f) }, f.help)));
     if (current) help.append(el("p", {}, current.help));
     help.hidden = !matches.length && !current;
+    // Argument help alone is not interactive: let clicks reach the grid for reference picking.
+    help.classList.toggle("help-only", !matches.length);
   };
   const focus = async () => {
     if (!help.isConnected) input.parentElement!.append(help);

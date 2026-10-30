@@ -141,6 +141,37 @@ pub enum Op {
     SheetDeleteRows { sheet: u32, at: u32, count: u32 },
     SheetInsertColumns { sheet: u32, at: u32, count: u32 },
     SheetDeleteColumns { sheet: u32, at: u32, count: u32 },
+    /// Named cells and ranges (workbook functions are listed by `functions`).
+    SheetNames,
+    /// `scope` is a sheet index for a sheet-level name; omitted for the whole workbook.
+    SheetDefineName { name: String, #[serde(default)] #[ts(optional, as = "Option<u32>")] scope: Option<u32>, refers_to: String },
+    /// Rename, rescope or repoint a name; formulas using it follow a rename.
+    SheetUpdateName {
+        name: String,
+        #[serde(default)] #[ts(optional, as = "Option<u32>")] scope: Option<u32>,
+        new_name: String,
+        #[serde(default)] #[ts(optional, as = "Option<u32>")] new_scope: Option<u32>,
+        refers_to: String,
+    },
+    SheetDeleteName { name: String, #[serde(default)] #[ts(optional, as = "Option<u32>")] scope: Option<u32> },
+    /// A cell's input and display, and for an error the cell it comes from.
+    SheetCellDetail { sheet: u32, row: u32, column: u32 },
+    /// Where a formula typed into a cell fails to parse; `null` when it parses.
+    SheetCheckFormula { sheet: u32, row: u32, column: u32, formula: String },
+    /// Copy the first row (down) or column (right) of `area` over the rest of it.
+    SheetFill { sheet: u32, area: rowfinity_engine::CellArea, direction: rowfinity_engine::FillDirection },
+    /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
+    SheetPaste {
+        from_sheet: u32,
+        source: rowfinity_engine::CellArea,
+        sheet: u32,
+        row: u32,
+        column: u32,
+        #[serde(default = "default_paste_mode")] #[ts(optional, as = "Option<rowfinity_engine::PasteMode>")] mode: rowfinity_engine::PasteMode,
+        #[serde(default)] #[ts(optional, as = "Option<bool>")] transpose: bool,
+    },
+    /// Cut and paste within one sheet; references to the moved cells follow them.
+    SheetMove { sheet: u32, source: rowfinity_engine::CellArea, row: u32, column: u32 },
     /// Copy a query's first rows into a new sheet. Fails with `too_large` when the result has
     /// more rows than a sheet copy holds, unless `allow_truncation`.
     CreateSheetFromQuery {
@@ -219,6 +250,10 @@ fn default_history() -> usize {
     100
 }
 
+fn default_paste_mode() -> rowfinity_engine::PasteMode {
+    rowfinity_engine::PasteMode::All
+}
+
 fn default_export_format() -> ExportFormat {
     ExportFormat::Csv
 }
@@ -231,7 +266,7 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SavedViews { .. } | History { .. }
+        Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } => None,
@@ -357,6 +392,9 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Materialized => json!(r.materialized()?),
         Op::Sheets => json!(r.sheets().list()),
         Op::SheetFetch { sheet, row_start, row_count, column_count } => json!(r.sheets().fetch(sheet, row_start, row_count, column_count)?),
+        Op::SheetNames => json!(r.sheets().names()),
+        Op::SheetCellDetail { sheet, row, column } => json!(r.sheets().cell_detail(sheet, row, column)?),
+        Op::SheetCheckFormula { sheet, row, column, formula } => json!(r.sheets().check_formula(sheet, row, column, &formula)?),
         Op::SavedViews { table } => json!(r.saved_views(Some(table.as_str()).filter(|t| !t.is_empty()))?),
         Op::History { after, limit } => json!(r.history(after, limit.min(1000))?),
         other => bail!("{} is not a read", op_name(&other)),
@@ -471,6 +509,30 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetDeleteColumns { sheet, at, count } => {
             wb.with_sheets(|s| s.delete_columns(sheet, at, count))?;
             (Value::Null, sheet_changed(sheet))
+        }
+        Op::SheetDefineName { name, scope, refers_to } => {
+            wb.with_sheets(|s| s.define_name(&name, scope, &refers_to))?;
+            (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetUpdateName { name, scope, new_name, new_scope, refers_to } => {
+            wb.with_sheets(|s| s.update_name(&name, scope, &new_name, new_scope, &refers_to))?;
+            (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetDeleteName { name, scope } => {
+            wb.with_sheets(|s| s.delete_name(&name, scope))?;
+            (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetFill { sheet, area, direction } => {
+            wb.with_sheets(|s| s.fill(sheet, area, direction))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
+        }
+        Op::SheetPaste { from_sheet, source, sheet, row, column, mode, transpose } => {
+            let area = wb.with_sheets(|s| s.paste(from_sheet, source, sheet, (row, column), mode, transpose))?;
+            (json!(area), sheet_changed(sheet))
+        }
+        Op::SheetMove { sheet, source, row, column } => {
+            let area = wb.with_sheets(|s| s.move_cells(sheet, source, (row, column)))?;
+            (json!(area), sheet_changed(sheet))
         }
         Op::CreateSheetFromQuery { name, sql, params, allow_truncation } => {
             require_sql(ctx)?;

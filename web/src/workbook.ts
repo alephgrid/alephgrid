@@ -1,5 +1,9 @@
 import { formulaHelp } from "./catalog";
 import { applyReferenceLock, referenceInsertion, referenceRanges } from "./references";
+import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
+import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
+import { workbookCommands } from "./workbookcommands";
+import type { PasteMode } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { AnalysisWorkspace, replaceDialog } from "./analysis";
 import { functionCompletion, functionLibrary } from "./functions";
@@ -133,6 +137,27 @@ export class WorkbookScreen {
   private formulaInput = el("input", { class: "formula-input", spellcheck: false, "aria-label": "Cell value or formula" });
   private referenceLegend = el("div", { class: "reference-legend", role: "region", "aria-label": "Formula references", hidden: true });
   private referencePickState: { base: string; start: number; end: number } | null = null;
+  /** The sheet cell a formula-bar edit belongs to; picking may show another sheet meanwhile. */
+  private formulaOrigin: { index: number; r: number; c: number } | null = null;
+  private formulaProblem = el("p", { class: "formula-problem", role: "alert", hidden: true });
+  private cellNote = el("p", { class: "cell-note", role: "status", hidden: true });
+  private cellNoteSeq = 0;
+  /** The cell the note was last looked up for, so data loads do not repeat the request. */
+  private cellNoteKey = "";
+  private closeNames: (() => void) | null = null;
+  private commands = new CommandRegistry();
+  /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
+   *  (formulas, formats) rather than the displayed values. */
+  private clip: { sheet: number; range: Range; text: string; cut: boolean } | null = null;
+  /** Sheet changes run one after another in the order the user made them: a formula's parse
+   *  check must not let a later edit (or undo) reach the server first. */
+  private sheetQueue: Promise<unknown> = Promise.resolve();
+
+  private inSheetOrder<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.sheetQueue.then(task, task);
+    this.sheetQueue = run.catch(() => undefined);
+    return run;
+  }
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
   private statsEl = el("div", { class: "stats" });
   private rowsEl = el("div", { class: "row-count" });
@@ -170,7 +195,7 @@ export class WorkbookScreen {
       this.grid.invalidate();
       if (document.activeElement !== this.formulaInput) this.refreshFormulaValue();
       // Sheet stats are computed from cached cells; recompute once fresh values arrive.
-      if (this.isSheet()) this.sheetSelectionStats(this.grid.selection());
+      if (this.isSheet()) { this.sheetSelectionStats(this.grid.selection()); this.showCellNote(false); }
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
@@ -209,8 +234,10 @@ export class WorkbookScreen {
         columnResized: () => self.saveWidths(),
         undo: () => self.undo(false),
         redo: () => self.undo(true),
+        command: (e) => self.commands.handle(e, "grid", (m) => toast(m)),
       },
     );
+    this.registerCommands();
     this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
@@ -359,11 +386,19 @@ export class WorkbookScreen {
     this.formulaInput.addEventListener("keydown", (e) => {
       if (e.key === "F4" && this.isSheet() && !e.isComposing) { e.preventDefault(); applyReferenceLock(this.formulaInput); }
       if (e.key === "Enter") { e.preventDefault(); this.commitFormulaBar(); }
-      if (e.key === "Escape") { this.onSelection(this.grid.selection(), this.grid.active); this.grid.focus(); }
+      if (e.key === "Escape") { void this.cancelFormulaBar(); }
     });
-    this.formulaInput.addEventListener("input", () => this.updateReferenceHints());
+    this.formulaInput.addEventListener("focus", () => this.markFormulaOrigin());
+    this.formulaInput.addEventListener("input", () => { this.markFormulaOrigin(); this.updateReferenceHints(); });
     this.formulaInput.addEventListener("focus", () => this.updateReferenceHints());
-    this.formulaInput.addEventListener("blur", () => { this.referencePickState = null; this.updateReferenceHints(); });
+    this.formulaInput.addEventListener("blur", () => {
+      this.referencePickState = null;
+      this.updateReferenceHints();
+      // Leaving the formula bar while another sheet is shown for picking returns to the edit's sheet.
+      const origin = this.formulaOrigin;
+      this.formulaOrigin = null;
+      if (origin && this.active?.kind === "sheet" && this.active.index !== origin.index) void this.returnToOrigin(origin);
+    });
     this.fileInput = el("input", { type: "file", hidden: true, multiple: true, accept: IMPORT_ACCEPT,
       onchange: (e: Event) => {
         const files = (e.target as HTMLInputElement).files;
@@ -380,6 +415,8 @@ export class WorkbookScreen {
     this.sheetButtons = [
       el("button", { class: "btn", title: "Undo (⌘Z)", "aria-label": "Undo", onclick: () => this.undo(false) }, "↶"),
       el("button", { class: "btn", title: "Redo (⇧⌘Z)", "aria-label": "Redo", onclick: () => this.undo(true) }, "↷"),
+      el("button", { class: "btn", title: "Named ranges", onclick: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } } }, "Names"),
+      el("button", { class: "btn", title: "Go to a cell, range or name (⌘G)", onclick: () => void this.goTo() }, "Go to"),
     ];
     const root = el("div", { class: "workbook" },
       el("header", { class: "toolbar" },
@@ -394,12 +431,15 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
+        el("button", { class: "btn", title: "Search all commands (⌘K)", onclick: () => { commandPalette(this.commands); } }, "Commands"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),
       this.chips,
       this.snapshotEl,
       el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput, this.referenceLegend),
+      this.formulaProblem,
+      this.cellNote,
       this.gridWrap,
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
@@ -632,7 +672,10 @@ export class WorkbookScreen {
       return el("button", {
         class: `tab tab-sheet${on ? " active" : ""}`, role: "tab", "aria-selected": on ? "true" : "false",
         title: "Sheet (Excel formulas)",
-        onclick: () => this.openSheet(s.index),
+        // While a formula is being written, a tab shows that sheet for picking references
+        // and keeps the formula bar focused (the edit still belongs to its own cell).
+        onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
+        onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
       }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "ƒ"), s.name);
     });
@@ -728,6 +771,8 @@ export class WorkbookScreen {
   private async refreshSheet(): Promise<void> {
     if (this.active?.kind !== "sheet") return;
     const index = this.active.index;
+    // Cell values may have changed: look the active cell's error up again when data arrives.
+    this.cellNoteKey = "";
     try {
       this.sheets = await this.rpc.call("sheets");
       const info = this.sheets.find((s) => s.index === index);
@@ -856,8 +901,12 @@ export class WorkbookScreen {
         ? `${columnLetter(active.c)}${active.r + 1}`
         : `${columnLetter(range.c0)}${range.r0 + 1}:${columnLetter(range.c1)}${range.r1 + 1}`;
       this.formulaInput.title = "";
-      this.refreshFormulaValue();
+      if (!this.formulaOrigin || document.activeElement !== this.formulaInput) {
+        this.refreshFormulaValue();
+        this.formulaProblem.hidden = true;
+      }
       this.sheetSelectionStats(range);
+      this.showCellNote();
       return;
     }
     const col = this.view?.columns[active.c];
@@ -927,7 +976,16 @@ export class WorkbookScreen {
 
   private async commitEdits(edits: { r: number; c: number; value: string | null }[]): Promise<boolean> {
     if (!edits.length) return true;
-    if (this.active?.kind === "sheet") return this.commitSheetEdits(this.active.index, edits);
+    if (this.active?.kind === "sheet") {
+      const index = this.active.index;
+      const [only] = edits;
+      return this.inSheetOrder(async () => {
+        if (edits.length === 1 && only.value?.trimStart().startsWith("=")) {
+          if (!await this.formulaParses({ index, r: only.r, c: only.c }, only.value)) return false;
+        }
+        return this.commitSheetEdits(index, edits);
+      });
+    }
     if (!this.view) return true;
     const cols = this.view.columns;
     const rowCount = this.view.row_count;
@@ -998,7 +1056,7 @@ export class WorkbookScreen {
       return;
     }
     try {
-      const changed = await this.rpc.call(redo ? "sheet_redo" : "sheet_undo");
+      const changed = await this.inSheetOrder(() => this.rpc.call(redo ? "sheet_redo" : "sheet_undo"));
       if (!changed) toast(redo ? "Nothing to redo" : "Nothing to undo");
       await this.refreshSheet();
     } catch (e) {
@@ -1026,7 +1084,8 @@ export class WorkbookScreen {
     if (!state) return false;
     const a = `${columnLetter(range.c0)}${range.r0 + 1}`;
     const b = `${columnLetter(range.c1)}${range.r1 + 1}`;
-    const text = a === b ? a : `${a}:${b}`;
+    const other = this.active?.kind === "sheet" && this.formulaOrigin && this.active.index !== this.formulaOrigin.index;
+    const text = `${other ? `${quoteSheet(this.active!.name)}!` : ""}${a === b ? a : `${a}:${b}`}`;
     this.formulaInput.value = state.base.slice(0, state.start) + text + state.base.slice(state.end);
     this.formulaInput.setSelectionRange(state.start + text.length, state.start + text.length);
     this.formulaInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1036,9 +1095,16 @@ export class WorkbookScreen {
   private async commitFormulaBar(): Promise<void> {
     const value = this.formulaInput.value;
     const { r, c } = this.grid.active;
-    if (this.isSheet()) {
-      await this.commitEdits([{ r, c, value: value === "" ? null : value }]);
-      this.grid.focus();
+    if (this.isSheet() && this.active?.kind === "sheet") {
+      const origin = this.formulaOrigin ?? { index: this.active.index, r, c };
+      const saved = await this.inSheetOrder(async () => {
+        if (!await this.formulaParses(origin, value)) return null;
+        return this.commitSheetEdits(origin.index, [{ r: origin.r, c: origin.c, value: value === "" ? null : value }]);
+      });
+      if (saved === null) return;
+      this.formulaOrigin = null;
+      if (this.active.index !== origin.index) await this.returnToOrigin(origin);
+      if (saved) this.grid.focus();
       return;
     }
     const col = this.view?.columns[c];
@@ -1053,6 +1119,130 @@ export class WorkbookScreen {
     } else {
       await this.commitEdits([{ r, c, value: value === "" ? null : value }]);
     }
+    this.grid.focus();
+  }
+
+  /** A formula that does not parse is not saved: the draft stays in the formula bar with
+   *  the caret where parsing stopped. Text starting with an apostrophe is saved as text. */
+  private async formulaParses(origin: { index: number; r: number; c: number }, value: string): Promise<boolean> {
+    if (!value.trimStart().startsWith("=")) { this.formulaProblem.hidden = true; return true; }
+    let problem;
+    try {
+      problem = await this.rpc.call("sheet_check_formula", { sheet: origin.index, row: origin.r, column: origin.c, formula: value });
+    } catch (e) {
+      toast((e as Error).message, "error");
+      return false;
+    }
+    if (!problem) { this.formulaProblem.hidden = true; return true; }
+    this.formulaOrigin = origin;
+    this.formulaInput.value = value;
+    this.formulaProblem.hidden = false;
+    this.formulaProblem.textContent = `Formula not saved: ${problem.message} (at character ${problem.position + 1}). Fix it, press Escape to discard, or start with an apostrophe to enter text.`;
+    this.formulaInput.focus();
+    const at = [...value].slice(0, problem.position).join("").length;
+    this.formulaInput.setSelectionRange(at, at);
+    return false;
+  }
+
+  private async cancelFormulaBar(): Promise<void> {
+    const origin = this.formulaOrigin;
+    this.formulaOrigin = null;
+    this.formulaProblem.hidden = true;
+    if (origin && this.active?.kind === "sheet" && this.active.index !== origin.index) await this.returnToOrigin(origin);
+    else this.onSelection(this.grid.selection(), this.grid.active);
+    this.grid.focus();
+  }
+
+  /** True while the formula bar holds a sheet formula that a reference could be inserted into. */
+  private pickingFormula(): boolean {
+    return this.isSheet() && document.activeElement === this.formulaInput && this.formulaInput.value.startsWith("=")
+      && !!referenceInsertion(this.formulaInput.value, this.formulaInput.selectionStart ?? 0, this.formulaInput.selectionEnd ?? 0);
+  }
+
+  /** Remember which cell a formula-bar edit belongs to (the input may already have focus). */
+  private markFormulaOrigin(): void {
+    if (this.active?.kind === "sheet" && !this.formulaOrigin) this.formulaOrigin = { index: this.active.index, r: this.grid.active.r, c: this.grid.active.c };
+  }
+
+  /** Show another sheet's cells for picking without leaving the formula edit. */
+  private async showSheetForPicking(index: number): Promise<void> {
+    this.markFormulaOrigin();
+    const draft = this.formulaInput.value;
+    const caret = [this.formulaInput.selectionStart ?? draft.length, this.formulaInput.selectionEnd ?? draft.length] as const;
+    await this.openSheet(index);
+    this.formulaInput.value = draft;
+    this.formulaInput.focus();
+    this.formulaInput.setSelectionRange(caret[0], caret[1]);
+    this.updateReferenceHints();
+  }
+
+  private async returnToOrigin(origin: { index: number; r: number; c: number }): Promise<void> {
+    await this.openSheet(origin.index);
+    this.grid.select({ r: origin.r, c: origin.c });
+  }
+
+  /** Errors show their origin and message under the formula bar (one bounded request per selection). */
+  private showCellNote(selectionChanged = true): void {
+    if (this.active?.kind !== "sheet") { this.cellNote.hidden = true; return; }
+    const { r, c } = this.grid.active;
+    const sheet = this.active.index;
+    const key = `${sheet}:${r}:${c}`;
+    if (!selectionChanged && key === this.cellNoteKey) return;
+    const cell = this.sheetCache.cell(r, c);
+    if (selectionChanged || cell !== undefined) {
+      this.cellNoteKey = cell === undefined ? "" : key;
+      ++this.cellNoteSeq;
+      this.cellNote.hidden = true;
+    }
+    if (!cell || !/^#[A-Z0-9/!?]+[!?]?$/.test(cell[0]) || cell[1] !== "center") return;
+    const seq = this.cellNoteSeq;
+    void this.rpc.call("sheet_cell_detail", { sheet, row: r, column: c }).then((d) => {
+      if (seq !== this.cellNoteSeq || !d.error) return;
+      const e = d.error;
+      this.cellNote.replaceChildren(`${e.code}: ${e.message || "error"}`);
+      if (e.origin && e.origin.replace(/^.*!/, "") !== `${columnLetter(c)}${r + 1}`) {
+        this.cellNote.append(` · comes from ${e.origin} `, el("button", { class: "btn btn-small", onclick: () => void this.goToAddress(e.origin) }, "Go to source"));
+      }
+      this.cellNote.hidden = false;
+    }).catch(() => { /* selection moved on or the cell changed */ });
+  }
+
+  private namesContext(): NamesContext {
+    return {
+      rpc: this.rpc,
+      sheets: () => this.sheets,
+      current: () => this.active?.kind === "sheet" ? { index: this.active.index, name: this.active.name, selection: this.grid.selection() } : null,
+      goTo: (t) => this.goToTarget(t),
+    };
+  }
+
+  private async goTo(): Promise<void> {
+    try { await goToDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  private async goToAddress(text: string): Promise<void> {
+    const t = parseAddress(text);
+    if (t) await this.goToTarget(t);
+  }
+
+  private async goToTarget(t: Address): Promise<void> {
+    if (t.sheet !== null) {
+      const s = this.sheets.find((x) => x.name.toLowerCase() === t.sheet!.toLowerCase());
+      if (!s) { toast(`There is no sheet named ${t.sheet}`, "error"); return; }
+      if (this.active?.kind !== "sheet" || this.active.index !== s.index) await this.openSheet(s.index);
+    } else if (this.active?.kind !== "sheet") return;
+    // Going past the shown grid grows it, as typing there would.
+    if (t.r1 >= this.sheetDims.rows || t.c1 >= this.sheetDims.cols) {
+      const cols = Math.max(this.sheetDims.cols, t.c1 + 6);
+      this.sheetDims = { rows: Math.max(this.sheetDims.rows, t.r1 + 200), cols };
+      if (cols !== this.sheetCols.length) {
+        this.sheetCols = sheetColumns(cols);
+        this.sheetCache.columns = cols;
+        const saved = this.loadWidths();
+        this.grid.setColumns(this.sheetCols.map((c) => saved[c.name] ?? SHEET_COL_WIDTH));
+      }
+    }
+    this.grid.select({ r: t.r0, c: t.c0 }, { r: t.r1, c: t.c1 });
     this.grid.focus();
   }
 
@@ -1098,6 +1288,7 @@ export class WorkbookScreen {
       const data = await this.fetchRange({ ...range, r1 });
       const text = data.map((row) => row.slice(range.c0, range.c1 + 1).map(tsvCell).join("\t")).join("\n");
       await navigator.clipboard.writeText(text);
+      this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false } : null;
       toast(`Copied ${formatCount(rows * (range.c1 - range.c0 + 1))} cells`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
@@ -1105,6 +1296,11 @@ export class WorkbookScreen {
   }
 
   private async paste(at: Cell, text: string): Promise<void> {
+    const same = (a: string) => a.replace(/\r\n/g, "\n").replace(/\n$/, "");
+    if (this.isSheet() && this.clip && same(text) === same(this.clip.text)) {
+      await this.pasteCells(at, "all", false);
+      return;
+    }
     const rows = parseTsv(text.replace(/\n$/, ""));
     const sheet = this.isSheet();
     const cols = this.view?.columns ?? [];
@@ -1114,6 +1310,111 @@ export class WorkbookScreen {
       if (sheet || (c < cols.length && !cols[c].formula)) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
     }));
     if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
+  }
+
+  /** Paste the copied (or cut) cells at `at`: formulas are translated, cut cells move. */
+  private async pasteCells(at: Cell, mode: PasteMode, transpose: boolean): Promise<void> {
+    const clip = this.clip;
+    if (!clip || this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const r = clip.range;
+    const source = { row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 };
+    if (source.rows * source.columns > this.maxEditCells) { toast(`That paste is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
+    try {
+      let area;
+      if (clip.cut) {
+        if (clip.sheet !== sheet) { toast("Moving cells to another sheet is not supported yet. Copy them, then clear the originals.", "error"); return; }
+        if (mode !== "all" || transpose) { toast("Paste special applies to copied cells. Cut cells move as they are.", "error"); return; }
+        area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c }));
+        this.clip = null;
+      } else {
+        area = await this.inSheetOrder(() => this.rpc.call("sheet_paste", { from_sheet: clip.sheet, source, sheet, row: at.r, column: at.c, mode, transpose }));
+      }
+      await this.refreshSheet();
+      this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
+      toast(`${clip.cut ? "Moved" : "Pasted"} ${formatCount(area.rows * area.columns)} cells`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  private async cut(): Promise<void> {
+    await this.copy(this.grid.selection());
+    if (this.clip) {
+      this.clip.cut = true;
+      toast("Cut. Paste to move these cells; formulas that refer to them follow.");
+    }
+  }
+
+  private pasteSpecialDialog(): void {
+    if (!this.clip || this.clip.cut) {
+      toast(this.clip ? "Paste special applies to copied cells. Cut cells move as they are." : "Copy cells in this workbook first. Text from other apps pastes as values with ⌘V.");
+      return;
+    }
+    const at = this.grid.active;
+    const modes: [PasteMode, string][] = [["all", "All (values, formulas and formats)"], ["formulas", "Formulas (no formats)"], ["values", "Values only"], ["formats", "Formats only"]];
+    const radios = modes.map(([m, label], i) => el("label", { class: "radio" }, el("input", { type: "radio", name: "paste-mode", value: m, ...(i === 0 ? { checked: true } : {}) }), label));
+    const transpose = el("input", { type: "checkbox" });
+    const go = () => {
+      const mode = (panel.querySelector<HTMLInputElement>('input[name="paste-mode"]:checked')?.value ?? "all") as PasteMode;
+      modal.close();
+      void this.pasteCells(at, mode, transpose.checked);
+    };
+    const panel = el("section", { class: "dialog" }, el("h2", {}, "Paste special"),
+      el("fieldset", {}, el("legend", {}, "Paste"), ...radios),
+      el("label", { class: "radio" }, transpose, "Transpose rows and columns"),
+      el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Cancel"), el("button", { class: "btn btn-primary", onclick: go }, "Paste")));
+    panel.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    const modal = openModal(panel, () => modal.close());
+    panel.querySelector<HTMLInputElement>("input")?.focus();
+  }
+
+  /** Ctrl/Cmd+D and +R: copy the selection's first row (column) over the rest. With a single
+   *  row (column) selected, copy the one above (to the left), as other spreadsheets do. */
+  private async fill(direction: "down" | "right"): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const s = this.grid.selection();
+    let area = { row: s.r0, column: s.c0, rows: s.r1 - s.r0 + 1, columns: s.c1 - s.c0 + 1 };
+    if (direction === "down" && area.rows === 1) {
+      if (s.r0 === 0) { toast("There is no row above to fill down from"); return; }
+      area = { ...area, row: s.r0 - 1, rows: 2 };
+    }
+    if (direction === "right" && area.columns === 1) {
+      if (s.c0 === 0) { toast("There is no column to the left to fill right from"); return; }
+      area = { ...area, column: s.c0 - 1, columns: 2 };
+    }
+    if (area.rows * area.columns > this.maxEditCells) { toast(`That fill is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
+    try {
+      const sheet = this.active.index;
+      const info = await this.inSheetOrder(() => this.rpc.call("sheet_fill", { sheet, area, direction }));
+      this.sheets = this.sheets.map((x) => (x.index === info.index ? info : x));
+      this.applySheetInfo(info, false);
+      this.sheetCache.refresh();
+      this.grid.invalidate();
+    } catch (e) {
+      toast((e as Error).message, "error");
+    }
+  }
+
+  private registerCommands(): void {
+    this.commands.register(...workbookCommands({
+      isSheet: () => this.isSheet(),
+      allowSql: () => this.allowSql,
+      undo: () => this.undo(false),
+      redo: () => this.undo(true),
+      copy: () => this.copy(this.grid.selection()),
+      cut: () => this.cut(),
+      pasteSpecial: () => this.pasteSpecialDialog(),
+      fill: (d) => this.fill(d),
+      selectAll: () => this.grid.selectAll(),
+      selectEntire: (w) => this.grid.selectEntire(w),
+      goTo: () => this.goTo(),
+      names: async () => { this.closeNames?.(); this.closeNames = await namesDialog(this.namesContext()); },
+      formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
+      sql: () => this.sqlPanel(),
+      palette: () => { commandPalette(this.commands); },
+      shortcuts: () => { shortcutHelp(this.commands); },
+    }));
   }
 
   // ------------------------------------------------------------------ menus

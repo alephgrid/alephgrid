@@ -1073,19 +1073,10 @@ impl<'a> Model<'a> {
                             ),
                         }
                     } else {
-                        // Currently unreachable from normal user formulas: static
-                        // analysis wraps array-returning subexpressions in scalar
-                        // contexts in implicit intersection (`@`), which collapses
-                        // them to a single value before they reach the cell. If we
-                        // ever get here, static analysis or implicit-intersection
-                        // insertion has regressed.
-                        debug_assert!(
-                            false,
-                            "Larger-than-1x1 array reached scalar-context cell \
-                             (sheet={sheet}, row={row}, column={column}, \
-                             {array_width}x{array_height}); implicit intersection \
-                             was expected to collapse it.",
-                        );
+                        // Rowfinity: reachable when a scalar formula refers to a name
+                        // that later becomes a multi-cell range (`=Sales` typed before
+                        // `Sales` was defined). The upstream debug assertion panicked
+                        // here in debug builds; the release result (#VALUE!) is kept.
                         FormulaValue::new_error(
                             Error::VALUE,
                             "".to_string(),

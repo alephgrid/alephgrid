@@ -343,7 +343,18 @@ impl<'a> Parser<'a> {
         // At the top level a formula may start with an expression or a range.
         self.expecting_here = vec![ExpectedTokens::Range, ExpectedTokens::Other];
         self.trailing_name = None;
-        self.parse_expr()
+        let node = self.parse_expr();
+        // Rowfinity: input left after a complete expression (`=1 2`, `=1+2)`) is an
+        // error; it was silently dropped, so the cell showed a plausible wrong result.
+        if !matches!(node, Node::ParseErrorKind { .. }) && self.lexer.peek_token() != TokenType::EOF {
+            return Node::ParseErrorKind {
+                formula: self.lexer.get_formula(),
+                expecting: vec![ExpectedTokens::Other],
+                position: self.lexer.get_position() as usize,
+                message: "Unexpected input after the end of the formula".to_string(),
+            };
+        }
+        node
     }
 
     /// Parses `formula` up to `cursor` (a char offset) and reports what the
@@ -708,6 +719,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary(&mut self) -> Node {
+        // Rowfinity: report unexpected tokens where they start, not at position 0.
+        let token_start = self.lexer.get_position() as usize;
         let next_token = self.lexer.next_token();
         match next_token {
             TokenType::LeftParenthesis => {
@@ -996,7 +1009,7 @@ impl<'a> Parser<'a> {
                         return Node::ParseErrorKind {
                             formula: self.lexer.get_formula(),
                             expecting: vec![ExpectedTokens::Other],
-                            position: 0,
+                            position: token_start,
                             message: format!("sheet not found: {}", context.sheet),
                         };
                     }
@@ -1069,7 +1082,7 @@ impl<'a> Parser<'a> {
                 Node::ParseErrorKind {
                     formula: self.lexer.get_formula(),
                     expecting: vec![ExpectedTokens::Other],
-                    position: 0,
+                    position: token_start,
                     message: "Unexpected token: 'COMPARE'".to_string(),
                 }
             }
@@ -1078,7 +1091,7 @@ impl<'a> Parser<'a> {
                 Node::ParseErrorKind {
                     formula: self.lexer.get_formula(),
                     expecting: vec![ExpectedTokens::Other],
-                    position: 0,
+                    position: token_start,
                     message: "Unexpected token: 'SUM'".to_string(),
                 }
             }
@@ -1087,7 +1100,7 @@ impl<'a> Parser<'a> {
                 Node::ParseErrorKind {
                     formula: self.lexer.get_formula(),
                     expecting: vec![ExpectedTokens::Other],
-                    position: 0,
+                    position: token_start,
                     message: "Unexpected token: 'PRODUCT'".to_string(),
                 }
             }
@@ -1096,7 +1109,7 @@ impl<'a> Parser<'a> {
                 Node::ParseErrorKind {
                     formula: self.lexer.get_formula(),
                     expecting: vec![ExpectedTokens::Other],
-                    position: 0,
+                    position: token_start,
                     message: "Unexpected token: 'POWER'".to_string(),
                 }
             }
@@ -1105,7 +1118,7 @@ impl<'a> Parser<'a> {
                 Node::ParseErrorKind {
                     formula: self.lexer.get_formula(),
                     expecting: vec![ExpectedTokens::Other],
-                    position: 0,
+                    position: token_start,
                     message: "Unexpected token: '@'".to_string(),
                 }
             }
@@ -1122,13 +1135,13 @@ impl<'a> Parser<'a> {
             | TokenType::Percent => Node::ParseErrorKind {
                 formula: self.lexer.get_formula(),
                 expecting: vec![ExpectedTokens::Other],
-                position: 0,
+                position: token_start,
                 message: format!("Unexpected token: '{next_token:?}'"),
             },
             TokenType::LeftBracket => Node::ParseErrorKind {
                 formula: self.lexer.get_formula(),
                 expecting: vec![ExpectedTokens::Other],
-                position: 0,
+                position: token_start,
                 message: "Unexpected token: '['".to_string(),
             },
             TokenType::StructuredReference {
@@ -1146,7 +1159,7 @@ impl<'a> Parser<'a> {
                         return Node::ParseErrorKind {
                             formula: self.lexer.get_formula(),
                             expecting: vec![ExpectedTokens::Other],
-                            position: 0,
+                            position: token_start,
                             message: format!("sheet not found: {}", context.sheet),
                         };
                     }
@@ -1165,7 +1178,7 @@ impl<'a> Parser<'a> {
                         return Node::ParseErrorKind {
                             formula: self.lexer.get_formula(),
                             expecting: vec![ExpectedTokens::Other],
-                            position: 0,
+                            position: token_start,
                             message,
                         };
                     }
@@ -1176,7 +1189,7 @@ impl<'a> Parser<'a> {
                         return Node::ParseErrorKind {
                             formula: self.lexer.get_formula(),
                             expecting: vec![ExpectedTokens::Other],
-                            position: 0,
+                            position: token_start,
                             message: format!("table sheet not found: {}", table.sheet_name),
                         };
                     }

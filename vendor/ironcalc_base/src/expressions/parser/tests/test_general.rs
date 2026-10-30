@@ -219,7 +219,8 @@ fn test_parser_bad_formula_3() {
         } => {
             assert_eq!(formula, "SUM(#VALVE!)");
             assert_eq!(message, "Unexpected token: 'Spill'");
-            assert_eq!(*position, 0);
+            // Rowfinity patch: the position is where the token starts (after "SUM(").
+            assert_eq!(*position, 4);
         }
         _ => {
             panic!("Expected error in formula");

@@ -301,17 +301,9 @@ fn lambda_r_and_c_parameters() {
 fn sin_is_not_immediately_invocable() {
     let mut p = parser();
     let t = p.parse("SIN(x)(3)", &cell());
-    // The result should be a plain SIN call, not a LambdaCallKind.
-    assert!(
-        matches!(
-            t,
-            Node::FunctionKind {
-                kind: Function::Sin,
-                ..
-            }
-        ),
-        "SIN(x)(3) should parse as SIN(x), got {t:?}"
-    );
+    // Rowfinity patch: trailing input is rejected instead of being dropped, so this is a
+    // parse error (it used to parse as SIN(x)).
+    assert!(matches!(t, Node::ParseErrorKind { .. }), "SIN(x)(3) should be rejected, got {t:?}");
     // Confirm it is NOT treated as a lambda call.
     assert!(
         !matches!(t, Node::LambdaCallKind { .. }),

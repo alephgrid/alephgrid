@@ -1,0 +1,727 @@
+//! Spreadsheet editing on top of IronCalc: named ranges, formula problems and error
+//! origins, fill down/right and formula-aware copy, move and paste special.
+//!
+//! Formula translation reuses IronCalc's parser and stringifier: a formula is parsed in
+//! the context of its source cell and written out in the context of its target cell, so
+//! relative references shift, absolute ones stay and references qualified with a sheet
+//! keep that sheet. Every operation validates its whole area before the first change and
+//! is one undo step.
+
+use anyhow::{anyhow, bail, Result};
+use ironcalc::base::expressions::parser::stringify::to_localized_string;
+use ironcalc::base::expressions::parser::{new_parser_english, Node};
+use ironcalc::base::expressions::types::CellReferenceRC;
+use ironcalc::base::types::{Cell, FormulaValue};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use super::{SheetInput, Sheets, MAX_BULK_CELLS, MAX_COLUMNS, MAX_ROWS};
+
+/// A named cell or range. `scope` is the sheet index of a sheet-level name, `null` for a
+/// workbook-level name. Workbook functions (LAMBDAs) are listed separately.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct NamedRange {
+    pub name: String,
+    pub scope: Option<u32>,
+    /// What the name refers to, e.g. `=Sheet1!$A$1:$B$4`.
+    pub refers_to: String,
+}
+
+/// Where an error shown in a cell comes from.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CellError {
+    /// The error as displayed, e.g. `#DIV/0!`.
+    pub code: String,
+    /// The cell that produced it, e.g. `Sheet1!B3`; empty for a typed error value.
+    pub origin: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct CellDetail {
+    pub input: String,
+    pub display: String,
+    pub error: Option<CellError>,
+}
+
+/// A formula the parser rejects, with the character offset (in the text as typed,
+/// including a leading `=`) where it stopped.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FormulaProblem {
+    pub message: String,
+    pub position: u32,
+}
+
+/// A rectangle of cells, 0-based.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS)]
+pub struct CellArea {
+    pub row: u32,
+    pub column: u32,
+    pub rows: u32,
+    pub columns: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum FillDirection {
+    Down,
+    Right,
+}
+
+/// What a paste writes. `all`: values, formulas and formats; `formulas`: values and
+/// formulas without formats; `values`: calculated values only; `formats`: formats only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteMode {
+    All,
+    Formulas,
+    Values,
+    Formats,
+}
+
+/// One source cell, read before anything is written.
+struct Source {
+    input: Option<String>,
+    is_text: bool,
+    value: Option<String>,
+    value_is_text: bool,
+}
+
+impl CellArea {
+    fn cells(&self) -> u64 {
+        self.rows as u64 * self.columns as u64
+    }
+
+    fn check(&self, what: &str) -> Result<()> {
+        if self.rows == 0 || self.columns == 0 {
+            bail!("the {what} area is empty");
+        }
+        if self.row as u64 + self.rows as u64 > MAX_ROWS as u64 || self.column as u64 + self.columns as u64 > MAX_COLUMNS as u64 {
+            bail!("the {what} area extends outside the sheet ({MAX_ROWS} rows × {MAX_COLUMNS} columns)");
+        }
+        if self.cells() > MAX_BULK_CELLS as u64 {
+            bail!(crate::limits::TooLarge(format!("too many cells in one edit (max {MAX_BULK_CELLS})")));
+        }
+        Ok(())
+    }
+
+}
+
+fn is_lambda(formula: &str) -> bool {
+    formula.trim().trim_start_matches('=').trim_start().to_ascii_uppercase().starts_with("LAMBDA(")
+}
+
+impl Sheets {
+    // ------------------------------------------------------------ named ranges
+
+    /// Named cells and ranges, sorted by name then scope. LAMBDA definitions (workbook
+    /// functions) are not named ranges and are left out.
+    pub fn names(&self) -> Vec<NamedRange> {
+        let Some(m) = &self.model else { return vec![] };
+        let mut out: Vec<NamedRange> = m
+            .get_defined_name_list()
+            .into_iter()
+            .filter(|(_, _, f)| !is_lambda(f))
+            .map(|(name, scope, f)| NamedRange { name, scope, refers_to: if f.starts_with('=') { f } else { format!("={f}") } })
+            .collect();
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.scope.cmp(&b.scope)));
+        out
+    }
+
+    fn check_name(&self, name: &str, scope: Option<u32>, refers_to: &str) -> Result<()> {
+        if name.is_empty() {
+            bail!("a name cannot be empty");
+        }
+        if let Some(s) = scope {
+            self.check_index(s)?;
+        }
+        if ironcalc::base::language::get_default_language().functions.lookup(name).is_some() {
+            bail!("{name} is a built-in function name; choose another name");
+        }
+        let m = self.model()?;
+        if m.get_defined_name_list().iter().any(|(n, _, f)| n.eq_ignore_ascii_case(name) && is_lambda(f)) {
+            bail!("{name} is a workbook function; choose another name");
+        }
+        if is_lambda(refers_to) {
+            bail!("a named range must refer to cells; define functions in the Functions panel");
+        }
+        Ok(())
+    }
+
+    /// IronCalc accepts any reference or LAMBDA; this API accepts references only.
+    fn name_error(e: String, refers_to: &str) -> anyhow::Error {
+        match e.split_once(": ") {
+            Some(("Formula", _)) => anyhow!("{refers_to:?} is not a cell or range reference (use e.g. =Sheet1!$A$1:$B$4)"),
+            Some(("Name", "Invalid defined name")) => anyhow!("invalid name: use letters, digits, _ or ., starting with a letter or _, and not a cell reference such as A1"),
+            Some(("Name", "Defined name already exists")) => anyhow!("that name already exists in this scope"),
+            Some((_, rest)) => anyhow!("{rest}"),
+            None => anyhow!(e),
+        }
+    }
+
+    pub fn define_name(&mut self, name: &str, scope: Option<u32>, refers_to: &str) -> Result<()> {
+        let name = name.trim();
+        let refers_to = refers_to.trim();
+        self.check_name(name, scope, refers_to)?;
+        // IronCalc takes the reference without the leading `=` that users type.
+        let target = refers_to.strip_prefix('=').unwrap_or(refers_to);
+        let groups = self.undo_groups.len();
+        self.model_mut()?.new_defined_name(name, scope, target).map_err(|e| Self::name_error(e, refers_to))?;
+        self.record(1);
+        let result = self.respill_array_results();
+        self.merge_groups_since(groups);
+        result
+    }
+
+    /// IronCalc fixes a cell's scalar/array kind when the formula is entered, so a formula
+    /// typed before its name referred to several cells shows #VALUE! afterwards. Enter such
+    /// cells again (same text) so they spill as they would if typed now. Bounded by the
+    /// used cells of the workbook; the caller folds these writes into its undo step.
+    fn respill_array_results(&mut self) -> Result<()> {
+        let mut redo = Vec::new();
+        {
+            let m = self.model()?;
+            for (index, ws) in m.get_model().workbook.worksheets.iter().enumerate() {
+                for row in ws.sheet_data.rows() {
+                    for (column, cell) in ws.sheet_data.cells_in_row(row) {
+                        if let Cell::CellFormula { v: FormulaValue::Error { d, .. }, .. } = cell.as_ref() {
+                            if d.m == "Array result in scalar context" {
+                                redo.push((index as u32, row, column, m.get_cell_content(index as u32, row, column).map_err(|e| anyhow!(e))?));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if redo.is_empty() {
+            return Ok(());
+        }
+        let m = self.model_mut()?;
+        m.pause_evaluation();
+        let mut entries = 0;
+        let result = (|| -> Result<()> {
+            for (index, row, column, content) in &redo {
+                m.set_user_input(*index, *row, *column, content).map_err(|e| anyhow!(e))?;
+                entries += 1;
+            }
+            Ok(())
+        })();
+        m.resume_evaluation();
+        m.evaluate();
+        self.record(entries);
+        result
+    }
+
+    /// Rename, rescope or repoint a name. Formulas using it follow a rename.
+    pub fn update_name(&mut self, name: &str, scope: Option<u32>, new_name: &str, new_scope: Option<u32>, refers_to: &str) -> Result<()> {
+        let new_name = new_name.trim();
+        let refers_to = refers_to.trim();
+        if !self.names().iter().any(|n| n.name.eq_ignore_ascii_case(name) && n.scope == scope) {
+            bail!("no named range {name:?} in that scope");
+        }
+        self.check_name(new_name, new_scope, refers_to)?;
+        let target = refers_to.strip_prefix('=').unwrap_or(refers_to);
+        let groups = self.undo_groups.len();
+        self.model_mut()?.update_defined_name(name, scope, new_name, new_scope, target).map_err(|e| Self::name_error(e, refers_to))?;
+        self.record(1);
+        let result = self.respill_array_results();
+        self.merge_groups_since(groups);
+        result
+    }
+
+    /// Formulas that used the name show #NAME? afterwards, as in other spreadsheets.
+    pub fn delete_name(&mut self, name: &str, scope: Option<u32>) -> Result<()> {
+        if !self.names().iter().any(|n| n.name.eq_ignore_ascii_case(name) && n.scope == scope) {
+            bail!("no named range {name:?} in that scope");
+        }
+        self.model_mut()?.delete_defined_name(name, scope).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ problems and origins
+
+    /// The input, display and (for an error) its origin and message.
+    pub fn cell_detail(&self, index: u32, row: u32, column: u32) -> Result<CellDetail> {
+        self.check_index(index)?;
+        let m = self.model()?;
+        let (r, c) = (row as i32 + 1, column as i32 + 1);
+        let display = m.get_formatted_cell_value(index, r, c).map_err(|e| anyhow!(e))?;
+        let input = m.get_cell_content(index, r, c).map_err(|e| anyhow!(e))?;
+        let cell = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?.cell(r, c).map(|c| c.into_owned());
+        let error = match cell {
+            Some(Cell::CellFormula { v: FormulaValue::Error { d, .. }, .. } | Cell::ArrayFormula { v: FormulaValue::Error { d, .. }, .. }) => {
+                Some(CellError { code: display.clone(), origin: d.o.clone(), message: d.m.clone() })
+            }
+            Some(Cell::ErrorCell { .. }) => Some(CellError { code: display.clone(), origin: String::new(), message: "Typed error value".into() }),
+            _ => None,
+        };
+        Ok(CellDetail { input, display, error })
+    }
+
+    /// Parse `formula` as if typed into the cell; `None` when it parses (or is not a formula).
+    pub fn check_formula(&self, index: u32, row: u32, column: u32, formula: &str) -> Result<Option<FormulaProblem>> {
+        self.check_index(index)?;
+        let lead = formula.len() - formula.trim_start().len();
+        let Some(body) = formula.trim_start().strip_prefix('=') else { return Ok(None) };
+        let m = self.model()?.get_model();
+        let wb = &m.workbook;
+        let mut parser = new_parser_english(wb.get_worksheet_names(), wb.get_defined_names_with_scope(), wb.tables.clone());
+        let context = CellReferenceRC { sheet: wb.worksheet(index).map_err(|e| anyhow!(e))?.get_name(), row: row as i32 + 1, column: column as i32 + 1 };
+        let first = parser.parse(body, &context);
+        // IronCalc completes one missing final `)` when it stores a formula; accept what it stores.
+        if matches!(first, Node::ParseErrorKind { .. }) && !matches!(parser.parse(&format!("{body})"), &context), Node::ParseErrorKind { .. }) {
+            return Ok(None);
+        }
+        Ok(match first {
+            Node::ParseErrorKind { message, position, .. } => {
+                // `position` counts characters of `body`; report it in the typed text.
+                let before = formula[..lead].chars().count() + 1;
+                Some(FormulaProblem { message, position: (before + position.min(body.chars().count())) as u32 })
+            }
+            _ => None,
+        })
+    }
+
+    // ------------------------------------------------------------ fill, copy, move
+
+    /// Read the source cells of a copy before anything changes.
+    fn read_area(&self, index: u32, area: &CellArea) -> Result<Vec<Vec<Source>>> {
+        let m = self.model()?;
+        let ws = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?;
+        let mut out = Vec::with_capacity(area.rows as usize);
+        for dr in 0..area.rows {
+            let mut row = Vec::with_capacity(area.columns as usize);
+            for dc in 0..area.columns {
+                let (r, c) = ((area.row + dr) as i32 + 1, (area.column + dc) as i32 + 1);
+                let cell = ws.cell(r, c).map(|c| c.into_owned());
+                let source = match cell {
+                    None | Some(Cell::EmptyCell { .. }) => Source { input: None, is_text: false, value: None, value_is_text: false },
+                    // Spilled values belong to their anchor formula, which is copied instead.
+                    Some(Cell::SpillCell { .. }) => Source { input: None, is_text: false, value: None, value_is_text: false },
+                    Some(cell) => {
+                        let input = m.get_cell_content(index, r, c).map_err(|e| anyhow!(e))?;
+                        let is_text = matches!(cell, Cell::SharedString { .. });
+                        let value = m.get_model().get_cell_value_by_index(index, r, c).map_err(|e| anyhow!(e))?;
+                        let (value, value_is_text) = match value {
+                            ironcalc::base::cell::CellValue::None => (None, false),
+                            ironcalc::base::cell::CellValue::String(s) => {
+                                // Error results read back as their code and paste as that error.
+                                let is_error = matches!(&cell, Cell::CellFormula { v: FormulaValue::Error { .. }, .. } | Cell::ErrorCell { .. });
+                                (Some(s), !is_error)
+                            }
+                            ironcalc::base::cell::CellValue::Number(n) => (Some(format!("{n}")), false),
+                            ironcalc::base::cell::CellValue::Boolean(b) => (Some(if b { "TRUE" } else { "FALSE" }.to_string()), false),
+                        };
+                        Source { input: Some(input), is_text, value, value_is_text }
+                    }
+                };
+                row.push(source);
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// The formula `input`, typed at source cell `from`, as it reads when copied to `to`
+    /// (sheet, row, column). The source sheet does not matter: see below.
+    fn translate(&self, input: &str, from: (u32, u32), to: (u32, u32, u32)) -> Result<String> {
+        let Some(body) = input.strip_prefix('=') else { return Ok(input.to_string()) };
+        let m = self.model()?.get_model();
+        let wb = &m.workbook;
+        let mut parser = new_parser_english(wb.get_worksheet_names(), wb.get_defined_names_with_scope(), wb.tables.clone());
+        let sheet_name = |i: u32| wb.worksheet(i).map(|w| w.get_name()).map_err(|e| anyhow!(e));
+        // Parse as if the source cell were on the target sheet: unqualified references then
+        // stay unqualified (relative to the destination sheet), as in other spreadsheets,
+        // while references naming a sheet keep naming it.
+        let source = CellReferenceRC { sheet: sheet_name(to.0)?, row: from.0 as i32 + 1, column: from.1 as i32 + 1 };
+        let target = CellReferenceRC { sheet: sheet_name(to.0)?, row: to.1 as i32 + 1, column: to.2 as i32 + 1 };
+        let node = parser.parse(body, &source);
+        if let Node::ParseErrorKind { .. } = node {
+            // An unparsable formula is copied as typed, as IronCalc stores it.
+            return Ok(input.to_string());
+        }
+        let language = ironcalc::base::language::get_default_language();
+        let locale = ironcalc::base::locale::get_default_locale();
+        Ok(format!("={}", to_localized_string(&node, &target, locale, language)))
+    }
+
+    fn style_grid(&self, index: u32, area: &CellArea) -> Result<Vec<Vec<ironcalc::base::types::Style>>> {
+        let m = self.model()?;
+        (0..area.rows)
+            .map(|dr| (0..area.columns).map(|dc| m.get_cell_style(index, (area.row + dr) as i32 + 1, (area.column + dc) as i32 + 1).map_err(|e| anyhow!(e))).collect())
+            .collect()
+    }
+
+    /// Write `inputs` (text flags keep text text) and optionally `styles` over `target`,
+    /// as one undo step.
+    fn write(&mut self, index: u32, inputs: Vec<(SheetInput, bool)>, styles: Option<(CellArea, Vec<Vec<ironcalc::base::types::Style>>)>) -> Result<()> {
+        let groups = self.undo_groups.len();
+        let result = (|| {
+            self.set_values(index, &inputs)?;
+            if let Some((area, styles)) = styles {
+                let m = self.model_mut()?;
+                m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
+                let (r0, c0) = (area.row as i32 + 1, area.column as i32 + 1);
+                m.set_selected_cell(r0, c0).map_err(|e| anyhow!(e))?;
+                m.set_selected_range(r0, c0, r0 + area.rows as i32 - 1, c0 + area.columns as i32 - 1).map_err(|e| anyhow!(e))?;
+                m.on_paste_styles(&styles).map_err(|e| anyhow!(e))?;
+                self.record(1);
+            }
+            Ok(())
+        })();
+        self.merge_groups_since(groups);
+        result
+    }
+
+    /// Fold the undo groups recorded since `len` into one user step.
+    fn merge_groups_since(&mut self, len: usize) {
+        if self.undo_groups.len() > len + 1 {
+            let total: u32 = self.undo_groups.drain(len..).sum();
+            self.undo_groups.push(total);
+        }
+    }
+
+    /// Ctrl+D / Ctrl+R: copy the first row (down) or first column (right) of `area` over
+    /// the rest of it, translating formulas and copying formats.
+    pub fn fill(&mut self, index: u32, area: CellArea, direction: FillDirection) -> Result<()> {
+        self.check_index(index)?;
+        area.check("fill")?;
+        let (span, len) = match direction {
+            FillDirection::Down => (CellArea { rows: 1, ..area }, area.rows),
+            FillDirection::Right => (CellArea { columns: 1, ..area }, area.columns),
+        };
+        if len < 2 {
+            return Ok(());
+        }
+        let sources = self.read_area(index, &span)?;
+        let source_styles = self.style_grid(index, &span)?;
+        let mut inputs = Vec::new();
+        let mut styles = vec![vec![ironcalc::base::types::Style::default(); area.columns as usize]; area.rows as usize];
+        for dr in 0..area.rows {
+            for dc in 0..area.columns {
+                let (sr, sc) = match direction { FillDirection::Down => (0, dc), FillDirection::Right => (dr, 0) };
+                let s = &sources[sr as usize][sc as usize];
+                styles[dr as usize][dc as usize] = source_styles[sr as usize][sc as usize].clone();
+                if (dr, dc) == (sr, sc) {
+                    continue;
+                }
+                let (row, column) = (area.row + dr, area.column + dc);
+                let value = match &s.input {
+                    Some(i) => self.translate(i, (span.row + sr, span.column + sc), (index, row, column))?,
+                    None => String::new(),
+                };
+                inputs.push((SheetInput { row, column, value }, s.is_text));
+            }
+        }
+        self.write(index, inputs, Some((area, styles)))
+    }
+
+    /// Paste the `source` area of sheet `from` at `at` on sheet `index`. Formulas are
+    /// translated as when copying; `transpose` swaps rows and columns.
+    pub fn paste(&mut self, from: u32, source: CellArea, index: u32, at: (u32, u32), mode: PasteMode, transpose: bool) -> Result<CellArea> {
+        self.check_index(from)?;
+        self.check_index(index)?;
+        source.check("copied")?;
+        let target = if transpose {
+            CellArea { row: at.0, column: at.1, rows: source.columns, columns: source.rows }
+        } else {
+            CellArea { row: at.0, column: at.1, rows: source.rows, columns: source.columns }
+        };
+        target.check("paste")?;
+        let sources = self.read_area(from, &source)?;
+        let source_styles = if matches!(mode, PasteMode::All | PasteMode::Formats) { Some(self.style_grid(from, &source)?) } else { None };
+        let mut inputs = Vec::new();
+        let mut styles = vec![vec![ironcalc::base::types::Style::default(); target.columns as usize]; target.rows as usize];
+        for dr in 0..source.rows {
+            for dc in 0..source.columns {
+                let (tr, tc) = if transpose { (dc, dr) } else { (dr, dc) };
+                if let Some(st) = &source_styles {
+                    styles[tr as usize][tc as usize] = st[dr as usize][dc as usize].clone();
+                }
+                if mode == PasteMode::Formats {
+                    continue;
+                }
+                let s = &sources[dr as usize][dc as usize];
+                let (row, column) = (target.row + tr, target.column + tc);
+                let (value, text) = match mode {
+                    PasteMode::Values => (s.value.clone().unwrap_or_default(), s.value_is_text),
+                    _ => match &s.input {
+                        Some(i) => (self.translate(i, (source.row + dr, source.column + dc), (index, row, column))?, s.is_text),
+                        None => (String::new(), false),
+                    },
+                };
+                inputs.push((SheetInput { row, column, value }, text));
+            }
+        }
+        let styles = source_styles.map(|_| (target, styles));
+        self.write(index, inputs, styles)?;
+        Ok(target)
+    }
+
+    /// Cut and paste within one sheet: cells move with their formats, formulas elsewhere
+    /// that refer to them follow, and references inside the moved area keep pointing at
+    /// the same cells. Uses IronCalc's own cut/paste.
+    pub fn move_cells(&mut self, index: u32, source: CellArea, at: (u32, u32)) -> Result<CellArea> {
+        self.check_index(index)?;
+        source.check("moved")?;
+        let target = CellArea { row: at.0, column: at.1, ..source };
+        target.check("paste")?;
+        if (target.row, target.column) == (source.row, source.column) {
+            return Ok(target);
+        }
+        let m = self.model_mut()?;
+        m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
+        let (r0, c0) = (source.row as i32 + 1, source.column as i32 + 1);
+        let (r1, c1) = (r0 + source.rows as i32 - 1, c0 + source.columns as i32 - 1);
+        m.set_selected_cell(r0, c0).map_err(|e| anyhow!(e))?;
+        m.set_selected_range(r0, c0, r1, c1).map_err(|e| anyhow!(e))?;
+        let clipboard = serde_json::to_value(m.copy_to_clipboard().map_err(|e| anyhow!(e))?)?;
+        let data = serde_json::from_value(clipboard["data"].clone())?;
+        // The clipboard's range is clamped to the used area; pass the full source range
+        // so the whole area moves (empty cells included).
+        m.set_selected_cell(target.row as i32 + 1, target.column as i32 + 1).map_err(|e| anyhow!(e))?;
+        m.paste_from_clipboard(index, (r0, c0, r1, c1), &data, true).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironcalc::base::expressions::types::Area;
+
+    fn sheets() -> Sheets {
+        let mut s = Sheets::from_bytes(None).unwrap();
+        s.create("Data").unwrap();
+        s
+    }
+
+    fn input(row: u32, column: u32, value: &str) -> SheetInput {
+        SheetInput { row, column, value: value.to_string() }
+    }
+
+    fn content(s: &Sheets, sheet: u32, row: u32, column: u32) -> String {
+        s.model().unwrap().get_cell_content(sheet, row as i32 + 1, column as i32 + 1).unwrap()
+    }
+
+    fn display(s: &Sheets, sheet: u32, row: u32, column: u32) -> String {
+        s.model().unwrap().get_formatted_cell_value(sheet, row as i32 + 1, column as i32 + 1).unwrap()
+    }
+
+    #[test]
+    fn formula_problems_report_where_parsing_stopped() {
+        let s = sheets();
+        assert!(s.check_formula(0, 0, 0, "=SUM(A1:A3)").unwrap().is_none());
+        assert!(s.check_formula(0, 0, 0, "plain text").unwrap().is_none());
+        // Positions count characters of the text as typed, including `=`.
+        // A missing final parenthesis is completed when stored, so it is not a problem.
+        assert!(s.check_formula(0, 0, 0, "=SUM(A1").unwrap().is_none());
+        assert!(s.check_formula(0, 0, 0, "=SUM(MAX(A1,2)").unwrap().is_none());
+        assert!(s.check_formula(0, 0, 0, "=SUM(1,,").unwrap().is_none(), "stored as =SUM(1,,)");
+        for (formula, position) in [("=1+)", 3), ("=SUM(1,+", 8), ("=SUM((A1", 8), ("=1 +* 2", 4), ("=1+2)", 4), ("=1 2", 2), ("  =\"abc", 7)] {
+            let p = s.check_formula(0, 0, 0, formula).unwrap().unwrap_or_else(|| panic!("{formula} should not parse"));
+            assert!(!p.message.is_empty());
+            assert_eq!(p.position, position, "{formula}: {p:?}");
+        }
+    }
+
+    /// Input after a complete expression used to be dropped silently (`=1 2` showed 1).
+    #[test]
+    fn trailing_input_is_an_error_not_a_shorter_formula() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "=1+2)"), input(1, 0, "=1 2"), input(2, 0, "=SUM(1,2"), input(3, 0, "=1+)")]).unwrap();
+        assert_eq!((content(&s, 0, 0, 0), display(&s, 0, 0, 0)), ("=1+2)".into(), "#ERROR!".into()));
+        assert_eq!((content(&s, 0, 1, 0), display(&s, 0, 1, 0)), ("=1 2".into(), "#ERROR!".into()));
+        // A missing closing parenthesis at the end is still completed, as before.
+        assert_eq!((content(&s, 0, 2, 0), display(&s, 0, 2, 0)), ("=SUM(1,2)".into(), "3".into()));
+        assert_eq!(display(&s, 0, 3, 0), "#ERROR!");
+    }
+
+    fn reopen(s: &Sheets) -> Sheets {
+        Sheets::from_bytes(s.to_bytes()).unwrap()
+    }
+
+    #[test]
+    fn named_ranges_follow_renames_survive_reopen_and_undo() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 1, "10"), input(1, 1, "20"), input(2, 1, "30"), input(0, 3, "=SUM(Sales)"), input(1, 3, "=Sales")]).unwrap();
+        assert_eq!(display(&s, 0, 0, 3), "#NAME?");
+        s.define_name("Sales", None, "=Data!$B$1:$B$3").unwrap();
+        assert_eq!(display(&s, 0, 0, 3), "60");
+        // A formula typed before the name existed spills like one typed now.
+        assert_eq!((display(&s, 0, 1, 3), display(&s, 0, 2, 3), display(&s, 0, 3, 3)), ("10".into(), "20".into(), "30".into()));
+        assert_eq!(s.names(), vec![NamedRange { name: "Sales".into(), scope: None, refers_to: "=Data!$B$1:$B$3".into() }]);
+        s.update_name("Sales", None, "Revenue", None, "=Data!$B$1:$B$2").unwrap();
+        assert_eq!(content(&s, 0, 0, 3), "=SUM(Revenue)");
+        assert_eq!(display(&s, 0, 0, 3), "30");
+        assert_eq!((display(&s, 0, 2, 3), display(&s, 0, 3, 3)), ("20".into(), "".into()), "the spill shrinks with the range");
+        let reopened = reopen(&s);
+        assert_eq!(reopened.names()[0].name, "Revenue");
+        assert_eq!(display(&reopened, 0, 0, 3), "30");
+        s.delete_name("Revenue", None).unwrap();
+        assert!(s.names().is_empty());
+        assert_eq!(display(&s, 0, 0, 3), "#NAME?");
+        assert!(s.undo().unwrap());
+        assert_eq!(display(&s, 0, 0, 3), "30");
+        assert!(s.undo().unwrap());
+        assert_eq!((s.names()[0].name.as_str(), display(&s, 0, 0, 3).as_str()), ("Sales", "60"));
+        assert!(s.redo().unwrap());
+        assert_eq!(content(&s, 0, 0, 3), "=SUM(Revenue)");
+    }
+
+    #[test]
+    fn sheet_scoped_names_shadow_workbook_names_on_their_sheet() {
+        let mut s = sheets();
+        s.create("Other").unwrap();
+        s.set(0, &[input(0, 0, "1"), input(0, 1, "2"), input(1, 0, "=Pick")]).unwrap();
+        s.set(1, &[input(0, 0, "=Pick")]).unwrap();
+        s.define_name("Pick", None, "=Data!$A$1").unwrap();
+        s.define_name("Pick", Some(0), "=Data!$B$1").unwrap();
+        assert_eq!(display(&s, 0, 1, 0), "2", "the sheet's own name wins on that sheet");
+        assert_eq!(display(&s, 1, 0, 0), "1", "other sheets use the workbook name");
+        assert_eq!(s.names().len(), 2);
+        assert!(s.define_name("pick", Some(0), "=Data!$A$1").is_err(), "names are case-insensitive within a scope");
+    }
+
+    #[test]
+    fn names_refuse_functions_constants_and_cell_like_names() {
+        let mut s = sheets();
+        s.model_mut().unwrap().new_defined_name("DOUBLE", None, "=LAMBDA(x,x*2)").unwrap();
+        let err = |r: Result<()>| r.unwrap_err().to_string();
+        assert!(err(s.define_name("Double", None, "=Data!$A$1")).contains("workbook function"));
+        assert!(err(s.define_name("SUM", None, "=Data!$A$1")).contains("built-in function"));
+        assert!(err(s.define_name("Half", None, "=LAMBDA(x,x/2)")).contains("must refer to cells"));
+        let e = err(s.define_name("TaxRate", None, "=5")); assert!(e.contains("not a cell or range reference"), "{e}");
+        assert!(err(s.define_name("A1", None, "=Data!$A$1")).contains("invalid name"));
+        assert!(err(s.define_name("", None, "=Data!$A$1")).contains("empty"));
+        assert!(err(s.define_name("Ok", Some(7), "=Data!$A$1")).contains("unknown sheet"));
+        assert!(err(s.delete_name("DOUBLE", None)).contains("no named range"), "functions are not managed as names");
+        assert!(s.names().is_empty(), "LAMBDAs are not listed as named ranges");
+        s.define_name("Ok", None, "=Data!$A$1").unwrap();
+        assert!(err(s.define_name("OK", None, "=Data!$A$2")).contains("already exists"));
+    }
+
+    #[test]
+    fn fill_down_and_right_copy_the_first_row_or_column() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "1"), input(0, 1, "=A1*2"), input(0, 2, "'007"), input(0, 3, "=$A$1+A$1")]).unwrap();
+        s.fill(0, CellArea { row: 0, column: 0, rows: 4, columns: 4 }, FillDirection::Down).unwrap();
+        for r in 1..4 {
+            // Ctrl+D copies; it does not extend a series.
+            assert_eq!(display(&s, 0, r, 0), "1");
+            assert_eq!(content(&s, 0, r, 1), format!("=A{}*2", r + 1));
+            assert_eq!(display(&s, 0, r, 1), "2");
+            assert_eq!(display(&s, 0, r, 2), "007", "text stays text");
+            assert_eq!(content(&s, 0, r, 3), "=$A$1+A$1");
+        }
+        assert!(s.undo().unwrap(), "one undo step");
+        assert!((1..4).all(|r| content(&s, 0, r, 1).is_empty() && content(&s, 0, r, 0).is_empty()));
+        assert_eq!(content(&s, 0, 0, 1), "=A1*2", "the source row stays");
+        s.set(0, &[input(2, 0, "=A1+$A1"), input(3, 0, "x")]).unwrap();
+        s.fill(0, CellArea { row: 2, column: 0, rows: 2, columns: 3 }, FillDirection::Right).unwrap();
+        assert_eq!(content(&s, 0, 2, 1), "=B1+$A1");
+        assert_eq!(content(&s, 0, 2, 2), "=C1+$A1");
+        assert_eq!(display(&s, 0, 3, 2), "x");
+        assert!(s.fill(0, CellArea { row: 0, column: 0, rows: MAX_ROWS, columns: 2 }, FillDirection::Down).is_err(), "bounded");
+        assert!(s.fill(0, CellArea { row: MAX_ROWS - 1, column: 0, rows: 2, columns: 1 }, FillDirection::Down).is_err());
+    }
+
+    #[test]
+    fn paste_special_modes_and_transpose() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "2"), input(0, 1, "=A1*10"), input(1, 0, "'05"), input(1, 1, "=1/0")]).unwrap();
+        let bold = Area { sheet: 0, row: 1, column: 2, width: 1, height: 1 };
+        s.model_mut().unwrap().update_range_style(&bold, "font.b", "true").unwrap();
+        let src = CellArea { row: 0, column: 0, rows: 2, columns: 2 };
+        let is_bold = |s: &Sheets, r: u32, c: u32| s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap().font.b;
+        // Values: calculated results, errors kept as errors, text kept as text, no formats.
+        s.paste(0, src, 0, (4, 0), PasteMode::Values, false).unwrap();
+        assert_eq!((content(&s, 0, 4, 0), content(&s, 0, 4, 1)), ("2".into(), "20".into()));
+        assert_eq!(display(&s, 0, 5, 0), "05");
+        assert_eq!(display(&s, 0, 5, 1), "#DIV/0!");
+        assert!(!is_bold(&s, 4, 1));
+        // Formulas: translated formulas, no formats.
+        s.paste(0, src, 0, (8, 2), PasteMode::Formulas, false).unwrap();
+        assert_eq!(content(&s, 0, 8, 3), "=C9*10");
+        assert!(!is_bold(&s, 8, 3));
+        // All: formulas and formats.
+        s.paste(0, src, 0, (12, 0), PasteMode::All, false).unwrap();
+        assert_eq!(content(&s, 0, 12, 1), "=A13*10");
+        assert!(is_bold(&s, 12, 1));
+        // Formats only leave the target's values alone.
+        s.set(0, &[input(20, 1, "keep")]).unwrap();
+        s.paste(0, src, 0, (20, 0), PasteMode::Formats, false).unwrap();
+        assert_eq!(display(&s, 0, 20, 1), "keep");
+        assert!(is_bold(&s, 20, 1));
+        // Transpose: A1:B2 at C31 swaps rows and columns; each formula is translated like
+        // an ordinary copy to the cell it lands in (B1 → C32 shifts A1 to B32).
+        let t = s.paste(0, src, 0, (30, 2), PasteMode::All, true).unwrap();
+        assert_eq!((t.row, t.column, t.rows, t.columns), (30, 2, 2, 2));
+        assert_eq!(content(&s, 0, 30, 2), "2");
+        assert_eq!(display(&s, 0, 30, 3), "05");
+        assert_eq!(content(&s, 0, 31, 2), "=B32*10");
+        assert!(!is_bold(&s, 30, 3) && is_bold(&s, 31, 2));
+        // A reference shifted off the grid becomes #REF!, as when copying.
+        s.paste(0, CellArea { row: 0, column: 1, rows: 1, columns: 1 }, 0, (40, 0), PasteMode::All, false).unwrap();
+        assert_eq!(content(&s, 0, 40, 0), "=#REF!*10");
+        // Each paste is one undo step.
+        assert!(s.undo().unwrap());
+        assert!(s.undo().unwrap());
+        assert!(content(&s, 0, 31, 2).is_empty() && content(&s, 0, 20, 1) == "keep");
+    }
+
+    #[test]
+    fn overlapping_paste_reads_sources_before_writing() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "1"), input(1, 0, "2"), input(2, 0, "=A1+A2")]).unwrap();
+        s.paste(0, CellArea { row: 0, column: 0, rows: 3, columns: 1 }, 0, (1, 0), PasteMode::All, false).unwrap();
+        assert_eq!((display(&s, 0, 1, 0), display(&s, 0, 2, 0)), ("1".into(), "2".into()));
+        assert_eq!(content(&s, 0, 3, 0), "=A2+A3");
+        assert_eq!(display(&s, 0, 3, 0), "3");
+    }
+
+    #[test]
+    fn move_updates_references_to_the_moved_cells() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "5"), input(1, 0, "=A1*2"), input(0, 1, "=A1+1"), input(0, 2, "=SUM(A1:A2)")]).unwrap();
+        let t = s.move_cells(0, CellArea { row: 0, column: 0, rows: 2, columns: 1 }, (4, 3)).unwrap();
+        assert_eq!((t.row, t.column), (4, 3));
+        assert!(content(&s, 0, 0, 0).is_empty() && content(&s, 0, 1, 0).is_empty());
+        assert_eq!(content(&s, 0, 4, 3), "5");
+        assert_eq!(content(&s, 0, 5, 3), "=D5*2", "references inside the moved area move with it");
+        assert_eq!(content(&s, 0, 0, 1), "=D5+1", "references from outside follow the moved cell");
+        assert_eq!(display(&s, 0, 0, 2), "15");
+        assert!(s.undo().unwrap());
+        assert_eq!((content(&s, 0, 0, 0), content(&s, 0, 0, 1)), ("5".into(), "=A1+1".into()));
+        assert!(content(&s, 0, 4, 3).is_empty());
+    }
+
+    #[test]
+    fn errors_report_their_origin() {
+        let mut s = sheets();
+        s.set(0, &[input(0, 0, "=1/0"), input(0, 1, "=A1+1"), input(0, 2, "#N/A"), input(0, 3, "7")]).unwrap();
+        let d = s.cell_detail(0, 0, 1).unwrap();
+        let e = d.error.expect("error detail");
+        assert_eq!((e.code.as_str(), e.origin.as_str()), ("#DIV/0!", "Data!A1"));
+        assert!(!e.message.is_empty());
+        assert_eq!(d.input, "=A1+1");
+        let typed = s.cell_detail(0, 0, 2).unwrap().error.expect("typed error");
+        assert_eq!((typed.code.as_str(), typed.origin.as_str()), ("#N/A", ""));
+        assert!(s.cell_detail(0, 0, 3).unwrap().error.is_none());
+        assert!(s.cell_detail(3, 0, 0).is_err());
+    }
+
+    #[test]
+    fn copy_translation_keeps_absolute_and_qualified_references() {
+        let mut s = sheets();
+        s.create("Other").unwrap();
+        s.set(0, &[input(0, 1, "=A1+$A$1+A$1+$A1+Data!A1+Other!B2")]).unwrap();
+        s.paste(0, CellArea { row: 0, column: 1, rows: 1, columns: 1 }, 0, (2, 3), PasteMode::All, false).unwrap();
+        assert_eq!(content(&s, 0, 2, 3), "=C3+$A$1+C$1+$A3+Data!C3+Other!D4");
+        // Into another sheet: unqualified references are relative to the new sheet.
+        s.paste(0, CellArea { row: 0, column: 1, rows: 1, columns: 1 }, 1, (0, 1), PasteMode::All, false).unwrap();
+        assert_eq!(content(&s, 1, 0, 1), "=A1+$A$1+A$1+$A1+Data!A1+Other!B2");
+    }
+}

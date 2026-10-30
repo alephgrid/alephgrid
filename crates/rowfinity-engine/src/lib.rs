@@ -29,7 +29,7 @@ pub mod wire;
 mod workbook;
 
 pub use model::*;
-pub use sheets::{Align, SheetBlock, SheetInfo, SheetInput};
+pub use sheets::{Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
 pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
 pub use queries::SchemaChanged;
 pub use sqlpolicy::{BadParameter, IsChange, NotAllowed, ParamType, QueryParam};
