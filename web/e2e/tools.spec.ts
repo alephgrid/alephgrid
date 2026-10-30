@@ -46,3 +46,21 @@ test("F.12: a list rule becomes a dropdown and refuses other values; dedupe make
   await expect(page.locator("body")).toContainText("is not allowed in column \"tier\"");
   ws.close();
 });
+
+test("F.13: an XLSX download first says what it leaves out", async ({ page }) => {
+  const wb = await server.createWorkbook("Compat"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "orders", sql: "SELECT * FROM (VALUES (1, 100.0)) v(id, amount)" });
+  await ws.call("sheet_create", { name: "Report" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "=SUM(orders[amount])" }] });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /Report/ }).click();
+  await page.getByRole("button", { name: "Export ▾" }).click();
+  await page.getByRole("menuitem", { name: /xlsx/i }).first().click();
+  const d = page.locator(".dialog", { hasText: "XLSX compatibility" });
+  await expect(d).toContainText("Report!A1: the table formula =SUM(orders[amount]) is exported as its value \"100\"");
+  await expect(d).toContainText("table orders (1 rows) is not in the file");
+  const download = page.waitForEvent("download");
+  await d.getByRole("button", { name: "Download anyway" }).click();
+  expect((await download).suggestedFilename()).toBe("Compat.xlsx");
+  ws.close();
+});

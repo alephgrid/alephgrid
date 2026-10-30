@@ -404,8 +404,8 @@ stops at the round limit with an error and the change is rolled back.
 column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`).
 
 **Export.** XLSX files cannot hold table formulas. A table cell is exported as its current
-value, and the export returns one note per such cell ("Report!B1: the table formula … is
-exported as its value "80" …"). Showing these notes in the download is F.13.
+value, and the download first lists one note per such cell ("Report!B1: the table formula … is
+exported as its value "80" …"); see [XLSX compatibility](#xlsx-compatibility-f13).
 
 ## Table results in sheets (F.10)
 
@@ -495,3 +495,22 @@ covers XLOOKUP, VLOOKUP and multi-key lookups against sheet ranges with duplicat
 key, `0`, `""` and case variants. Workbook tests cover source edits, one result per row with
 duplicate keys, renames, refused deletes, tables that look each other up and refused circular
 references, before and after reopening.
+
+## XLSX compatibility (F.13)
+
+An XLSX file holds sheets, not Alephgrid tables, so before downloading one the workbook lists
+everything the file leaves out or changes (`xlsx_compatibility`), and the download asks for
+confirmation when there is anything to say. Nothing is replaced silently:
+
+* a **table cell** (a sheet cell reading tables) is written as its current value, or a spilled
+  table result as its values, each with a note naming the cell or range and the formula;
+* a **dynamic array formula** is kept, with a note that Excel 365/2021 spills it and older
+  versions show one value;
+* a formula calling a function **Excel does not have** (by the catalog's sources) is kept, with
+  a note that Excel will show `#NAME?`;
+* every **table** is listed as not in the file (download it as CSV or Parquet), with its
+  presentation, validation and formula columns.
+
+Importing XLSX already reports what it cannot keep (unsupported features as warnings). Sheet
+styles and number formats round-trip through the sheet engine's reader and writer (tested in
+`tests::xlsx`). A reproducible sample workbook lives in [docs/samples](samples/README.md).

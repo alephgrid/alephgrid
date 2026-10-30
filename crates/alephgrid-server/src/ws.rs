@@ -100,6 +100,8 @@ pub enum Op {
     PreviewTransform { table: String, transform: alephgrid_core::tools::Transform },
     ApplyTransform { table: String, transform: alephgrid_core::tools::Transform, name: String },
     InspectFormula { table: String, column: String },
+    /// What an XLSX download leaves out or replaces by values (F.13), one note each.
+    XlsxCompatibility,
     /// The view spec of the rows behind one result row of a summary or report.
     Drill { spec: alephgrid_core::AnalysisSpec, #[ts(type = "CellValue[]")] row: Vec<Value> },
     MaterializeAnalysis { name: String, spec: alephgrid_core::AnalysisSpec },
@@ -296,7 +298,7 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -412,6 +414,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Dashboards => json!(r.dashboards()?),
         Op::Dashboard { dashboard } => json!(r.dashboard_results(&dashboard)?),
         Op::Drill { spec, row } => json!(r.drill(&spec, &row)?),
+        Op::XlsxCompatibility => json!(r.xlsx_compatibility()?),
         Op::ReplacePreview { spec } => json!(r.replace_preview(&spec)?),
         Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {

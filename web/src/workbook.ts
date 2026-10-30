@@ -1651,7 +1651,15 @@ export class WorkbookScreen {
     this.navigateDownload(api.exportUrl(this.meta.id, spec, format));
   }
 
-  private downloadXlsx(): void {
+  /** XLSX holds the sheets only and cannot hold table formulas: say what it leaves out or
+   *  replaces by values before downloading (F.13), never silently. */
+  private async downloadXlsx(): Promise<void> {
+    let notes: string[] = [];
+    try { notes = await this.rpc.call("xlsx_compatibility", {}); } catch (e) { toast((e as Error).message, "error"); return; }
+    if (notes.length) {
+      const shown = notes.slice(0, 20).join("\n") + (notes.length > 20 ? `\n… and ${notes.length - 20} more` : "");
+      if (!(await confirmDialog("XLSX compatibility", `${notes.length} note${notes.length === 1 ? "" : "s"} for this download:\n${shown}`, "Download anyway"))) return;
+    }
     this.navigateDownload(api.xlsxUrl(this.meta.id));
   }
 

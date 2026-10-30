@@ -1749,6 +1749,16 @@ impl Reader {
         self.db().recalculate(table, ticket)
     }
 
+    /// Everything an XLSX download leaves out or changes (F.13): the sheets' notes (see
+    /// [`crate::sheets::Sheets::xlsx_compatibility`]), and tables, which are not part of the file.
+    pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
+        let mut notes = self.sheets().xlsx_compatibility()?;
+        for t in self.db().list_tables()? {
+            notes.push(format!("table {} ({} rows) is not in the file: download it as CSV or Parquet; formulas over it are exported as values", t.name, t.row_count));
+        }
+        Ok(notes)
+    }
+
     /// Check a formula as if typed into a sheet cell: the sheet engine's parse, or for a
     /// formula that reads tables, whether it compiles as a table cell.
     pub fn check_sheet_formula(&self, sheet: u32, row: u32, column: u32, formula: &str) -> Result<Option<crate::sheets::FormulaProblem>> {

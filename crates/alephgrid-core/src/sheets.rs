@@ -582,6 +582,46 @@ impl Sheets {
         Ok(notes)
     }
 
+    /// What an XLSX export of the sheets cannot keep (F.13), one note per finding, without
+    /// writing a file the user sees: table cells exported as values, dynamic arrays that need
+    /// Excel 365/2021 to spill, and functions Excel does not have.
+    pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
+        let path = std::env::temp_dir().join(format!("alephgrid-compat-{}-{}.xlsx", std::process::id(), crate::storage::now_ms()));
+        let notes = self.export_xlsx(&path);
+        let _ = std::fs::remove_file(&path);
+        let mut notes = notes?;
+        let m = self.model()?;
+        let catalog: serde_json::Value = serde_json::from_str(include_str!("../data/function_catalog.json"))?;
+        let not_excel: Vec<String> = catalog["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["sheet_status"] == "registered" && !f["sources"].as_array().is_some_and(|s| s.iter().any(|x| x == "excel")))
+            .filter_map(|f| f["name"].as_str().map(str::to_string)).collect();
+        for info in self.list() {
+            let Ok(ws) = m.get_model().workbook.worksheet(info.index) else { continue };
+            for (row, column, cell) in ws.sheet_data.cells() {
+                let array = matches!(*cell, ironcalc::base::types::Cell::ArrayFormula { .. });
+                if !array && !matches!(*cell, ironcalc::base::types::Cell::CellFormula { .. }) {
+                    continue;
+                }
+                let content = m.get_cell_content(info.index, row, column).unwrap_or_default();
+                if links::slot_of(&content).is_some() {
+                    continue;
+                }
+                let at = format!("{}!{}{}", info.name, column_name(column as u32 - 1), row);
+                if array {
+                    notes.push(format!("{at}: {content} is a dynamic array formula; Excel 365 or 2021 spills it, older versions show one value"));
+                }
+                let upper = content.to_uppercase();
+                for f in &not_excel {
+                    let hit = upper.match_indices(&format!("{f}(")).any(|(i, _)| i == 0 || !upper.as_bytes()[i - 1].is_ascii_alphanumeric() && upper.as_bytes()[i - 1] != b'.' && upper.as_bytes()[i - 1] != b'_');
+                    if hit {
+                        notes.push(format!("{at}: {f} is not an Excel function; Excel will show #NAME?"));
+                    }
+                }
+            }
+        }
+        Ok(notes)
+    }
+
     /// The used range as typed table columns (first row = header). Reads every row,
     /// independent of viewport fetch limits.
     ///

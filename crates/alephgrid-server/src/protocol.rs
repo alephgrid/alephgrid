@@ -67,7 +67,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("analyze", "AnalysisResult"), ("analyses", "SavedAnalysis[]"), ("save_analysis", "SavedAnalysis"),
     ("delete_analysis", "null"), ("dashboards", "Dashboard[]"), ("dashboard", "DashboardResult"), ("save_dashboard", "Dashboard"),
     ("delete_dashboard", "null"), ("validations", "Validation[]"), ("set_validations", "ValidationReport"),
-    ("preview_transform", "TransformPreview"), ("apply_transform", "TableInfo"), ("inspect_formula", "FormulaInspection"), ("drill", "ViewSpec"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
+    ("preview_transform", "TransformPreview"), ("apply_transform", "TableInfo"), ("inspect_formula", "FormulaInspection"), ("xlsx_compatibility", "string[]"), ("drill", "ViewSpec"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
     ("replace_apply", "ReplaceOutcome"), ("replace_undo", "ReplaceOutcome"), ("presentation", "Presentation"), ("save_presentation", "Presentation"),
     ("functions", "WorkbookFunction[]"),
     ("test_function", "FunctionTestResult[]"),

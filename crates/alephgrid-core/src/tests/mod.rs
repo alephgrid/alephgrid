@@ -13,6 +13,7 @@ mod tablecells;
 mod results;
 mod reports;
 mod tools;
+mod compat;
 mod precision;
 mod props;
 mod sheets;
