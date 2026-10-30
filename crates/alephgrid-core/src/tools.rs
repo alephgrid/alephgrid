@@ -251,11 +251,7 @@ impl Workbook {
 
     /// Preview a transform: the first rows of its result, its size and what it changes.
     pub fn preview_transform(&self, table: &str, t: &Transform) -> Result<TransformPreview> {
-        let db = self.db();
-        let (sql, affected) = transform_sql(&db, table, t)?;
-        let rows: i64 = self.conn.query_row(&format!("SELECT count(*) FROM ({sql})"), [], |r| r.get(0))?;
-        let affected: i64 = self.conn.query_row(&affected, [], |r| r.get(0))?;
-        Ok(TransformPreview { sample: db.run_select(&sql, PREVIEW_ROWS)?, rows: rows.max(0) as u64, affected: affected.max(0) as u64 })
+        preview(&self.db(), table, t)
     }
 
     /// Apply a transform as a new table `name`; the source is not changed.
@@ -266,10 +262,37 @@ impl Workbook {
 
     /// What a formula column reads, what reads it, how it runs, and its errors.
     pub fn inspect_formula(&self, table: &str, column: &str) -> Result<FormulaInspection> {
+        inspect(&self.db(), table, column)
+    }
+}
+
+impl crate::Reader {
+    pub fn validations(&self, table: &str) -> Result<Vec<Validation>> {
+        validations(self.connection(), table)
+    }
+    pub fn preview_transform(&self, table: &str, t: &Transform) -> Result<TransformPreview> {
+        preview(&self.db_for_reports(), table, t)
+    }
+    pub fn inspect_formula(&self, table: &str, column: &str) -> Result<FormulaInspection> {
+        inspect(&self.db_for_reports(), table, column)
+    }
+}
+
+fn preview(db: &Db, table: &str, t: &Transform) -> Result<TransformPreview> {
+    let (sql, affected) = transform_sql(db, table, t)?;
+    db.snapshot(|| {
+        let rows: i64 = db.conn.query_row(&format!("SELECT count(*) FROM ({sql})"), [], |r| r.get(0))?;
+        let affected: i64 = db.conn.query_row(&affected, [], |r| r.get(0))?;
+        Ok((rows, affected))
+    }).and_then(|(rows, affected)| Ok(TransformPreview { sample: db.run_select(&sql, PREVIEW_ROWS)?, rows: rows.max(0) as u64, affected: affected.max(0) as u64 }))
+}
+
+fn inspect(db: &Db, table: &str, column: &str) -> Result<FormulaInspection> {
+    {
         use crate::table_formula::{references, Reference};
-        let (_, formula) = self.db().formulas(table)?.into_iter().find(|(n, _)| n == column).ok_or_else(|| anyhow!("{column:?} is not a formula column"))?;
+        let (_, formula) = db.formulas(table)?.into_iter().find(|(n, _)| n == column).ok_or_else(|| anyhow!("{column:?} is not a formula column"))?;
         let mut out = FormulaInspection { table: table.into(), column: column.into(), formula: formula.clone(), reads_columns: vec![], reads_tables: vec![], reads_cells: vec![], read_by: vec![], plan: vec![], errors: vec![] };
-        if self.db().sheet_formulas(table)?.contains(column) {
+        if db.sheet_formulas(table)?.contains(column) {
             for r in references(&formula).map_err(|e| anyhow!("{e}"))? {
                 match r {
                     Reference::Own { column, .. } => out.reads_columns.push(column),
@@ -288,12 +311,19 @@ impl Workbook {
                 out.plan.push("row expression".into());
             }
             let e = crate::reads::error_column(column);
-            out.errors = self.conn.prepare(&format!("SELECT {e}, count(*) FROM ({}) WHERE {e} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC", self.db().base_select(table)?, e = ident(&e)))?
+            out.errors = db.conn.prepare(&format!("SELECT {e}, count(*) FROM ({}) WHERE {e} IS NOT NULL GROUP BY 1 ORDER BY 2 DESC", db.base_select(table)?, e = ident(&e)))?
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<Result<_, _>>()?;
         } else {
             out.plan.push("SQL expression".into());
         }
-        for (t, name, f) in self.all_sheet_formulas()? {
+        let mut all = Vec::new();
+        for t in storage::user_tables(db.conn)? {
+            let sheet = db.sheet_formulas(&t)?;
+            for (name, f) in db.formulas(&t)? {
+                if sheet.contains(&name) { all.push((t.clone(), name, f)); }
+            }
+        }
+        for (t, name, f) in all {
             let Ok(refs) = references(&f) else { continue };
             let reads = refs.iter().any(|r| match r {
                 Reference::Own { column: c, .. } => t == table && c.eq_ignore_ascii_case(column) && name != column,
@@ -304,7 +334,9 @@ impl Workbook {
                 out.read_by.push(format!("{t}.{name}"));
             }
         }
-        for (place, f) in self.table_cells_in_use()? {
+        let cells = storage::table_cells(db.conn)?;
+        let placed = if cells.is_empty() { Vec::new() } else { db.shared.sheets.lock().unwrap_or_else(|e| e.into_inner()).slot_cells() };
+        for (place, f) in placed.into_iter().filter_map(|p| cells.iter().find(|c| c.slot == p.slot).map(|c| (p.cell, c.formula.clone()))) {
             if references(&f).is_ok_and(|refs| refs.iter().any(|r| matches!(r, Reference::Column { table: rt, column: c, .. } if rt.eq_ignore_ascii_case(table) && c.eq_ignore_ascii_case(column)))) {
                 out.read_by.push(place.text((false, false)));
             }

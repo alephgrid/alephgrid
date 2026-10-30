@@ -122,12 +122,19 @@ test("a view sorted by a lookup column shows stale stored results while they are
   await expect(note).toBeHidden();
   // Another session renames a customer: orders' results are recalculated in the background.
   const customers = await ws.call("open_view", { spec: { table: "customers", sort: [], filters: [] } });
-  await ws.call("edit", { view_id: customers.view_id, edits: [{ row: 0, column: "name", value: "zz" }] });
-  await expect(note).toContainText("recalculating");
-  await note.getByRole("button", { name: "Cancel" }).click();
+  // A recalculation can finish before the click lands; edit again until a cancel does.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await ws.call("edit", { view_id: customers.view_id, edits: [{ row: 0, column: "name", value: `zz${attempt}` }] });
+    await expect(note).toContainText("recalculating");
+    await note.getByRole("button", { name: "Cancel" }).click({ timeout: 2000 }).catch(() => {});
+    if (await expect(note).toContainText("cancelled", { timeout: 5000 }).then(() => true, () => false)) break;
+    await expect(note).toBeHidden({ timeout: 60_000 });
+  }
   await expect(note).toContainText("recalculation failed: cancelled");
   // Still the last committed order, flagged.
-  expect(await shown(page, 0, 2)).toContain("c000000");
+  // Still the last committed order: c000000 unless an earlier attempt's recalculation (which
+  // renamed it to zz…) completed first, then c000001.
+  await expect.poll(() => shown(page, 0, 2)).toMatch(/c00000[01]/);
   await note.getByRole("button", { name: "Recalculate" }).click();
   await expect(note).toBeHidden({ timeout: 60_000 });
   await expect.poll(() => shown(page, 0, 2)).toContain("c000001");

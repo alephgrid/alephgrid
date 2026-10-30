@@ -93,8 +93,8 @@ pub enum Op {
     SaveDashboard { saved: Option<String>, name: String, tiles: Vec<alephgrid_core::reports::Tile>, slicers: Vec<alephgrid_core::reports::Slicer> },
     DeleteDashboard { dashboard: String },
     /// Data tools (F.12): validation rules, transform previews and derived tables, formula
-    /// inspection. They run on the writer; only `set_validations` and `apply_transform` change
-    /// anything.
+    /// inspection. Only `set_validations` and `apply_transform` change anything (and run on
+    /// the writer); the others read.
     Validations { table: String },
     SetValidations { table: String, rules: Vec<alephgrid_core::tools::Validation> },
     PreviewTransform { table: String, transform: alephgrid_core::tools::Transform },
@@ -298,7 +298,7 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -415,6 +415,9 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Dashboard { dashboard } => json!(r.dashboard_results(&dashboard)?),
         Op::Drill { spec, row } => json!(r.drill(&spec, &row)?),
         Op::XlsxCompatibility => json!(r.xlsx_compatibility()?),
+        Op::Validations { table } => json!(r.validations(&table)?),
+        Op::PreviewTransform { table, transform } => json!(r.preview_transform(&table, &transform)?),
+        Op::InspectFormula { table, column } => json!(r.inspect_formula(&table, &column)?),
         Op::ReplacePreview { spec } => json!(r.replace_preview(&spec)?),
         Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {
@@ -446,11 +449,8 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
         Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync {})),
-        Op::Validations { table } => (json!(wb.validations(&table)?), None),
         Op::SetValidations { table, rules } => (json!(wb.set_validations(&table, rules)?), Some(Event::TableChanged { table, origin, revision: 0 })),
-        Op::PreviewTransform { table, transform } => (json!(wb.preview_transform(&table, &transform)?), None),
         Op::ApplyTransform { table, transform, name } => (json!(wb.apply_transform(&table, &transform, &name)?), Some(Event::TablesChanged { origin, revision: 0 })),
-        Op::InspectFormula { table, column } => (json!(wb.inspect_formula(&table, &column)?), None),
         Op::SaveDashboard { saved, name, tiles, slicers } => (json!(wb.save_dashboard(saved.as_deref(), &name, tiles, slicers)?), Some(Event::Resync {})),
         Op::DeleteDashboard { dashboard } => { wb.delete_dashboard(&dashboard)?; (Value::Null, Some(Event::Resync {})) },
         Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync {})) },
