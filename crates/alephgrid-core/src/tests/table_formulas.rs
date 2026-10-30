@@ -386,3 +386,70 @@ fn lookups_follow_reordered_sources_and_reject_stale_caches() {
     t.wb.delete_rows(v.view_id, 2, 1).unwrap();
     assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"zeroth\"|\"first\""]);
 }
+
+/// F.T04 benchmark: lookups, conditional aggregates, a sorted view, a report and a source edit
+/// over skewed data with blanks, with latency (cold, warm), peak memory, temporary disk, bytes
+/// of the tables scanned and statements per page, against regression budgets. Opt-in:
+/// `ALEPHGRID_BENCH_ROWS=1000000 cargo test --release -p alephgrid-core --lib analyst_benchmark -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn analyst_benchmark() {
+    let rows: u64 = std::env::var("ALEPHGRID_BENCH_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let customers = (rows / 10).max(10);
+    let mut t = TempWb::new();
+    let ms = |f: &mut dyn FnMut()| { let s = std::time::Instant::now(); f(); s.elapsed().as_secs_f64() * 1000.0 };
+    let probe = |wb: &Workbook, sql: &str| -> i64 { wb.raw_query(sql).ok().and_then(|r| r.first().and_then(|r| match r[0] { duckdb::types::Value::BigInt(n) => Some(n), duckdb::types::Value::HugeInt(n) => Some(n as i64), duckdb::types::Value::Int(n) => Some(n as i64), duckdb::types::Value::UBigInt(n) => Some(n as i64), _ => None })).unwrap_or(-1) };
+    let mut peak_mem = 0i64;
+    let mut peak_tmp = 0i64;
+    let mut sample = |wb: &Workbook| {
+        peak_mem = peak_mem.max(probe(wb, "SELECT CAST(sum(memory_usage_bytes) AS BIGINT) FROM duckdb_memory()"));
+        peak_tmp = peak_tmp.max(probe(wb, "SELECT CAST(coalesce(sum(size), 0) AS BIGINT) FROM duckdb_temporary_files()"));
+    };
+    t.wb.create_table_from_query("customers", &format!("SELECT i AS id, 'c' || i AS name, ['West','East','North'][1 + (i % 3)] AS region FROM range({customers}) r(i)")).unwrap();
+    // Skew: half the orders go to 1% of customers; 5% have no customer.
+    t.wb.create_table_from_query("orders", &format!(
+        "SELECT i AS id, CASE WHEN i % 20 = 0 THEN NULL WHEN i % 2 = 0 THEN (hash(i) % {hot})::BIGINT ELSE (hash(i) % {customers})::BIGINT END AS cid, (i % 1000) * 1.5 AS amount FROM range({rows}) r(i)",
+        hot = (customers / 100).max(1)
+    )).unwrap();
+    sample(&t.wb);
+    t.wb.add_formula_column_as("orders", "region", "=XLOOKUP([@cid],customers[id],customers[region],\"none\")", FormulaLanguage::Sheet).unwrap();
+    t.wb.add_formula_column_as("customers", "total", "=SUMIFS(orders[amount],orders[cid],[@id])", FormulaLanguage::Sheet).unwrap();
+    let v = t.wb.open_view(spec("orders")).unwrap().view_id;
+    let cold = ms(&mut || { t.wb.fetch(v, rows / 2, 100).unwrap(); });
+    let warm = ms(&mut || { t.wb.fetch(v, rows / 3, 100).unwrap(); });
+    sample(&t.wb);
+    let c = t.wb.open_view(spec("customers")).unwrap().view_id;
+    let agg_cold = ms(&mut || { t.wb.fetch(c, 0, 100).unwrap(); });
+    let agg_warm = ms(&mut || { t.wb.fetch(c, customers / 2, 100).unwrap(); });
+    let mut sorted = spec("orders");
+    sorted.sort = vec![SortKey { column: "region".into(), desc: false }];
+    let sort = ms(&mut || { t.wb.open_view(sorted.clone()).unwrap(); });
+    sample(&t.wb);
+    let report = crate::AnalysisSpec::Report { table: "orders".into(), groups: vec!["region".into()],
+        measures: vec![crate::reports::Measure { aggregate: crate::Aggregate::Sum, value: Some("amount".into()), name: "revenue".into() }],
+        calculated: vec![], totals: true, filters: vec![], pivot: None };
+    let pivot = ms(&mut || { t.wb.analyze(&report).unwrap(); });
+    let edit_ms = ms(&mut || { t.wb.edit(c, &[edit(0, "region", "East")]).unwrap(); });
+    let after_edit = ms(&mut || { t.wb.fetch(v, rows / 2, 100).unwrap(); });
+    let recalc = ms(&mut || { t.wb.recalculate("orders").unwrap(); });
+    sample(&t.wb);
+    // Bytes of the workbook file, an upper bound of what a full scan of both tables reads.
+    let scanned = probe(&t.wb, "SELECT CAST(sum(total_blocks * block_size) AS BIGINT) FROM pragma_database_size() WHERE database_name = current_database()");
+    // Statements per page: the same at every size (no per-row queries).
+    let statements = |wb: &mut Workbook| -> i64 {
+        let _ = wb.raw_query("CALL enable_logging('QueryLog')");
+        let before = probe(wb, "SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog'");
+        wb.fetch(v, rows / 4, 100).unwrap();
+        let after = probe(wb, "SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog'");
+        if before < 0 || after < 0 { -1 } else { after - before - 1 }
+    };
+    let per_page = statements(&mut t.wb);
+    eprintln!("BENCH rows={rows} customers={customers} page_cold_ms={cold:.1} page_warm_ms={warm:.1} sumifs_page_cold_ms={agg_cold:.1} sumifs_page_warm_ms={agg_warm:.1} sort_lookup_ms={sort:.1} report_ms={pivot:.1} source_edit_ms={edit_ms:.1} page_after_edit_ms={after_edit:.1} recalc_ms={recalc:.1} peak_duckdb_mem_mb={:.1} peak_temp_mb={:.1} database_mb={:.1} statements_per_page={per_page}",
+        peak_mem as f64 / 1e6, peak_tmp as f64 / 1e6, scanned as f64 / 1e6);
+    // Regression budgets (release build, an Apple M-series laptop; see TABLE_FORMULAS.md).
+    let scale = if rows > 2_000_000 { 4.0 } else { 1.0 };
+    assert!(warm < 250.0 * scale, "warm page {warm:.1} ms over budget");
+    assert!(agg_warm < 250.0 * scale, "warm SUMIFS page {agg_warm:.1} ms over budget");
+    assert!(sort < 2_000.0 * scale, "sort by lookup {sort:.1} ms over budget");
+    assert!(pivot < 2_000.0 * scale, "report {pivot:.1} ms over budget");
+}

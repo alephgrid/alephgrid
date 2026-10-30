@@ -514,3 +514,31 @@ confirmation when there is anything to say. Nothing is replaced silently:
 Importing XLSX already reports what it cannot keep (unsupported features as warnings). Sheet
 styles and number formats round-trip through the sheet engine's reader and writer (tested in
 `tests::xlsx`). A reproducible sample workbook lives in [docs/samples](samples/README.md).
+
+## Benchmarks and budgets (F.T04)
+
+`analyst_benchmark` (release build, Apple M-series laptop, 31 October 2026): orders with a
+lookup column (XLOOKUP of the customer's region) and customers with a SUMIFS total of their
+orders; half the orders go to 1% of the customers (skew) and 5% have no customer (blanks).
+Pages are 100 rows. "Cold" is the first read after the formula was added (it builds the cached
+grouped relations); "warm" a later page.
+
+| Measure | 100K orders / 10K customers | 1M / 100K | 10M / 1M |
+|---|---|---|---|
+| lookup page, cold / warm | 12.7 / 12.5 ms | 17.8 / 17.5 ms | 101.6 / 69.8 ms |
+| SUMIFS page, cold / warm | 12.9 / 12.6 ms | 16.2 / 16.2 ms | 36.3 / 31.1 ms |
+| first sort by the lookup column (stores the results) | 59 ms | 169 ms | 3.44 s |
+| report: revenue by region with totals | 115 ms | 293 ms | 2.95 s |
+| edit a customer / next lookup page / recalculate stored results | 7 / 20 / 41 ms | 14 / 124 / 199 ms | 94 / 434 / 2432 ms |
+| peak DuckDB memory | 17 MB | 112 MB | 1,048 MB |
+| temporary disk | 0 | 0 | 0 |
+| statements per page | 21 | 21 | 21 |
+
+**Budgets**, asserted by the benchmark (×4 above 2M rows): a warm page of either formula
+column under 250 ms, a first sort by a lookup column and a report under 2 s. The statement count
+per page is the same at every size: no plan issues a query per row or per cell. No read sends
+full tables to the browser: pages are bounded by `fetch_rows` and `MAX_REPLY_BYTES` (tested in
+`tests::basic` and the browser suite), analyses by 500 rows and charts by 100 groups.
+Not measured: bytes scanned per query (DuckDB reports none without profiling; the workbook file
+is small because the generated columns compress well) and process RSS; a 10M sort after the
+results are stored (1M: 151 ms) was not repeated at 10M.
