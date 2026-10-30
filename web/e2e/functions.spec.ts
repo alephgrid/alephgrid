@@ -44,7 +44,7 @@ test("define, test, complete, call, upgrade, rollback and reopen a formula funct
   await editor.fill("=MARGIN(100,60)");
   await editor.press("Enter");
   const ws = await server.connect(wb);
-  const cell = async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 1 })).rows[0][0][0];
+  const cell = async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 1 })).rows[0]?.[0]?.[0];
   await expect.poll(cell).toBe("0.4");
   await page.getByRole("button", { name: "Functions", exact: true }).click();
   await dialog.getByRole("button", { name: "MARGIN · v1", exact: true }).click();
