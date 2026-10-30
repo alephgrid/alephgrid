@@ -348,6 +348,10 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "QueryVersion[]" => conforms::<Vec<alephgrid_core::QueryVersion>>(op, v),
         "MaterializedTable" => conforms::<alephgrid_core::MaterializedTable>(op, v),
         "MaterializedTable[]" => conforms::<Vec<alephgrid_core::MaterializedTable>>(op, v),
+        "Dashboard" => conforms::<alephgrid_core::reports::Dashboard>(op, v),
+        "Dashboard[]" => conforms::<Vec<alephgrid_core::reports::Dashboard>>(op, v),
+        "DashboardResult" => conforms::<alephgrid_core::reports::DashboardResult>(op, v),
+        "ViewSpec" => conforms::<alephgrid_core::ViewSpec>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
@@ -439,6 +443,11 @@ async fn every_operation_replies_with_its_declared_type() {
         run("analyses", json!({})),
         run("save_analysis", json!({"saved":null,"name":"Profile","spec":{"kind":"profile","table":"t","columns":["s"]},"chart":false})),
         run("materialize_analysis", json!({"name":"analysis_copy","spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        run("save_dashboard", json!({"saved":null,"name":"Board","tiles":[{"analysis":"ANALYSIS","x":0,"y":0,"w":6,"h":6}],"slicers":[]})),
+        run("dashboards", json!({})),
+        run("dashboard", json!({"dashboard":"DASHBOARD"})),
+        run("drill", json!({"spec":{"kind":"summary","table":"t","groups":["s"],"aggregate":"count","value":null,"pivot":null},"row":["x",1]})),
+        run("delete_dashboard", json!({"dashboard":"DASHBOARD"})),
         run("delete_analysis", json!({"analysis":"ANALYSIS"})),
         run("presentation", json!({"table":"t"})),
         run("save_presentation", json!({"table":"t","presentation":{"hidden":[],"frozen":1,"formats":{},"rules":[]}})),
@@ -456,10 +465,13 @@ async fn every_operation_replies_with_its_declared_type() {
     let mut saved_id = String::new();
     let mut query_id = String::new();
     let mut analysis_id = String::new();
+    let mut dashboard_id = String::new();
     let mut preview_revision = Value::Null;
     let mut undo_revision = Value::Null;
     for (op, mut params) in script {
         if params["analysis"]=="ANALYSIS" {params["analysis"]=json!(analysis_id);}
+        if params["tiles"][0]["analysis"]=="ANALYSIS" {params["tiles"][0]["analysis"]=json!(analysis_id);}
+        if params["dashboard"]=="DASHBOARD" {params["dashboard"]=json!(dashboard_id);}
         if params["revision"]=="PREVIEW_REV" {params["revision"]=preview_revision.clone();}
         if params["revision"]=="UNDO_REV" {params["revision"]=undo_revision.clone();}
         if params["saved"] == "PLACEHOLDER" {
@@ -471,6 +483,7 @@ async fn every_operation_replies_with_its_declared_type() {
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
         if op=="save_analysis" {analysis_id=v["id"].as_str().unwrap().to_string();}
+        if op=="save_dashboard" {dashboard_id=v["id"].as_str().unwrap().to_string();}
         if op=="replace_preview" {preview_revision=v["sample"]["revision"].clone();}
         if op=="replace_apply" {undo_revision=v["undo_revision"].clone();}
         if op == "save_view" {

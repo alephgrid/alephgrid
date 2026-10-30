@@ -77,8 +77,23 @@ struct Envelope {
 pub enum Op {
     Analyze { spec: alephgrid_core::AnalysisSpec },
     Analyses,
-    SaveAnalysis { saved: Option<String>, name: String, spec: alephgrid_core::AnalysisSpec, chart: bool },
+    SaveAnalysis {
+        saved: Option<String>,
+        name: String,
+        spec: alephgrid_core::AnalysisSpec,
+        chart: bool,
+        #[serde(default)]
+        #[ts(optional, as = "Option<alephgrid_core::reports::ChartKind>")]
+        chart_kind: alephgrid_core::reports::ChartKind,
+    },
     DeleteAnalysis { analysis: String },
+    /// Dashboards (F.11): tiles of saved analyses on a 12×24 grid, with shared slicers.
+    Dashboards,
+    Dashboard { dashboard: String },
+    SaveDashboard { saved: Option<String>, name: String, tiles: Vec<alephgrid_core::reports::Tile>, slicers: Vec<alephgrid_core::reports::Slicer> },
+    DeleteDashboard { dashboard: String },
+    /// The view spec of the rows behind one result row of a summary or report.
+    Drill { spec: alephgrid_core::AnalysisSpec, #[ts(type = "CellValue[]")] row: Vec<Value> },
     MaterializeAnalysis { name: String, spec: alephgrid_core::AnalysisSpec },
     ReplacePreview { spec: alephgrid_core::ReplaceSpec },
     ReplaceApply { spec: alephgrid_core::ReplaceSpec, revision: u64 },
@@ -273,7 +288,7 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -386,6 +401,9 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         }
         Op::Analyze { spec } => json!(r.analyze(&spec)?),
         Op::Analyses => json!(r.analyses()?),
+        Op::Dashboards => json!(r.dashboards()?),
+        Op::Dashboard { dashboard } => json!(r.dashboard_results(&dashboard)?),
+        Op::Drill { spec, row } => json!(r.drill(&spec, &row)?),
         Op::ReplacePreview { spec } => json!(r.replace_preview(&spec)?),
         Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {
@@ -416,7 +434,9 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
-        Op::SaveAnalysis { saved, name, spec, chart } => (json!(wb.save_analysis(saved.as_deref(), &name, spec, chart)?),Some(Event::Resync {})),
+        Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync {})),
+        Op::SaveDashboard { saved, name, tiles, slicers } => (json!(wb.save_dashboard(saved.as_deref(), &name, tiles, slicers)?), Some(Event::Resync {})),
+        Op::DeleteDashboard { dashboard } => { wb.delete_dashboard(&dashboard)?; (Value::Null, Some(Event::Resync {})) },
         Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync {})) },
         Op::MaterializeAnalysis { name, spec } => (json!(wb.materialize_analysis(&name,&spec)?),tables()),
         Op::ReplaceApply { spec, revision } => {let out=wb.replace_apply(&spec,revision)?;let event=changed(out.table.clone());(json!(out),event)},

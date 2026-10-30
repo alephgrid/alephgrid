@@ -36,7 +36,8 @@ test("no-SQL gate: import, join, summarize, chart, save and reopen", async ({ pa
   await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
   await expect(d.getByRole("status")).toContainText("3 rows");
   await expect(d.getByRole("figure", { name: "Summary chart" })).toContainText("Ada");
-  expect(await d.locator("tbody tr").allTextContents()).toEqual(["Ada30", "Grace30", "Lin30"]);
+  // Each summary row ends with its drill-down button (F.11).
+  expect(await d.locator("tbody tr").allTextContents()).toEqual(["Ada30Show rows", "Grace30Show rows", "Lin30Show rows"]);
   await d.getByRole("textbox", { name: "Analysis name" }).fill("Revenue by person");
   await d.getByRole("button", { name: "Save analysis", exact: true }).click();
   await expect(d.getByRole("status")).toContainText("Analysis saved");
@@ -46,7 +47,7 @@ test("no-SQL gate: import, join, summarize, chart, save and reopen", async ({ pa
   const ws = await server.connect(wb); await ws.call("sql_change", { sql: "UPDATE joined SET left_amount=left_amount*2" }); ws.close();
   await expect(d.getByRole("status")).toContainText("Workbook changed");
   await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
-  await expect(d.locator("tbody tr").first()).toHaveText("Ada60");
+  await expect(d.locator("tbody tr").first()).toHaveText("Ada60Show rows");
   expect((await new AxeBuilder({ page }).include('.analysis-dialog').analyze()).violations).toEqual([]);
   const schemaWriter = await server.connect(wb); await schemaWriter.call("drop_column", { table: "joined", name: "right_name" }); schemaWriter.close();
   await page.reload(); await page.getByRole("button", { name: "Analyze", exact: true }).click();
@@ -71,7 +72,7 @@ test("profile, pivot and bounded charts return only aggregate rows", async ({ pa
   await d.getByRole("combobox", { name: "Pivot column" }).selectOption("category");
   await d.getByRole("textbox", { name: "Pivot values" }).fill("even\nodd");
   await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
-  await expect(d.locator("tbody tr")).toHaveText(["300300"]);
+  await expect(d.locator("tbody tr")).toHaveText(["300300Show rows"]);
   await d.getByRole("combobox", { name: "Analysis kind" }).selectOption("profile");
   await d.getByRole("listbox", { name: "Profile columns" }).selectOption("category");
   await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
@@ -123,4 +124,44 @@ test("formatting preserves exact decimals, percentages and dates", () => {
   expect(displayValue("2024-02-29", { ...col, kind: "date" }, { ...f, kind: "date", timezone: "America/New_York" })).toBe("02/29/2024");
   expect(cellColor(null, "v", [{ column: "v", condition: "empty", value: 0, color: "red" }])).toBe("#d33b3b33");
   expect(cellColor("9007199254740993", "v", [{ column: "v", condition: "greater", value: 0, color: "red" }])).toBeUndefined();
+});
+
+test("F.11: a report with totals, a line chart, drill-down and a sliced dashboard", async ({ page }) => {
+  const wb = await server.createWorkbook("Reports"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "orders", sql: "SELECT * FROM (VALUES (1, 'West', 100), (2, 'East', 50), (3, 'West', 25)) v(id, region, amount)" });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("button", { name: "Analyze", exact: true }).click();
+  const d = page.getByRole("dialog", { name: "Analyze data" });
+  await d.getByRole("combobox", { name: "Analysis kind", exact: true }).selectOption("report");
+  await d.getByRole("combobox", { name: "Source table", exact: true }).selectOption("orders");
+  await d.getByRole("listbox", { name: "Group columns" }).selectOption("region");
+  await d.getByRole("textbox", { name: "Measures", exact: true }).fill("revenue = sum(amount)\norders = count()");
+  await d.getByRole("textbox", { name: "Calculated measures", exact: true }).fill("average = [@revenue]/[@orders]");
+  await d.getByRole("combobox", { name: "Chart kind", exact: true }).selectOption("line");
+  await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
+  // East 50, West 125 (62.5 each), total 175.
+  const table = d.locator("table.result-table").last();
+  await expect(table).toContainText("West");
+  await expect(table).toContainText("62.5");
+  await expect(table).toContainText("total");
+  await expect(d.getByRole("list", { name: "Chart values" })).toContainText("West: 125");
+  await d.getByRole("textbox", { name: "Analysis name" }).fill("Revenue by region");
+  await d.getByRole("button", { name: "Save analysis", exact: true }).click();
+  await expect(d.getByRole("status")).toContainText("Analysis saved");
+  // Drill into West: the orders view, filtered to its two rows.
+  await table.getByRole("row", { name: /West/ }).getByRole("button", { name: "Show rows" }).click();
+  await expect(d).toBeHidden();
+  await expect(page.locator(".footer")).toContainText("2 rows");
+  // A dashboard sliced to East.
+  await page.getByRole("button", { name: "Dashboards", exact: true }).click();
+  const b = page.getByRole("dialog", { name: "Dashboards" });
+  await b.getByRole("listbox", { name: "Analyses on the dashboard" }).selectOption({ label: "Revenue by region" });
+  await b.getByRole("textbox", { name: "Slicer table" }).fill("orders");
+  await b.getByRole("textbox", { name: "Slicer column" }).fill("region");
+  await b.getByRole("textbox", { name: "Slicer values" }).fill("East");
+  await b.getByRole("button", { name: "Save dashboard", exact: true }).click();
+  const tile = b.getByRole("region", { name: "Revenue by region" });
+  await expect(tile).toContainText("East");
+  await expect(tile).not.toContainText("West");
+  ws.close();
 });

@@ -1693,6 +1693,14 @@ fn update_view(db: &Db, id: u64, spec: ViewSpec) -> Result<ViewInfo> {
 }
 
 impl Reader {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn db_for_reports(&self) -> Db<'_> {
+        self.db()
+    }
+
     pub fn analyze(&self,spec:&crate::AnalysisSpec)->Result<crate::AnalysisResult>{crate::analysis::analyze(&self.db(),spec)}
     pub fn analyses(&self)->Result<Vec<crate::SavedAnalysis>>{crate::analysis::analyses(&self.conn)}
     pub fn presentation(&self,table:&str)->Result<crate::Presentation>{crate::analysis::presentation(&self.db(),table)}

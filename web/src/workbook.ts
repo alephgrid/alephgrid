@@ -5,7 +5,7 @@ import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
 import type { PasteMode } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
-import { AnalysisWorkspace, replaceDialog } from "./analysis";
+import { AnalysisWorkspace, dashboardsDialog, replaceDialog } from "./analysis";
 import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
@@ -147,6 +147,7 @@ export class WorkbookScreen {
   /** The cell the note was last looked up for, so data loads do not repeat the request. */
   private cellNoteKey = "";
   private closeNames: (() => void) | null = null;
+  private closeDashboards: (() => void) | null = null;
   private commands = new CommandRegistry();
   /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
    *  (formulas, formats) rather than the displayed values. */
@@ -429,7 +430,9 @@ export class WorkbookScreen {
         ...this.sheetButtons,
         el("button", { class: "btn", onclick: () => this.fileInput.click() }, "Import"),
         ...this.tableButtons,
-        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); }); } }, "Analyze"),
+        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
+          async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); } }, "Analyze"),
+        el("button", { class: "btn", onclick: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); } }, "Dashboards"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),

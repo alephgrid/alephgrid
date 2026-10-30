@@ -21,6 +21,7 @@ pub mod model;
 mod queries;
 mod reads;
 pub mod results;
+pub mod reports;
 pub mod sheets;
 pub mod sql;
 mod sqlchange;

@@ -106,3 +106,38 @@ Storage format 5 adds saved plans, presentation and the bounded replacement undo
 refuse format 5 rather than editing data without understanding its new metadata.
 
 See the phase 6 section of [TEST_MATRIX.md](TEST_MATRIX.md) for engine, server and browser evidence.
+
+## Reports, charts and dashboards (F.11)
+
+A **report** (`kind: "report"`) extends a summary: up to four group columns (formula columns
+included, so a report can group by a looked-up value), up to eight measures (`revenue =
+sum(amount)`, `orders = count()`; count, sum, average, min, max), up to four **calculated
+measures** written as table formulas over the measures (`average = [@revenue]/[@orders]`,
+compiled by the table-formula compiler, errors shown as blank), optional **totals** (`ROLLUP`:
+a subtotal row per group level and a grand total, marked `row_kind` = `row`, `subtotal` or
+`total`; subtotals follow their rows), up to eight **filters** (the view filter operators), and
+an optional pivot column (one column per measure and value, at most 64). Calculated measures and
+a pivot cannot be combined. Results stay bounded at 500 rows. Summaries now read formula columns
+too.
+
+**Drill-down.** Every summary or report row has *Show rows*: `drill` returns a view spec of the
+table filtered by the row's group values (a subtotal leaves out the levels it adds up, a blank
+value filters for blanks), and the grid opens it; rows are paged like any view, never
+materialized.
+
+**Charts.** A saved analysis keeps a `chart_kind`: bars (default), a line, or points (scatter)
+of the first measure over the groups, at most 100 groups; totals are not drawn; a list beside
+the chart gives every exact value.
+
+**Dashboards.** Saved analyses as tiles on a 12×24 grid (`save_dashboard`): tiles must fit and
+must not overlap; at most 12 tiles, 6 slicers (1–24 values each) and 32 dashboards per
+workbook. A **slicer** filters every report on the dashboard over its table (`column IN
+values`, `(NULL)` for blanks); summaries over other tables are unaffected. Opening a dashboard
+computes every tile in its own snapshot; a tile whose analysis was deleted or no longer compiles
+says why instead of failing the dashboard. Dashboards are stored in `_rf_meta` (no format
+change) and survive reopening.
+
+Tests: `tests::reports` (3: measures, calculated measures, totals and subtotals, filters, pivot,
+refusals; drill-down; dashboards, slicers, limits, collisions, deleted analyses, reopen), server
+`every_operation_replies_with_its_declared_type`, `e2e/analysis.spec.ts` (report with totals and
+a line chart, drill-down into the grid, a sliced dashboard).

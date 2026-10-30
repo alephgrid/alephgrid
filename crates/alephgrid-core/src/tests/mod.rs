@@ -11,6 +11,7 @@ mod integrity;
 mod links;
 mod tablecells;
 mod results;
+mod reports;
 mod precision;
 mod props;
 mod sheets;
