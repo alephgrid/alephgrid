@@ -64,11 +64,19 @@ export type WorkbookFunction = { name: string, pinned: number, versions: Array<F
 
 export type Kind = "int" | "number" | "bool" | "date" | "datetime" | "time" | "text";
 
+export type FormulaLanguage = "sql" | "sheet";
+
 export type Column = { name: string, sql_type: string, kind: Kind, 
 /**
  * Present for computed (formula) columns.
  */
-formula?: string, };
+formula?: string, 
+/**
+ * `sheet` for a formula written in spreadsheet syntax; absent for DuckDB SQL formulas.
+ */
+formula_language?: FormulaLanguage, };
+
+export type CellErrorMark = { row: number, column: number, code: string, };
 
 export type TableInfo = { name: string, row_count: number, column_count: number, };
 
@@ -109,7 +117,11 @@ ids: Array<number>, column_start: number,
  * Fewer rows than asked for, because the reply reached its size limit; fetch the
  * rest from `row_start + rows.len()`.
  */
-truncated: boolean, };
+truncated: boolean, 
+/**
+ * Cells of spreadsheet-formula columns that hold an error (their value is `null`).
+ */
+errors?: Array<CellErrorMark>, };
 
 export type CellEdit = { 
 /**
@@ -245,6 +257,32 @@ total_rows?: number,
  */
 truncated: boolean, row_limit: number, };
 
+export type NamedRange = { name: string, scope: number | null, 
+/**
+ * What the name refers to, e.g. `=Sheet1!$A$1:$B$4`.
+ */
+refers_to: string, };
+
+export type CellError = { 
+/**
+ * The error as displayed, e.g. `#DIV/0!`.
+ */
+code: string, 
+/**
+ * The cell that produced it, e.g. `Sheet1!B3`; empty for a typed error value.
+ */
+origin: string, message: string, };
+
+export type CellDetail = { input: string, display: string, error: CellError | null, };
+
+export type FormulaProblem = { message: string, position: number, };
+
+export type CellArea = { row: number, column: number, rows: number, columns: number, };
+
+export type FillDirection = "down" | "right";
+
+export type PasteMode = "all" | "formulas" | "values" | "formats";
+
 export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
 
 export type HistoryEntry = { revision: number, mutation_id?: string, op: string, actor?: string, at_ms: number, 
@@ -285,7 +323,7 @@ export type Workspace = { id: string, name: string, created_at: number, };
 
 export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "progress", request: number, percentage: number, };
 
-export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, } | { "op": "delete_analysis", analysis: string, } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, };
+export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, } | { "op": "delete_analysis", analysis: string, } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, };
 
 export type ColumnType = { name: string, sql_type: string, };
 
@@ -477,6 +515,15 @@ export interface Results {
   sheet_delete_rows: null;
   sheet_insert_columns: null;
   sheet_delete_columns: null;
+  sheet_names: NamedRange[];
+  sheet_define_name: NamedRange[];
+  sheet_update_name: NamedRange[];
+  sheet_delete_name: NamedRange[];
+  sheet_cell_detail: CellDetail;
+  sheet_check_formula: FormulaProblem | null;
+  sheet_fill: SheetInfo;
+  sheet_paste: CellArea;
+  sheet_move: CellArea;
   create_sheet_from_query: SheetCopy;
   table_to_sheet: SheetCopy;
   saved_views: SavedView[];

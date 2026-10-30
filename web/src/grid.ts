@@ -40,6 +40,8 @@ export interface GridHandlers {
   columnResized(col: number, width: number): void;
   undo?(): void;
   redo?(): void;
+  /** The command registry gets each grid key first; true when it used the key. */
+  command?(e: KeyboardEvent): boolean;
 }
 
 const ROW_H = 24;
@@ -285,6 +287,18 @@ export class Grid {
 
   focus(): void {
     this.host.focus({ preventScroll: true });
+  }
+
+  selectAll(): void {
+    this.select({ r: Math.max(0, this.model.rowCount() - 1), c: this.widths.length - 1 }, { r: 0, c: 0 }, false);
+  }
+
+  /** Extend the selection to whole rows (Shift+Space) or whole columns (Ctrl+Space). */
+  selectEntire(what: "rows" | "columns"): void {
+    const s = this.selection();
+    const lastRow = Math.max(0, this.model.rowCount() - 1), lastCol = this.widths.length - 1;
+    if (what === "rows") this.select({ r: s.r0, c: lastCol }, { r: s.r1, c: 0 }, false);
+    else this.select({ r: lastRow, c: s.c0 }, { r: 0, c: s.c1 }, false);
   }
 
   scrollToTop(): void {
@@ -615,6 +629,7 @@ export class Grid {
 
   private onKey(e: KeyboardEvent): void {
     if (this.editing) return;
+    if (this.handlers.command?.(e)) { e.preventDefault(); return; }
     const mod = e.metaKey || e.ctrlKey;
     const pageRows = Math.max(1, Math.floor(this.bodyHeight() / ROW_H) - 1);
     const lastRow = Math.max(0, this.model.rowCount() - 1);

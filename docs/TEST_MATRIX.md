@@ -633,3 +633,22 @@ array-input XLOOKUP regression remain applicable.
 
 Final editor-increment validation: frontend type checking/bundling and server rebuild passed;
 full browser suite **55/55 passed** on macOS arm64/Chrome. No retries or increased timeouts.
+
+### F.02 — mode-level formula evidence
+
+- `tests::catalog::certification_cases_match_independent_expectations`: 121 manifest
+  cases across 44 P0 functions; independent expected results, unique IDs, explicit
+  verified/gap statuses and file-backed reopening. Known gaps are excluded from
+  passing assertions and remain documented with their desired results.
+- `web/e2e/catalog.spec.ts`: inspect verified lookup cases and the inline-array
+  XLOOKUP gap through Formula help; retain search, pagination and accessibility checks.
+- `web/e2e/sheets.spec.ts`: wait for accessible selection coordinates before reading
+  the cell value, with bounded retries when opening a view resets selection.
+- This increment is case-level evidence, not full function/mode certification.
+
+Executed locally on 28 October 2026: catalog tests **4 passed / 6 explicitly ignored**;
+all six ignored desired-result tests were run separately and failed as documented;
+focused catalog/functions/sheets browser suite **9/9 passed**, followed by **3/3 catalog
+checks** after adding the unequal-range evidence assertion. Frontend typecheck/build
+and server build passed. These counts distinguish test functions from the 115 passing
+mode fixtures and do not count known failures as supported behavior.

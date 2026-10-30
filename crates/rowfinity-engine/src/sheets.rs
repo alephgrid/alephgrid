@@ -14,6 +14,9 @@ use ironcalc::base::UserModel;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+mod editing;
+pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
+
 const LANG: &str = "en";
 /// Hard cap on cells written in one go (paste, query → sheet).
 pub const MAX_BULK_CELLS: usize = 1_000_000;

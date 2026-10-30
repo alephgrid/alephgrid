@@ -609,16 +609,49 @@ impl Workbook {
 
     /// Add a formula column. The formula is a DuckDB expression; `[Col]` refers to a column.
     pub fn add_formula_column(&mut self, table: &str, name: &str, formula: &str) -> Result<()> {
+        self.add_formula_column_as(table, name, formula, FormulaLanguage::Sql)
+    }
+
+    /// Add a formula column in either language. A spreadsheet formula (see
+    /// docs/TABLE_FORMULAS.md) is compiled against the table's current columns first.
+    pub fn add_formula_column_as(&mut self, table: &str, name: &str, formula: &str, language: FormulaLanguage) -> Result<()> {
         self.ensure_new_column(table, name, None)?;
-        formula::analyze(&self.conn, formula)?;
-        let probe = format!("SELECT ({}) AS {} FROM ({}) LIMIT 1", formula_to_sql(formula), ident(name), self.base_select(table)?);
-        self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
+        self.check_formula(table, formula, language)?;
+        let language = match language { FormulaLanguage::Sql => "sql", FormulaLanguage::Sheet => "sheet" };
         self.mutating("add_formula_column", None, |wb| {
             wb.conn.execute(
-                "INSERT INTO _rf_columns VALUES (?, ?, ?, (SELECT coalesce(max(position) + 1, 0) FROM _rf_columns WHERE table_name = ?))",
-                duckdb::params![table, name, formula, table],
+                "INSERT INTO _rf_columns (table_name, name, formula, position, language) VALUES (?, ?, ?, (SELECT coalesce(max(position) + 1, 0) FROM _rf_columns WHERE table_name = ?), ?)",
+                duckdb::params![table, name, formula, table, language],
             )?;
+            wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
+        })
+    }
+
+    /// Validate a formula against the table as it is now (before any change).
+    fn check_formula(&self, table: &str, formula: &str, language: FormulaLanguage) -> Result<()> {
+        match language {
+            FormulaLanguage::Sql => {
+                formula::analyze(&self.conn, formula)?;
+                let probe = format!("SELECT ({}) AS v FROM ({}) LIMIT 1", formula_to_sql(formula), self.base_select(table)?);
+                self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
+            }
+            FormulaLanguage::Sheet => self.db().check_sheet_formula(table, formula, None)?,
+        }
+        Ok(())
+    }
+
+    fn language_of(&self, table: &str, name: &str) -> Result<FormulaLanguage> {
+        Ok(if self.db().sheet_formulas(table)?.contains(name) { FormulaLanguage::Sheet } else { FormulaLanguage::Sql })
+    }
+
+    fn formula_references(&self, table: &str, name: &str, formula: &str, column: &str) -> Result<bool> {
+        Ok(match self.language_of(table, name)? {
+            FormulaLanguage::Sql => formula::references(&self.conn, formula, column)?,
+            FormulaLanguage::Sheet => crate::table_formula::referenced_columns(formula)
+                .map_err(|e| anyhow!("formula error: {e}"))?
+                .iter()
+                .any(|(n, _)| formula::same_name(n, column)),
         })
     }
 
@@ -626,7 +659,13 @@ impl Workbook {
         if !self.formulas(table)?.iter().any(|(n, _)| n == name) {
             bail!("{name:?} is not a formula column");
         }
-        formula::analyze(&self.conn, formula)?;
+        let language = self.language_of(table, name)?;
+        if language == FormulaLanguage::Sql {
+            formula::analyze(&self.conn, formula)?;
+        } else {
+            // Compile against the other columns: a formula cannot read itself.
+            self.db().check_sheet_formula(table, formula, Some(name))?;
+        }
         self.mutating("update_formula", None, |wb| {
             wb.conn.execute(
                 "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
@@ -641,7 +680,7 @@ impl Workbook {
     fn dependents(&self, table: &str, column: &str) -> Result<Vec<String>> {
         let mut out = Vec::new();
         for (name, f) in self.formulas(table)? {
-            if !formula::same_name(&name, column) && formula::references(&self.conn, &f, column)? {
+            if !formula::same_name(&name, column) && self.formula_references(table, &name, &f, column)? {
                 out.push(name);
             }
         }
@@ -704,7 +743,11 @@ impl Workbook {
         let is_formula = formulas.iter().any(|(n, _)| n == name);
         let mut rewritten = Vec::new();
         for (fname, f) in &formulas {
-            if let Some(updated) = formula::rename_reference(&self.conn, f, name, new_name)? {
+            let updated = match self.language_of(table, fname)? {
+                FormulaLanguage::Sql => formula::rename_reference(&self.conn, f, name, new_name)?,
+                FormulaLanguage::Sheet => crate::table_formula::rename_column(f, name, new_name).map_err(|e| anyhow!("formula error: {e}"))?,
+            };
+            if let Some(updated) = updated {
                 rewritten.push((fname.clone(), updated));
             }
         }

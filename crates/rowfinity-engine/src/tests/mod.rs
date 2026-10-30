@@ -14,6 +14,7 @@ mod sheets;
 mod sql;
 mod sqlwork;
 mod storage;
+mod table_formulas;
 mod views;
 mod xlsx;
 

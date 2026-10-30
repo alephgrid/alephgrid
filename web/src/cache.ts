@@ -238,6 +238,8 @@ export class RowCache {
           column_start: cb * COL_BLOCK, column_count: COL_BLOCK,
         });
         if (gen !== this.generation) return;
+        // Error values of spreadsheet-formula columns arrive beside the rows; show their codes.
+        for (const e of res.errors ?? []) res.rows[e.row][e.column] = e.code;
         block.rows.push(...res.rows);
         block.ids.push(...res.ids);
         block.bytes = estimateBytes(block.rows);

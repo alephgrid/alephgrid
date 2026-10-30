@@ -30,7 +30,19 @@ async function shown(page: Page, cell: [number, number]): Promise<string> {
   for (let i = 0; i < cell[0]; i++) await page.keyboard.press("ArrowDown");
   for (let i = 0; i < cell[1]; i++) await page.keyboard.press("ArrowRight");
   const id = await page.locator(".grid-host").getAttribute("aria-activedescendant");
-  return (await page.locator(`#${id}`).getAttribute("aria-label")) ?? "";
+  const activeCell = page.locator(`#${id}`);
+  // Keyboard selection is synchronous, but the accessible cell updates on the
+  // next animation frame. Wait for its coordinates before reading its value;
+  // otherwise polling navigates again before the previous selection is painted.
+  try {
+    await expect(activeCell.locator("..")).toHaveAttribute("aria-rowindex", String(cell[0] + 2), { timeout: 500 });
+    await expect(activeCell).toHaveAttribute("aria-colindex", String(cell[1] + 1), { timeout: 500 });
+  } catch {
+    // Opening a view can reset selection during navigation. Let the outer
+    // value assertion retry navigation once the view has settled.
+    return "selection pending";
+  }
+  return (await activeCell.getAttribute("aria-label")) ?? "";
 }
 
 test("blank sheet in a new workbook, edits, errors, and live updates for a second person", async ({ page, browser }) => {

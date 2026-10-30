@@ -52,15 +52,65 @@ large-table compilation, cross-engine recalculation and the analyst gate remain 
 [the implementation checklist](IMPLEMENTATION_CHECKLIST.md). Research context is in the
 [comparison matrix](FORMULA_COMPATIBILITY_MATRIX.md) and [execution design](SPREADSHEET_COMPETITIVENESS.md).
 
-## Known XLOOKUP array-input gap
+## XLOOKUP array-input gap (resolved locally)
 
-During this increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
-the independent expected answer is `20`. Range-based lookup over the same values passes.
-The desired-result regression `xlookup_inline_arrays_should_find_a_present_key` is explicitly
-ignored in the passing baseline and can be run with `--ignored` during upstream triage.
-It is not evidence of supported behavior and must not be removed just to obtain a green suite.
-[Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338) is related; test current
-upstream before deciding whether to extend that report or propose a separate fix. No issue or
-upstream PR was sent as part of this increment. F.02 remains incomplete.
+During the first increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
+the independent expected answer is `20`. The local `rowfinity-compat-1` patch now returns `20`
+and `xlookup_inline_arrays_should_find_a_present_key` runs without `--ignored`. The patch covers
+one-dimensional inline lookup arrays with equally shaped inline/range results only; see
+[FORMULA_GAPS.md](FORMULA_GAPS.md). [Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338)
+is related. No upstream issue or PR has been sent, and current upstream has not been reproduced.
 
 The next editor increment adds [F4 reference locking, same-sheet range picking and reference hints](FORMULA_EDITOR.md). Broader F.03 capabilities remain pending.
+
+## Mode-level certification increment (F.02)
+
+Catalog schema 2 adds `verification_cases` to each entry. Each case has a unique ID,
+mode description, formula, independently calculated expected display text, status
+(`verified` or `known_gap`) and a limitation note. The existing A1:C4 fixture applies;
+A5:A6 are empty. Empty expected strings mean an empty displayed result, not an absent
+formula. The fixture occupies columns A–C and test formulas occupy column D.
+
+The 121 cases span all 44 P0 functions. They cover exact/approximate lookups,
+first/last duplicate matches, sorted binary-search examples, missing values and
+invalid ranges; conditional aggregate criteria; error handling and lazy IF branches;
+text/empty-string/Unicode BMP cases; signed rounding; leap days and month/year rollover.
+Tests evaluate the actual sheet adapter and repeat assertions after reopening the
+file-backed workbook. The original 44 examples and source-edit/undo tests remain.
+
+Formula help exposes the exact cases in an expandable **Mode evidence** section,
+including expected results and known gaps. A passing case certifies that input only.
+In particular, the binary-search cases use correctly sorted input and unique search
+keys; they do not promise duplicate tie behavior or correctness on unsorted input.
+BMP examples do not certify emoji/grapheme handling. Locale/date-system parity,
+complete coercion matrices, all optional arguments and broad performance certification
+remain future work. F.02 and F.T01 remain unchecked overall.
+
+The local `rowfinity-compat-1` patch resolves the six original gaps: **all 121 cases pass**. This certifies those inputs only; broader P0 mode/coercion coverage remains incomplete.
+The original failures and remaining upstream work are recorded in the
+[minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
+receive a verified label; each has a separately runnable desired-result regression.
+
+## Coercion and argument-mode matrix (F.01/F.02, schema 3)
+
+Schema 3 adds per-case `group` (`modes` or `coercion`) and `oracle` (the rule the expected
+value comes from), and per-argument documentation for every P0 entry: each argument's
+`rule` cites the verification cases that exercise it. The test checks that argument names
+match the reviewed signature and that every cited case exists for that function. The 518
+entries without a reviewed signature remain explicitly "Not reviewed" with no argument data.
+
+Coercion inputs are F1:G8 of the shared fixture: number 2, text `'2`, TRUE, an empty cell,
+`=NA()`, `=""`, `Ärger`, -3.5, and `a*b`/`a?b`/`axb`. A separate test checks these types
+with ISTEXT/ISBLANK/ISLOGICAL/ISNA before and after reopen.
+
+The 156 coercion cases cover: numbers/text/logical/blank/error in ranges versus direct
+arguments for SUM, AVERAGE, COUNT, COUNTA, MIN and MAX; numeric-text and logical conversion
+in scalar functions; logical conditions given text, blanks and errors; criteria with empty
+strings, logical values, error text, numeric text, Unicode case folding, wildcards and `~`
+escapes; text conversion of numbers, logical values and blanks; Unicode character counts;
+date serial boundaries and truncated month arguments; and lookup keys that must not convert
+text to numbers. 150 pass. Six are known gaps, see [FORMULA_GAPS.md](FORMULA_GAPS.md).
+
+Totals: 277 cases (271 verified, 6 known gaps). Still not covered: locale-specific parsing,
+the 1904 date system, all optional-argument combinations, emoji/grapheme clusters,
+array/spill results of P0 functions, and numerical precision at extremes.

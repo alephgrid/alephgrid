@@ -5,12 +5,14 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci || npm install
 COPY web/ ./
+COPY crates/rowfinity-engine/data/ /src/crates/rowfinity-engine/data/
 RUN npm run build
 
 FROM rust:1.97-bookworm AS server
 WORKDIR /src
 COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
+COPY vendor ./vendor
 COPY --from=web /src/web/dist ./web/dist
 RUN cargo build --release --locked -p rowfinity-server || cargo build --release -p rowfinity-server
 

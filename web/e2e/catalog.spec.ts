@@ -23,8 +23,28 @@ test("formula help searches a bounded catalog and distinguishes registry evidenc
   await expect(details).toContainText("DuckDB table formulas: not supported");
   await expect(details).toContainText("=XLOOKUP(2,A1:A4,B1:B4)");
   await expect(details).toContainText("tested example");
+  await details.getByText("Mode evidence: 14 verified cases, 0 known gaps", { exact: true }).click();
+  await expect(details.getByText("Verified case: inline arrays", { exact: true })).toBeVisible();
+  await expect(details.getByText("Verified case: last duplicate", { exact: true })).toBeVisible();
+  await expect(details.getByText("Verified case: exact mode treats ? literally", { exact: true })).toBeVisible();
+  await expect(details).toContainText("Source: Microsoft Excel XLOOKUP function reference: match_mode 0 does not interpret wildcards.");
+  // Argument rules cite the cases that exercise them.
+  await expect(details.getByRole("term").filter({ hasText: "match_mode" })).toBeVisible();
+  await expect(details).toContainText("Cases: xlookup-01, xlookup-05, xlookup-06, xlookup-07, xlookup-c03, xlookup-c04");
+  const typed = details.getByRole("table", { name: "Coercion inputs in F1:G8" });
+  await expect(typed.getByRole("row", { name: "2 '2 a?b" })).toBeVisible();
+  await expect(typed.getByRole("row", { name: "4 (empty)" })).toBeVisible();
   const axe = await new AxeBuilder({ page }).include('.catalog-dialog').analyze();
   expect(axe.violations.filter(v => v.impact === "serious" || v.impact === "critical")).toEqual([]);
+  await search.fill("SUMIFS");
+  await details.getByText("Mode evidence: 6 verified cases, 0 known gaps", { exact: true }).click();
+  await expect(details.getByText("Verified case: unequal ranges", { exact: true })).toBeVisible();
+  await expect(details).toContainText('expected "#VALUE!"');
+  // A known gap stays labelled as such, with its reason.
+  await search.fill("IFERROR");
+  await details.getByText("Mode evidence: 4 verified cases, 1 known gap", { exact: true }).click();
+  await expect(details.getByText("Known gap: empty cell", { exact: true })).toBeVisible();
+  await expect(details).toContainText("IronCalc returns 0, as a direct reference to an empty cell does.");
   await search.fill("REGEXMATCH");
   await dialog.getByLabel("Formula availability").selectOption("not_registered");
   await expect(details).toContainText("not registered under this name");
