@@ -636,10 +636,7 @@ impl Workbook {
                 let probe = format!("SELECT ({}) AS v FROM ({}) LIMIT 1", formula_to_sql(formula), self.base_select(table)?);
                 self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
             }
-            FormulaLanguage::Sheet => {
-                let columns: Vec<(String, String)> = self.columns(table)?.into_iter().map(|c| (c.name, c.sql_type)).collect();
-                crate::table_formula::compile(formula, &columns, "_rf_check_").map_err(|e| anyhow!("formula error: {e}"))?;
-            }
+            FormulaLanguage::Sheet => self.db().check_sheet_formula(table, formula, None)?,
         }
         Ok(())
     }
@@ -667,8 +664,7 @@ impl Workbook {
             formula::analyze(&self.conn, formula)?;
         } else {
             // Compile against the other columns: a formula cannot read itself.
-            let columns: Vec<(String, String)> = self.columns(table)?.into_iter().filter(|c| c.name != name).map(|c| (c.name, c.sql_type)).collect();
-            crate::table_formula::compile(formula, &columns, "_rf_check_").map_err(|e| anyhow!("formula error: {e}"))?;
+            self.db().check_sheet_formula(table, formula, Some(name))?;
         }
         self.mutating("update_formula", None, |wb| {
             wb.conn.execute(

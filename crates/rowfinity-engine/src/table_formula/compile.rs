@@ -58,11 +58,38 @@ pub fn column_type(sql_type: &str) -> Option<Ty> {
     }
 }
 
-/// A compiled table formula: `steps` are `(alias, sql)` pairs to add, in order, to one
-/// select list; `value` and `error` then read them.
+/// Another table a formula can read whole columns of (lookups).
+pub struct Relation {
+    /// A `SELECT` producing the table's rows, including `_rf_ord`.
+    pub sql: String,
+    pub columns: Vec<(String, String)>,
+    /// (column, error column) for its spreadsheet-formula columns.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Resolves table names in `Table[column]` references.
+pub trait Relations {
+    fn relation(&self, table: &str) -> Result<Option<Relation>, String>;
+}
+
+struct NoRelations;
+impl Relations for NoRelations {
+    fn relation(&self, _: &str) -> Result<Option<Relation>, String> { Ok(None) }
+}
+
+/// Evaluation stages: select-list steps, or a left join of a grouped lookup relation whose
+/// `k`, `v`, `e` outputs become columns `<alias>k`, `<alias>v`, `<alias>e`.
+#[derive(Debug, Clone)]
+pub enum Stage {
+    Steps(Vec<(String, String)>),
+    Join { alias: String, sql: String, key: String },
+}
+
+/// A compiled table formula: `stages` add columns to the input relation in order; `value`
+/// and `error` then read them.
 #[derive(Debug, Clone)]
 pub struct Compiled {
-    pub steps: Vec<(String, String)>,
+    pub stages: Vec<Stage>,
     /// Value, `NULL` where the row has an error.
     pub value: String,
     /// Error code (`'#DIV/0!'`…) or `NULL`.
@@ -70,6 +97,37 @@ pub struct Compiled {
     pub ty: Ty,
     /// Columns of the table the formula reads, as named in the table.
     pub columns: Vec<String>,
+    /// Other tables the formula reads.
+    pub tables: Vec<String>,
+}
+
+impl Compiled {
+    /// The input relation with every stage applied (temporary columns included).
+    pub fn wrap(&self, input: &str) -> String {
+        let mut sql = input.to_string();
+        for stage in &self.stages {
+            sql = match stage {
+                Stage::Steps(steps) if steps.is_empty() => sql,
+                Stage::Steps(steps) => {
+                    let list: String = steps.iter().map(|(a, s)| format!(", {s} AS {}", ident(a))).collect();
+                    format!("SELECT *{list} FROM ({sql})")
+                }
+                Stage::Join { alias, sql: sub, key } => format!(
+                    "SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM ({sql}) o LEFT JOIN ({sub}) j ON j.k = o.{key}",
+                    k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
+                ),
+            };
+        }
+        sql
+    }
+
+    /// Names of the temporary columns `wrap` adds.
+    pub fn temps(&self) -> Vec<String> {
+        self.stages.iter().flat_map(|s| match s {
+            Stage::Steps(steps) => steps.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(),
+            Stage::Join { alias, .. } => vec![format!("{alias}k"), format!("{alias}v"), format!("{alias}e")],
+        }).collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +146,9 @@ struct Compiler<'a> {
     columns: &'a [(String, String)],
     /// Columns that carry an error code in a companion column (other spreadsheet formulas).
     errors: &'a [(String, String)],
+    relations: &'a dyn Relations,
+    stages: Vec<Stage>,
+    tables: BTreeSet<String>,
     steps: Vec<(String, String)>,
     prefix: String,
     refs: BTreeSet<String>,
@@ -136,7 +197,8 @@ fn serial_date(n: &str) -> (String, String) {
 
 impl Compiler<'_> {
     fn bind(&mut self, sql: String) -> String {
-        let name = format!("{}{}", self.prefix, self.steps.len());
+        let n: usize = self.steps.len() + self.stages.iter().map(|s| match s { Stage::Steps(x) => x.len(), Stage::Join { .. } => 1 }).sum::<usize>();
+        let name = format!("{}{}", self.prefix, n);
         self.steps.push((name.clone(), sql));
         ident(&name)
     }
@@ -717,7 +779,8 @@ impl Compiler<'_> {
                 format!("{name_upper} changes on every calculation; table formulas only use deterministic functions for now"),
                 span,
             ),
-            "XLOOKUP" | "VLOOKUP" | "HLOOKUP" | "XMATCH" | "MATCH" | "INDEX" | "LOOKUP" => fail(
+            "XLOOKUP" => self.xlookup(args, span),
+            "VLOOKUP" | "HLOOKUP" | "XMATCH" | "MATCH" | "INDEX" | "LOOKUP" => fail(
                 format!("{name_upper} over table columns is not available yet (planned: exact lookups through batched joins)"),
                 span,
             ),
@@ -727,6 +790,94 @@ impl Compiler<'_> {
             ),
             _ => fail(format!("{name_upper} is not available in table formulas; see the list in TABLE_FORMULAS.md"), span),
         }
+    }
+
+    /// Exact XLOOKUP over another table: one grouped relation keyed by the normalized
+    /// lookup value, left-joined, so every row gets at most one match.
+    fn xlookup(&mut self, args: &[Expr], span: Span) -> Result<V, FormulaError> {
+        Self::arity("XLOOKUP", args, 3, 6, span)?;
+        let whole = |e: &Expr| match &e.kind {
+            ExprKind::TableColumn { table, column } => Ok((table.clone(), column.clone())),
+            _ => fail("XLOOKUP needs whole columns of a table here, e.g. Customers[id]", e.span),
+        };
+        let ((lt, lc), (rt, rc)) = (whole(&args[1])?, whole(&args[2])?);
+        if !lt.eq_ignore_ascii_case(&rt) {
+            return fail("the lookup and return columns must come from the same table", args[2].span);
+        }
+        let literal = |i: usize, allowed: &[f64], what: &str| -> Result<f64, FormulaError> {
+            match args.get(i).map(|a| &a.kind) {
+                None | Some(ExprKind::Empty) => Ok(allowed[0]),
+                Some(ExprKind::Number(n)) if allowed.contains(n) => Ok(*n),
+                Some(ExprKind::Unary { op: UnaryOp::Neg, expr }) if matches!(expr.kind, ExprKind::Number(n) if allowed.contains(&-n)) => {
+                    let ExprKind::Number(n) = expr.kind else { unreachable!() };
+                    Ok(-n)
+                }
+                _ => fail(what.to_string(), args[i].span),
+            }
+        };
+        literal(4, &[0.0], "only exact match (match_mode 0) is available for table lookups; approximate and wildcard modes are not yet")?;
+        let last = literal(5, &[1.0, -1.0], "search_mode must be 1 (first match) or -1 (last match); binary search is not available for tables")? < 0.0;
+        let rel = self.relations.relation(&lt).map_err(|m| FormulaError { message: m, span: args[1].span })?
+            .ok_or_else(|| FormulaError { message: format!("there is no table named {lt:?}"), span: args[1].span })?;
+        let col = |name: &str, at: Span| -> Result<(String, Ty), FormulaError> {
+            let (actual, t) = rel.columns.iter().find(|(c, _)| c.eq_ignore_ascii_case(name))
+                .ok_or_else(|| FormulaError { message: format!("table {lt:?} has no column named {name:?}"), span: at })?;
+            let ty = column_type(t).ok_or_else(|| FormulaError { message: format!("column {actual:?} has type {t}, which table formulas cannot use yet"), span: at })?;
+            Ok((actual.clone(), ty))
+        };
+        let ((key_col, key_ty), (ret_col, ret_ty)) = (col(&lc, args[1].span)?, col(&rc, args[2].span)?);
+        self.tables.insert(lt.clone());
+        let err_of = |c: &str| rel.errors.iter().find(|(n, _)| n == c).map(|(_, e)| ident(e));
+        let lookup = self.expr(&args[0])?;
+        let nf = match args.get(3) {
+            None | Some(Expr { kind: ExprKind::Empty, .. }) => None,
+            Some(a) => Some(self.expr(a)?),
+        };
+        let ret = V { v: "NULL".into(), e: None, ty: ret_ty, is_ref: false, empty_text: false, span: args[2].span };
+        let ty = match &nf { Some(n) => self.unify("XLOOKUP", &[&ret, n], span)?, None => ret_ty };
+        // Spreadsheet exact matching: numbers at 15 digits, text case-insensitively, types
+        // never equal each other; a blank matches 0, "", FALSE and blank cells.
+        let key_of = |v: &str, t: Ty| -> String {
+            match t {
+                Ty::Text => format!("'t' || upper({v})"),
+                Ty::Bool => format!("'b' || CAST({v} AS VARCHAR)"),
+                Ty::Date => format!("'n' || CAST({} AS VARCHAR)", p15(&serial(v))),
+                _ => format!("'n' || CAST({} AS VARCHAR)", p15(v)),
+            }
+        };
+        let (k, kv) = (ident(&key_col), ident(&ret_col));
+        let key_err = err_of(&key_col).map(|e| format!(" AND {e} IS NULL")).unwrap_or_default();
+        let ret_err = err_of(&ret_col).unwrap_or_else(|| "CAST(NULL AS VARCHAR)".into());
+        let zero = match key_ty { Ty::Text => format!("{k} = ''"), Ty::Bool => format!("{k} = FALSE"), Ty::Date => "FALSE".into(), _ => format!("{k} = 0") };
+        let src = &rel.sql;
+        let row = |key: String, cond: String| format!("SELECT {key} AS k, {kv} AS v, {ret_err} AS e, _rf_ord AS o FROM ({src}) WHERE {cond}{key_err}");
+        let parts = [
+            row(key_of(&k, key_ty), format!("{k} IS NOT NULL")),
+            row("'blank'".into(), format!("({k} IS NULL OR {zero})")),
+            row(key_of("CAST(0 AS DOUBLE)", Ty::Number), format!("{k} IS NULL")),
+            row("'t'".into(), format!("{k} IS NULL")),
+            row("'bfalse'".into(), format!("{k} IS NULL")),
+        ];
+        let order = if last { "DESC" } else { "ASC" };
+        let sub = format!(
+            "SELECT k, v, e FROM (SELECT k, v, e, row_number() OVER (PARTITION BY k ORDER BY o {order}) AS rn FROM ({})) WHERE rn = 1",
+            parts.join(" UNION ALL ")
+        );
+        let probe = if lookup.ty == Ty::Blank { "'blank'".to_string() } else { format!("CASE WHEN {} IS NULL THEN 'blank' ELSE {} END", lookup.v, key_of(&lookup.v, lookup.ty)) };
+        let probe = self.bind(probe);
+        // Close the current steps and join.
+        let alias = format!("{}j{}", self.prefix, self.stages.len());
+        let steps = std::mem::take(&mut self.steps);
+        self.stages.push(Stage::Steps(steps));
+        self.stages.push(Stage::Join { alias: alias.clone(), sql: sub, key: probe });
+        let (jk, jv, je) = (ident(&format!("{alias}k")), ident(&format!("{alias}v")), ident(&format!("{alias}e")));
+        let (nv, ne) = match &nf {
+            Some(n) => (self.as_ty(n, ty), n.e.clone().unwrap_or_else(|| "NULL".into())),
+            None => ("NULL".into(), "'#N/A'".into()),
+        };
+        let value = format!("CASE WHEN {jk} IS NOT NULL THEN {jv} ELSE {nv} END");
+        let error = first_error([lookup.e.clone(), Some(format!("CASE WHEN {jk} IS NOT NULL THEN {je} ELSE {ne} END"))]);
+        Ok(self.make(value, error, ty, span))
     }
 
     /// A date argument: a Date, or a Number serial (1 = 1899-12-31). Text is refused.
@@ -760,8 +911,13 @@ pub fn compile(formula: &str, columns: &[(String, String)], prefix: &str) -> Res
 /// Like [`compile`]; `errors` pairs a column with the column holding its error codes, so
 /// errors of one formula column propagate into formulas that read it.
 pub fn compile_with_errors(formula: &str, columns: &[(String, String)], errors: &[(String, String)], prefix: &str) -> Result<Compiled, FormulaError> {
+    compile_full(formula, columns, errors, &NoRelations, prefix)
+}
+
+/// Like [`compile_with_errors`], resolving other tables through `relations`.
+pub fn compile_full(formula: &str, columns: &[(String, String)], errors: &[(String, String)], relations: &dyn Relations, prefix: &str) -> Result<Compiled, FormulaError> {
     let ast = parse(formula)?;
-    let mut c = Compiler { columns, errors, steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
+    let mut c = Compiler { columns, errors, relations, stages: Vec::new(), tables: BTreeSet::new(), steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
     let top = c.expr(&ast)?;
     let ty = match top.ty {
         Ty::Blank => return fail("the formula always returns an empty value", top.span),
@@ -772,7 +928,9 @@ pub fn compile_with_errors(formula: &str, columns: &[(String, String)], errors: 
     let value = if top.e.is_some() { format!("CASE WHEN {error} IS NULL THEN {} END", top.v) } else { top.v.clone() };
     let value = format!("CAST({value} AS {})", ty.sql_type());
     let error = format!("CAST({error} AS VARCHAR)");
-    Ok(Compiled { steps: c.steps, value, error, ty, columns: c.refs.into_iter().collect() })
+    let mut stages = c.stages;
+    stages.push(Stage::Steps(c.steps));
+    Ok(Compiled { stages, value, error, ty, columns: c.refs.into_iter().collect(), tables: c.tables.into_iter().collect() })
 }
 
 /// Columns a formula reads (for rename/delete dependency checks), without compiling it.

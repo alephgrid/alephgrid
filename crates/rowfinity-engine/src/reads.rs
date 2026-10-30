@@ -27,6 +27,35 @@ pub(crate) fn is_internal(name: &str) -> bool {
     name == ID || name == ORD || name.starts_with(ERROR_PREFIX)
 }
 
+/// Other tables for lookups: their full relation (with their own formulas), or for the
+/// formula's own table its stored columns only (formula columns are not available there).
+struct TableRelations<'a, 'b> {
+    db: &'a Db<'b>,
+    own: &'a str,
+    own_select: String,
+    visiting: std::cell::RefCell<Vec<String>>,
+}
+
+impl crate::table_formula::Relations for TableRelations<'_, '_> {
+    fn relation(&self, table: &str) -> std::result::Result<Option<crate::table_formula::Relation>, String> {
+        let found = storage::user_tables(self.db.conn).map_err(|e| e.to_string())?.into_iter().find(|t| t.eq_ignore_ascii_case(table));
+        let Some(actual) = found else { return Ok(None) };
+        let sql = if actual.eq_ignore_ascii_case(self.own) {
+            self.own_select.clone()
+        } else {
+            if self.visiting.borrow().contains(&actual.to_lowercase()) {
+                return Err(format!("circular lookup: {actual:?} already depends on this table"));
+            }
+            let mut visiting = self.visiting.borrow().clone();
+            self.db.base_select_from(&actual, &mut visiting).map_err(|e| e.to_string())?
+        };
+        let described = self.db.describe(&sql).map_err(|e| e.to_string())?;
+        let errors = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
+        let columns = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
+        Ok(Some(crate::table_formula::Relation { sql, columns, errors }))
+    }
+}
+
 /// The hidden column holding the error codes of spreadsheet-formula column `name`.
 pub(crate) const ERROR_PREFIX: &str = "_rf_e_";
 
@@ -111,9 +140,15 @@ impl Db<'_> {
     /// `SELECT _rf_id, _rf_ord, <data columns>, <formula columns> FROM table`. A spreadsheet
     /// formula column adds its value and a hidden `_rf_e_<name>` error column.
     pub fn base_select(&self, table: &str) -> Result<String> {
+        self.base_select_from(table, &mut Vec::new())
+    }
+
+    /// `visiting` holds the tables whose relation is being built, to refuse lookup cycles.
+    fn base_select_from(&self, table: &str, visiting: &mut Vec<String>) -> Result<String> {
         // Qualified, so a CTE that shadows the table (see `expand_query`) can read it.
         let mut select = format!("SELECT * FROM main.{}", ident(table));
         let sheet = self.sheet_formulas(table)?;
+        visiting.push(table.to_lowercase());
         for (i, (name, formula)) in self.formulas(table)?.into_iter().enumerate() {
             if !sheet.contains(&name) {
                 select = format!("SELECT *, ({}) AS {} FROM ({select})", formula_to_sql(&formula), ident(&name));
@@ -125,17 +160,39 @@ impl Db<'_> {
                 .filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone())))
                 .collect();
             let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-            let c = crate::table_formula::compile_with_errors(&formula, &columns, &errors, &format!("_rf_t{i}_"))
-                .map_err(|e| anyhow!("formula error in {name:?}: {e}"))?;
-            let steps: String = c.steps.iter().map(|(a, s)| format!(", {s} AS {}", ident(a))).collect();
-            let temps = c.steps.iter().map(|(a, _)| ident(a)).collect::<Vec<_>>().join(", ");
-            let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
-            select = format!(
-                "SELECT *{exclude}, {} AS {}, {} AS {} FROM (SELECT *{steps} FROM ({select}))",
-                c.value, ident(&name), c.error, ident(&error_column(&name))
-            );
+            let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), visiting: std::cell::RefCell::new(visiting.clone()) };
+            match crate::table_formula::compile_full(&formula, &columns, &errors, &relations, &format!("_rf_t{i}_")) {
+                Ok(c) => {
+                    let temps = c.temps().iter().map(|a| ident(a)).collect::<Vec<_>>().join(", ");
+                    let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
+                    select = format!(
+                        "SELECT *{exclude}, {} AS {}, {} AS {} FROM ({})",
+                        c.value, ident(&name), c.error, ident(&error_column(&name)), c.wrap(&select)
+                    );
+                }
+                // A formula that no longer compiles (a column or table it reads was renamed or
+                // deleted, a cycle) shows #REF! instead of making the whole table unreadable.
+                Err(_) => {
+                    select = format!("SELECT *, CAST(NULL AS VARCHAR) AS {}, '#REF!' AS {} FROM ({select})", ident(&name), ident(&error_column(&name)));
+                }
+            }
         }
+        visiting.pop();
         Ok(select)
+    }
+
+    /// Compile a spreadsheet formula against `table` as it is now, without `except` (the
+    /// column being edited, which a formula cannot read).
+    pub fn check_sheet_formula(&self, table: &str, formula: &str, except: Option<&str>) -> Result<()> {
+        let select = self.base_select(table)?;
+        let described = self.describe(&select)?;
+        let errors: Vec<(String, String)> = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
+        let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name) && Some(c.name.as_str()) != except).map(|c| (c.name, c.sql_type)).collect();
+        let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), visiting: std::cell::RefCell::new(vec![table.to_lowercase()]) };
+        let c = crate::table_formula::compile_full(formula, &columns, &errors, &relations, "_rf_check_").map_err(|e| anyhow!("formula error: {e}"))?;
+        // Plan it, so a type mistake in generated SQL fails here rather than on read.
+        self.describe(&format!("SELECT {}, {} FROM ({})", c.value, c.error, c.wrap(&select)))?;
+        Ok(())
     }
 
     pub fn describe(&self, select: &str) -> Result<Vec<Column>> {

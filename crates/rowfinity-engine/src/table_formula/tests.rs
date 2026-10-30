@@ -1,5 +1,6 @@
 //! Golden values and a differential check against IronCalc (the sheet engine).
 use super::*;
+use super::compile::compile_full;
 use duckdb::Connection;
 use ironcalc::base::{cell::CellValue, types::CellType, Model};
 
@@ -63,12 +64,11 @@ enum Out {
 fn run(conn: &Connection, formula: &str) -> (Ty, Vec<Out>) {
     let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let c = compile(formula, &cols, "_rf_t_").unwrap_or_else(|e| panic!("{formula}: {e}"));
-    let steps: String = c.steps.iter().map(|(a, s)| format!(", {s} AS {}", crate::sql::ident(a))).collect();
     let value = match c.ty {
         Ty::Date => format!("CAST(date_diff('day', DATE '1899-12-30', {}) AS VARCHAR)", c.value),
         _ => format!("CAST({} AS VARCHAR)", c.value),
     };
-    let sql = format!("SELECT {value}, {} FROM (SELECT *{steps} FROM t) ORDER BY k", c.error);
+    let sql = format!("SELECT {value}, {} FROM ({}) ORDER BY k", c.error, c.wrap("SELECT * FROM t"));
     let mut stmt = conn.prepare(&sql).unwrap_or_else(|e| panic!("{formula}: {e}\n{sql}"));
     let out = stmt
         .query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
@@ -218,7 +218,7 @@ fn refusals_explain_and_point_at_the_problem() {
     assert!(err("=IF([@amount]>1,1)").message.contains("value for when the condition is false"));
     assert!(err("=TODAY()").message.contains("deterministic"));
     assert!(err("=Orders[amount]").message.contains("whole column"));
-    assert!(err("=XLOOKUP([@amount],T[a],T[b])").message.contains("not available yet"));
+    assert!(err("=XLOOKUP([@amount],T[a],T[b])").message.contains("no table named"));
     assert!(err("=VLOOKUPX(1)").message.contains("not available in table formulas"));
     assert!(err("=ROUND(1)").message.contains("takes 2 arguments"));
     assert!(err("=AND(\"x\")").message.contains("not a condition"));
@@ -230,4 +230,90 @@ fn refusals_explain_and_point_at_the_problem() {
     assert_eq!(ok.columns, vec!["amount".to_string()]);
     assert_eq!(ok.ty, Ty::Number);
     assert_eq!(referenced_columns("=IF([@a]>1,[b],[@[c d]])").unwrap().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a", "b", "c d"]);
+}
+
+struct Lk;
+impl Relations for Lk {
+    fn relation(&self, table: &str) -> Result<Option<Relation>, String> {
+        Ok((table == "lk").then(|| Relation {
+            sql: "SELECT kn, kt, r, o AS _rf_ord FROM lk".into(),
+            columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
+            errors: vec![],
+        }))
+    }
+}
+
+/// Exact XLOOKUP over another table versus the same lookup over a sheet range.
+#[test]
+fn table_lookups_agree_with_the_sheet_engine() {
+    let rows = rows();
+    let conn = Connection::open_in_memory().unwrap();
+    table(&conn, &rows);
+    // Lookup table: duplicates, a blank key, 0, "", case variants; the last row is filled
+    // so the sheet range is not clipped.
+    let lk: [(Option<f64>, Option<&str>, &str); 7] = [
+        (Some(2.0), Some("x"), "a"), (Some(1.0), Some("X"), "b"), (Some(2.0), Some(""), "c"), (None, None, "d"),
+        (Some(0.0), Some("abc"), "e"), (Some(-2.5), Some("ärger"), "f"), (Some(3.0), Some("x"), "g"),
+    ];
+    conn.execute_batch("CREATE TABLE lk (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT)").unwrap();
+    for (o, (kn, kt, r)) in lk.iter().enumerate() {
+        conn.execute("INSERT INTO lk VALUES (?, ?, ?, ?)", duckdb::params![kn, kt, r, (o as i64) * 10]).unwrap();
+    }
+    let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let mut failures = Vec::new();
+    for f in [
+        "=XLOOKUP([@n],lk[kn],lk[r])", "=XLOOKUP([@i],lk[kn],lk[r],\"none\")", "=XLOOKUP([@s],lk[kt],lk[r])",
+        "=XLOOKUP([@s],lk[kt],lk[r],\"none\",0,-1)", "=XLOOKUP([@s],lk[kn],lk[r],\"none\")", "=XLOOKUP([@n],lk[kt],lk[r],\"none\")",
+        "=XLOOKUP([@b],lk[kn],lk[r],\"none\")", "=XLOOKUP([@i]*1,lk[kn],lk[r],\"none\",0,-1)", "=XLOOKUP([@n]/[@i],lk[kn],lk[r])",
+        "=IFNA(XLOOKUP(UPPER([@s]),lk[kt],lk[r]),\"?\")&\"!\"",
+    ] {
+        let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
+        let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM t"));
+        let ours: Vec<Out> = conn.prepare(&sql).unwrap_or_else(|e| panic!("{f}: {e}\n{sql}")).query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
+            .unwrap().map(|r| match r.unwrap() { (_, Some(e)) => Out::Error(e), (Some(s), None) => Out::Text(s), (None, None) => Out::Blank }).collect();
+        assert_eq!(ours.len(), rows.len(), "{f}: one result per row");
+        let sheet_formula = f.replace("lk[kn]", "$H$1:$H$7").replace("lk[kt]", "$I$1:$I$7").replace("lk[r]", "$J$1:$J$7");
+        let theirs = ironcalc_with(&rows, &sheet_formula, &lk);
+        for (k, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+            if !same(a, b) { failures.push(format!("{f} row {k} {:?}: table {a:?}, sheet {b:?}", rows[k])); }
+        }
+    }
+    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+}
+
+fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, &str)]) -> Vec<Out> {
+    let mut m = Model::new_empty("diff", "en", "UTC", "en").unwrap();
+    for (r, (kn, kt, v)) in lk.iter().enumerate() {
+        let rr = r as i32 + 1;
+        if let Some(kn) = kn { m.set_user_input(0, rr, 8, format!("{kn}")).unwrap(); }
+        match kt { Some("") => m.set_user_input(0, rr, 9, "=\"\"".into()).unwrap(), Some(t) => m.set_user_input(0, rr, 9, format!("'{t}")).unwrap(), None => {} }
+        m.set_user_input(0, rr, 10, format!("'{v}")).unwrap();
+    }
+    let mut out = Vec::new();
+    // Rows go below the lookup block so ranges do not overlap.
+    let base = 20;
+    for (r, row) in rows.iter().enumerate() {
+        let rr = base + r as i32;
+        if let Some(n) = row.n { m.set_user_input(0, rr, 1, format!("{n}")).unwrap(); }
+        if let Some(i) = row.i { m.set_user_input(0, rr, 2, format!("{i}")).unwrap(); }
+        if let Some(s) = row.s { m.set_user_input(0, rr, 3, format!("'{s}")).unwrap(); }
+        if let Some(b) = row.b { m.set_user_input(0, rr, 4, if b { "TRUE".into() } else { "FALSE".to_string() }).unwrap(); }
+        let f = formula.replace("[@n]", &format!("A{rr}")).replace("[@i]", &format!("B{rr}")).replace("[@s]", &format!("C{rr}")).replace("[@b]", &format!("D{rr}"));
+        m.set_user_input(0, rr, 6, f).unwrap();
+    }
+    m.evaluate();
+    for r in 0..rows.len() {
+        let rr = base + r as i32;
+        out.push(if m.get_cell_type(0, rr, 6).unwrap() == CellType::ErrorValue {
+            Out::Error(m.get_formatted_cell_value(0, rr, 6).unwrap())
+        } else {
+            match m.get_cell_value_by_index(0, rr, 6).unwrap() {
+                CellValue::None => Out::Blank,
+                CellValue::Number(n) => Out::Number(n),
+                CellValue::String(s) => Out::Text(s),
+                CellValue::Boolean(b) => Out::Bool(b),
+            }
+        });
+    }
+    out
 }
