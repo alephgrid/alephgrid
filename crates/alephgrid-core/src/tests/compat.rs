@@ -77,3 +77,15 @@ fn the_published_sample_workbook_opens_with_its_documented_values() {
         assert_eq!(detail.input, i.value, "{}{}", crate::sheets::column_name(i.column), i.row + 1);
     }
 }
+
+/// F.14: defects proposed upstream that are not catalog cases; each assertion is the
+/// current (wrong) result, so an upgrade that fixes one fails here and is relabelled.
+/// See docs/UPSTREAM.md.
+#[test]
+fn upstream_reproducers_still_reproduce() {
+    let mut t = TempWb::new();
+    let s = t.wb.with_sheets(|sh| sh.create("Repro")).unwrap().index;
+    t.wb.set_sheet_cells(s, &[sheet_input(0, 0, "3"), sheet_input(1, 0, "1"), sheet_input(2, 0, "2"), sheet_input(0, 2, "=TEXTJOIN(\",\",TRUE,SORT(A1:A3))")]).unwrap();
+    // Proposal 5: TEXTJOIN does not accept arrays from functions (expected "1,2,3").
+    assert_eq!(cell_text(&t.wb, s, 0, 2).as_deref(), Some("#N/IMPL!"));
+}
