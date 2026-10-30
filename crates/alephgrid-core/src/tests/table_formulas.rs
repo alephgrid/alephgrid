@@ -365,3 +365,24 @@ fn nearest_sorted_and_positional_lookups_in_a_workbook() {
     t.reopen();
     assert_eq!(rendered(&mut t.wb)[0], "1|50|0.0|#N/A|#N/A|#N/A|500.0");
 }
+
+/// F.T02: first and last matches follow the table's persisted order, so inserting a row
+/// above changes which duplicate a lookup returns; an edit to the looked-up table refreshes
+/// the cached relation instead of serving a stale one. By hand from the rows below.
+#[test]
+fn lookups_follow_reordered_sources_and_reject_stale_caches() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("codes", "SELECT * FROM (VALUES ('a', 'first'), ('a', 'second')) v(k, label)").unwrap();
+    t.wb.create_table_from_query("uses", "SELECT * FROM (VALUES (1, 'a')) v(id, k)").unwrap();
+    t.wb.add_formula_column_as("uses", "first", "=XLOOKUP([@k],codes[k],codes[label])", FormulaLanguage::Sheet).unwrap();
+    t.wb.add_formula_column_as("uses", "last", "=XLOOKUP([@k],codes[k],codes[label],,0,-1)", FormulaLanguage::Sheet).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"first\"|\"second\""]);
+    // A new duplicate inserted at the top becomes the first match.
+    let v = t.wb.open_view(spec("codes")).unwrap();
+    t.wb.insert_rows(v.view_id, 0, 1).unwrap();
+    t.wb.edit(v.view_id, &[edit(0, "k", "a"), edit(0, "label", "zeroth")]).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"zeroth\"|\"second\""]);
+    // Deleting the last duplicate: the cached relation is rebuilt, not reused.
+    t.wb.delete_rows(v.view_id, 2, 1).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"zeroth\"|\"first\""]);
+}
