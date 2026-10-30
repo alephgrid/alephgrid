@@ -25,6 +25,7 @@ mod sqlchange;
 mod sqllex;
 pub mod sqlpolicy;
 pub mod storage;
+pub mod table_formula;
 pub mod wire;
 mod workbook;
 
