@@ -5,6 +5,8 @@ License: MIT OR Apache-2.0; original license files and third-party notices retai
 Owner: Alephgrid maintainers. Status: local patch, not an upstream-approved release.
 
 Changes:
+- Text criteria `"<=x"` and `">=x"` (COUNTIF/SUMIF/AVERAGEIF and the *IFS forms) compare in
+  the right direction; upstream counted text after `x` for `<=` and before it for `>=`.
 - COUNTIFS checks both range dimensions against the first criteria range.
 - Shared IFS aggregation checks criteria dimensions against the result range (SUMIFS,
   AVERAGEIFS, MINIFS and MAXIFS).

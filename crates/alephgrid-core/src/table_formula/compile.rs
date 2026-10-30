@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use super::parse::{parse, BinaryOp, ErrorCode, Expr, ExprKind, FormulaError, Span, UnaryOp};
 use crate::sql::{ident, lit};
 
+mod aggregate;
+
 /// Static type of a table formula value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
@@ -86,6 +88,9 @@ pub enum Stage {
     Steps(Vec<(String, String)>),
     /// `reads` are the tables whose data `sql` reads (see [`Relation::reads`]).
     Join { alias: String, sql: String, key: String, reads: Vec<String> },
+    /// Like `Join`, but `sql` also reads the input relation, under the name `<alias>o`
+    /// (conditional aggregates whose criteria come from the rows themselves).
+    Correlated { alias: String, sql: String, key: String },
 }
 
 /// A compiled table formula: `stages` add columns to the input relation in order; `value`
@@ -119,6 +124,11 @@ impl Compiled {
                     "SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM ({sql}) o LEFT JOIN ({sub}) j ON j.k = o.{key}",
                     k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
                 ),
+                Stage::Correlated { alias, sql: sub, key } => format!(
+                    "WITH {input} AS MATERIALIZED ({sql}) SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM {input} o LEFT JOIN ({sub}) j ON j.k = o.{key}",
+                    input = ident(&format!("{alias}o")),
+                    k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
+                ),
             };
         }
         sql
@@ -128,7 +138,7 @@ impl Compiled {
     pub fn temps(&self) -> Vec<String> {
         self.stages.iter().flat_map(|s| match s {
             Stage::Steps(steps) => steps.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(),
-            Stage::Join { alias, .. } => vec![format!("{alias}k"), format!("{alias}v"), format!("{alias}e")],
+            Stage::Join { alias, .. } | Stage::Correlated { alias, .. } => vec![format!("{alias}k"), format!("{alias}v"), format!("{alias}e")],
         }).collect()
     }
 }
@@ -200,10 +210,20 @@ fn serial_date(n: &str) -> (String, String) {
 
 impl Compiler<'_> {
     fn bind(&mut self, sql: String) -> String {
-        let n: usize = self.steps.len() + self.stages.iter().map(|s| match s { Stage::Steps(x) => x.len(), Stage::Join { .. } => 1 }).sum::<usize>();
+        let n: usize = self.steps.len() + self.stages.iter().map(|s| match s { Stage::Steps(x) => x.len(), Stage::Join { .. } | Stage::Correlated { .. } => 1 }).sum::<usize>();
         let name = format!("{}{}", self.prefix, n);
         self.steps.push((name.clone(), sql));
         ident(&name)
+    }
+
+    /// End the current select-list layer: later steps read the earlier ones as columns of a
+    /// subquery. DuckDB inlines a lateral alias at each use, so a long chain of steps that
+    /// reuse each other must be split, or its expression grows exponentially.
+    fn layer(&mut self) {
+        if !self.steps.is_empty() {
+            let steps = std::mem::take(&mut self.steps);
+            self.stages.push(Stage::Steps(steps));
+        }
     }
 
     /// Literals and plain identifiers are used in place; anything else is bound once.
@@ -792,8 +812,9 @@ impl Compiler<'_> {
                 format!("{name_upper} over table columns is not available yet (planned: exact lookups through batched joins)"),
                 span,
             ),
-            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" | "COUNT" | "COUNTA" => fail(
-                format!("{name_upper} over table columns is not available yet (planned: grouped aggregates)"),
+            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" => self.conditional(&name_upper, args, span),
+            "COUNT" | "COUNTA" => fail(
+                format!("{name_upper} over table columns is not available yet; COUNTIFS counts rows that match criteria"),
                 span,
             ),
             _ => fail(format!("{name_upper} is not available in table formulas; see the list in TABLE_FORMULAS.md"), span),

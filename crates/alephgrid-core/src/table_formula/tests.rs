@@ -258,6 +258,12 @@ impl Relations for Lk {
                 errors: vec![],
                 reads: vec![],
             }),
+            "ag" => Some(Relation {
+                sql: "SELECT kn, kt, kb, kd, r, o AS _rf_ord FROM ag".into(),
+                columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("kb".into(), "BOOLEAN".into()), ("kd".into(), "DATE".into()), ("r".into(), "DOUBLE".into())],
+                errors: vec![],
+                reads: vec![],
+            }),
             _ => None,
         })
     }
@@ -396,4 +402,133 @@ fn vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally() {
     let (v, e) = (|s: &str| (Some(s.to_string()), None), |s: &str| (None, Some(s.to_string())));
     assert_eq!(run("=VLOOKUP([@s],lt,3,FALSE)"), [v("a"), e("#VALUE!"), e("#VALUE!"), e("#VALUE!"), e("#N/A")]);
     assert_eq!(run("=XLOOKUP([@s],lk[kt],lk[r],\"-\")"), [v("a"), v("c"), v("-"), v("-"), v("-")]);
+}
+
+/// Source rows for conditional aggregates: numbers, numeric text, "", blank, logical text,
+/// a literal `*`, dates (serials) and amounts.
+/// (kn, kt, kb, kd as a serial, r).
+type AgRow = (Option<f64>, Option<&'static str>, Option<bool>, Option<i64>, Option<f64>);
+const AG: [AgRow; 7] = [
+    (Some(2.0), Some("x"), Some(true), Some(45351), Some(10.0)),
+    (Some(1.0), Some("2"), Some(false), Some(36526), Some(20.0)),
+    (None, Some(""), None, None, None),
+    (Some(0.0), Some("abc"), Some(true), Some(61), Some(5.0)),
+    (Some(-2.5), Some("a*b"), Some(false), Some(45322), Some(7.5)),
+    (Some(3.0), None, Some(true), Some(36525), Some(1.0)),
+    (Some(2.0), Some("TRUE"), None, Some(45351), Some(2.0)),
+];
+
+/// SUMIFS/COUNTIFS/AVERAGEIFS over a table versus the same formulas over sheet ranges:
+/// `ag` is P1:T7 (kn, kt, kb, kd, r).
+#[test]
+fn conditional_aggregates_agree_with_the_sheet_engine() {
+    let rows = rows();
+    let conn = Connection::open_in_memory().unwrap();
+    table(&conn, &rows);
+    conn.execute_batch("CREATE TABLE ag (kn DOUBLE, kt VARCHAR, kb BOOLEAN, kd DATE, r DOUBLE, o BIGINT)").unwrap();
+    for (o, (kn, kt, kb, kd, r)) in AG.iter().enumerate() {
+        conn.execute("INSERT INTO ag VALUES (?, ?, ?, ?, ?, ?)", duckdb::params![kn, kt, kb, kd.map(chrono_like), r, o as i64]).unwrap();
+    }
+    let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+    let mut failures = Vec::new();
+    for f in [
+        "=COUNTIFS(ag[kn],[@n])", "=COUNTIFS(ag[kt],[@s])", "=COUNTIFS(ag[kb],[@b])", "=COUNTIFS(ag[kb],[@s])", "=COUNTIFS(ag[kn],[@s])",
+        "=SUMIFS(ag[r],ag[kn],[@i])", "=SUMIFS(ag[r],ag[kn],\">\"&[@n])", "=SUMIFS(ag[r],ag[kt],\"<>\"&[@s])", "=SUMIFS(ag[r],ag[kt],\"<=\"&[@s])",
+        "=AVERAGEIFS(ag[r],ag[kn],[@n])", "=AVERAGEIFS(ag[r],ag[kn],\"<\"&[@i])", "=AVERAGEIFS(ag[kt],ag[kn],[@n])",
+        "=COUNTIFS(ag[kd],\">=\"&[@d])", "=SUMIFS(ag[r],ag[kd],[@d])", "=SUMIFS(ag[r],ag[kn],[@n],ag[kt],[@s])", "=SUMIFS(ag[r],ag[kn],[@i],ag[kb],[@b])",
+        "=SUMIF(ag[kn],[@n],ag[r])", "=SUMIF(ag[kn],[@n])", "=COUNTIF(ag[kb],[@b])", "=AVERAGEIF(ag[kn],[@i],ag[r])",
+        "=COUNTIFS(ag[kt],\"a*\")", "=COUNTIFS(ag[kt],\"<>\")", "=COUNTIFS(ag[kt],\"\")", "=COUNTIFS(ag[kt],\"<=b\")", "=COUNTIFS(ag[kt],\">=b\")",
+        "=COUNTIFS(ag[kt],\"a~*b\")", "=COUNTIFS(ag[kt],\"<>a*\")", "=COUNTIFS(ag[kt],\"?\")", "=COUNTIFS(ag[kt],\"true\")", "=COUNTIFS(ag[kb],\"<>TRUE\")",
+        "=COUNTIFS(ag[kd],\"<7/31/2023\")", "=COUNTIFS(ag[kd],\">=2000-01-01\")", "=COUNTIFS(ag[kd],\"=Feb/29/2024\")", "=COUNTIFS(ag[kn],\">=\"&\"1\")",
+        "=AVERAGEIF(ag[kn],\">0\")", "=COUNTIFS(ag[kn],\"<\")", "=COUNTIFS(ag[kn],\"<>2\",ag[kt],\"<>\")", "=SUMIFS(ag[r],ag[kt],\"*\",ag[kn],\">\"&[@i])",
+    ] {
+        let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
+        let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM t"));
+        let ours: Vec<Out> = conn.prepare(&sql).unwrap_or_else(|e| panic!("{f}: {e}\n{sql}")).query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
+            .unwrap().map(|r| match r.unwrap() {
+                (_, Some(e)) => Out::Error(e),
+                (Some(s), None) => Out::Number(s.parse().unwrap()),
+                (None, None) => Out::Blank,
+            }).collect();
+        assert_eq!(ours.len(), rows.len(), "{f}: one result per row");
+        let sheet = f.replace("ag[kn]", "$P$1:$P$7").replace("ag[kt]", "$Q$1:$Q$7").replace("ag[kb]", "$R$1:$R$7").replace("ag[kd]", "$S$1:$S$7").replace("ag[r]", "$T$1:$T$7");
+        let theirs = ironcalc_aggregates(&rows, &sheet);
+        for (k, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+            if !same(a, b) { failures.push(format!("{f} row {k} {:?}: table {a:?}, sheet {b:?}", rows[k])); }
+        }
+    }
+    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+}
+
+fn ironcalc_aggregates(rows: &[Row], formula: &str) -> Vec<Out> {
+    let mut m = Model::new_empty("diff", "en", "UTC", "en").unwrap();
+    for (r, (kn, kt, kb, kd, v)) in AG.iter().enumerate() {
+        let rr = r as i32 + 1;
+        if let Some(x) = kn { m.set_user_input(0, rr, 16, format!("{x}")).unwrap(); }
+        match kt { Some("") => m.set_user_input(0, rr, 17, "=\"\"".into()).unwrap(), Some(s) => m.set_user_input(0, rr, 17, format!("'{s}")).unwrap(), None => {} }
+        if let Some(b) = kb { m.set_user_input(0, rr, 18, if *b { "TRUE".into() } else { "FALSE".into() }).unwrap(); }
+        if let Some(d) = kd { m.set_user_input(0, rr, 19, format!("{d}")).unwrap(); }
+        if let Some(x) = v { m.set_user_input(0, rr, 20, format!("{x}")).unwrap(); }
+    }
+    let base = 20;
+    for (r, row) in rows.iter().enumerate() {
+        let rr = base + r as i32;
+        if let Some(n) = row.n { m.set_user_input(0, rr, 1, format!("{n}")).unwrap(); }
+        if let Some(i) = row.i { m.set_user_input(0, rr, 2, format!("{i}")).unwrap(); }
+        if let Some(s) = row.s { m.set_user_input(0, rr, 3, format!("'{s}")).unwrap(); }
+        if let Some(b) = row.b { m.set_user_input(0, rr, 4, if b { "TRUE".into() } else { "FALSE".to_string() }).unwrap(); }
+        if let Some(d) = row.d { m.set_user_input(0, rr, 5, format!("{d}")).unwrap(); }
+        let f = formula.replace("[@n]", &format!("A{rr}")).replace("[@i]", &format!("B{rr}")).replace("[@s]", &format!("C{rr}")).replace("[@b]", &format!("D{rr}")).replace("[@d]", &format!("E{rr}"));
+        m.set_user_input(0, rr, 6, f).unwrap();
+    }
+    m.evaluate();
+    (0..rows.len()).map(|r| {
+        let rr = base + r as i32;
+        if m.get_cell_type(0, rr, 6).unwrap() == CellType::ErrorValue {
+            Out::Error(m.get_formatted_cell_value(0, rr, 6).unwrap())
+        } else {
+            match m.get_cell_value_by_index(0, rr, 6).unwrap() {
+                CellValue::None => Out::Blank,
+                CellValue::Number(n) => Out::Number(n),
+                CellValue::String(s) => Out::Text(s),
+                CellValue::Boolean(b) => Out::Bool(b),
+            }
+        }
+    }).collect()
+}
+
+
+
+/// Expected values worked out by hand from the `AG` rows, independently of either engine.
+#[test]
+fn conditional_aggregates_by_hand() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE one (k INTEGER); INSERT INTO one VALUES (0); CREATE TABLE ag (kn DOUBLE, kt VARCHAR, kb BOOLEAN, kd DATE, r DOUBLE, o BIGINT)").unwrap();
+    for (o, (kn, kt, kb, kd, r)) in AG.iter().enumerate() {
+        conn.execute("INSERT INTO ag VALUES (?, ?, ?, ?, ?, ?)", duckdb::params![kn, kt, kb, kd.map(chrono_like), r, o as i64]).unwrap();
+    }
+    let cols = vec![("k".to_string(), "INTEGER".to_string())];
+    let run = |f: &str| -> String {
+        let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
+        let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({})", c.value, c.error, c.wrap("SELECT * FROM one"));
+        let (v, e): (Option<String>, Option<String>) = conn.query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        e.or(v).unwrap_or_default()
+    };
+    for (f, want) in [
+        ("=COUNTIFS(ag[kt],\"<=b\")", "4.0"), // "2", "", "abc", "a*b"
+        ("=COUNTIFS(ag[kt],\">=b\")", "2.0"), // "x", "TRUE"
+        ("=COUNTIFS(ag[kt],\"a*\")", "2.0"),  // "abc", "a*b"
+        ("=COUNTIFS(ag[kt],\"a~*b\")", "1.0"),
+        ("=COUNTIFS(ag[kt],\"<>\")", "6.0"),  // every non-blank cell, "" included
+        ("=COUNTIFS(ag[kt],\"\")", "2.0"),    // "" and the blank cell
+        ("=COUNTIFS(ag[kn],2)", "2.0"),
+        ("=COUNTIFS(ag[kt],2)", "1.0"),       // the text "2" reads as the number
+        ("=SUMIFS(ag[r],ag[kn],\">0\")", "33.0"),
+        ("=AVERAGEIFS(ag[r],ag[kn],\"<0\")", "7.5"),
+        ("=AVERAGEIFS(ag[r],ag[kn],99)", "#DIV/0!"),
+        ("=COUNTIFS(ag[kd],\">=2000-01-01\")", "4.0"),
+        ("=SUMIFS(ag[r],ag[kn],2,ag[kb],TRUE)", "10.0"),
+    ] {
+        assert_eq!(run(f), want, "{f}");
+    }
 }

@@ -300,9 +300,11 @@ fn result_is_less_than_string(calc_result: &CalcResult, target: &str) -> bool {
 
 fn result_is_less_or_equal_than_string(calc_result: &CalcResult, target: &str) -> bool {
     match calc_result {
+        // Alephgrid: the cell is at most the target (upstream compared the other way round,
+        // so "<=b" counted text after "b").
         CalcResult::String(s) => {
             let lower_case = &s.to_lowercase();
-            target.cmp(lower_case) == std::cmp::Ordering::Less || lower_case == target
+            lower_case.as_str() <= target
         }
         _ => false,
     }
@@ -317,9 +319,10 @@ fn result_is_greater_than_string(calc_result: &CalcResult, target: &str) -> bool
 
 fn result_is_greater_or_equal_than_string(calc_result: &CalcResult, target: &str) -> bool {
     match calc_result {
+        // Alephgrid: the cell is at least the target (upstream was reversed, as above).
         CalcResult::String(s) => {
             let lower_case = &s.to_lowercase();
-            target.cmp(lower_case) == std::cmp::Ordering::Greater || lower_case == target
+            lower_case.as_str() >= target
         }
         _ => false,
     }
