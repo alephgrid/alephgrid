@@ -157,7 +157,7 @@ impl Workbook {
         if !in_txn {
             self.shared.sweep(&self.conn);
         }
-        Db { conn: &self.conn, shared: &self.shared, in_txn }
+        Db { conn: &self.conn, shared: &self.shared, in_txn, keep: Default::default() }
     }
 
     /// Apply DuckDB settings such as `memory_limit` or `threads`.
@@ -1668,7 +1668,7 @@ impl Reader {
 
     fn db(&self) -> Db<'_> {
         self.shared.sweep(&self.conn);
-        Db { conn: &self.conn, shared: &self.shared, in_txn: false }
+        Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default() }
     }
 
     pub fn list_tables(&self) -> Result<Vec<TableInfo>> {

@@ -81,11 +81,13 @@ pub(crate) struct Build {
     /// column that is one of them or depends on one of them: reading it would be circular.
     in_progress: std::cell::RefCell<Vec<Node>>,
     graph: std::cell::OnceCell<Graph>,
+    /// Tables read by each relation being built, innermost last.
+    reads: std::cell::RefCell<Vec<std::collections::BTreeSet<String>>>,
 }
 
 impl Build {
     fn new() -> Self {
-        Build { in_progress: std::cell::RefCell::new(Vec::new()), graph: std::cell::OnceCell::new() }
+        Build { in_progress: std::cell::RefCell::new(Vec::new()), graph: std::cell::OnceCell::new(), reads: std::cell::RefCell::new(Vec::new()) }
     }
 }
 
@@ -102,15 +104,15 @@ impl crate::table_formula::Relations for TableRelations<'_, '_> {
     fn relation(&self, table: &str) -> std::result::Result<Option<crate::table_formula::Relation>, String> {
         let found = storage::user_tables(self.db.conn).map_err(|e| e.to_string())?.into_iter().find(|t| t.eq_ignore_ascii_case(table));
         let Some(actual) = found else { return Ok(None) };
-        let sql = if actual.eq_ignore_ascii_case(self.own) {
-            self.own_select.clone()
+        let (sql, reads) = if actual.eq_ignore_ascii_case(self.own) {
+            (self.own_select.clone(), vec![actual.to_lowercase()])
         } else {
-            self.db.base_select_in(&actual, self.build).map_err(|e| e.to_string())?
+            self.db.base_select_tracked(&actual, self.build).map_err(|e| e.to_string())?
         };
         let described = self.db.describe(&sql).map_err(|e| e.to_string())?;
         let errors = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
         let columns = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-        Ok(Some(crate::table_formula::Relation { sql, columns, errors }))
+        Ok(Some(crate::table_formula::Relation { sql, columns, errors, reads }))
     }
 }
 
@@ -132,6 +134,8 @@ pub(crate) struct Db<'a> {
     /// Inside the writer's transaction: no snapshots of our own, no caching of what is
     /// read (it may be rolled back), no scratch writes (a transaction writes one database).
     pub in_txn: bool,
+    /// Cached lookup tables this operation's SQL refers to, kept until it is done.
+    pub keep: std::cell::RefCell<Vec<Arc<crate::catalog::Scratch>>>,
 }
 
 impl Db<'_> {
@@ -254,6 +258,52 @@ impl Db<'_> {
         Ok(out)
     }
 
+    /// [`Self::base_select_in`], with the tables the relation reads (lowercase).
+    fn base_select_tracked(&self, table: &str, build: &Build) -> Result<(String, Vec<String>)> {
+        build.reads.borrow_mut().push(std::collections::BTreeSet::from([table.to_lowercase()]));
+        let out = self.base_select_in(table, build);
+        let mine = build.reads.borrow_mut().pop().unwrap_or_default();
+        if let Some(parent) = build.reads.borrow_mut().last_mut() {
+            parent.extend(mine.iter().cloned());
+        }
+        Ok((out?, mine.into_iter().collect()))
+    }
+
+    /// The scratch table holding grouped lookup relation `sql` as of the current data of
+    /// `reads`, built now if needed. `None` inside the writer's transaction (no scratch
+    /// writes there), or when the result is larger than [`limits::LOOKUP_CACHE_ROWS`].
+    fn cached_lookup(&self, sql: &str, reads: &[String]) -> Result<Option<String>> {
+        if self.in_txn || reads.is_empty() {
+            return Ok(None);
+        }
+        let all = storage::data_revisions(self.conn)?;
+        let revisions = |all: &HashMap<String, u64>| -> Option<Vec<(String, u64)>> {
+            reads.iter().map(|r| all.iter().find(|(t, _)| t.eq_ignore_ascii_case(r)).map(|(_, v)| (r.clone(), *v))).collect()
+        };
+        let Some(revs) = revisions(&all) else { return Ok(None) };
+        let mut cache = self.shared.lookups.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(sql, &revs) {
+            return Ok(hit.map(|s| { let name = s.qualified(); self.keep.borrow_mut().push(s); name }));
+        }
+        let scratch = self.shared.new_scratch("lk");
+        self.conn.execute_batch(&format!("CREATE TABLE {} AS {sql};", scratch.qualified()))?;
+        let rows: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {}", scratch.qualified()), [], |r| r.get(0))?;
+        // Built outside a snapshot, the data may have moved on meanwhile: do not keep it.
+        if revisions(&storage::data_revisions(self.conn)?).as_ref() != Some(&revs) {
+            return Ok(None);
+        }
+        let rows = rows.max(0) as u64;
+        if rows > limits::LOOKUP_CACHE_ROWS {
+            cache.put(sql, revs, None, rows);
+            return Ok(None);
+        }
+        let scratch = Arc::new(scratch);
+        let name = scratch.qualified();
+        self.keep.borrow_mut().push(scratch.clone());
+        cache.put(sql, revs, Some(scratch), rows);
+        Ok(Some(name))
+    }
+
     /// Build `table`'s relation within `build`: formula columns that would be circular
     /// here (see [`Build`]) show #REF!, keeping their place so column numbers stay valid.
     fn base_select_in(&self, table: &str, build: &Build) -> Result<String> {
@@ -294,7 +344,15 @@ impl Db<'_> {
             let compiled = crate::table_formula::compile_full(&formula, &columns, &errors, &relations, &format!("_rf_t{i}_"));
             build.in_progress.borrow_mut().pop();
             match compiled {
-                Ok(c) => {
+                Ok(mut c) => {
+                    // Grouped lookup relations come from the cache when it is fresh.
+                    for stage in &mut c.stages {
+                        if let crate::table_formula::Stage::Join { sql, reads, .. } = stage {
+                            if let Some(cached) = self.cached_lookup(sql, reads)? {
+                                *sql = format!("SELECT k, v, e FROM {cached}");
+                            }
+                        }
+                    }
                     let temps = c.temps().iter().map(|a| ident(a)).collect::<Vec<_>>().join(", ");
                     let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
                     select = format!(

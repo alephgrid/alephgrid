@@ -170,9 +170,28 @@ the column being computed shows `#REF!` there instead of looping.
 
 A lookup into the formula's own table sees its stored columns only, not its formula columns.
 
-**Cost.** Lookups are evaluated when rows are read, like other formula columns: a read that
-uses a lookup scans the looked-up table once per lookup. See Verification for measured
-timings.
+**Cached lookup results.** Building a grouped relation scans the whole looked-up table, which
+dominated every page read of a large table. Each grouped relation is therefore kept in the
+workbook's in-memory scratch database, keyed by its SQL and by the data revisions of every
+table it reads (the looked-up table, and tables its own formulas look up). Edits to the
+formula's own table reuse it; an edit to a looked-up table makes the next read rebuild it.
+Reads check or build it inside their own snapshot, so a page never mixes new rows with an old
+lookup; the writer's transaction never uses or builds one. At most
+`LOOKUP_CACHE_ROWS` (5,000,000) grouped rows are kept across a workbook's lookups, least
+recently used first out; a larger lookup is evaluated uncached. The cache is not persisted.
+
+Measured on an Apple M-series laptop (release build, `lookup_read_timings`; one XLOOKUP and
+one VLOOKUP column on orders, looking up customers, about 5% of orders without a customer):
+
+| Read | 1M orders / 100K customers, uncached | 10M orders / 1M customers, uncached | 10M / 1M, cached |
+|---|---|---|---|
+| Page of 100 rows (first, middle or last) | 43–47 ms | 182–189 ms | 45–58 ms |
+| First page after editing one customer | 43 ms | 195 ms | 52 ms (after a one-time rebuild) |
+| Rebuild both cached lookups | — | — | 120–420 ms, once per source change |
+| Open a view sorted by a lookup column | 258 ms | 3.1 s | 3.5 s |
+
+Sorting or filtering by a lookup column evaluates it for every row and is not sped up by the
+cache; that and persisted (materialized) lookup columns belong to F.09.
 
 ## Storage, reads and editing
 

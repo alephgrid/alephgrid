@@ -250,11 +250,13 @@ impl Relations for Lk {
                 sql: "SELECT kn, kt, r, o AS _rf_ord FROM lk".into(),
                 columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
                 errors: vec![],
+                reads: vec![],
             }),
             "lt" => Some(Relation {
                 sql: "SELECT kt, kn, r, o AS _rf_ord FROM lk".into(),
                 columns: vec![("kt".into(), "VARCHAR".into()), ("kn".into(), "DOUBLE".into()), ("r".into(), "VARCHAR".into())],
                 errors: vec![],
+                reads: vec![],
             }),
             _ => None,
         })

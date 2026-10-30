@@ -44,6 +44,68 @@ pub struct Shared {
     /// Scratch tables whose last user is gone; dropped by the next operation.
     graveyard: Arc<Mutex<Vec<String>>>,
     scratch_seq: AtomicU64,
+    pub(crate) lookups: Mutex<LookupCache>,
+}
+
+/// Grouped lookup relations built into scratch tables, keyed by their SQL. An entry is valid
+/// for the data revisions of the tables its SQL reads.
+#[derive(Default)]
+pub struct LookupCache {
+    entries: HashMap<String, LookupEntry>,
+    tick: u64,
+}
+
+struct LookupEntry {
+    revisions: Vec<(String, u64)>,
+    /// None when the result was too large to keep.
+    table: Option<Arc<Scratch>>,
+    rows: u64,
+    used: u64,
+}
+
+impl LookupCache {
+    /// The scratch table holding `sql`'s rows at `revisions`; `Some(None)` when that result
+    /// is known to be too large to keep; `None` when it is not cached.
+    pub(crate) fn get(&mut self, sql: &str, revisions: &[(String, u64)]) -> Option<Option<Arc<Scratch>>> {
+        self.tick += 1;
+        let tick = self.tick;
+        let e = self.entries.get_mut(sql).filter(|e| e.revisions == revisions)?;
+        e.used = tick;
+        Some(e.table.clone())
+    }
+
+    /// Keep `table` (`rows` rows of `sql` at `revisions`), dropping least recently used
+    /// entries beyond [`crate::limits::LOOKUP_CACHE_ROWS`].
+    pub(crate) fn put(&mut self, sql: &str, revisions: Vec<(String, u64)>, table: Option<Arc<Scratch>>, rows: u64) {
+        self.tick += 1;
+        self.entries.insert(sql.to_string(), LookupEntry { revisions, table, rows, used: self.tick });
+        while self.rows() > crate::limits::LOOKUP_CACHE_ROWS {
+            let Some(oldest) = self.entries.iter().filter(|(_, e)| e.table.is_some()).min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    /// Rows held by cached lookups.
+    pub fn rows(&self) -> u64 {
+        self.entries.values().filter(|e| e.table.is_some()).map(|e| e.rows).sum()
+    }
+
+    /// Cached lookups holding rows (for tests and diagnostics).
+    pub fn len(&self) -> usize {
+        self.entries.values().filter(|e| e.table.is_some()).count()
+    }
+
+    /// Whether no lookup holds rows.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Scratch tables of the cached lookups, sorted (for tests).
+    pub fn tables(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.entries.values().filter_map(|e| e.table.as_ref().map(|t| t.qualified())).collect();
+        out.sort();
+        out
+    }
 }
 
 #[derive(Default)]
@@ -97,6 +159,7 @@ impl Shared {
             sheets: Mutex::new(sheets),
             graveyard: Arc::new(Mutex::new(Vec::new())),
             scratch_seq: AtomicU64::new(0),
+            lookups: Mutex::new(LookupCache::default()),
         }
     }
 

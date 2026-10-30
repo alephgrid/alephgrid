@@ -65,6 +65,8 @@ pub struct Relation {
     pub columns: Vec<(String, String)>,
     /// (column, error column) for its spreadsheet-formula columns.
     pub errors: Vec<(String, String)>,
+    /// Tables whose data `sql` reads (lowercase), for caching results built from it.
+    pub reads: Vec<String>,
 }
 
 /// Resolves table names in `Table[column]` references.
@@ -82,7 +84,8 @@ impl Relations for NoRelations {
 #[derive(Debug, Clone)]
 pub enum Stage {
     Steps(Vec<(String, String)>),
-    Join { alias: String, sql: String, key: String },
+    /// `reads` are the tables whose data `sql` reads (see [`Relation::reads`]).
+    Join { alias: String, sql: String, key: String, reads: Vec<String> },
 }
 
 /// A compiled table formula: `stages` add columns to the input relation in order; `value`
@@ -112,7 +115,7 @@ impl Compiled {
                     let list: String = steps.iter().map(|(a, s)| format!(", {s} AS {}", ident(a))).collect();
                     format!("SELECT *{list} FROM ({sql})")
                 }
-                Stage::Join { alias, sql: sub, key } => format!(
+                Stage::Join { alias, sql: sub, key, .. } => format!(
                     "SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM ({sql}) o LEFT JOIN ({sub}) j ON j.k = o.{key}",
                     k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
                 ),
@@ -872,7 +875,7 @@ impl Compiler<'_> {
         let alias = format!("{}j{}", self.prefix, self.stages.len());
         let steps = std::mem::take(&mut self.steps);
         self.stages.push(Stage::Steps(steps));
-        self.stages.push(Stage::Join { alias: alias.clone(), sql: sub, key: probe });
+        self.stages.push(Stage::Join { alias: alias.clone(), sql: sub, key: probe, reads: rel.reads.clone() });
         (ident(&format!("{alias}k")), ident(&format!("{alias}v")), ident(&format!("{alias}e")))
     }
 

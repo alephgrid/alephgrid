@@ -158,3 +158,100 @@ fn tables_may_look_each_other_up_but_circular_references_are_refused() {
     let err = t.wb.add_formula_column_as("orders", "loop", "=XLOOKUP([@cid],customers[id],customers[first_label],\"-\")", FormulaLanguage::Sheet);
     assert!(err.is_ok(), "reading a column that reads this table is not circular by itself: {err:?}");
 }
+
+/// Lookup read timings on large tables (F.06/F.T04). Opt-in, release build:
+/// `ALEPHGRID_BENCH_ROWS=1000000 cargo test --release -p alephgrid-core --lib lookup_read_timings -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn lookup_read_timings() {
+    let rows: u64 = std::env::var("ALEPHGRID_BENCH_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000_000);
+    let customers = (rows / 10).max(1);
+    let mut t = TempWb::new();
+    let time = |label: &str, f: &mut dyn FnMut()| {
+        let start = std::time::Instant::now();
+        f();
+        eprintln!("{label:<44} {:>9.1} ms", start.elapsed().as_secs_f64() * 1000.0);
+    };
+    t.wb.create_table_from_query("customers", &format!(
+        "SELECT i AS id, 'customer ' || i AS name, (i % 5)::INTEGER AS tier FROM range({customers}) r(i)"
+    )).unwrap();
+    t.wb.create_table_from_query("orders", &format!(
+        "SELECT i AS id, (hash(i) % {})::BIGINT AS cid, (i % 1000) * 1.5 AS amount FROM range({rows}) r(i)", customers + customers / 20
+    )).unwrap();
+    eprintln!("{rows} orders, {customers} customers (about 5% of orders have no customer)");
+    time("add XLOOKUP column (compile + check)", &mut || {
+        t.wb.add_formula_column_as("orders", "customer", "=XLOOKUP([@cid],customers[id],customers[name],\"none\")", FormulaLanguage::Sheet).unwrap();
+    });
+    time("add VLOOKUP column", &mut || {
+        t.wb.add_formula_column_as("orders", "tier", "=VLOOKUP([@cid],customers,3,FALSE)", FormulaLanguage::Sheet).unwrap();
+    });
+    let mut view = 0;
+    time("open view", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
+    for (label, at) in [("first page (100 rows)", 0), ("first page again", 0), ("middle page", rows / 2), ("last page", rows.saturating_sub(100))] {
+        time(label, &mut || { let b = t.wb.fetch(view, at, 100).unwrap(); assert_eq!(b.rows.len(), 100.min(rows as usize)); });
+    }
+    let mut sorted = spec("orders");
+    sorted.sort = vec![SortKey { column: "customer".into(), desc: false }];
+    time("open view sorted by the lookup column", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
+    time("first page of the sorted view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    let cv = t.wb.open_view(spec("customers")).unwrap().view_id;
+    time("edit one customer name", &mut || {
+        t.wb.edit(cv, &[CellEdit { row: 0, column: "name".into(), value: Some("renamed".into()), record: None }]).unwrap();
+    });
+    let mut view = 0;
+    time("open view after the source edit", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
+    time("first page after the source edit", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+}
+
+
+#[test]
+fn cached_lookups_are_rebuilt_only_when_their_source_changes() {
+    let mut t = lookups();
+    let cached = |wb: &Workbook| wb.shared.lookups.lock().unwrap().tables();
+    let before = rendered(&table_block(&mut t.wb, "orders"));
+    let first = cached(&t.wb);
+    assert_eq!(first.len(), 4, "one grouped relation per lookup formula: {first:?}");
+    // Reading again reuses them.
+    assert_eq!(rendered(&table_block(&mut t.wb, "orders")), before);
+    assert_eq!(cached(&t.wb), first);
+    // Editing the table that holds the formulas does not touch the looked-up table's results.
+    let v = t.wb.open_view(spec("orders")).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "want".into(), value: Some("silver".into()), record: None }]).unwrap();
+    let after = rendered(&table_block(&mut t.wb, "orders"));
+    assert_eq!(after[1], "11|2|\"silver\"|\"Bo\"|\"Bo\"|\"silver\"|\"Bo\"", "the multi-key lookup sees the new key");
+    assert_eq!(cached(&t.wb), first);
+    // Editing the looked-up table rebuilds them, with the new data.
+    let v = t.wb.open_view(spec("customers")).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "name".into(), value: Some("Bea".into()), record: None }]).unwrap();
+    let after = rendered(&table_block(&mut t.wb, "orders"));
+    assert_eq!(after[1], "11|2|\"silver\"|\"Bea\"|\"Bea\"|\"silver\"|\"Bea\"");
+    let rebuilt = cached(&t.wb);
+    assert_eq!(rebuilt.len(), 4);
+    assert!(rebuilt.iter().all(|n| !first.contains(n)), "{first:?} → {rebuilt:?}");
+    // A reopened workbook starts with an empty cache and computes the same results.
+    t.reopen();
+    assert!(t.wb.shared.lookups.lock().unwrap().is_empty());
+    assert_eq!(rendered(&table_block(&mut t.wb, "orders")), after);
+}
+
+#[test]
+fn the_lookup_cache_drops_the_least_recently_used_beyond_its_budget() {
+    let t = TempWb::new();
+    let half = crate::limits::LOOKUP_CACHE_ROWS / 2;
+    let mut cache = crate::catalog::LookupCache::default();
+    let table = || Some(std::sync::Arc::new(t.wb.shared.new_scratch("lk")));
+    let revs = |r: u64| vec![("customers".to_string(), r)];
+    cache.put("a", revs(1), table(), half);
+    cache.put("b", revs(1), table(), half);
+    assert_eq!(cache.len(), 2);
+    assert!(cache.get("a", &revs(1)).is_some(), "a is now the most recently used");
+    assert!(cache.get("a", &revs(2)).is_none(), "another data revision is a miss");
+    cache.put("c", revs(1), table(), half);
+    assert_eq!(cache.len(), 2);
+    assert!(cache.get("b", &revs(1)).is_none(), "b was the least recently used");
+    assert!(cache.get("a", &revs(1)).is_some() && cache.get("c", &revs(1)).is_some());
+    // A result too large to keep is remembered as such, without rows.
+    cache.put("huge", revs(1), None, crate::limits::LOOKUP_CACHE_ROWS * 2);
+    assert!(matches!(cache.get("huge", &revs(1)), Some(None)));
+    assert!(cache.rows() <= crate::limits::LOOKUP_CACHE_ROWS);
+}
