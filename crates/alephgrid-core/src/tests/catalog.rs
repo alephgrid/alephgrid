@@ -64,7 +64,8 @@ fn catalog_registry_and_metadata_match_the_pinned_engine() {
         assert_eq!(f["table_status"] == "supported", compiles_in_tables(name), "table status drift: {name}");
         assert!(!f["limitations"].as_array().unwrap().is_empty());
         assert!(!f["implementation"].as_str().unwrap().is_empty());
-        if f["priority"] == "P0" {
+        // P0 entries are all reviewed; reviewed P1 entries (F.10) meet the same bar.
+        if f["priority"] == "P0" || !f["signature"].is_null() {
             assert!(f["signature"].as_str().unwrap().starts_with(&format!("{name}(")));
             assert!(!f["examples"].as_array().unwrap().is_empty());
             assert!(!f["evidence"].as_array().unwrap().is_empty());
@@ -98,12 +99,12 @@ fn certification_cases_match_independent_expectations() {
     let mut inputs: Vec<SheetInput> = serde_json::from_value(c["fixture"].clone()).unwrap();
     let cases: Vec<_> = c["functions"].as_array().unwrap().iter()
         .flat_map(|f| f["verification_cases"].as_array().unwrap()).collect();
-    assert_eq!(cases.len(), 277, "review certification case changes explicitly");
+    assert_eq!(cases.len(), 351, "review certification case changes explicitly");
     assert_eq!(cases.iter().filter(|c| c["group"] == "coercion").count(), 156);
-    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 273);
+    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 344);
     let gaps: BTreeSet<_> = cases.iter().filter(|c| c["status"] == "known_gap")
         .map(|c| c["id"].as_str().unwrap()).collect();
-    assert_eq!(gaps, BTreeSet::from(["day-c01", "day-c02", "month-c01", "year-c01"]),
+    assert_eq!(gaps, BTreeSet::from(["day-c01", "day-c02", "month-c01", "year-c01", "take-03", "textafter-03", "textbefore-03"]),
         "changing the known-gap set requires review of the desired-result regressions");
     let mut ids = BTreeSet::new();
     for (row, case) in cases.iter().enumerate() {
@@ -115,13 +116,21 @@ fn certification_cases_match_independent_expectations() {
         if case["status"] == "known_gap" {
             assert!(!case["note"].as_str().unwrap().is_empty());
         }
-        inputs.push(sheet_input(row as u32, 3, case["formula"].as_str().unwrap()));
+        if case["spill"] != true {
+            inputs.push(sheet_input(row as u32, 3, case["formula"].as_str().unwrap()));
+        }
     }
+    // Array results (F.10) spill from column U, 12 rows apart, and are read cell by cell.
+    let spills: Vec<(usize, &&Value)> = cases.iter().enumerate().filter(|(_, c)| c["spill"] == true).collect();
+    inputs.extend(spills.iter().enumerate().map(|(k, (_, c))| sheet_input(k as u32 * 12, 20, c["formula"].as_str().unwrap())));
     t.wb.with_sheets(|s| { s.create("Certification")?; s.set(0, &inputs) }).unwrap();
     let mut failures = Vec::new();
     for reopen in [false, true] {
         if reopen { t.reopen(); }
         for (row, case) in cases.iter().enumerate() {
+            if case["spill"] == true {
+                continue;
+            }
             let actual = cell_text(&t.wb, 0, row as u32, 3).expect("formula cell must survive, even with empty display text");
             if case["status"] == "known_gap" {
                 // A gap that starts passing must be relabelled (with review), not left as a gap.
@@ -132,6 +141,29 @@ fn certification_cases_match_independent_expectations() {
             }
             if Some(actual.as_str()) != case["expected"].as_str() {
                 failures.push(format!("{} {}: expected {}, received {actual:?}, reopened={reopen}", case["id"], case["formula"], case["expected"]));
+            }
+        }
+    }
+    for reopen in [false, true] {
+        if reopen { t.reopen(); }
+        for (k, (_, case)) in spills.iter().enumerate() {
+            let want: Vec<Vec<&str>> = case["expected"].as_str().unwrap().split(';').map(|r| r.split(',').collect()).collect();
+            let (rows, cols) = (want.len() as u32, want[0].len() as u32);
+            let block = t.wb.sheets().fetch(0, k as u32 * 12, rows + 1, cols + 21).unwrap();
+            let got: Vec<Vec<String>> = (0..=rows).map(|r| (0..=cols).map(|c| {
+                block.rows.get(r as usize).and_then(|row| row.get(20 + c as usize)).cloned().flatten().map(|x| x.0).unwrap_or_default()
+            }).collect()).collect();
+            let inside: Vec<Vec<String>> = got[..rows as usize].iter().map(|r| r[..cols as usize].to_vec()).collect();
+            let outside_empty = got[rows as usize].iter().all(|v| v.is_empty()) && got.iter().all(|r| r[cols as usize].is_empty());
+            let matches = inside == want.iter().map(|r| r.iter().map(|v| v.to_string()).collect::<Vec<_>>()).collect::<Vec<_>>() && outside_empty;
+            if case["status"] == "known_gap" {
+                if matches {
+                    failures.push(format!("{} now matches its expected result; review and mark it verified", case["id"]));
+                }
+                continue;
+            }
+            if !matches {
+                failures.push(format!("{} {}: expected spill {}, received {got:?}, reopened={reopen}", case["id"], case["formula"], case["expected"]));
             }
         }
     }
@@ -193,7 +225,7 @@ fn catalog_examples_match_independent_expectations() {
     let examples: Vec<_> = c["functions"].as_array().unwrap().iter()
         .flat_map(|f| f["examples"].as_array().unwrap().iter().map(move |e| (f["name"].as_str().unwrap(), e)))
         .collect();
-    assert_eq!(examples.len(), 44);
+    assert_eq!(examples.len(), 76, "44 P0 and 32 reviewed P1 (F.10) examples");
     for (row, (_, e)) in examples.iter().enumerate() {
         inputs.push(sheet_input(row as u32, 3, e["formula"].as_str().unwrap()));
     }
