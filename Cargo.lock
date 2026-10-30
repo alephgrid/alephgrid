@@ -32,6 +32,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "alephgrid-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "duckdb",
+ "ironcalc",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "ts-rs",
+ "zip",
+]
+
+[[package]]
+name = "alephgrid-server"
+version = "0.1.0"
+dependencies = [
+ "alephgrid-core",
+ "anyhow",
+ "axum",
+ "clap",
+ "duckdb",
+ "futures-util",
+ "mime_guess",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1911,49 +1954,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rowfinity-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "duckdb",
- "ironcalc",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "ts-rs",
- "zip",
-]
-
-[[package]]
-name = "rowfinity-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "duckdb",
- "futures-util",
- "mime_guess",
- "reqwest",
- "rowfinity-engine",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
 ]
 
 [[package]]

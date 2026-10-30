@@ -86,7 +86,7 @@ test("a running import can be stopped and retried", async ({ page }) => {
   // because Playwright limits in-memory files to 50 MB.
   const lines = ["a,b,c,d"];
   for (let i = 0; i < 4_000_000; i++) lines.push(`${i},${(i * 7) % 1000},${i % 13},text ${i % 101}`);
-  const file = join(mkdtempSync(join(tmpdir(), "rowfinity-big-")), "big.csv");
+  const file = join(mkdtempSync(join(tmpdir(), "alephgrid-big-")), "big.csv");
   writeFileSync(file, lines.join("\n") + "\n");
   await page.locator('.workbook input[type="file"]').setInputFiles(file);
   const dialog = page.getByRole("dialog", { name: "Import big.csv" });

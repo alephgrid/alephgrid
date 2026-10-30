@@ -20,7 +20,7 @@ server. `docs/SQL_AND_CUSTOM_FUNCTIONS.md`, named in the checklist header, is no
 
 ```bash
 cargo test --workspace                                   # PROPTEST_CASES=96 in CI
-ROWFINITY_SMALL_FS=<64 MB fs> cargo test --workspace --test storage_faults
+ALEPHGRID_SMALL_FS=<64 MB fs> cargo test --workspace --test storage_faults
 cargo clippy --workspace --all-targets -- -D warnings
 cd web && npm run build && cd .. && cargo build --workspace --all-targets
 cd web && npx playwright test                            # 41 tests; needs Google Chrome, or:

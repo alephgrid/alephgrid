@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const BIN = process.env.ROWFINITY_BIN ?? resolve(fileURLToPath(new URL(".", import.meta.url)), "../../target/debug/rowfinity");
+const BIN = process.env.ALEPHGRID_BIN ?? resolve(fileURLToPath(new URL(".", import.meta.url)), "../../target/debug/alephgrid");
 
 async function freePort(): Promise<number> {
   return new Promise((ok) => {
@@ -17,9 +17,9 @@ async function freePort(): Promise<number> {
   });
 }
 
-/** One `rowfinity` process on a private data directory; can be killed and restarted. */
+/** One `alephgrid` process on a private data directory; can be killed and restarted. */
 export class Server {
-  dataDir = mkdtempSync(join(tmpdir(), "rowfinity-e2e-"));
+  dataDir = mkdtempSync(join(tmpdir(), "alephgrid-e2e-"));
   port = 0;
   private proc: ChildProcess | null = null;
 

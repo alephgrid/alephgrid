@@ -1073,7 +1073,7 @@ impl<'a> Model<'a> {
                             ),
                         }
                     } else {
-                        // Rowfinity: reachable when a scalar formula refers to a name
+                        // Alephgrid: reachable when a scalar formula refers to a name
                         // that later becomes a multi-cell range (`=Sales` typed before
                         // `Sales` was defined). The upstream debug assertion panicked
                         // here in debug builds; the release result (#VALUE!) is kept.

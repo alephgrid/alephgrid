@@ -74,7 +74,7 @@ Persist acknowledgements according to a documented durability contract. A copy o
 4. **Validated ecosystem:** second provider proves portability, published contracts and conformance tests, documented compatibility policy and contributor governance.
 5. **Later scale:** workload balancing and stronger failover after their storage/fencing designs are verified. Distributed execution inside one workbook remains separate scope.
 
-Do not build a bespoke cloud scheduler: delegate pod/node placement to the selected infrastructure and retain workbook policy/lifecycle in Rowfinity. Do not make a JupyterHub fork the core; consider an integration for existing JupyterHub installations after the standalone contract is stable.
+Do not build a bespoke cloud scheduler: delegate pod/node placement to the selected infrastructure and retain workbook policy/lifecycle in Alephgrid. Do not make a JupyterHub fork the core; consider an integration for existing JupyterHub installations after the standalone contract is stable.
 
 ## Evidence required before calling it industry-grade
 
@@ -95,4 +95,4 @@ Unresolved engineering choices include the exact runtime isolation implementatio
 - [JupyterHub spawner interfaces](https://jupyterhub.readthedocs.io/en/stable/reference/spawners.html): narrow lifecycle abstractions enable deployment extensions.
 - [JupyterHub environment profiles](https://z2jh.jupyter.org/en/4.4.3/jupyterhub/customizing/user-environment.html): selectable administrator-defined environments.
 - [Kubernetes multi-tenancy](https://kubernetes.io/docs/concepts/security/multi-tenancy/): tenant isolation requires more than grouping resources.
-- [AWS JupyterHub on EKS blueprint](https://aws.amazon.com/blogs/containers/building-multi-tenant-jupyterhub-platforms-on-amazon-eks/): infrastructure reference, not a Rowfinity implementation.
+- [AWS JupyterHub on EKS blueprint](https://aws.amazon.com/blogs/containers/building-multi-tenant-jupyterhub-platforms-on-amazon-eks/): infrastructure reference, not a Alephgrid implementation.

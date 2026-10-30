@@ -2,15 +2,15 @@
 
 Maps checklist task IDs ([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)) to their behavior, tests and latest
 results. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
-`E` = `crates/rowfinity-engine/src/tests/`, `S` = `crates/rowfinity-server/tests/`, `W` = `web/e2e/`.
+`E` = `crates/alephgrid-core/src/tests/`, `S` = `crates/alephgrid-server/tests/`, `W` = `web/e2e/`.
 
 **Phase 1 verification (2026-10-26, macOS arm64, local).** CI on PR #1 has since run `cargo test --workspace` on Linux: all tests passed; the run then failed only because clippy was missing from the pinned toolchain (fixed in `ec28345`).
 
 | Command | Result |
 |---|---|
 | `cargo test --workspace` | engine 61 passed; server api 9, journey 2, crash 2, protocol 2 passed |
-| `PROPTEST_CASES=400 cargo test -p rowfinity-engine --lib props` | 3 passed (188 s) |
-| `cargo test -p rowfinity-server` ×3 | passed every time |
+| `PROPTEST_CASES=400 cargo test -p alephgrid-core --lib props` | 3 passed (188 s) |
+| `cargo test -p alephgrid-server` ×3 | passed every time |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `cd web && npm run build` | type check + bundle passed |
 | `cd web && npx playwright test` ×4 | 4 passed every time (Chrome 1.64 runner, headless) |
@@ -90,7 +90,7 @@ Not executed: scheduled 2000-case run (`scheduled.yml`), any CI run, Linux/Windo
 
 ## Phase 2
 
-**Latest verification (2026-10-26, macOS arm64, local, branch `phase-2-local-spreadsheet`):** `cargo test --workspace` engine 81 passed; server api 9, crash 2, imports 5, journey 2, protocol 4 passed; clippy clean; `npx playwright test` 20 passed in two consecutive runs; `cargo test -p rowfinity-server --test api` 6 consecutive runs passed. CI has not run on this branch.
+**Latest verification (2026-10-26, macOS arm64, local, branch `phase-2-local-spreadsheet`):** `cargo test --workspace` engine 81 passed; server api 9, crash 2, imports 5, journey 2, protocol 4 passed; clippy clean; `npx playwright test` 20 passed in two consecutive runs; `cargo test -p alephgrid-server --test api` 6 consecutive runs passed. CI has not run on this branch.
 
 ### 2.01 Sheet tabs, rendering, editing, change events
 - **Behavior:** sheets open as tabs, render IronCalc's display values (errors included), edit in the grid and formula bar, and other people's edits appear without reloading.
@@ -144,7 +144,7 @@ as the work is verified. Nothing here is checked off until its tests have run an
 ### Shared decisions
 - **Limits are enforced where they are named.** DuckDB `memory_limit` bounds DuckDB's buffer manager per
   workbook instance, not the process's resident memory; `threads` bounds DuckDB worker threads per
-  instance; `max_temp_directory_size` bounds DuckDB spill files. Rowfinity's own accounting covers the sum
+  instance; `max_temp_directory_size` bounds DuckDB spill files. Alephgrid's own accounting covers the sum
   across open workbooks, staged uploads and an estimate of sheet memory. Nothing in phase 3 is an OS-level
   (cgroup/rlimit) limit, and nothing is a security boundary between workbooks.
 - **Local provider = in-process allocations.** A local allocation is a workbook engine opened inside the
@@ -311,10 +311,10 @@ Injected write/disk-full/permission failures (`S/storage_faults.rs` on a real 64
 
 | Command | Result |
 |---|---|
-| `ROWFINITY_SMALL_FS=<64 MB HFS+ image> cargo test --workspace` | engine 100; server unit 13, api 9, backup 3, crash 3, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, storage_faults 2 (disk full really hit ENOSPC) — all pass |
-| `PROPTEST_CASES=300 cargo test -p rowfinity-engine --lib props` | 4 pass (263 s) |
+| `ALEPHGRID_SMALL_FS=<64 MB HFS+ image> cargo test --workspace` | engine 100; server unit 13, api 9, backup 3, crash 3, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, storage_faults 2 (disk full really hit ENOSPC) — all pass |
+| `PROPTEST_CASES=300 cargo test -p alephgrid-core --lib props` | 4 pass (263 s) |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
-| `cd web && npm run build && cd .. && cargo build -p rowfinity-server && cd web && npx playwright test` | 29 pass in each of two consecutive runs (and three runs by the client agent) |
+| `cd web && npm run build && cd .. && cargo build -p alephgrid-server && cd web && npx playwright test` | 29 pass in each of two consecutive runs (and three runs by the client agent) |
 
 Cancellation, overload, disk-full, crash/restart and restore preserve consistency, and resource use stays bounded at the limits that are named. Not established: multi-node failover, power-loss durability, OS-level resource limits. CI has not run this branch.
 
@@ -442,11 +442,11 @@ Contracts below were written before implementation (TEST_STRATEGY "Rules for eve
 - **Oracle:** state snapshots before and after (revision, history length, table checksums, settings,
   directory listings).
 
-### 4.08 SQL changes through operations that keep Rowfinity's bookkeeping
+### 4.08 SQL changes through operations that keep Alephgrid's bookkeeping
 - **Behavior:** `INSERT INTO t [(cols)] <query or VALUES>`, `UPDATE t SET col = expr, … [WHERE cond]` and
   `DELETE FROM t [WHERE cond]` typed in the SQL panel are recognised (`query` replies with code
   `sql_change` and the statement kind; *narrowed during implementation:* it does not count the affected
-  rows in advance, the UI asks for confirmation and the outcome reports the rows changed); `sql_change {sql, params}` applies them as one Rowfinity change:
+  rows in advance, the UI asks for confirmation and the outcome reports the rows changed); `sql_change {sql, params}` applies them as one Alephgrid change:
   new rows get record ids and order keys, updated cells are cast exactly like edits, deleted rows leave
   other ids untouched, the table's structure generation and data revision advance, one revision and history
   entry, a `table_changed` event, and a `mutation_id` makes a retry apply once. Each expression is checked by
@@ -508,7 +508,7 @@ ones, settings, files) unchanged. **Pass.**
 
 | Command | Result |
 |---|---|
-| `PROPTEST_CASES=96 ROWFINITY_SMALL_FS=<64 MB tmpfs> cargo test --workspace --no-fail-fast` | engine 134; server unit 13, api 9, backup 3, crash 4, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, sqlworkspace 6, storage_faults 2 — all pass |
+| `PROPTEST_CASES=96 ALEPHGRID_SMALL_FS=<64 MB tmpfs> cargo test --workspace --no-fail-fast` | engine 134; server unit 13, api 9, backup 3, crash 4, imports 5, journey 2, protocol 4, runtime 11, scheduling 10, shutdown 4, sqlworkspace 6, storage_faults 2 — all pass |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `cd web && npm run build` | type check + bundle pass |
 | `E2E_CHROME_PATH=/opt/pw-browsers/chromium-1243/chrome-linux64/chrome npx playwright test` (headless Chromium 1243; Google Chrome is not installed here) | 41 pass (12 in `sql.spec.ts`); also 41/41 in the run before the last server fixes |
@@ -530,7 +530,7 @@ The contract and limitations are in [FUNCTIONS.md](FUNCTIONS.md).
 | 5.06 | `dependency_versions_upgrade_and_rollback_atomically`, `workbook_scope_and_recreated_sheets_keep_exact_pins`: publication leaves active versions alone; incompatible single upgrades fail; version maps upgrade/rollback atomically; another workbook is unaffected. Browser journey activates v2 and rolls back v1. |
 | 5.07 | `formula_blanks_errors_dates_and_array_results_are_explicit`, `sql_columns_refresh_and_null_decimal_date_semantics`, `validation_conflicts_and_engine_boundaries_are_atomic`: blank/error handling, exact DECIMAL output, dates, array spill and occupied-cell refusal, name conflicts and execution-engine boundaries. |
 | 5.08 | SQL persistence/validation and column tests cover real macros, query calls, calculated-column invalidation, NULL/DECIMAL/DATE, statement/subquery/settings refusals. Browser SQL editor journey publishes and queries the macro. |
-| 5.09 | Engine tests cover indirect cycles, save/reopen, version changes and XLSX named-LAMBDA round trips. XLSX intentionally omits the Rowfinity registry and SQL macros; imported names cannot silently become registry functions. |
+| 5.09 | Engine tests cover indirect cycles, save/reopen, version changes and XLSX named-LAMBDA round trips. XLSX intentionally omits the Alephgrid registry and SQL macros; imported names cannot silently become registry functions. |
 | 5.11 | `incompatible_runtime_and_missing_pins_refuse_reopen`; runtime `incompatibility_names_the_reason`: exact adapter/DuckDB/IronCalc components, invalid pins, unsupported execution adapters and capability mismatches refuse execution. |
 | 5.T01–5.T02 | All tests above, `invalid_formulas_and_failed_publish_leave_no_changes`, `failed_commit_rolls_back_registry_macros_and_sheet_model` (injected history/commit failures), `storage_v3_migrates_before_function_publication`, `oversized_definitions_and_expanding_dependency_graphs_are_refused`. |
 | 5.10 | Browser journey defines, tests, calls, upgrades, rolls back and reloads a workbook function. Engine range test edits an input and independently checks the recalculated result. |
@@ -538,12 +538,12 @@ The contract and limitations are in [FUNCTIONS.md](FUNCTIONS.md).
 
 Validation: `cargo test --workspace` passed; the final focused function run passed **14 engine tests**;
 `cargo clippy --workspace --all-targets -- -D warnings` passed; generated protocol drift tests passed;
-`npm run build` passed; `cargo build -p rowfinity-server` passed; the full browser suite passed **44 tests**,
+`npm run build` passed; `cargo build -p alephgrid-server` passed; the full browser suite passed **44 tests**,
 then all **3 function journeys** passed again against the final rebuilt server.
 
 Limits of this evidence: no certification against Microsoft Excel itself or every function/argument combination;
 no new Linux/Windows run performed locally. The disk-full test in the workspace suite requires
-`ROWFINITY_SMALL_FS` on CI and skips its full-disk scenario on this machine. Current-time/volatile,
+`ALEPHGRID_SMALL_FS` on CI and skips its full-disk scenario on this machine. Current-time/volatile,
 recursive and unsupported formula constructs are refused; Python and shared-space function authorization
 are outside phase 5. The Local provider is not a hostile-code sandbox. Test-preview assertions for arrays
 cover the anchor cell; the engine test separately verifies spill cells and collision handling.
@@ -566,7 +566,7 @@ Clippy with `--all-targets -- -D warnings`, generated protocol drift checks, fro
 and server build passed. The final full browser suite passed **49/49 tests**, including all five new analysis tests.
 
 Evidence limits: no new Linux/Windows run, no Microsoft Excel certification, and no exhaustive locale or
-browser matrix. The full-disk fault scenario requires `ROWFINITY_SMALL_FS` and skips that scenario locally.
+browser matrix. The full-disk fault scenario requires `ALEPHGRID_SMALL_FS` and skips that scenario locally.
 The first browser run passed 48/49; the import journey exposed a test readiness race (the tab appears before
 its view opens), now synchronized on loaded rows. An initial Rust link failed because local build artifacts
 filled the disk; clearing generated artifacts and rebuilding with incremental compilation disabled succeeded.
@@ -600,7 +600,7 @@ The scope is [FORMULA_CATALOG.md](FORMULA_CATALOG.md), not full spreadsheet cert
 | Area | Evidence |
 |---|---|
 | Initial F.01 manifest | `E/catalog.rs::catalog_registry_and_metadata_match_the_pinned_engine`: 562 unique names, pinned dependency/version, exact registry status, table-status boundary and metadata requirements. |
-| F.02 baseline | `catalog_examples_match_independent_expectations`: 44 hand-calculated P0 examples evaluated through real Rowfinity sheets and checked again after reopening. |
+| F.02 baseline | `catalog_examples_match_independent_expectations`: 44 hand-calculated P0 examples evaluated through real Alephgrid sheets and checked again after reopening. |
 | Lookup boundary cases | `lookup_modes_errors_and_source_changes_have_golden_results`: duplicate reverse selection, missing/default, approximate next-larger, wildcards, index/range errors, recalculation and undo/reopen. |
 | Initial F.03 completion | `W/catalog.spec.ts`: built-in Tab insertion and actual range-based lookup, ordinary/quoted text suppression, persistence and no sheet completion in table context. Existing `functions.spec.ts` covers custom function completion and publishing/version changes. |
 | Search/help UX | `W/catalog.spec.ts`: at most 40 results, paging, filtering, empty states, explicit unverified/unsupported status and axe serious/critical checks. |

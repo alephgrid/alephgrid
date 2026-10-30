@@ -150,7 +150,7 @@ export async function replaceDialog(rpc: Rpc, table: string, workbookId: string)
   let preview: ReplacePreview | null = null;
   let previewSpec: ReturnType<typeof spec> | null = null;
   let generation = 0;
-  const key = `rowfinity-replace-${workbookId}`;
+  const key = `alephgrid-replace-${workbookId}`;
   let revision = Number(localStorage.getItem(key)) || 0;
   const spec = () => ({ table, column: column.value, find: find.value, replacement: replacement.value });
   const run = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { status.textContent = String(e); } };
