@@ -32,7 +32,7 @@ Current boundaries:
 - Named-range management and richer parser error locations remain unchecked in F.03.
 - Named-range APIs exist upstream, but their integration needs explicit collision protection
   against registered LAMBDAs, scope rules, transactional undo and rename/delete/reopen tests.
-- The existing inline-array XLOOKUP engine limitation remains unchanged.
+- Inline-array XLOOKUP is handled by the local engine patch described in [FORMULA_GAPS.md](FORMULA_GAPS.md).
 
 Verification: `web/e2e/references.spec.ts` tests reference-token boundaries, all four anchor states,
 qualified/quoted names, invalid coordinates, source-preserving range insertion, original edit

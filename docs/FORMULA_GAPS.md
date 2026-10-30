@@ -1,15 +1,16 @@
 # P0 formula compatibility gaps
 
-Pinned engine: IronCalc 0.9.1. Local reproductions: 28 October 2026.
-These cases block complete F.02 certification. Expected results are retained in the
-versioned catalog; six explicitly ignored desired-result regressions are separate
-from passing coverage. No dependency patch, upstream issue or upstream PR is included.
+Pinned engine: IronCalc 0.9.1 with the local `rowfinity-compat-1` patch (29 October 2026).
+The six original desired-result regressions now pass and run without ignores.
+See [patch provenance and removal conditions](../vendor/ironcalc_base/ROWFINITY_PATCHES.md).
+The table below preserves the original unpatched observations. This resolves those
+specific defects, not complete P0 certification or all Excel compatibility.
 
 Use the catalog fixture: A1:A4 = 1, 2, 2, 4; B1:B4 = 10, 20, 30, 40;
 C1:C4 = alpha, beta, beta, gamma. All cases were reproduced through Rowfinity's
-actual sheet adapter. The five newly discovered cases also fail after reopening.
+actual sheet adapter. The original five newly discovered cases also failed after reopening; the patched catalog is checked before and after reopening.
 
-| Case ID | Formula | Expected | Observed | Next action |
+| Case ID | Formula | Expected | Original unpatched result | Patch scope |
 |---|---|---|---|---|
 | averageifs-03 | `=AVERAGEIFS(B1:B4,A1:A3,2)` | `#VALUE!` | `25` | Validate dimensions before evaluation upstream |
 | countifs-02 | `=COUNTIFS(A1:A4,2,B1:B3,">0")` | `#VALUE!` | `2` | Validate every criteria range upstream |
@@ -34,19 +35,20 @@ empty-string arguments with `ignore_empty=TRUE`; this scalar case needs direct E
 comparison during upstream triage rather than treating the empty-cell documentation alone
 as proof of scalar parity. The expected result remains an explicit product contract.
 
-## Reproduce and resolve
+## Reproduce and follow up
 
 ```bash
-CARGO_INCREMENTAL=0 cargo test -p rowfinity-engine tests::catalog -j 1
-# Deliberately fails until the six engine gaps are resolved:
-CARGO_INCREMENTAL=0 cargo test -p rowfinity-engine tests::catalog -j 1 -- --ignored
+CARGO_INCREMENTAL=0 cargo test --workspace --lib tests::catalog -j 1
 ```
 
-1. Reproduce each minimal case on current upstream as well as the pinned version.
-2. Check existing issues, then prepare a focused engine regression and proposed fix.
-3. Adopt a reviewed pinned release/commit; avoid a formula-text rewrite in Rowfinity.
-4. Re-run the desired-result tests, source-change/undo/reopen tests and browser tests.
-5. Remove the corresponding ignore and change its manifest status only after the fix
-   passes. Update the asserted known-gap inventory and record the dependency version.
+All 121 catalog cases are enabled, alongside dedicated regressions and a 23-case
+boundary suite checked before and after reopening. The added XLOOKUP support covers
+one-dimensional inline lookup arrays and equally shaped inline/range results;
+multi-column result spills and range-lookup/inline-result combinations remain outside
+this patch. Binary searches retain IronCalc's sorted-input precondition.
 
-This document is a triage package, not a claim that current upstream has the same defects.
+Before removing the local patch, reproduce on current upstream, check existing issues,
+and prepare focused upstream tests/proposals. Adopt an upstream release only after
+these regressions pass. No upstream issue or PR was submitted by this change.
+TEXTJOIN scalar empty-string behavior remains a Rowfinity contract pending independent
+Excel/Sheets parity evidence. Broader coercion/argument-mode certification remains open.

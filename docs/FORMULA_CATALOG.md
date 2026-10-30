@@ -52,16 +52,14 @@ large-table compilation, cross-engine recalculation and the analyst gate remain 
 [the implementation checklist](IMPLEMENTATION_CHECKLIST.md). Research context is in the
 [comparison matrix](FORMULA_COMPATIBILITY_MATRIX.md) and [execution design](SPREADSHEET_COMPETITIVENESS.md).
 
-## Known XLOOKUP array-input gap
+## XLOOKUP array-input gap (resolved locally)
 
-During this increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
-the independent expected answer is `20`. Range-based lookup over the same values passes.
-The desired-result regression `xlookup_inline_arrays_should_find_a_present_key` is explicitly
-ignored in the passing baseline and can be run with `--ignored` during upstream triage.
-It is not evidence of supported behavior and must not be removed just to obtain a green suite.
-[Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338) is related; test current
-upstream before deciding whether to extend that report or propose a separate fix. No issue or
-upstream PR was sent as part of this increment. F.02 remains incomplete.
+During the first increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
+the independent expected answer is `20`. The local `rowfinity-compat-1` patch now returns `20`
+and `xlookup_inline_arrays_should_find_a_present_key` runs without `--ignored`. The patch covers
+one-dimensional inline lookup arrays with equally shaped inline/range results only; see
+[FORMULA_GAPS.md](FORMULA_GAPS.md). [Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338)
+is related. No upstream issue or PR has been sent, and current upstream has not been reproduced.
 
 The next editor increment adds [F4 reference locking, same-sheet range picking and reference hints](FORMULA_EDITOR.md). Broader F.03 capabilities remain pending.
 
@@ -88,7 +86,7 @@ BMP examples do not certify emoji/grapheme handling. Locale/date-system parity,
 complete coercion matrices, all optional arguments and broad performance certification
 remain future work. F.02 and F.T01 remain unchecked overall.
 
-Verification found **115 passing cases and six known gaps** in the 121-case suite.
-Five gaps are new; inline-array XLOOKUP was already tracked. See the
+The local `rowfinity-compat-1` patch resolves the six original gaps: **all 121 cases pass**. This certifies those inputs only; broader P0 mode/coercion coverage remains incomplete.
+The original failures and remaining upstream work are recorded in the
 [minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
 receive a verified label; each has a separately runnable desired-result regression.

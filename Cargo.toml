@@ -24,3 +24,7 @@ strip = true
 [profile.dev.package.libduckdb-sys]
 opt-level = 1
 debug = false
+
+# Temporary, reviewable compatibility fixes; see vendor/ironcalc_base/ROWFINITY_PATCHES.md.
+[patch.crates-io]
+ironcalc_base = { path = "vendor/ironcalc_base" }

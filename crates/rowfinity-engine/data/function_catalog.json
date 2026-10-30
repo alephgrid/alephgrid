@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "catalog_version": "2026-10-28.2",
+  "catalog_version": "2026-10-29.1",
   "engine": "ironcalc-0.9.1",
   "sources": {
     "google": "https://support.google.com/docs/table/25273?hl=en"
@@ -794,7 +794,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known gap: unequal ranges. IronCalc 0.9.1 returns 25. Desired compatibility result retained; upstream triage pending."
+        "Original IronCalc 0.9.1 defect covered by local rowfinity-compat-1 regression; other modes remain uncertified."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -833,8 +833,8 @@
           "mode": "unequal ranges",
           "formula": "=AVERAGEIFS(B1:B4,A1:A3,2)",
           "expected": "#VALUE!",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns 25. Desired compatibility result retained; upstream triage pending."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         }
       ]
     },
@@ -2391,7 +2391,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known gap: unequal ranges. IronCalc 0.9.1 returns 2. Desired compatibility result retained; upstream triage pending."
+        "Original IronCalc 0.9.1 defect covered by local rowfinity-compat-1 regression; other modes remain uncertified."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -2422,8 +2422,8 @@
           "mode": "unequal ranges",
           "formula": "=COUNTIFS(A1:A4,2,B1:B3,\">0\")",
           "expected": "#VALUE!",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns 2. Desired compatibility result retained; upstream triage pending."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         }
       ]
     },
@@ -11468,7 +11468,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known gap: unequal ranges. IronCalc 0.9.1 returns 50. Desired compatibility result retained; upstream triage pending."
+        "Original IronCalc 0.9.1 defect covered by local rowfinity-compat-1 regression; other modes remain uncertified."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -11507,8 +11507,8 @@
           "mode": "unequal ranges",
           "formula": "=SUMIFS(B1:B4,A1:A3,2)",
           "expected": "#VALUE!",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns 50. Desired compatibility result retained; upstream triage pending."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         }
       ]
     },
@@ -12049,7 +12049,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known gap: skip empty strings. IronCalc 0.9.1 returns a--b. Desired compatibility result retained; upstream triage pending."
+        "Original IronCalc 0.9.1 defect covered by local rowfinity-compat-1 regression; other modes remain uncertified."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -12072,8 +12072,8 @@
           "mode": "skip empty strings",
           "formula": "=TEXTJOIN(\"-\",TRUE,\"a\",\"\",\"b\")",
           "expected": "a-b",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns a--b. Desired compatibility result retained; upstream triage pending."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         },
         {
           "id": "textjoin-02",
@@ -13017,7 +13017,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known gap: nonpositive column. IronCalc 0.9.1 returns #REF!. Desired compatibility result retained; upstream triage pending."
+        "Original IronCalc 0.9.1 defect covered by local rowfinity-compat-1 regression; other modes remain uncertified."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -13080,8 +13080,8 @@
           "mode": "nonpositive column",
           "formula": "=VLOOKUP(2,A1:B4,0,FALSE)",
           "expected": "#VALUE!",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns #REF!. Desired compatibility result retained; upstream triage pending."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         }
       ]
     },
@@ -13338,7 +13338,7 @@
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
-        "Known IronCalc 0.9.1 gap: XLOOKUP with inline lookup/return arrays can return #N/A for a present key. Use sheet ranges; array-input compatibility is not certified."
+        "Local rowfinity-compat-1 supports one-dimensional inline lookup arrays with equally shaped array/range results. Range lookup with inline result arrays and multi-column result spills remain unsupported."
       ],
       "evidence": [
         "catalog_examples_match_independent_expectations",
@@ -13433,8 +13433,8 @@
           "mode": "inline arrays",
           "formula": "=XLOOKUP(2,{1;2;2},{10;20;30})",
           "expected": "20",
-          "status": "known_gap",
-          "note": "IronCalc 0.9.1 returns #N/A; desired result retained. Related upstream issue 1338."
+          "status": "verified",
+          "note": "Verified with local rowfinity-compat-1 patch; see docs/FORMULA_GAPS.md. Does not certify other argument modes."
         }
       ]
     },
@@ -13755,5 +13755,6 @@
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
     }
-  ]
+  ],
+  "engine_patch": "rowfinity-compat-1"
 }

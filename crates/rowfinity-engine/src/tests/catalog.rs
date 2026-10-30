@@ -11,6 +11,7 @@ fn catalog_registry_and_metadata_match_the_pinned_engine() {
     let c = catalog();
     assert_eq!(c["schema_version"], 2);
     assert_eq!(c["engine"], "ironcalc-0.9.1");
+    assert_eq!(c["engine_patch"], "rowfinity-compat-1");
     let lock = include_str!("../../../../Cargo.lock");
     let pinned = lock.split("[[package]]").find(|p| p.contains("name = \"ironcalc_base\"\n")).unwrap();
     assert!(pinned.contains("version = \"0.9.1\"\n"), "review catalog evidence when upgrading IronCalc");
@@ -44,10 +45,10 @@ fn certification_cases_match_independent_expectations() {
     let cases: Vec<_> = c["functions"].as_array().unwrap().iter()
         .flat_map(|f| f["verification_cases"].as_array().unwrap()).collect();
     assert_eq!(cases.len(), 121, "review certification case changes explicitly");
-    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 115);
+    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 121);
     let gaps: BTreeSet<_> = cases.iter().filter(|c| c["status"] == "known_gap")
         .map(|c| c["id"].as_str().unwrap()).collect();
-    assert_eq!(gaps, BTreeSet::from(["averageifs-03", "countifs-02", "sumifs-03", "textjoin-01", "vlookup-06", "xlookup-10"]),
+    assert_eq!(gaps, BTreeSet::new(),
         "changing the known-gap set requires review of the desired-result regressions");
     let mut ids = BTreeSet::new();
     for (row, case) in cases.iter().enumerate() {
@@ -74,7 +75,7 @@ fn certification_cases_match_independent_expectations() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-fn assert_known_gap(id: &str) {
+fn assert_compatibility_regression(id: &str) {
     let c = catalog();
     let case = c["functions"].as_array().unwrap().iter()
         .flat_map(|f| f["verification_cases"].as_array().unwrap())
@@ -86,19 +87,18 @@ fn assert_known_gap(id: &str) {
     assert_eq!(cell_text(&t.wb, 0, 0, 3).unwrap_or_default(), case["expected"].as_str().unwrap(), "{id}: {}", case["formula"]);
 }
 
-macro_rules! known_gap_test {
+macro_rules! compatibility_regression_test {
     ($name:ident, $id:literal) => {
         #[test]
-        #[ignore = "Known IronCalc 0.9.1 compatibility gap; see docs/FORMULA_GAPS.md"]
-        fn $name() { assert_known_gap($id); }
+        fn $name() { assert_compatibility_regression($id); }
     };
 }
 
-known_gap_test!(averageifs_should_reject_unequal_ranges, "averageifs-03");
-known_gap_test!(countifs_should_reject_unequal_ranges, "countifs-02");
-known_gap_test!(sumifs_should_reject_unequal_ranges, "sumifs-03");
-known_gap_test!(textjoin_should_skip_empty_strings_when_requested, "textjoin-01");
-known_gap_test!(vlookup_zero_column_should_return_value_error, "vlookup-06");
+compatibility_regression_test!(averageifs_should_reject_unequal_ranges, "averageifs-03");
+compatibility_regression_test!(countifs_should_reject_unequal_ranges, "countifs-02");
+compatibility_regression_test!(sumifs_should_reject_unequal_ranges, "sumifs-03");
+compatibility_regression_test!(textjoin_should_skip_empty_strings_when_requested, "textjoin-01");
+compatibility_regression_test!(vlookup_zero_column_should_return_value_error, "vlookup-06");
 
 #[test]
 fn catalog_examples_match_independent_expectations() {
@@ -154,10 +154,8 @@ fn lookup_modes_errors_and_source_changes_have_golden_results() {
     assert_eq!(cell_text(&t.wb, 0, 11, 3).as_deref(), Some("50"));
 }
 
-/// Desired compatibility, deliberately excluded from the passing baseline. Run this
-/// explicitly when evaluating an IronCalc upgrade; remove ignore only after fixing it.
+/// Regression for the locally patched inline-array lookup path.
 #[test]
-#[ignore = "IronCalc 0.9.1 array-input XLOOKUP gap; upstream issue 1338 is related"]
 fn xlookup_inline_arrays_should_find_a_present_key() {
     let mut t = TempWb::new();
     t.wb.with_sheets(|s| {
@@ -165,4 +163,45 @@ fn xlookup_inline_arrays_should_find_a_present_key() {
         s.set(0, &[sheet_input(0, 0, "=XLOOKUP(2,{1;2;2},{10;20;30})")])
     }).unwrap();
     assert_eq!(cell_text(&t.wb, 0, 0, 0).as_deref(), Some("20"));
+}
+
+#[test]
+fn patched_formula_boundaries_survive_reopen() {
+    let cases = [
+        ("=SUMIFS(A1:A3,B1:C3,1)", "#VALUE!"),
+        ("=AVERAGEIFS(A1:A3,B1:C3,1)", "#VALUE!"),
+        ("=COUNTIFS(A1:A3,1,B1:C3,1)", "#VALUE!"),
+        ("=SUMIFS(B1:B4,A1:A4,2)", "50"),
+        ("=AVERAGEIFS(B1:B4,A1:A4,2)", "25"),
+        ("=COUNTIFS(A1:A4,2,B1:B4,\">0\")", "2"),
+        ("=TEXTJOIN(\"-\",FALSE,\"a\",\"\",\"b\")", "a--b"),
+        ("=TEXTJOIN(\"-\",TRUE,\"\",\"\")", ""),
+        ("=VLOOKUP(2,A1:B4,-1,FALSE)", "#VALUE!"),
+        ("=VLOOKUP(2,A1:B4,3,FALSE)", "#REF!"),
+        ("=XLOOKUP(2,{1,2,2},{10,20,30})", "20"),
+        ("=XLOOKUP(2,{1;2;2},{10;20;30},\"none\",0,-1)", "30"),
+        ("=XLOOKUP(9,{1;2;2},{10;20;30},\"none\")", "none"),
+        ("=XLOOKUP(9,{1;2;2},{10;20;30})", "#N/A"),
+        ("=XLOOKUP(3,{1;2;4},{10;20;40},\"none\",-1)", "20"),
+        ("=XLOOKUP(3,{1;2;4},{10;20;40},\"none\",1)", "40"),
+        ("=XLOOKUP(2,{1;2;4},{10;20;40},\"none\",0,2)", "20"),
+        ("=XLOOKUP(2,{4;2;1},{40;20;10},\"none\",0,-2)", "20"),
+        ("=XLOOKUP(3,{1;2;4},{10;20;40},\"none\",0,2)", "none"),
+        ("=XLOOKUP(2,{1;2;4},{10;20})", "#VALUE!"),
+        ("=XLOOKUP(2,{1;2;4},{10,20,40})", "#VALUE!"),
+        ("=XLOOKUP(2,{1;2;2;4},B1:B4)", "20"),
+        ("=XLOOKUP(\"b*\",{\"alpha\";\"beta\"},{10;20},\"none\",2)", "20"),
+    ];
+    let mut t = TempWb::new();
+    let mut inputs: Vec<SheetInput> = serde_json::from_value(catalog()["fixture"].clone()).unwrap();
+    for (row, (formula, _)) in cases.iter().enumerate() {
+        inputs.push(sheet_input(row as u32, 3, formula));
+    }
+    t.wb.with_sheets(|s| { s.create("Boundaries")?; s.set(0, &inputs) }).unwrap();
+    for reopen in [false, true] {
+        if reopen { t.reopen(); }
+        for (row, (formula, expected)) in cases.iter().enumerate() {
+            assert_eq!(cell_text(&t.wb, 0, row as u32, 3).as_deref(), Some(*expected), "{formula}, reopened={reopen}");
+        }
+    }
 }
