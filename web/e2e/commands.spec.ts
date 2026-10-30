@@ -50,8 +50,7 @@ async function sheetPage(page: Page, name: string, inputs: { row: number; column
   if (page.context().browser()?.browserType().name() === "chromium") {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
   }
-  // Tests cannot read the system clipboard there without a user action, so remember what
-  // the app writes to it; `pasteClipboard` falls back to that.
+  // Remember what the app writes to the clipboard; `pasteClipboard` delivers it.
   await page.addInitScript(() => {
     const write = navigator.clipboard.writeText.bind(navigator.clipboard);
     navigator.clipboard.writeText = async (text: string) => {
@@ -75,14 +74,14 @@ async function sheetPage(page: Page, name: string, inputs: { row: number; column
 
 /** The system clipboard's text, delivered as a paste event (what Mod+V does). */
 async function pasteClipboard(page: Page) {
-  const system = page.context().browser()?.browserType().name() === "chromium";
-  await page.evaluate(async (system) => {
-    const copied = (window as unknown as { __copied?: string }).__copied ?? "";
-    const text = system ? await navigator.clipboard.readText() : copied;
+  // The text the app wrote: reading the system clipboard back is unreliable in headless
+  // browsers (Linux has no clipboard owner; Firefox and WebKit need a user action).
+  await page.evaluate(async () => {
+    const text = (window as unknown as { __copied?: string }).__copied ?? "";
     const data = new DataTransfer();
     data.setData("text/plain", text);
     document.querySelector(".grid-host")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
-  }, system);
+  });
 }
 
 test("fill down and right translate formulas and undo as one step", async ({ page }) => {
