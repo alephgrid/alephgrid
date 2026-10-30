@@ -41,10 +41,11 @@ test("formula help searches a bounded catalog and distinguishes registry evidenc
   await expect(details.getByText("Verified case: unequal ranges", { exact: true })).toBeVisible();
   await expect(details).toContainText('expected "#VALUE!"');
   // A known gap stays labelled as such, with its reason.
-  await search.fill("IFERROR");
+  await search.fill("YEAR");
+  await dialog.getByRole("region", { name: "Matching formulas" }).getByRole("button", { name: "YEAR", exact: true }).click();
   await details.getByText("Mode evidence: 4 verified cases, 1 known gap", { exact: true }).click();
-  await expect(details.getByText("Known gap: empty cell", { exact: true })).toBeVisible();
-  await expect(details).toContainText("IronCalc returns 0, as a direct reference to an empty cell does.");
+  await expect(details.getByText("Known gap: empty cell is serial 0", { exact: true })).toBeVisible();
+  await expect(details).toContainText("Accepted gap (30 October 2026).");
   await search.fill("REGEXMATCH");
   await dialog.getByLabel("Formula availability").selectOption("not_registered");
   await expect(details).toContainText("not registered under this name");

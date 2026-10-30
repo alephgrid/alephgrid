@@ -3,7 +3,8 @@
 Pinned engine: IronCalc 0.9.1 with the local `alephgrid-compat-1` patch (29 October 2026).
 The six original desired-result regressions now pass and run without ignores. The coercion
 matrix (30 October 2026) found seven more differences: one is patched (LEFT/RIGHT/MID numeric
-text counts), six remain explicit known gaps (below).
+text counts), two were wrong expectations corrected from observed Excel output (IFERROR/IFNA
+of an empty cell), and four are accepted date-system gaps (below).
 See [patch provenance and removal conditions](../vendor/ironcalc_base/ALEPHGRID_PATCHES.md).
 The table below preserves the original unpatched observations. This resolves those
 specific defects, not complete P0 certification or all Excel compatibility.
@@ -43,7 +44,7 @@ as proof of scalar parity. The expected result remains an explicit product contr
 CARGO_INCREMENTAL=0 cargo test --workspace --lib tests::catalog -j 1
 ```
 
-All 277 catalog cases run (271 verified, 6 known gaps checked to still differ), alongside
+All 277 catalog cases run (273 verified, 4 accepted gaps checked to still differ), alongside
 dedicated regressions and a 23-case boundary suite checked before and after reopening. The added XLOOKUP support covers
 one-dimensional inline lookup arrays and equally shaped inline/range results;
 multi-column result spills and range-lookup/inline-result combinations remain outside
@@ -60,24 +61,34 @@ Excel/Sheets parity evidence. Broader coercion/argument-mode certification remai
 The 156 coercion cases use typed inputs in F1:G8 (number, text `'2`, TRUE, empty, `=NA()`,
 `=""`, Unicode text, negative decimal, and three wildcard strings). Expected values cite the
 Microsoft Excel rule for each case (`oracle` in the catalog), not this engine's output.
-150 pass; these six are labelled `known_gap`:
+150 passed at first; the six differences and their resolution:
 
 | Case ID | Formula | Expected | IronCalc 0.9.1 + patch | Decision |
 |---|---|---|---|---|
-| day-c01 | `=DAY(0)` | `0` | `#NUM!` | Date system, not patched |
-| day-c02 | `=DAY(F1)` (serial 2) | `2` | `1` | Date system, not patched |
-| month-c01 | `=MONTH(0)` | `1` | `#NUM!` | Date system, not patched |
-| year-c01 | `=YEAR(F4)` (empty → 0) | `1900` | `#NUM!` | Date system, not patched |
-| iferror-c02 | `=IFERROR(F4,"x")` | empty text | `0` | Confirm against Excel output first |
-| ifna-c02 | `=IFNA(F4,"x")` | empty text | `0` | Confirm against Excel output first |
+| day-c01 | `=DAY(0)` | `0` | `#NUM!` | Accepted gap: date numbering |
+| day-c02 | `=DAY(F1)` (serial 2) | `2` | `1` | Accepted gap: date numbering |
+| month-c01 | `=MONTH(0)` | `1` | `#NUM!` | Accepted gap: date numbering |
+| year-c01 | `=YEAR(F4)` (empty → 0) | `1900` | `#NUM!` | Accepted gap: date numbering |
+| iferror-c02 | `=IFERROR(F4,"x")` | `0` (was: empty text) | `0` | Expectation corrected; verified |
+| ifna-c02 | `=IFNA(F4,"x")` | `0` (was: empty text) | `0` | Expectation corrected; verified |
 
-IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0. Excel's 1900 system numbers
-serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ;
-from serial 61 (1900-03-01) the systems agree (`day-c03`, `month-c03`). Changing this would
-also change date formatting, parsing and XLSX round trips, so it needs upstream discussion
-rather than a local patch. For IFERROR/IFNA, Microsoft's reference says an empty value is
-treated as empty text; IronCalc returns 0, as for `=F4`. The expected value stays as
-documented until independent Excel output confirms or contradicts it.
+**Dates before 1900-03-01 (accepted).** IronCalc numbers serial 1 as 1899-12-31 and rejects
+serial 0. Excel's 1900 system numbers serial 1 as 1900-01-01 and counts the fictitious
+1900-02-29, so serials below 61 differ; from serial 61 (1900-03-01) the systems agree
+(`day-c03`, `month-c03`). IronCalc is consistent with itself: `DATE(1900,1,1)` is serial 2 and
+`DAY` reads it back as 1. A patch limited to DAY/MONTH/YEAR was tried and rejected: it made
+`DAY(DATE(1900,1,1))` return 2 and broke six upstream tests that pin the current numbering on
+purpose. Matching Excel needs one change to IronCalc's date numbering (DATE, DATEVALUE,
+parsing, formatting, financial functions and XLSX), which is upstream work tracked in F.14.
+Practical effect: only raw serials 0–60 and dates in January–February 1900 differ; the most
+likely case is `YEAR` of an empty cell, which is `#NUM!` here and 1900 in Excel.
+
+**IFERROR/IFNA of an empty cell (corrected).** Microsoft's function reference says an empty
+value is treated as empty text, but observed Excel (and OpenOffice) output is 0, the same as a
+direct reference to the empty cell. This was recorded by Microsoft in OASIS OpenFormula issue
+[OFFICE-3468](https://issues.oasis-open.org/browse/OFFICE-3468), and ODF 1.2 removed the
+empty-string rule to match. The expected value is now 0 and both cases are verified; IronCalc
+already returns 0, and no engine change was made.
 
 The test guards these gaps in both directions: a gap that starts matching its expected
 value fails the suite until it is reviewed and relabelled `verified`, and the gap set is

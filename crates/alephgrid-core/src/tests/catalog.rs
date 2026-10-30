@@ -62,10 +62,10 @@ fn certification_cases_match_independent_expectations() {
         .flat_map(|f| f["verification_cases"].as_array().unwrap()).collect();
     assert_eq!(cases.len(), 277, "review certification case changes explicitly");
     assert_eq!(cases.iter().filter(|c| c["group"] == "coercion").count(), 156);
-    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 271);
+    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 273);
     let gaps: BTreeSet<_> = cases.iter().filter(|c| c["status"] == "known_gap")
         .map(|c| c["id"].as_str().unwrap()).collect();
-    assert_eq!(gaps, BTreeSet::from(["day-c01", "day-c02", "iferror-c02", "ifna-c02", "month-c01", "year-c01"]),
+    assert_eq!(gaps, BTreeSet::from(["day-c01", "day-c02", "month-c01", "year-c01"]),
         "changing the known-gap set requires review of the desired-result regressions");
     let mut ids = BTreeSet::new();
     for (row, case) in cases.iter().enumerate() {
