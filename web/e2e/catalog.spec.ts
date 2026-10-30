@@ -48,7 +48,7 @@ test("formula help searches a bounded catalog and distinguishes registry evidenc
   await search.fill("REGEXMATCH");
   await dialog.getByLabel("Formula availability").selectOption("not_registered");
   await expect(details).toContainText("not registered under this name");
-  await expect(details).toContainText("No Rowfinity calculation example");
+  await expect(details).toContainText("No Alephgrid calculation example");
   await search.fill("does-not-exist");
   await expect(dialog.getByRole("status")).toHaveText("0 matching formulas");
   await expect(details).toHaveText("No matching formulas.");

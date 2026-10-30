@@ -1,4 +1,4 @@
-# Rowfinity implementation checklist
+# Alephgrid implementation checklist
 
 Created: 26 October 2026.
 
@@ -202,7 +202,7 @@ Build on the existing SQL console. Depends on phases 1–3; shared query permiss
   - Test: `sqlwork.rs` materializations and data revisions, `storage.rs` v2 fixture, `crash.rs` kill during refresh, `sql.spec.ts`. Evidence: TEST_MATRIX 4.06 (storage format 3).
 - [x] **4.07** Restrict SQL/formula capabilities, external readers, extension loading and internal metadata access for shared-host mode; console disabling alone is insufficient.
   - Test: `capabilities.rs`, `sqlpolicy.rs`, `sqlworkspace.rs` lockdown. Evidence: TEST_MATRIX 4.07 (fixed multi-statement execution and internal-table access). Applies to every server, not only shared hosts. Not organization authorization (phase 7).
-- [x] **4.08** Route supported mutations through operations that maintain Rowfinity metadata, history and revisions.
+- [x] **4.08** Route supported mutations through operations that maintain Alephgrid metadata, history and revisions.
   - Test: `capabilities.rs` reference model and refusals, `sqlworkspace.rs`, `sql.spec.ts`. Evidence: TEST_MATRIX 4.08. INSERT/UPDATE/DELETE only; other DDL/DML refused.
 - [x] **4.T01** Test 4.01–4.06: schema/autocomplete correctness, bound parameters, hostile strings, joins/CTEs/calculated columns, exact values, truncated previews, cancellation and saved-result refresh/reopen in API and browser journeys.
   - Evidence: TEST_MATRIX 4.T01; pass 2026-10-26 (local).
@@ -249,7 +249,7 @@ Verification (27 October 2026): [analysis guide](ANALYSIS.md), engine/server `an
 
 ## F. Deliver familiar spreadsheet formulas at analytical scale
 
-New planning work; phase 5 custom functions and phase 6 bounded analysis remain completed within their documented scope. This phase closes built-in compatibility, editor and large-table formula gaps. Read the [562-function matrix](FORMULA_COMPATIBILITY_MATRIX.md), [execution design](SPREADSHEET_COMPETITIVENESS.md) and [keyboard/upstream plan](SPREADSHEET_INTERACTION_PLAN.md). Registry presence is not a completion checkmark.
+New planning work; phase 5 custom functions and phase 6 bounded analysis remain completed within their documented scope. This phase closes built-in compatibility, editor and large-table formula gaps. Read the [function catalog](FORMULA_CATALOG.md), [table formulas](TABLE_FORMULAS.md) and [keyboard reference](KEYBOARD.md). Registry presence is not a completion checkmark.
 
 Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on phases 2–6; team release also requires phases 7/9. S3, Python, MCP and Kubernetes do not block the local analyst gate. P2/deferred catalog rows are backlog proposals, not prerequisites for F.15.
 
@@ -281,7 +281,7 @@ Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on p
 - [ ] **F.11** Extend phase 6 pivots with multiple measures, totals/subtotals, calculated measures and bounded drill-down; add line/scatter charts, shared slicers and persisted dashboard layouts with explicit limits.
 - [ ] **F.12** Add validation/dropdowns, deduplication, split/trim/type-conversion previews and formula inspection; use atomic/reversible mutations or derived result tables.
 - [ ] **F.13** Add XLSX compatibility reports for unsupported formulas, arrays, styles and table references; never silently replace a live formula with a value. Publish reproducible sample workbooks.
-- [ ] **F.14** Triage missing pure functions and defects against current IronCalc; prepare focused upstream proposals/tests. Track temporary patches, pinned upgrades and removal conditions; keep connectors/UI/DuckDB integration in Rowfinity.
+- [ ] **F.14** Triage missing pure functions and defects against current IronCalc; prepare focused upstream proposals/tests. Track temporary patches, pinned upgrades and removal conditions; keep connectors/UI/DuckDB integration in Alephgrid.
 - [ ] **F.T01** Test F.01–F.04: independent golden values per function/mode, missing/duplicate keys, first/last matches, wildcard escapes, mixed types, blanks/errors, unequal ranges, Unicode, absolute/mixed references, keyboard-only formula entry and undo/reopen.
 - [ ] **F.T02** Test F.05–F.09: independent small reference evaluator versus batched plans, duplicate/cardinality invariants, stable ordering, cycles, source rename/delete/reorder, cross-engine errors, concurrent source edits, cancellation/fault rollback and stale-cache rejection.
 - [ ] **F.T03** Test F.10–F.13: spill collision/size refusal, dynamic arrays, pivot/filter totals, chart bounds, validation bypass attempts, XLSX provenance fixtures and explicit incompatibility reports; include round-trip and real-browser journeys.
@@ -307,7 +307,7 @@ Depends on phase 3 and the SQL restrictions in phase 4. Design can begin earlier
 - [ ] **7.14** Make Open workbook automatically locate/start compatible capacity and route collaborators to its owner; show queued/starting/ready/draining/failed states with actionable errors.
 - [ ] **7.15** Add optional profile selection and dedicated-allocation requests for authorized users; preserve workbook URL, ownership and version pins across controlled resize/restart.
 - [ ] **7.16** Implement idle shutdown based on meaningful activity and active jobs; checkpoint/drain before stopping, retain storage and show its retention/cost implications. Heartbeats alone must not keep compute alive forever.
-- [ ] **7.17** Define identity-provider claim mapping and revocation behavior; keep authorization in Rowfinity and reject untrusted forwarded identity headers.
+- [ ] **7.17** Define identity-provider claim mapping and revocation behavior; keep authorization in Alephgrid and reject untrusted forwarded identity headers.
 - [ ] **7.T01** Test 7.01–7.07, 7.10–7.11 and 7.17: positive/negative role-operation matrix across every HTTP/WS path, cross-space object IDs, export/query/function access, expired/revoked sessions, secret redaction and audit attribution.
 - [ ] **7.T02** Test 7.08–7.09: same/different-row concurrent edits, structural races, duplicate/delayed/missed events, reconnect and undo under the documented conflict policy.
 - [ ] **7.T03** Test 7.13–7.16: concurrent quota admission, forged profile requests, two collaborators opening a stopped workbook, failed start, controlled resize, heartbeat-only idle and long-running jobs during idle evaluation.
@@ -424,7 +424,7 @@ These are optional follow-on decisions, not blockers for a useful open-source re
 - [ ] **12.04** Evaluate desktop packaging and a smaller-data browser-only mode.
 - [ ] **12.05** Evaluate an optional local/BYOK AI assistant with explicit data access and reviewable operations.
 - [ ] **12.06** Evaluate general Python notebooks and table-returning function jobs separately from pure cell functions.
-- [ ] **12.07** Evaluate a Microsoft Excel add-in if users need custom Rowfinity functions inside Excel itself.
+- [ ] **12.07** Evaluate a Microsoft Excel add-in if users need custom Alephgrid functions inside Excel itself.
 - [ ] **12.08** Evaluate optional JupyterHub integration through supported authentication/routing contracts for existing customer deployments; do not fork or require JupyterHub core.
 - [ ] **12.T01** For each evaluation 12.01–12.08, record demand, decision, prototype evidence, cost/operational tradeoffs and acceptance tests if adopted. Checking an evaluation does not mean its proposed feature is implemented; add implementation tasks before advertising support.
 

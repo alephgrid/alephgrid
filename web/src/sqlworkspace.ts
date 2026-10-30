@@ -136,7 +136,7 @@ export class SqlWorkspace {
   }
 
   private get draftKey(): string {
-    return `rowfinity:sql-draft:${this.host.workbookId}`;
+    return `alephgrid:sql-draft:${this.host.workbookId}`;
   }
 
   // ---------------------------------------------------------------- opening

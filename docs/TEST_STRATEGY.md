@@ -1,6 +1,6 @@
 # Test strategy
 
-Rowfinity holds people's data, so reliability is a feature. The approach borrows from
+Alephgrid holds people's data, so reliability is a feature. The approach borrows from
 [SQLite's testing](https://sqlite.org/testing.html): several independent layers, boundary
 values, fault injection, randomized operation sequences checked against a simple model,
 and recovery checks. It does not claim SQLite's level of assurance. Coverage numbers and
@@ -32,9 +32,9 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
 | Layer | Where | What it covers |
 |---|---|---|
 | A. Unit | `#[cfg(test)]` modules in `crates/*/src` (`wire.rs`, `sql.rs`, `formula.rs`) | Pure transformations: exact-value encoding, input validation, SQL lexing, formula reference mapping |
-| B. Integration | `crates/rowfinity-engine/src/tests/*` (real DuckDB and IronCalc, file-backed workbooks); `crates/rowfinity-server/tests/api.rs` (real HTTP and WebSocket against an in-process server) | Persistence, import/export, SQL expansion, sheets, deletion lifecycle, uploads |
-| C. Browser end to end | `web/e2e/*.spec.ts` (Playwright with the installed Chrome, real `rowfinity` binary) | User journeys through the UI. Checks on-screen results (formula bar, toasts, status bar) and persisted state (exports, after restart or crash) |
-| D. Property / state machine | `crates/rowfinity-engine/src/tests/props.rs` (proptest) | Random edit, insert, delete, reopen and sort sequences compared after every step with a `Vec` reference model. Failing seeds are shrunk and saved in `proptest-regressions/` |
+| B. Integration | `crates/alephgrid-core/src/tests/*` (real DuckDB and IronCalc, file-backed workbooks); `crates/alephgrid-server/tests/api.rs` (real HTTP and WebSocket against an in-process server) | Persistence, import/export, SQL expansion, sheets, deletion lifecycle, uploads |
+| C. Browser end to end | `web/e2e/*.spec.ts` (Playwright with the installed Chrome, real `alephgrid` binary) | User journeys through the UI. Checks on-screen results (formula bar, toasts, status bar) and persisted state (exports, after restart or crash) |
+| D. Property / state machine | `crates/alephgrid-core/src/tests/props.rs` (proptest) | Random edit, insert, delete, reopen and sort sequences compared after every step with a `Vec` reference model. Failing seeds are shrunk and saved in `proptest-regressions/` |
 | E. Differential / metamorphic | `tests/sql.rs`, `tests/precision.rs`, `tests/sheets.rs`, `tests/journey.rs` | Formula columns vs the same expression written inline; closed-form sums; Parquet round trip compared with `EXCEPT`; xlsx export→import equality; export before and after restart |
 | F. Fault injection and recovery | `faults::fail_next(point)` in the engine; raw-TCP interrupted uploads; `tests/crash.rs` (SIGKILL of the real binary) | Failed saves, failed mutations, interrupted uploads, process kill during writes |
 | G. Fuzz | Not yet implemented, apart from the proptest generators over formula translation and table-name sanitizing. Planned targets: WebSocket frame parsing, CSV/xlsx import adapters, formula translation | — |
@@ -57,7 +57,7 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
   `write_durably`, `upload_write`, `open_workbook`, and start-stage hooks), dropped client
   connections mid-upload, clients that disappear or never read, `SIGKILL` of the server during and
   between writes, `SIGTERM` during edits and imports, a **genuinely full filesystem**
-  (`storage_faults.rs` on a 64 MB disk image or tmpfs named by `ROWFINITY_SMALL_FS`), read-only
+  (`storage_faults.rs` on a 64 MB disk image or tmpfs named by `ALEPHGRID_SMALL_FS`), read-only
   workbook and data directories, corrupt database files, damaged backups, and a lock held by
   another process.
 - **Not simulated:** power loss, `fsync` failures, torn or reordered writes, media errors,
@@ -89,10 +89,10 @@ Local runs do not count as scheduled or release checks having passed.
 
 ```bash
 cargo test --workspace                                      # A, B, D, E, F (fast tier)
-PROPTEST_CASES=2000 cargo test -p rowfinity-engine --lib props   # longer D run
-UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol # regenerate web/src/protocol.ts
+PROPTEST_CASES=2000 cargo test -p alephgrid-core --lib props   # longer D run
+UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol # regenerate web/src/protocol.ts
 cargo clippy --workspace --all-targets -- -D warnings
 (cd web && npm run build)                                   # type check + bundle
-cargo build -p rowfinity-server && (cd web && npm run e2e)  # C (needs Google Chrome)
-ROWFINITY_SMALL_FS=/path/to/small/fs cargo test -p rowfinity-server --test storage_faults  # real disk full
+cargo build -p alephgrid-server && (cd web && npm run e2e)  # C (needs Google Chrome)
+ALEPHGRID_SMALL_FS=/path/to/small/fs cargo test -p alephgrid-server --test storage_faults  # real disk full
 ```

@@ -1,12 +1,12 @@
-"""Targeted mutation check for Rowfinity's critical engine safeguards.
+"""Targeted mutation check for Alephgrid's critical engine safeguards.
 
 Run from the repository root: `python3 tools/mutants.py`. Each mutant disables one
 safeguard; the relevant engine tests must fail ("KILLED"). Sources are restored after
 each run. See docs/TEST_STRATEGY.md.
 """
 import pathlib, subprocess, sys
-W = pathlib.Path("crates/rowfinity-engine/src/workbook.rs")
-S = pathlib.Path("crates/rowfinity-engine/src/sheets.rs")
+W = pathlib.Path("crates/alephgrid-core/src/workbook.rs")
+S = pathlib.Path("crates/alephgrid-core/src/sheets.rs")
 mutants = [
   ("edit: skip exact-input check", W, "wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;", "let _ = wire::check_exact_input(col, value);", "tests::precision"),
   ("edit: empty batch not short-circuited", W, "        if edits.is_empty() {\n            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0 });\n        }\n", "", "tests::integrity"),
@@ -26,7 +26,7 @@ for name, path, old, new, filt in mutants:
         results.append((name, "MUTATION NOT APPLIED")); continue
     path.write_text(src.replace(old, new, 1))
     try:
-        r = subprocess.run(["cargo", "test", "-q", "-p", "rowfinity-engine", "--lib", filt], capture_output=True, text=True)
+        r = subprocess.run(["cargo", "test", "-q", "-p", "alephgrid-core", "--lib", filt], capture_output=True, text=True)
         out = r.stdout + r.stderr
         if "error[" in out or "could not compile" in out:
             results.append((name, "did not compile"))

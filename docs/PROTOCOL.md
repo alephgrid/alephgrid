@@ -6,7 +6,7 @@ token). Every frame is a JSON text message.
 The TypeScript types in [`web/src/protocol.ts`](../web/src/protocol.ts) are generated from
 the Rust types and are the precise definition of every request, event and result
 (`Op`, `Event`, `Results`). `cargo test` fails when that file is stale; regenerate with
-`UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`.
+`UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol`.
 
 ## Envelope
 

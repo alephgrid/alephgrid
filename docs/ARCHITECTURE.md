@@ -7,17 +7,17 @@
 │        │                     │                          │
 │        └──── Rpc (one WebSocket per workbook) ──────────┼──┐
 └─────────────────────────────────────────────────────────┘  │ JSON
-┌─────────────────── rowfinity (one binary) ──────────────┐  │
-│  rowfinity-server (axum)                                │◀─┘
+┌─────────────────── alephgrid (one binary) ──────────────┐  │
+│  alephgrid-server (axum)                                │◀─┘
 │   /ws/{id}        protocol (docs/PROTOCOL.md)           │
 │   /api/…          workbooks, streamed import, export    │
 │   embedded UI     web/dist via rust-embed               │
 │        │ spawn_blocking                                 │
-│  rowfinity-engine                                       │
+│  alephgrid-core                                       │
 │   Workbook = DuckDB file  ─ tables, views, formulas     │
 └────────────────────────────┬────────────────────────────┘
                              ▼
-        rowfinity-data/<workbook-id>/data.duckdb
+        alephgrid-data/<workbook-id>/data.duckdb
 ```
 
 ## Storage
@@ -129,7 +129,7 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
 
 Why not one engine for both tiers? IronCalc keeps every cell in memory (great for
 models, wrong for 100M rows). DuckDB is columnar and set-based (great for 100M rows,
-wrong for `=B4*C2`). Rowfinity keeps both and makes moving data between them one click.
+wrong for `=B4*C2`). Alephgrid keeps both and makes moving data between them one click.
 
 ## Workspaces
 
@@ -231,7 +231,7 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
 ## Security model
 
 * By default it binds to `127.0.0.1`: only you can reach it.
-* `--token` (or `ROWFINITY_TOKEN`) enables a shared bearer token for the API and
+* `--token` (or `ALEPHGRID_TOKEN`) enables a shared bearer token for the API and
   WebSocket.
 * User SQL and formulas are checked by the SQL policy (below) and run in a database that is
   closed to the outside world. `--disable-sql` additionally refuses every user-SQL operation.

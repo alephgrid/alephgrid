@@ -46,13 +46,13 @@ jobs:
       - run: cargo test --workspace
         env:
           PROPTEST_CASES: "96"
-          ROWFINITY_SMALL_FS: /mnt/rfsmall
+          ALEPHGRID_SMALL_FS: /mnt/rfsmall
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo build -p rowfinity-server
+      - run: cargo build -p alephgrid-server
       - uses: actions/upload-artifact@v4
         with:
-          name: rowfinity-debug
-          path: target/debug/rowfinity
+          name: alephgrid-debug
+          path: target/debug/alephgrid
 
   e2e:
     needs: rust
@@ -64,14 +64,14 @@ jobs:
           node-version: 22
       - uses: actions/download-artifact@v4
         with:
-          name: rowfinity-debug
+          name: alephgrid-debug
           path: target/debug
       # Debug builds serve the UI from web/dist on disk.
       - uses: actions/download-artifact@v4
         with:
           name: web-dist
           path: web/dist
-      - run: chmod +x target/debug/rowfinity
+      - run: chmod +x target/debug/alephgrid
       - run: npm ci
         working-directory: web
         env:

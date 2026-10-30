@@ -709,7 +709,7 @@ impl<'a> Model<'a> {
             TextArg::Scalar(ArrayNode::Number(1.0))
         };
         broadcast_text(cell, &[&text, &num], |i, j| {
-            // Rowfinity: numeric text and logical counts convert like other numeric arguments.
+            // Alephgrid: numeric text and logical counts convert like other numeric arguments.
             left_element(text.elem(i, j), self.text_number(num.elem(i, j)))
         })
     }
@@ -731,7 +731,7 @@ impl<'a> Model<'a> {
             TextArg::Scalar(ArrayNode::Number(1.0))
         };
         broadcast_text(cell, &[&text, &num], |i, j| {
-            // Rowfinity: numeric text and logical counts convert like other numeric arguments.
+            // Alephgrid: numeric text and logical counts convert like other numeric arguments.
             right_element(text.elem(i, j), self.text_number(num.elem(i, j)))
         })
     }
@@ -753,7 +753,7 @@ impl<'a> Model<'a> {
             Err(e) => return e,
         };
         broadcast_text(cell, &[&text, &start, &length], |i, j| {
-            // Rowfinity: numeric text and logical positions convert like other numeric arguments.
+            // Alephgrid: numeric text and logical positions convert like other numeric arguments.
             mid_element(text.elem(i, j), self.text_number(start.elem(i, j)), self.text_number(length.elem(i, j)))
         })
     }

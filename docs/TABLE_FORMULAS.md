@@ -11,7 +11,7 @@ over the whole table without copying rows into sheet cells:
 
 Existing calculated columns whose formula is a DuckDB SQL expression keep working unchanged;
 each formula column records its language (`sql` or `sheet`). This document is the contract the
-compiler implements (`crates/rowfinity-engine/src/table_formula/`). Anything not listed here is
+compiler implements (`crates/alephgrid-core/src/table_formula/`). Anything not listed here is
 refused with an explanation and the character position, never approximated.
 
 ## Pipeline
@@ -65,7 +65,7 @@ A result that is not finite (overflow) is `#NUM!`.
 
 **Blank.** A `NULL` source value is blank. Blank is `0` in arithmetic, `""` in text, `FALSE` as
 a condition, and equal to both `0` and `""` in comparisons. A formula whose whole result is
-blank (`=[@note]` on an empty note) stays blank: Rowfinity keeps `NULL` distinct from `0`,
+blank (`=[@note]` on an empty note) stays blank: Alephgrid keeps `NULL` distinct from `0`,
 where a spreadsheet would display `0`.
 
 **Empty text in non-text results.** `""` returned where the result is a Number, Logical or
@@ -81,7 +81,7 @@ Date (`=IFERROR([@a]/[@b], "")`) becomes blank. Any other mix of result types (`
 | Logical | `≠ 0` | `TRUE`/`FALSE` (any case); otherwise `#VALUE!` | — | serial `≠ 0` | `FALSE` |
 
 Text-to-number conversion does not accept thousands separators, currency symbols, percent
-signs or locale formats; sheets may. Number-to-text matches Rowfinity sheets for ordinary
+signs or locale formats; sheets may. Number-to-text matches Alephgrid sheets for ordinary
 magnitudes; numbers below 1e-5 or of 1e15 and above may be written differently.
 
 ## Comparison
@@ -123,7 +123,7 @@ sheets are F.09.
 
 Storage format 6 adds `language` (`sql` or `sheet`) to `_rf_columns`; opening an older
 workbook migrates it in one transaction after the usual `.v<N>.bak` copy, and every existing
-formula column stays `sql`. A Rowfinity build that only knows format 5 refuses format-6 files.
+formula column stays `sql`. A Alephgrid build that only knows format 5 refuses format-6 files.
 
 A `sheet` column adds two columns to the table's base relation: its typed value and a hidden
 `_rf_e_<name>` error column (names starting with `_rf_e_` are reserved). Formulas are layered

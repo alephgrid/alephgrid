@@ -1,4 +1,11 @@
-# Rowfinity
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/alephgrid-horizontal-inverse.svg">
+    <img src="assets/brand/alephgrid-horizontal-primary.svg" alt="Alephgrid" width="360">
+  </picture>
+</p>
+
+# Alephgrid
 
 **An open-source spreadsheet for data that doesn't fit in a spreadsheet.**
 Open CSV and Parquet files with hundreds of millions of rows, then scroll, sort,
@@ -8,11 +15,11 @@ on your laptop or your own server. Your data never leaves it, and there are no s
 tiers or paywalls.
 
 ```bash
-rowfinity flights.parquet          # opens http://127.0.0.1:7878 with the file loaded
-rowfinity --demo-rows 100000000    # or try it on 100M generated rows
+alephgrid flights.parquet          # opens http://127.0.0.1:7878 with the file loaded
+alephgrid --demo-rows 100000000    # or try it on 100M generated rows
 ```
 
-Rowfinity is a self-hostable alternative to cloud big-data spreadsheets: your data
+Alephgrid is a self-hostable alternative to cloud big-data spreadsheets: your data
 and credentials stay on your machines, workbooks open without cold starts, and
 export, SSO and every other feature are free.
 
@@ -45,7 +52,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 | Edit 1 cell / paste 1,000 cells | 3 ms / 43 ms |
 | Insert / delete a row mid-table | 312 ms / 173 ms |
 
-Reproduce with `rowfinity --demo-rows 20000000` and the script in `docs/bench.mjs`.
+Reproduce with `alephgrid --demo-rows 20000000` and the script in `docs/bench.mjs`.
 
 ## Features (v0.1)
 
@@ -71,10 +78,10 @@ Reproduce with `rowfinity --demo-rows 20000000` and the script in `docs/bench.mj
 Requires Rust 1.88+ and Node 20+.
 
 ```bash
-git clone https://github.com/<you>/rowfinity && cd rowfinity
+git clone https://github.com/<you>/alephgrid && cd alephgrid
 (cd web && npm install && npm run build)       # build the UI (embedded into the binary)
 cargo build --release
-./target/release/rowfinity --demo-rows 10000000
+./target/release/alephgrid --demo-rows 10000000
 ```
 
 The first build compiles DuckDB from source, which takes several minutes.
@@ -82,7 +89,7 @@ The first build compiles DuckDB from source, which takes several minutes.
 ### Docker (for a team)
 
 ```bash
-docker compose up -d        # edit ROWFINITY_TOKEN in docker-compose.yml first
+docker compose up -d        # edit ALEPHGRID_TOKEN in docker-compose.yml first
 open "http://localhost:7878/?token=change-me"
 ```
 
@@ -90,12 +97,12 @@ open "http://localhost:7878/?token=change-me"
 
 | Flag | Env | Default |
 |------|-----|---------|
-| `--data-dir` | `ROWFINITY_DATA_DIR` | `./rowfinity-data` |
-| `--host` / `--port` | `ROWFINITY_HOST` / `ROWFINITY_PORT` | `127.0.0.1` / `7878` |
-| `--token` | `ROWFINITY_TOKEN` | none (only safe on localhost) |
-| `--memory-limit` | `ROWFINITY_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
-| `--threads` | `ROWFINITY_THREADS` | all cores |
-| `--disable-sql` | `ROWFINITY_DISABLE_SQL` | SQL console enabled |
+| `--data-dir` | `ALEPHGRID_DATA_DIR` | `./alephgrid-data` |
+| `--host` / `--port` | `ALEPHGRID_HOST` / `ALEPHGRID_PORT` | `127.0.0.1` / `7878` |
+| `--token` | `ALEPHGRID_TOKEN` | none (only safe on localhost) |
+| `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
+| `--threads` | `ALEPHGRID_THREADS` | all cores |
+| `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL console enabled |
 | `--demo-rows N` | | generate a demo workbook |
 
 ## Formulas
@@ -142,7 +149,7 @@ and calculations run on the server. See [the analysis guide](docs/ANALYSIS.md) f
 ## Development
 
 ```bash
-cargo run -p rowfinity-server -- --demo-rows 1000000   # API on :7878
+cargo run -p alephgrid-server -- --demo-rows 1000000   # API on :7878
 cd web && npm run dev                                  # UI with hot reload on :5173 (proxies to :7878)
 cargo test --workspace
 ```
@@ -150,8 +157,8 @@ cargo test --workspace
 Layout:
 
 ```
-crates/rowfinity-engine   DuckDB tables, views, formula columns, IronCalc sheets (pure Rust library)
-crates/rowfinity-server   axum HTTP + WebSocket server, CLI, embedded UI
+crates/alephgrid-core   DuckDB tables, views, formula columns, IronCalc sheets (pure Rust library)
+crates/alephgrid-server   axum HTTP + WebSocket server, CLI, embedded UI
 web/                      TypeScript client (canvas grid, row cache, UI)
 docs/                     architecture, protocol, roadmap
 ```

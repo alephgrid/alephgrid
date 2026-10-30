@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 
-// `npm run dev` proxies the API to a running `rowfinity` server on :7878.
+// `npm run dev` proxies the API to a running `alephgrid` server on :7878.
 export default defineConfig({
   server: {
     port: 5173,

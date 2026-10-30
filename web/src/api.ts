@@ -4,7 +4,7 @@ import type {
   UploadPreview, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
 } from "./types";
 
-const TOKEN_KEY = "rowfinity:token";
+const TOKEN_KEY = "alephgrid:token";
 
 /** Pick up `?token=` once, remember it, and remove it from the address bar. */
 export function initToken(): void {
