@@ -388,18 +388,32 @@ fn decode_value(kind: &str, num: Option<f64>, text: Option<String>) -> crate::ta
         "text" => CellValue::Text(text.unwrap_or_default()),
         "bool" => CellValue::Bool(num.unwrap_or(0.0) != 0.0),
         "error" => CellValue::Error(text.unwrap_or_else(|| "#REF!".into())),
+        "array" => {
+            let rows: Vec<Vec<serde_json::Value>> = text.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            CellValue::Array(rows.into_iter().map(|r| r.into_iter().map(|x| {
+                decode_value(x[0].as_str().unwrap_or("blank"), x[1].as_f64(), x[2].as_str().map(str::to_string))
+            }).collect()).collect())
+        }
         _ => CellValue::Blank,
     }
 }
 
-fn encode_value(v: &crate::table_formula::CellValue) -> (&'static str, Option<f64>, Option<&str>) {
+fn encode_value(v: &crate::table_formula::CellValue) -> (&'static str, Option<f64>, Option<String>) {
     use crate::table_formula::CellValue;
     match v {
         CellValue::Blank => ("blank", None, None),
         CellValue::Number(n) => ("number", Some(*n), None),
-        CellValue::Text(t) => ("text", None, Some(t)),
+        CellValue::Text(t) => ("text", None, Some(t.clone())),
         CellValue::Bool(b) => ("bool", Some(if *b { 1.0 } else { 0.0 }), None),
-        CellValue::Error(e) => ("error", None, Some(e)),
+        CellValue::Error(e) => ("error", None, Some(e.clone())),
+        // Rows of [kind, value] pairs.
+        CellValue::Array(rows) => {
+            let json: Vec<Vec<serde_json::Value>> = rows.iter().map(|r| r.iter().map(|v| {
+                let (k, n, t) = encode_value(v);
+                serde_json::json!([k, n, t])
+            }).collect()).collect();
+            ("array", None, Some(serde_json::Value::from(json.into_iter().map(serde_json::Value::from).collect::<Vec<_>>()).to_string()))
+        }
     }
 }
 
@@ -434,7 +448,7 @@ pub fn set_table_cell_formula(conn: &Connection, slot: u32, formula: &str) -> Re
 
 pub fn set_table_cell_value(conn: &Connection, slot: u32, value: &crate::table_formula::CellValue) -> Result<()> {
     let (kind, num, text) = encode_value(value);
-    conn.execute("UPDATE _rf_table_cells SET kind = ?, num = ?, text = ? WHERE slot = ?", duckdb::params![kind, num, text, slot as i32])?;
+    conn.execute("UPDATE _rf_table_cells SET kind = ?, num = ?, text = ? WHERE slot = ?", duckdb::params![kind, num, text.as_deref(), slot as i32])?;
     Ok(())
 }
 
@@ -449,7 +463,7 @@ pub fn set_links(conn: &Connection, links: &[Link]) -> Result<()> {
     let mut stmt = conn.prepare("INSERT INTO _rf_links VALUES (?, ?, ?, ?, ?, ?, ?)")?;
     for l in links {
         let (kind, num, text) = encode_value(&l.value);
-        stmt.execute(duckdb::params![l.anchor as i32, l.cell.sheet, l.cell.row as i32, l.cell.column as i32, kind, num, text])?;
+        stmt.execute(duckdb::params![l.anchor as i32, l.cell.sheet, l.cell.row as i32, l.cell.column as i32, kind, num, text.as_deref()])?;
     }
     Ok(())
 }

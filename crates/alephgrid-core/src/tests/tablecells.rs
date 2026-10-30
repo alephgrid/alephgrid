@@ -234,3 +234,75 @@ fn a_failed_recalculation_leaves_tables_and_sheets_as_they_were() {
     assert_eq!(value(&t.wb, r, 0, 0), "985.5");
     assert_eq!(value(&t.wb, r, 0, 1), "1971");
 }
+
+/// F.10: table results spill into the sheet, follow their table, collide like any spill, are
+/// bounded, and export as values. By hand from the `report()` rows.
+#[test]
+fn table_results_spill_into_sheets() {
+    let (mut t, r) = report();
+    t.wb.set_sheet_cells(r, &[
+        sheet_input(0, 0, "=SORT(UNIQUE(orders[region]))"),
+        sheet_input(0, 2, "=FILTER(orders[amount], orders[region]=\"West\")"),
+        sheet_input(0, 4, "=TAKE(SORT(orders, 3, -1), 2)"),
+        sheet_input(0, 8, "=FILTER(orders[id], orders[amount]>1000, \"none\")"),
+        sheet_input(0, 10, "=SUM(C1:C2)"),
+    ]).unwrap();
+    // East, West, then the blank region last.
+    assert_eq!((0..4).map(|k| value(&t.wb, r, k, 0)).collect::<Vec<_>>(), ["East", "West", "", ""]);
+    assert_eq!([value(&t.wb, r, 0, 2), value(&t.wb, r, 1, 2), value(&t.wb, r, 2, 2)], ["100", "25.5", ""]);
+    // The two largest amounts, whole rows: (1, West, 100, …), (2, East, 50, …).
+    assert_eq!([value(&t.wb, r, 0, 4), value(&t.wb, r, 0, 5), value(&t.wb, r, 0, 6), value(&t.wb, r, 1, 5), value(&t.wb, r, 1, 6)], ["1", "West", "100", "East", "50"]);
+    assert_eq!(value(&t.wb, r, 0, 8), "none");
+    assert_eq!(value(&t.wb, r, 0, 10), "125.5");
+    assert_eq!(shown(&t.wb, r, 0, 2).1.as_deref(), Some("=FILTER(orders[amount], orders[region]=\"West\")"));
+    // The table changes; so does the result, and what reads it.
+    let v = t.wb.open_view(spec("orders")).unwrap();
+    t.wb.edit(v.view_id, &[edit(2, "amount", "30")]).unwrap();
+    assert_eq!(value(&t.wb, r, 1, 2), "30");
+    assert_eq!(value(&t.wb, r, 0, 10), "130");
+    // Something in the way: #SPILL!, as for any array.
+    t.wb.set_sheet_cells(r, &[sheet_input(1, 2, "x")]).unwrap();
+    assert_eq!(value(&t.wb, r, 0, 2), "#SPILL!");
+    t.wb.set_sheet_cells(r, &[sheet_input(1, 2, "")]).unwrap();
+    assert_eq!(value(&t.wb, r, 1, 2), "30");
+    // Too large for a sheet: refused when entered.
+    t.wb.create_table_from_query("big", "SELECT i FROM range(10001) t(i)").unwrap();
+    let e = t.wb.set_sheet_cells(r, &[sheet_input(20, 0, "=FILTER(big[i], big[i]>=0)")]).unwrap_err().to_string();
+    assert!(e.contains("more than 10000 cells") && e.contains("create a table from that view"), "{e}");
+    // Reopen, export.
+    t.wb.close_view(v.view_id);
+    t.reopen();
+    assert_eq!(value(&t.wb, r, 1, 0), "West");
+    let path = t.dir.path().join("out.xlsx");
+    let notes = t.wb.sheets().export_xlsx(&path).unwrap();
+    assert!(notes.iter().any(|n| n.starts_with("Report!C1:C2: the table formula =FILTER(orders[amount], orders[region]=\"West\") is exported as its 2×1 values")), "{notes:?}");
+    let (sheets, _) = crate::sheets::Sheets::preview_xlsx(&path).unwrap();
+    assert_eq!(sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Report"]);
+}
+
+/// F.10: named ranges feed dynamic arrays; renaming the name keeps them working. By hand
+/// from A1:A4 = 1, 2, 2, 4.
+#[test]
+fn named_ranges_feed_dynamic_arrays() {
+    let mut t = TempWb::new();
+    let s = t.wb.with_sheets(|sh| sh.create("Data")).unwrap().index;
+    t.wb.set_sheet_cells(s, &[sheet_input(0, 0, "1"), sheet_input(1, 0, "2"), sheet_input(2, 0, "2"), sheet_input(3, 0, "4")]).unwrap();
+    t.wb.with_sheets(|sh| sh.define_name("Sales", None, "=Data!$A$1:$A$4")).unwrap();
+    t.wb.set_sheet_cells(s, &[
+        sheet_input(0, 2, "=SUM(FILTER(Sales,Sales>1))"),
+        sheet_input(1, 2, "=ROWS(UNIQUE(Sales))"),
+        sheet_input(0, 4, "=SORT(Sales,1,-1)"),
+        sheet_input(0, 6, "=LET(x,MAX(Sales),x*2)"),
+    ]).unwrap();
+    let col = |wb: &Workbook, c: u32| (0..5).map(|r| cell_text(wb, s, r, c).unwrap_or_default()).collect::<Vec<_>>();
+    assert_eq!(cell_text(&t.wb, s, 0, 2).as_deref(), Some("8"));
+    assert_eq!(cell_text(&t.wb, s, 1, 2).as_deref(), Some("3"));
+    assert_eq!(col(&t.wb, 4), ["4", "2", "2", "1", ""]);
+    assert_eq!(cell_text(&t.wb, s, 0, 6).as_deref(), Some("8"));
+    t.wb.with_sheets(|sh| sh.update_name("Sales", None, "Units", None, "=Data!$A$1:$A$4")).unwrap();
+    t.wb.set_sheet_cells(s, &[sheet_input(3, 0, "10")]).unwrap();
+    assert_eq!(col(&t.wb, 4), ["10", "2", "2", "1", ""]);
+    assert_eq!(cell_text(&t.wb, s, 0, 2).as_deref(), Some("14"));
+    t.reopen();
+    assert_eq!(cell_text(&t.wb, s, 0, 6).as_deref(), Some("20"));
+}

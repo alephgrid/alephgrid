@@ -47,9 +47,18 @@ pub(crate) fn table_cell_problem(db: &Db, sheet: u32, row: u32, column: u32, inp
     if !trimmed.starts_with('=') {
         return Ok(None);
     }
-    let problem = db.shared.sheets.lock().unwrap_or_else(|e| e.into_inner()).check_formula(sheet, row, column, input)?;
-    // The sheet engine reports names it does not know as tables only after `name[`.
-    if !problem.as_ref().is_some_and(|p| p.message.starts_with("Table not found")) {
+    let (problem, names) = {
+        let sheets = db.shared.sheets.lock().unwrap_or_else(|e| e.into_inner());
+        (sheets.check_formula(sheet, row, column, input)?, sheets.names())
+    };
+    // The sheet engine reports names it does not know as tables only after `name[`; a table
+    // named alone (`SORT(orders)`) reads as an unknown name there, unless a name defines it.
+    let unknown_table = problem.as_ref().is_some_and(|p| p.message.starts_with("Table not found"));
+    let names_table = problem.is_none() && crate::table_formula::references(trimmed).is_ok_and(|refs| refs.iter().any(|r| match r {
+        Reference::Table { table, .. } => !names.iter().any(|n| n.name.eq_ignore_ascii_case(table)) && db.table_exists(table).unwrap_or(false),
+        _ => false,
+    }));
+    if !unknown_table && !names_table {
         return Ok(None);
     }
     let lead = input.chars().count() - trimmed.chars().count();
@@ -71,6 +80,7 @@ fn kind(v: &CellValue) -> u8 {
         CellValue::Text(_) => 1,
         CellValue::Bool(_) => 2,
         CellValue::Blank | CellValue::Number(_) | CellValue::Error(_) => 0,
+        CellValue::Array(_) => 3,
     }
 }
 
@@ -241,10 +251,16 @@ impl Workbook {
                 new.push((k, formula));
             }
         }
+        let spills: Vec<bool> = new.iter().map(|(_, f)| self.db().table_cell_spills(f)).collect();
         self.mutating("sheets", None, |wb| {
-            for (k, formula) in &new {
+            for ((k, formula), spills) in new.iter().zip(spills) {
                 let slot = storage::add_table_cell(&wb.conn, formula)?;
-                inputs[*k].value = crate::sheets::slot_input(slot);
+                if spills {
+                    // The reference must find its sheet when the sheet engine reads it.
+                    wb.sheet_epoch += 1;
+                    wb.sheets().ensure_spill_sheet(slot)?;
+                }
+                inputs[*k].value = crate::sheets::slot_input(slot, spills);
             }
             wb.with_sheets(|s| s.set(sheet, &inputs))
         })

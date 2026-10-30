@@ -524,6 +524,12 @@ impl Db<'_> {
         let own = "SELECT 0::BIGINT AS _rf_id, 0::BIGINT AS _rf_ord";
         let build = Build::new();
         let relations = TableRelations { db: self, own: "", own_select: own.into(), build: &build, live };
+        // A table result that spills (F.10): FILTER, SORT, UNIQUE or TAKE over a table.
+        match crate::table_formula::array_plan(formula, &relations) {
+            Err(e) => return Ok(Err(e)),
+            Ok(Some(plan)) => return self.table_cell_array(&plan, live, formula),
+            Ok(None) => {}
+        }
         let mut c = match crate::table_formula::compile_full(formula, &[], &[], &relations, "_rf_c_") {
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
@@ -551,6 +557,62 @@ impl Db<'_> {
             (None, Ty::Bool) => num.map(|n| CellValue::Bool(n != 0.0)).unwrap_or(CellValue::Blank),
             (None, _) => num.map(CellValue::Number).unwrap_or(CellValue::Blank),
         }))
+    }
+
+    /// Whether a sheet cell's table formula gives a table result that spills.
+    pub(crate) fn table_cell_spills(&self, formula: &str) -> bool {
+        let build = Build::new();
+        let relations = TableRelations { db: self, own: "", own_select: "SELECT 0::BIGINT AS _rf_id, 0::BIGINT AS _rf_ord".into(), build: &build, live: true };
+        matches!(crate::table_formula::array_plan(formula, &relations), Ok(Some(_)))
+    }
+
+    /// The rows of a table result, bounded by [`crate::sheets::MAX_SPILL_CELLS`]: a larger
+    /// one is refused when it is entered (`live`), and shows `#SPILL!` when it grows later.
+    fn table_cell_array(&self, plan: &crate::table_formula::ArrayPlan, live: bool, formula: &str) -> Result<std::result::Result<crate::table_formula::CellValue, crate::table_formula::FormulaError>> {
+        use crate::table_formula::{CellValue, Ty};
+        let width = plan.types.len().max(1);
+        let cap = crate::sheets::MAX_SPILL_CELLS / width;
+        let cols: Vec<String> = plan.types.iter().enumerate().map(|(k, t)| match t {
+            Ty::Date => format!("CAST(date_diff('day', DATE '1899-12-30', c{k}) AS DOUBLE) AS c{k}"),
+            Ty::Text => format!("CAST(c{k} AS VARCHAR) AS c{k}"),
+            Ty::Bool => format!("c{k}"),
+            _ => format!("CAST(c{k} AS DOUBLE) AS c{k}"),
+        }).collect();
+        let sql = format!("SELECT {} FROM ({}) LIMIT {}", cols.join(", "), plan.sql, cap + 1);
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        let mut out: Vec<Vec<CellValue>> = Vec::new();
+        while let Some(r) = rows.next()? {
+            let mut row = Vec::with_capacity(width);
+            for (k, t) in plan.types.iter().enumerate() {
+                row.push(match t {
+                    Ty::Text => r.get::<_, Option<String>>(k)?.map(CellValue::Text).unwrap_or(CellValue::Blank),
+                    Ty::Bool => r.get::<_, Option<bool>>(k)?.map(CellValue::Bool).unwrap_or(CellValue::Blank),
+                    _ => r.get::<_, Option<f64>>(k)?.map(CellValue::Number).unwrap_or(CellValue::Blank),
+                });
+            }
+            out.push(row);
+        }
+        if out.len() > cap {
+            if live {
+                return Ok(Err(crate::table_formula::FormulaError {
+                    message: format!("this table result has more than {} cells, more than a sheet takes from a table; sort and filter the table's view instead, and create a table from that view to keep a copy", crate::sheets::MAX_SPILL_CELLS),
+                    span: crate::table_formula::Span { start: 0, end: formula.chars().count() },
+                }));
+            }
+            return Ok(Ok(CellValue::Array(vec![vec![CellValue::Error("#SPILL!".into())]])));
+        }
+        if out.is_empty() {
+            let empty = match plan.if_empty.as_ref().map(|e| &e.kind) {
+                Some(crate::table_formula::ExprKind::Number(n)) => CellValue::Number(*n),
+                Some(crate::table_formula::ExprKind::Text(t)) => CellValue::Text(t.clone()),
+                Some(crate::table_formula::ExprKind::Bool(b)) => CellValue::Bool(*b),
+                Some(crate::table_formula::ExprKind::Error(e)) => CellValue::Error(e.code().to_string()),
+                _ => CellValue::Error("#CALC!".into()),
+            };
+            return Ok(Ok(CellValue::Array(vec![vec![empty]])));
+        }
+        Ok(Ok(CellValue::Array(out)))
     }
 
     pub fn describe(&self, select: &str) -> Result<Vec<Column>> {

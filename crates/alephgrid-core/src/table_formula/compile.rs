@@ -83,6 +83,8 @@ pub enum CellValue {
     Bool(bool),
     /// An error value as the sheet shows it: `#DIV/0!`, `#REF!`, …
     Error(String),
+    /// Rows of values: a table result that spills into a sheet (F.10).
+    Array(Vec<Vec<CellValue>>),
 }
 
 /// Resolves table names in `Table[column]` references, and sheet cells.
@@ -368,6 +370,8 @@ impl Compiler<'_> {
         };
         let (v, e, ty) = match value {
             CellValue::Blank => ("CAST(NULL AS DOUBLE)".to_string(), None, Ty::Number),
+            // A sheet cell holds one value; arrays are table results, never read back.
+            CellValue::Array(_) => ("CAST(NULL AS DOUBLE)".to_string(), Some(lit("#VALUE!")), Ty::Number),
             CellValue::Number(n) => (num_lit(n), None, Ty::Number),
             CellValue::Text(t) => (lit(&t), None, Ty::Text),
             CellValue::Bool(b) => (if b { "TRUE" } else { "FALSE" }.to_string(), None, Ty::Bool),
@@ -1150,7 +1154,12 @@ pub fn compile_with_errors(formula: &str, columns: &[(String, String)], errors: 
 
 /// Like [`compile_with_errors`], resolving other tables through `relations`.
 pub fn compile_full(formula: &str, columns: &[(String, String)], errors: &[(String, String)], relations: &dyn Relations, prefix: &str) -> Result<Compiled, FormulaError> {
-    let ast = parse(formula)?;
+    compile_ast(&parse(formula)?, columns, errors, relations, prefix)
+}
+
+/// [`compile_full`] for a parsed formula.
+pub(crate) fn compile_ast(ast: &Expr, columns: &[(String, String)], errors: &[(String, String)], relations: &dyn Relations, prefix: &str) -> Result<Compiled, FormulaError> {
+    let ast = ast.clone();
     let mut c = Compiler { columns, errors, relations, stages: Vec::new(), tables: BTreeSet::new(), steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
     let top = c.expr(&ast)?;
     let ty = match top.ty {

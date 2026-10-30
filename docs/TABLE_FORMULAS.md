@@ -407,6 +407,45 @@ column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`
 value, and the export returns one note per such cell ("Report!B1: the table formula … is
 exported as its value "80" …"). Showing these notes in the download is F.13.
 
+## Table results in sheets (F.10)
+
+A sheet cell can spill rows of a table:
+
+```text
+=SORT(UNIQUE(orders[region]))
+=FILTER(orders[amount], orders[region]="West", "none")
+=TAKE(SORT(orders, 3, -1), 10)            the ten rows with the largest third column
+```
+
+`FILTER(T[c] or T, condition, [if_empty])`, `SORT(array, [column], [1 or -1])`,
+`UNIQUE(array)` and `TAKE(array, n)` over whole columns of one table (or the whole table)
+compile to one ordered query; inside FILTER's condition `T[x]` is the row's `x`, so any
+row formula can filter. Rows keep table order unless sorted; SORT orders numbers, text (by its
+upper case) and logical values, blanks last, ties in table order; UNIQUE compares text
+case-insensitively and keeps the first row of each value; FILTER without a match gives
+`if_empty` (written in the formula) or `#CALC!`. A blank cell of the result spills as an empty
+text. Other array functions, `by_col`/`exactly_once`, and TAKE by columns are refused.
+
+**Spilling.** The result is written, as an array constant, to a very hidden sheet of its own
+(`_rf_spill_<slot>`); the user's cell holds a spill reference to it, so the sheet engine spills
+it as any dynamic array: other formulas read it (`=SUM(C1:C2)`, `C1#`), and a cell in the way
+gives `#SPILL!` until it is cleared. It is recomputed with the tables it reads, in the same
+transaction (see [sheet cells that read tables](#sheet-cells-that-read-tables-f09)).
+
+**Bounded.** At most `MAX_SPILL_CELLS` (10,000) cells. A larger result is refused when entered,
+pointing at the route for big results: sort and filter the table's view, and create a table from
+that view to keep a copy. A result that grows past the bound later shows `#SPILL!`.
+Exports write the spilled values, with a note per range.
+
+**Volatile functions (decision).** Table formulas and table cells refuse `TODAY`, `NOW`, `RAND`,
+`RANDBETWEEN` and `RANDARRAY`: their results are cached, stored and recomputed only when what
+they read changes, so a value that changes on its own would be silently stale, and a seed per
+row would make results depend on when they were computed. Sheets keep the sheet engine's
+behaviour (recalculated whenever the sheets are evaluated). Workbook functions stay
+deterministic: formula functions may call only an allowlist of pure functions and SQL
+functions are refused if they call `NOW`, `CURRENT_DATE` or functions with side effects, so no
+volatile value can enter a table through them either.
+
 ## Stored formula results (F.09)
 
 Pages are cheap to compute live, but sorting, filtering or summarizing a view by a formula

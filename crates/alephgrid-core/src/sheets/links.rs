@@ -107,18 +107,38 @@ pub struct SlotCell {
     pub slot: u32,
 }
 
-/// What the sheet engine holds for the table cell of `slot`.
-pub(crate) fn slot_input(slot: u32) -> String {
-    format!("={LINK_SHEET}!$B${slot}")
+/// What the sheet engine holds for the table cell of `slot`: a reference to its value, or for
+/// a table result (`spills`) a spill reference to the array in its own very hidden sheet.
+pub(crate) fn slot_input(slot: u32, spills: bool) -> String {
+    if spills { format!("={SPILL_PREFIX}{slot}!$A$1#") } else { format!("={LINK_SHEET}!$B${slot}") }
 }
 
-/// The slot of a cell whose content is exactly a slot reference.
+/// Very hidden sheets holding table results, `_rf_spill_<slot>`, one array each at A1.
+pub(crate) const SPILL_PREFIX: &str = "_rf_spill_";
+/// Most cells a table result may spill into a sheet.
+pub const MAX_SPILL_CELLS: usize = 10_000;
+
+/// The slot of a cell whose content is exactly a slot reference (either form).
 pub(crate) fn slot_of(content: &str) -> Option<u32> {
     let (sheet, cell) = content.strip_prefix('=')?.split_once('!')?;
-    if !sheet.trim_matches('\'').eq_ignore_ascii_case(LINK_SHEET) {
-        return None;
+    let sheet = sheet.trim_matches('\'');
+    if sheet.eq_ignore_ascii_case(LINK_SHEET) {
+        return cell.strip_prefix("$B$")?.parse().ok().filter(|n| *n >= 1);
     }
-    cell.strip_prefix("$B$")?.parse().ok().filter(|n| *n >= 1)
+    let n = sheet.get(..SPILL_PREFIX.len()).filter(|p| p.eq_ignore_ascii_case(SPILL_PREFIX)).map(|_| &sheet[SPILL_PREFIX.len()..])?;
+    (cell == "$A$1#").then(|| n.parse().ok()).flatten().filter(|n| *n >= 1)
+}
+
+/// An array as an array constant the sheet engine spills (blanks become "").
+fn array_constant(rows: &[Vec<CellValue>]) -> String {
+    let one = |v: &CellValue| match v {
+        CellValue::Number(n) => format!("{n}"),
+        CellValue::Text(t) => format!("\"{}\"", t.replace('"', "\"\"")),
+        CellValue::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
+        CellValue::Error(e) => e.clone(),
+        CellValue::Blank | CellValue::Array(_) => "\"\"".into(),
+    };
+    format!("={{{}}}", rows.iter().map(|r| r.iter().map(one).collect::<Vec<_>>().join(",")).collect::<Vec<_>>().join(";"))
 }
 
 fn tokens(formula: &str) -> Vec<TokenType> {
@@ -137,7 +157,9 @@ fn tokens(formula: &str) -> Vec<TokenType> {
 /// Whether a formula refers to the link sheet by name.
 pub(crate) fn mentions_link_sheet(formula: &str) -> bool {
     tokens(formula).iter().any(|t| match t {
-        TokenType::Reference { sheet: Some(s), .. } | TokenType::Range { sheet: Some(s), .. } => s.eq_ignore_ascii_case(LINK_SHEET),
+        TokenType::Reference { sheet: Some(s), .. } | TokenType::Range { sheet: Some(s), .. } => {
+            s.eq_ignore_ascii_case(LINK_SHEET) || s.get(..SPILL_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(SPILL_PREFIX))
+        }
         _ => false,
     })
 }
@@ -170,7 +192,7 @@ impl Sheets {
         for info in self.list() {
             let Ok(ws) = m.get_model().workbook.worksheet(info.index) else { continue };
             for (row, column, cell) in ws.sheet_data.cells() {
-                if !matches!(*cell, Cell::CellFormula { .. }) {
+                if !matches!(*cell, Cell::CellFormula { .. } | Cell::ArrayFormula { .. }) {
                     continue;
                 }
                 let content = m.get_cell_content(info.index, row, column).unwrap_or_default();
@@ -182,6 +204,12 @@ impl Sheets {
         out
     }
 
+    /// Create the very hidden sheet of table result `slot` (before anything refers to it).
+    pub(crate) fn ensure_spill_sheet(&mut self, slot: u32) -> Result<()> {
+        self.model_mut()?.ensure_unrecorded_sheet(&format!("{SPILL_PREFIX}{slot}")).map_err(|e| anyhow!(e))?;
+        Ok(())
+    }
+
     /// Write table-cell results into their slots, outside the undo history, and evaluate.
     pub(crate) fn set_slot_values(&mut self, values: &[(u32, CellValue)]) -> Result<()> {
         if values.is_empty() {
@@ -191,6 +219,10 @@ impl Sheets {
         let sheet = m.ensure_unrecorded_sheet(LINK_SHEET).map_err(|e| anyhow!(e))?;
         m.pause_evaluation();
         let out = values.iter().try_for_each(|(slot, v)| {
+            if let CellValue::Array(rows) = v {
+                let spill = m.ensure_unrecorded_sheet(&format!("{SPILL_PREFIX}{slot}"))?;
+                return m.set_unrecorded_input(spill, 1, 1, &array_constant(rows));
+            }
             let input = match v {
                 CellValue::Blank => String::new(),
                 // Shortest text that reads back as the same number.
@@ -198,6 +230,7 @@ impl Sheets {
                 CellValue::Text(t) => format!("'{t}"),
                 CellValue::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
                 CellValue::Error(e) => format!("={e}"),
+                CellValue::Array(_) => unreachable!("written above"),
             };
             m.set_unrecorded_input(sheet, *slot as i32, RESULT_COLUMN, &input)
         });

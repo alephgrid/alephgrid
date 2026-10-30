@@ -16,7 +16,7 @@ use ts_rs::TS;
 
 mod editing;
 mod links;
-pub use links::{Anchor, SlotCell, LINK_SHEET};
+pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
 pub(crate) use links::{slot_input, slot_of};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
 
@@ -530,10 +530,50 @@ impl Sheets {
                         (_, Ok(CellValue::String(t))) => format!("'{t}"),
                         _ => String::new(),
                     };
-                    copy.set_user_input(index, row, column, &value).map_err(|e| anyhow!(e))?;
-                    let formula = self.shown_input(index, m.get_cell_content(index, row, column).unwrap_or_default());
-                    notes.push(format!("{}: the table formula {formula} is exported as its value {shown:?}; other spreadsheets cannot read Alephgrid tables", placed.cell.text((false, false))));
+                    let content = m.get_cell_content(index, row, column).unwrap_or_default();
+                    let formula = self.shown_input(index, content.clone());
+                    // A table result: every spilled cell becomes its value.
+                    let (rows, columns) = if content.ends_with('#') {
+                        let spill = m.get_worksheets_properties().iter().position(|p| p.name == format!("{}{}", links::SPILL_PREFIX, placed.slot));
+                        match spill.and_then(|k| m.get_model().workbook.worksheet(k as u32).ok()).map(|w| w.dimension()) {
+                            Some(d) => (d.max_row, d.max_column),
+                            None => (1, 1),
+                        }
+                    } else {
+                        (1, 1)
+                    };
+                    if rows == 1 && columns == 1 {
+                        copy.set_user_input(index, row, column, &value).map_err(|e| anyhow!(e))?;
+                    }
+                    for r in 0..rows {
+                        for c in 0..columns {
+                            if rows == 1 && columns == 1 { continue; }
+                            let (rr, cc) = (row + r, column + c);
+                            let v = match (m.get_cell_type(index, rr, cc), m.get_model().get_cell_value_by_index(index, rr, cc)) {
+                                (Ok(CellType::ErrorValue), _) => m.get_formatted_cell_value(index, rr, cc).unwrap_or_default(),
+                                (_, Ok(CellValue::Number(n))) => format!("{n}"),
+                                (_, Ok(CellValue::Boolean(b))) => if b { "TRUE".into() } else { "FALSE".into() },
+                                (_, Ok(CellValue::String(t))) => format!("'{t}"),
+                                _ => String::new(),
+                            };
+                            copy.set_user_input(index, rr, cc, &v).map_err(|e| anyhow!(e))?;
+                        }
+                    }
+                    let place = if rows == 1 && columns == 1 {
+                        placed.cell.text((false, false))
+                    } else {
+                        format!("{}:{}{}", placed.cell.text((false, false)), column_name((column + columns - 2) as u32), row + rows - 1)
+                    };
+                    let what = if rows == 1 && columns == 1 { format!("its value {shown:?}") } else { format!("its {rows}×{columns} values") };
+                    notes.push(format!("{place}: the table formula {formula} is exported as {what}; other spreadsheets cannot read Alephgrid tables"));
                 }
+                // Without the hidden sheets: table results, then the link sheet.
+                let hidden: Vec<usize> = copy.get_worksheets_properties().iter().enumerate()
+                    .filter(|(_, p)| p.name.starts_with(links::SPILL_PREFIX) && p.state != "visible").map(|(k, _)| k).collect();
+                for k in hidden.into_iter().rev() {
+                    copy.delete_sheet(k as u32).map_err(|e| anyhow!(e))?;
+                }
+                let i = copy.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET).unwrap_or(i);
                 copy.delete_sheet(i as u32).map_err(|e| anyhow!(e))?;
                 ironcalc::export::save_xlsx_to_writer(copy.get_model(), file)
             }
