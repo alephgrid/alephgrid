@@ -153,9 +153,30 @@ export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dial
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
   });
+  // Safari does not focus a clicked button, so focus can leave the dialog for the page body:
+  // keep Escape and Tab working for the topmost dialog wherever focus is, and bring focus
+  // back to the dialog when a click inside it leaves focus nowhere.
+  if (!dialog.hasAttribute("tabindex")) dialog.tabIndex = -1;
+  const outside = (e: KeyboardEvent) => {
+    const top = [...document.querySelectorAll(".backdrop")].at(-1) === backdrop;
+    if (!top || e.defaultPrevented || backdrop.contains(document.activeElement)) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      dialog.focus({ preventScroll: true });
+    }
+  };
+  const refocus = () => setTimeout(() => {
+    if (backdrop.isConnected && !backdrop.contains(document.activeElement)) dialog.focus({ preventScroll: true });
+  });
+  document.addEventListener("keydown", outside);
+  dialog.addEventListener("mousedown", refocus);
   document.body.append(backdrop);
   return {
     close: () => {
+      document.removeEventListener("keydown", outside);
       backdrop.remove();
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     },

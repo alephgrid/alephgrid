@@ -54,10 +54,12 @@ async function run(page: Page): Promise<void> {
 
 const csvOf = (wb: string, table: string) => server.exportCsv(wb, { table, sort: [], filters: [], hidden: [] });
 
-test("browse the schema, insert a column by keyboard, bind a hostile parameter, cancel and rerun", async ({ page }) => {
+test("browse the schema, insert a column by keyboard, bind a hostile parameter, cancel and rerun", async ({ page, browserName }) => {
   const wb = await workbook("Schema journey");
   const sent: { op: string; sql?: string; params?: { name: string; type: string; value?: string }[] }[] = [];
-  page.on("websocket", (ws) => ws.on("framesent", (f) => sent.push(JSON.parse(String(f.payload)))));
+  // Playwright's Firefox reports text frames decoded as Latin-1; re-read them as UTF-8.
+  const frame = (p: string | Buffer) => (typeof p === "string" && browserName === "firefox" ? Buffer.from(p, "latin1").toString("utf8") : String(p));
+  page.on("websocket", (ws) => ws.on("framesent", (f) => sent.push(JSON.parse(frame(f.payload)))));
   const dialog = await openSql(page, wb);
   const editor = page.locator(".sql-editor");
   await editor.fill("SELECT ");
@@ -539,7 +541,12 @@ async function seriousViolations(page: Page): Promise<string[]> {
     .map((v) => `${v.id}: ${v.help} (${v.nodes.map((n) => n.target.join(" ") + " " + n.failureSummary).join(", ")})`);
 }
 
-test("the SQL workspace is accessible and works from the keyboard", async ({ page }) => {
+test("the SQL workspace is accessible and works from the keyboard", async ({ page, browserName }) => {
+  // Safari's Tab reaches only text fields unless "Press Tab to highlight each item" is on
+  // (Option+Tab reaches every control), and in macOS Safari and Firefox End scrolls a text
+  // area instead of moving the caret (⌘↓ moves it to the end).
+  const tab = browserName === "webkit" ? "Alt+Tab" : "Tab";
+  const end = process.platform === "darwin" && browserName !== "chromium" ? "Meta+ArrowDown" : "End";
   const wb = await workbook("Accessible SQL");
   const dialog = await openSql(page, wb);
   const editor = page.locator(".sql-editor");
@@ -549,7 +556,7 @@ test("the SQL workspace is accessible and works from the keyboard", async ({ pag
   // Run from the keyboard: Tab from the editor reaches the Run button.
   await editor.focus();
   const runButton = page.getByRole("button", { name: "Run", exact: true });
-  for (let i = 0; i < 8 && !(await runButton.evaluate((b) => b === document.activeElement)); i++) await page.keyboard.press("Tab");
+  for (let i = 0; i < 8 && !(await runButton.evaluate((b) => b === document.activeElement)); i++) await page.keyboard.press(tab);
   await expect(runButton).toBeFocused();
   await page.keyboard.press("Enter");
   await expect.poll(() => resultRows(page)).toEqual([["north", "10"], ["north", "30"], [HOSTILE, "40"]]);
@@ -566,7 +573,7 @@ test("the SQL workspace is accessible and works from the keyboard", async ({ pag
 
   // Results, parameter rows and the suggestion list open together.
   await editor.fill("SELECT region, amount FROM sales WHERE region <> $skip AND am");
-  await editor.press("End");
+  await editor.press(end);
   await page.keyboard.type("o");
   await expect(dialog.getByRole("listbox", { name: "Suggestions" })).toBeVisible();
   await expect(dialog.getByLabel("Value of $skip")).toBeVisible();

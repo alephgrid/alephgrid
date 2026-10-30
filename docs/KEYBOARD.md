@@ -53,8 +53,22 @@ Ctrl+C still copies when the key types `с`.
 | Cmd+Space, Mod+T, Mod+W, Mod+N, Mod+Shift+N, Mod+Tab | Spotlight, tabs, windows | Never bound |
 | F5, F11, F12 | Reload, full screen, dev tools | Never bound |
 
+## Browsers and platforms
+
+The browser suite runs in Chrome (macOS in development, Linux in CI), and in Playwright's
+Firefox and WebKit (the engine of Safari) on macOS with `E2E_BROWSER=firefox` or `webkit`.
+Differences found there, and what users of those browsers should know:
+
+| Browser | Behaviour | What to do |
+|---|---|---|
+| Safari | Tab moves only between text fields unless *Settings → Advanced → Press Tab to highlight each item* is on | Option+Tab reaches buttons, checkboxes and the schema tree |
+| Safari | Clicking a button does not focus it | Dialogs keep Escape and Tab working wherever focus is |
+| Safari, Firefox (macOS) | End and Home scroll a text field instead of moving the caret, as in native Mac apps | ⌘→ / ⌘← move to the end or start of the line; ⌘↓ to the end of the SQL editor |
+| All | A panel opened while the page is still connecting used to fail with "not connected" | Requests now wait for the connection that is being made |
+
 Not verified: screen-reader announcements with VoiceOver, NVDA or JAWS (no automated
-assistive-technology run is part of the suite), Windows/Linux browsers (the suite runs Chrome
-on macOS in development and Linux in CI), and physical non-US keyboards (layouts are simulated
-with synthetic key events). The palette and dialogs are checked with axe and keyboard-only
+assistive-technology run is part of the suite), Windows browsers, physical non-US keyboards
+(layouts are simulated with synthetic key events), and paste into the grid in Firefox
+(Playwright's Firefox cannot deliver a paste there). [ACCESSIBILITY_TESTING.md](ACCESSIBILITY_TESTING.md)
+is the manual script for these. The palette and dialogs are checked with axe and keyboard-only
 journeys in `web/e2e/commands.spec.ts`.

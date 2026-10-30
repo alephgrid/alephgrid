@@ -28,7 +28,10 @@ test("F4 changes only valid A1 reference tokens and cycles mixed anchors", () =>
   expect(referenceInsertion('=SUM(A1:B3)', 5, 10)).toEqual({ start: 5, end: 10 });
 });
 
-test("dragging a formula reference preserves its destination, F4 and Escape are reversible", async ({ page }) => {
+test("dragging a formula reference preserves its destination, F4 and Escape are reversible", async ({ page, browserName }) => {
+  // In macOS Safari and Firefox, End scrolls a text field instead of moving the caret (as in
+  // native Mac apps); ⌘→ moves it to the end there.
+  const end = process.platform === "darwin" && browserName !== "chromium" ? "Meta+ArrowRight" : "End";
   const wb = await server.createWorkbook("Reference editing"), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Inputs" });
   await ws.call("sheet_set", { sheet: 0, inputs: [
@@ -49,9 +52,9 @@ test("dragging a formula reference preserves its destination, F4 and Escape are 
   await expect(input).toBeFocused();
   await expect(page.locator('.cell-ref')).toHaveText('C1');
   await expect(page.getByRole('region', { name: 'Formula references' })).toHaveText('A1:A3');
-  await input.press('End'); await input.press('F4');
+  await input.press(end); await input.press('F4');
   await expect(input).toHaveValue('=SUM(A1:$A$3');
-  await input.press('End'); await input.pressSequentially(')'); await input.press('Enter');
+  await input.press(end); await input.pressSequentially(')'); await input.press('Enter');
   const result = async () => (await ws.call('sheet_fetch', { sheet: 0, row_start: 0, row_count: 1, column_count: 3 })).rows[0]?.[2]?.[0];
   await expect.poll(result).toBe('60');
   await input.fill('=A1'); await input.press('F4'); await input.press('Escape');

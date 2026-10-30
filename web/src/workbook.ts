@@ -1274,7 +1274,16 @@ export class WorkbookScreen {
     return out;
   }
 
-  private async copy(range: Range): Promise<void> {
+  /** The copy or cut in progress; a paste waits for it, so it sees what was just copied. */
+  private clipboardWork: Promise<void> = Promise.resolve();
+
+  private copy(range: Range): Promise<void> {
+    const work = this.copyNow(range);
+    this.clipboardWork = work.catch(() => undefined);
+    return work;
+  }
+
+  private async copyNow(range: Range): Promise<void> {
     const last = this.isSheet()
       ? Math.min(range.r1, Math.max(0, (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.rows ?? 1) - 1))
       : Math.min(range.r1, (this.view?.row_count ?? 1) - 1);
@@ -1296,6 +1305,7 @@ export class WorkbookScreen {
   }
 
   private async paste(at: Cell, text: string): Promise<void> {
+    await this.clipboardWork;
     const same = (a: string) => a.replace(/\r\n/g, "\n").replace(/\n$/, "");
     if (this.isSheet() && this.clip && same(text) === same(this.clip.text)) {
       await this.pasteCells(at, "all", false);
@@ -1338,12 +1348,16 @@ export class WorkbookScreen {
     }
   }
 
-  private async cut(): Promise<void> {
-    await this.copy(this.grid.selection());
-    if (this.clip) {
-      this.clip.cut = true;
-      toast("Cut. Paste to move these cells; formulas that refer to them follow.");
-    }
+  private cut(): Promise<void> {
+    const work = (async () => {
+      await this.copyNow(this.grid.selection());
+      if (this.clip) {
+        this.clip.cut = true;
+        toast("Cut. Paste to move these cells; formulas that refer to them follow.");
+      }
+    })();
+    this.clipboardWork = work.catch(() => undefined);
+    return work;
   }
 
   private pasteSpecialDialog(): void {
