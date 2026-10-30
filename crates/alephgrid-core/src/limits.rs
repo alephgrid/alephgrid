@@ -22,6 +22,10 @@ pub const MAX_INSERT_ROWS: u64 = 1_000_000;
 pub const MAX_EDIT_CELLS: usize = crate::sheets::MAX_BULK_CELLS;
 /// Rows a demo table may have.
 pub const MAX_DEMO_ROWS: u64 = 1_000_000_000;
+/// Most rows of grouped lookup results (one per distinct key of a looked-up table) kept in
+/// the in-memory scratch database, across all of a workbook's lookups. Least recently used
+/// lookups are dropped first; a lookup larger than this is evaluated uncached.
+pub const LOOKUP_CACHE_ROWS: u64 = 5_000_000;
 
 /// Rows a fetch of `columns` columns may return: at most `requested`, [`MAX_FETCH_ROWS`]
 /// and the cell budget.

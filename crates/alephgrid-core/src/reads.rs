@@ -27,32 +27,92 @@ pub(crate) fn is_internal(name: &str) -> bool {
     name == ID || name == ORD || name.starts_with(ERROR_PREFIX)
 }
 
-/// Other tables for lookups: their full relation (with their own formulas), or for the
-/// formula's own table its stored columns only (formula columns are not available there).
+/// A column of a table, both names lowercased, as a dependency-graph node.
+type Node = (String, String);
+
+/// A table's columns in relation order, and its formulas as (name, formula, is_sheet).
+type Layout = (Vec<String>, Vec<(String, String, bool)>);
+
+/// Column-level dependencies of every formula column in the workbook, so lookups across
+/// tables can tell real circular references from tables that merely look each other up.
+pub(crate) struct Graph {
+    deps: HashMap<Node, Vec<Node>>,
+}
+
+impl Graph {
+    /// Nodes reachable from `from` (not including `from` unless a path leads back to it).
+    fn closure(&self, from: &[Node]) -> std::collections::HashSet<Node> {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<Node> = from.iter().flat_map(|n| self.deps.get(n).cloned().unwrap_or_default()).collect();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n.clone()) {
+                stack.extend(self.deps.get(&n).cloned().unwrap_or_default());
+            }
+        }
+        seen
+    }
+
+    /// A dependency path from `deps` (a new formula's references) to `target`, if any.
+    fn path(&self, deps: &[Node], target: &Node) -> Option<Vec<Node>> {
+        let mut parent: HashMap<Node, Option<Node>> = HashMap::new();
+        let mut queue: std::collections::VecDeque<Node> = std::collections::VecDeque::new();
+        for d in deps {
+            if parent.insert(d.clone(), None).is_none() { queue.push_back(d.clone()); }
+        }
+        while let Some(n) = queue.pop_front() {
+            if &n == target {
+                let mut path = vec![n.clone()];
+                let mut at = n;
+                while let Some(Some(p)) = parent.get(&at) { path.push(p.clone()); at = p.clone(); }
+                path.reverse();
+                return Some(path);
+            }
+            for d in self.deps.get(&n).cloned().unwrap_or_default() {
+                if !parent.contains_key(&d) { parent.insert(d.clone(), Some(n.clone())); queue.push_back(d); }
+            }
+        }
+        None
+    }
+}
+
+/// State shared while one table's relation is built, including nested lookup relations.
+pub(crate) struct Build {
+    /// Formula columns being compiled, outermost first. A nested relation leaves out any
+    /// column that is one of them or depends on one of them: reading it would be circular.
+    in_progress: std::cell::RefCell<Vec<Node>>,
+    graph: std::cell::OnceCell<Graph>,
+    /// Tables read by each relation being built, innermost last.
+    reads: std::cell::RefCell<Vec<std::collections::BTreeSet<String>>>,
+}
+
+impl Build {
+    fn new() -> Self {
+        Build { in_progress: std::cell::RefCell::new(Vec::new()), graph: std::cell::OnceCell::new(), reads: std::cell::RefCell::new(Vec::new()) }
+    }
+}
+
+/// Other tables for lookups: their full relation (with their own formulas, except any that
+/// would be circular here), or for the formula's own table its stored columns only.
 struct TableRelations<'a, 'b> {
     db: &'a Db<'b>,
     own: &'a str,
     own_select: String,
-    visiting: std::cell::RefCell<Vec<String>>,
+    build: &'a Build,
 }
 
 impl crate::table_formula::Relations for TableRelations<'_, '_> {
     fn relation(&self, table: &str) -> std::result::Result<Option<crate::table_formula::Relation>, String> {
         let found = storage::user_tables(self.db.conn).map_err(|e| e.to_string())?.into_iter().find(|t| t.eq_ignore_ascii_case(table));
         let Some(actual) = found else { return Ok(None) };
-        let sql = if actual.eq_ignore_ascii_case(self.own) {
-            self.own_select.clone()
+        let (sql, reads) = if actual.eq_ignore_ascii_case(self.own) {
+            (self.own_select.clone(), vec![actual.to_lowercase()])
         } else {
-            if self.visiting.borrow().contains(&actual.to_lowercase()) {
-                return Err(format!("circular lookup: {actual:?} already depends on this table"));
-            }
-            let mut visiting = self.visiting.borrow().clone();
-            self.db.base_select_from(&actual, &mut visiting).map_err(|e| e.to_string())?
+            self.db.base_select_tracked(&actual, self.build).map_err(|e| e.to_string())?
         };
         let described = self.db.describe(&sql).map_err(|e| e.to_string())?;
         let errors = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
         let columns = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-        Ok(Some(crate::table_formula::Relation { sql, columns, errors }))
+        Ok(Some(crate::table_formula::Relation { sql, columns, errors, reads }))
     }
 }
 
@@ -74,6 +134,8 @@ pub(crate) struct Db<'a> {
     /// Inside the writer's transaction: no snapshots of our own, no caching of what is
     /// read (it may be rolled back), no scratch writes (a transaction writes one database).
     pub in_txn: bool,
+    /// Cached lookup tables this operation's SQL refers to, kept until it is done.
+    pub keep: std::cell::RefCell<Vec<Arc<crate::catalog::Scratch>>>,
 }
 
 impl Db<'_> {
@@ -140,16 +202,133 @@ impl Db<'_> {
     /// `SELECT _rf_id, _rf_ord, <data columns>, <formula columns> FROM table`. A spreadsheet
     /// formula column adds its value and a hidden `_rf_e_<name>` error column.
     pub fn base_select(&self, table: &str) -> Result<String> {
-        self.base_select_from(table, &mut Vec::new())
+        self.base_select_in(table, &Build::new())
     }
 
-    /// `visiting` holds the tables whose relation is being built, to refuse lookup cycles.
-    fn base_select_from(&self, table: &str, visiting: &mut Vec<String>) -> Result<String> {
+    /// The columns of `table` in relation order (stored, then formula columns), and its
+    /// formulas as (name, formula, is_sheet).
+    pub(crate) fn layout(&self, table: &str) -> Result<Layout> {
+        let sheet = self.sheet_formulas(table)?;
+        let stored: Vec<String> = self.describe(&format!("SELECT * FROM main.{}", ident(table)))?.into_iter().map(|c| c.name).filter(|n| !is_internal(n)).collect();
+        let formulas: Vec<(String, String, bool)> = self.formulas(table)?.into_iter().map(|(n, f)| { let s = sheet.contains(&n); (n, f, s) }).collect();
+        let mut order = stored;
+        order.extend(formulas.iter().map(|(n, _, _)| n.clone()));
+        Ok((order, formulas))
+    }
+
+    /// Dependencies of every formula column in the workbook.
+    pub(crate) fn graph(&self) -> Result<Graph> {
+        let mut layouts = HashMap::new();
+        for t in storage::user_tables(self.conn)? {
+            layouts.insert(t.to_lowercase(), self.layout(&t)?);
+        }
+        let mut deps = HashMap::new();
+        for (t, (order, formulas)) in &layouts {
+            for (k, (name, f, sheet)) in formulas.iter().enumerate() {
+                let out = if *sheet {
+                    // A formula that no longer parses reads nothing (it shows #REF!).
+                    self.sheet_deps(t, f, &layouts).unwrap_or_default()
+                } else {
+                    // A SQL formula reads only its own table; count every column before it.
+                    order[..order.len() - formulas.len() + k].iter().map(|c| (t.clone(), c.to_lowercase())).collect()
+                };
+                deps.insert((t.clone(), name.to_lowercase()), out);
+            }
+        }
+        Ok(Graph { deps })
+    }
+
+    /// The columns a spreadsheet formula of `table` reads, as graph nodes.
+    fn sheet_deps(&self, table: &str, formula: &str, layouts: &HashMap<String, Layout>) -> Result<Vec<Node>> {
+        use crate::table_formula::Reference;
+        let own = table.to_lowercase();
+        let mut out = Vec::new();
+        for r in crate::table_formula::references(formula).map_err(|e| anyhow!("{e}"))? {
+            match r {
+                Reference::Own { column, .. } => out.push((own.clone(), column.to_lowercase())),
+                Reference::Column { table, column, .. } => out.push((table.to_lowercase(), column.to_lowercase())),
+                Reference::Table { table, positions, .. } => {
+                    let t = table.to_lowercase();
+                    if let Some((order, _)) = layouts.get(&t) {
+                        out.extend(positions.iter().filter_map(|p| order.get(p - 1)).map(|c| (t.clone(), c.to_lowercase())));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Self::base_select_in`], with the tables the relation reads (lowercase).
+    fn base_select_tracked(&self, table: &str, build: &Build) -> Result<(String, Vec<String>)> {
+        build.reads.borrow_mut().push(std::collections::BTreeSet::from([table.to_lowercase()]));
+        let out = self.base_select_in(table, build);
+        let mine = build.reads.borrow_mut().pop().unwrap_or_default();
+        if let Some(parent) = build.reads.borrow_mut().last_mut() {
+            parent.extend(mine.iter().cloned());
+        }
+        Ok((out?, mine.into_iter().collect()))
+    }
+
+    /// The scratch table holding grouped lookup relation `sql` as of the current data of
+    /// `reads`, built now if needed. `None` inside the writer's transaction (no scratch
+    /// writes there), or when the result is larger than [`limits::LOOKUP_CACHE_ROWS`].
+    fn cached_lookup(&self, sql: &str, reads: &[String]) -> Result<Option<String>> {
+        if self.in_txn || reads.is_empty() {
+            return Ok(None);
+        }
+        let all = storage::data_revisions(self.conn)?;
+        let revisions = |all: &HashMap<String, u64>| -> Option<Vec<(String, u64)>> {
+            reads.iter().map(|r| all.iter().find(|(t, _)| t.eq_ignore_ascii_case(r)).map(|(_, v)| (r.clone(), *v))).collect()
+        };
+        let Some(revs) = revisions(&all) else { return Ok(None) };
+        let mut cache = self.shared.lookups.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(sql, &revs) {
+            return Ok(hit.map(|s| { let name = s.qualified(); self.keep.borrow_mut().push(s); name }));
+        }
+        let scratch = self.shared.new_scratch("lk");
+        self.conn.execute_batch(&format!("CREATE TABLE {} AS {sql};", scratch.qualified()))?;
+        let rows: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {}", scratch.qualified()), [], |r| r.get(0))?;
+        // Built outside a snapshot, the data may have moved on meanwhile: do not keep it.
+        if revisions(&storage::data_revisions(self.conn)?).as_ref() != Some(&revs) {
+            return Ok(None);
+        }
+        let rows = rows.max(0) as u64;
+        if rows > limits::LOOKUP_CACHE_ROWS {
+            cache.put(sql, revs, None, rows);
+            return Ok(None);
+        }
+        let scratch = Arc::new(scratch);
+        let name = scratch.qualified();
+        self.keep.borrow_mut().push(scratch.clone());
+        cache.put(sql, revs, Some(scratch), rows);
+        Ok(Some(name))
+    }
+
+    /// Build `table`'s relation within `build`: formula columns that would be circular
+    /// here (see [`Build`]) show #REF!, keeping their place so column numbers stay valid.
+    fn base_select_in(&self, table: &str, build: &Build) -> Result<String> {
         // Qualified, so a CTE that shadows the table (see `expand_query`) can read it.
         let mut select = format!("SELECT * FROM main.{}", ident(table));
         let sheet = self.sheet_formulas(table)?;
-        visiting.push(table.to_lowercase());
+        let own = table.to_lowercase();
         for (i, (name, formula)) in self.formulas(table)?.into_iter().enumerate() {
+            let node = (own.clone(), name.to_lowercase());
+            let circular = {
+                let in_progress = build.in_progress.borrow();
+                !in_progress.is_empty() && (in_progress.contains(&node) || {
+                    let graph = match build.graph.get() { Some(g) => g, None => { let g = self.graph()?; build.graph.get_or_init(|| g) } };
+                    graph.closure(std::slice::from_ref(&node)).iter().any(|n| in_progress.contains(n))
+                })
+            };
+            if circular {
+                let value = if sheet.contains(&name) { "CAST(NULL AS VARCHAR)" } else { "NULL" };
+                select = format!("SELECT *, {value} AS {}, '#REF!' AS {} FROM ({select})", ident(&name), ident(&error_column(&name)));
+                if !sheet.contains(&name) {
+                    // SQL formula columns have no error column; drop the placeholder's.
+                    select = format!("SELECT * EXCLUDE ({}) FROM ({select})", ident(&error_column(&name)));
+                }
+                continue;
+            }
             if !sheet.contains(&name) {
                 select = format!("SELECT *, ({}) AS {} FROM ({select})", formula_to_sql(&formula), ident(&name));
                 continue;
@@ -160,9 +339,20 @@ impl Db<'_> {
                 .filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone())))
                 .collect();
             let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-            let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), visiting: std::cell::RefCell::new(visiting.clone()) };
-            match crate::table_formula::compile_full(&formula, &columns, &errors, &relations, &format!("_rf_t{i}_")) {
-                Ok(c) => {
+            let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build };
+            build.in_progress.borrow_mut().push(node);
+            let compiled = crate::table_formula::compile_full(&formula, &columns, &errors, &relations, &format!("_rf_t{i}_"));
+            build.in_progress.borrow_mut().pop();
+            match compiled {
+                Ok(mut c) => {
+                    // Grouped lookup relations come from the cache when it is fresh.
+                    for stage in &mut c.stages {
+                        if let crate::table_formula::Stage::Join { sql, reads, .. } = stage {
+                            if let Some(cached) = self.cached_lookup(sql, reads)? {
+                                *sql = format!("SELECT k, v, e FROM {cached}");
+                            }
+                        }
+                    }
                     let temps = c.temps().iter().map(|a| ident(a)).collect::<Vec<_>>().join(", ");
                     let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
                     select = format!(
@@ -171,25 +361,38 @@ impl Db<'_> {
                     );
                 }
                 // A formula that no longer compiles (a column or table it reads was renamed or
-                // deleted, a cycle) shows #REF! instead of making the whole table unreadable.
+                // deleted outside Alephgrid) shows #REF! instead of making the table unreadable.
                 Err(_) => {
                     select = format!("SELECT *, CAST(NULL AS VARCHAR) AS {}, '#REF!' AS {} FROM ({select})", ident(&name), ident(&error_column(&name)));
                 }
             }
         }
-        visiting.pop();
         Ok(select)
     }
 
-    /// Compile a spreadsheet formula against `table` as it is now, without `except` (the
-    /// column being edited, which a formula cannot read).
-    pub fn check_sheet_formula(&self, table: &str, formula: &str, except: Option<&str>) -> Result<()> {
+    /// Compile spreadsheet formula `formula` for column `column` of `table` as the table is
+    /// now (a formula cannot read its own column), refusing circular references.
+    pub fn check_sheet_formula(&self, table: &str, formula: &str, column: &str) -> Result<()> {
         let select = self.base_select(table)?;
         let described = self.describe(&select)?;
         let errors: Vec<(String, String)> = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
-        let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name) && Some(c.name.as_str()) != except).map(|c| (c.name, c.sql_type)).collect();
-        let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), visiting: std::cell::RefCell::new(vec![table.to_lowercase()]) };
+        let columns: Vec<(String, String)> = described.into_iter().filter(|c| !is_internal(&c.name) && c.name != column).map(|c| (c.name, c.sql_type)).collect();
+        let target = (table.to_lowercase(), column.to_lowercase());
+        let build = Build::new();
+        build.in_progress.borrow_mut().push(target.clone());
+        let relations = TableRelations { db: self, own: table, own_select: format!("SELECT * FROM main.{}", ident(table)), build: &build };
         let c = crate::table_formula::compile_full(formula, &columns, &errors, &relations, "_rf_check_").map_err(|e| anyhow!("formula error: {e}"))?;
+        // Circular references across tables, with the path in the message.
+        let graph = match build.graph.into_inner() { Some(g) => g, None => self.graph()? };
+        let mut layouts = HashMap::new();
+        for t in storage::user_tables(self.conn)? {
+            layouts.insert(t.to_lowercase(), self.layout(&t)?);
+        }
+        let deps = self.sheet_deps(table, formula, &layouts).map_err(|e| anyhow!("formula error: {e}"))?;
+        if let Some(path) = graph.path(&deps, &target) {
+            let names: Vec<String> = std::iter::once(&target).chain(path.iter()).map(|(t, c)| format!("{t}.{c}")).collect();
+            bail!("formula error: circular reference: {}", names.join(" → "));
+        }
         // Plan it, so a type mistake in generated SQL fails here rather than on read.
         self.describe(&format!("SELECT {}, {} FROM ({})", c.value, c.error, c.wrap(&select)))?;
         Ok(())

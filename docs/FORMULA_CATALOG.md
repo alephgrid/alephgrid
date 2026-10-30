@@ -109,8 +109,8 @@ in scalar functions; logical conditions given text, blanks and errors; criteria 
 strings, logical values, error text, numeric text, Unicode case folding, wildcards and `~`
 escapes; text conversion of numbers, logical values and blanks; Unicode character counts;
 date serial boundaries and truncated month arguments; and lookup keys that must not convert
-text to numbers. 150 pass. Six are known gaps, see [FORMULA_GAPS.md](FORMULA_GAPS.md).
+text to numbers. 152 pass; four are accepted date-system gaps, see [FORMULA_GAPS.md](FORMULA_GAPS.md).
 
-Totals: 277 cases (271 verified, 6 known gaps). Still not covered: locale-specific parsing,
+Totals: 277 cases (273 verified, 4 accepted gaps). Still not covered: locale-specific parsing,
 the 1904 date system, all optional-argument combinations, emoji/grapheme clusters,
 array/spill results of P0 functions, and numerical precision at extremes.

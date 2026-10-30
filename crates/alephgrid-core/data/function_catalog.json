@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "catalog_version": "2026-10-30.1",
+  "catalog_version": "2026-10-30.2",
   "engine": "ironcalc-0.9.1",
   "sources": {
     "google": "https://support.google.com/docs/table/25273?hl=en"
@@ -447,8 +447,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -625,8 +624,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Array/reference adapter with shape rules and bounded spills; map only proven equivalent operations",
       "upstream": "Discuss pure array semantics upstream; table binding stays local",
       "verification_cases": []
@@ -1219,8 +1217,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Pure evaluator implementation with independent domain-specific golden cases",
       "upstream": "Yes, bounded upstream function candidate",
       "verification_cases": []
@@ -1262,8 +1259,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -1283,8 +1279,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -1304,8 +1299,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -1325,8 +1319,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -1522,8 +1515,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -1697,8 +1689,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Server aggregation with explicit edges, NULL handling and bounded output",
       "upstream": "Pure histogram function possible; chart integration local",
       "verification_cases": []
@@ -1718,8 +1709,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Server aggregation with explicit edges, NULL handling and bounded output",
       "upstream": "Pure histogram function possible; chart integration local",
       "verification_cases": []
@@ -3202,8 +3192,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Pure sheet function plus batched distinct/aggregate/ranking plan for tables; specify ties/blanks",
       "upstream": "Yes, candidate after current-main and issue audit",
       "verification_cases": []
@@ -3531,8 +3520,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Alephgrid lazy-table/reference metadata API; stable IDs and no full-table cell copies",
       "upstream": "No: primarily Alephgrid table integration",
       "verification_cases": []
@@ -3692,8 +3680,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Typed date/time helper; define units, serial conversion and timezone contract",
       "upstream": "Yes for general-purpose pure date functions",
       "verification_cases": []
@@ -3797,7 +3784,7 @@
           "formula": "=DAY(0)",
           "expected": "0",
           "status": "known_gap",
-          "note": "IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0; Excel's 1900 date system numbers serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ. Serials from 61 (1900-03-01) agree. Not patched: the date system also affects formatting, parsing and XLSX round trips.",
+          "note": "Accepted gap (30 October 2026). IronCalc numbers serials below 61 one day later than Excel (serial 1 is 1899-12-31, serial 0 is rejected) and does so consistently: DATE(1900,1,1) is serial 2 and DAY reads it back as 1. Patching only DAY/MONTH/YEAR would break DAY(DATE(...)) for January-February 1900, so the fix belongs in IronCalc's date numbering (DATE, parsing, formatting, XLSX), proposed upstream (F.14). Serials from 61 (1900-03-01) agree.",
           "group": "coercion",
           "oracle": "Microsoft Excel DAY function reference: Serial 0 is January 0, 1900."
         },
@@ -3807,7 +3794,7 @@
           "formula": "=DAY(F1)",
           "expected": "2",
           "status": "known_gap",
-          "note": "IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0; Excel's 1900 date system numbers serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ. Serials from 61 (1900-03-01) agree. Not patched: the date system also affects formatting, parsing and XLSX round trips.",
+          "note": "Accepted gap (30 October 2026). IronCalc numbers serials below 61 one day later than Excel (serial 1 is 1899-12-31, serial 0 is rejected) and does so consistently: DATE(1900,1,1) is serial 2 and DAY reads it back as 1. Patching only DAY/MONTH/YEAR would break DAY(DATE(...)) for January-February 1900, so the fix belongs in IronCalc's date numbering (DATE, parsing, formatting, XLSX), proposed upstream (F.14). Serials from 61 (1900-03-01) agree.",
           "group": "coercion",
           "oracle": "Microsoft Excel DAY function reference: Serial 2 is January 2, 1900."
         },
@@ -4357,8 +4344,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -4976,8 +4962,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -5041,8 +5026,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Alephgrid lazy-table/reference metadata API; stable IDs and no full-table cell copies",
       "upstream": "No: primarily Alephgrid table integration",
       "verification_cases": []
@@ -6118,8 +6102,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Server aggregation with explicit edges, NULL handling and bounded output",
       "upstream": "Pure histogram function possible; chart integration local",
       "verification_cases": []
@@ -6545,11 +6528,11 @@
           "id": "iferror-c02",
           "mode": "empty cell",
           "formula": "=IFERROR(F4,\"x\")",
-          "expected": "",
-          "status": "known_gap",
-          "note": "IronCalc returns 0, as a direct reference to an empty cell does. Microsoft's reference states the empty-string rule; confirm against Excel output before patching.",
+          "expected": "0",
+          "status": "verified",
+          "note": "",
           "group": "coercion",
-          "oracle": "Microsoft Excel IFERROR function reference: An empty value is treated as the empty string."
+          "oracle": "Observed Excel and OpenOffice behaviour recorded in OASIS OpenFormula issue OFFICE-3468 (https://issues.oasis-open.org/browse/OFFICE-3468): an empty-cell argument evaluates to 0, as a direct reference does, so the result is 0; ODF 1.2 removed the empty-string rule. Microsoft's function reference says an empty value is treated as empty text; observed output takes precedence."
         },
         {
           "id": "iferror-c03",
@@ -6647,11 +6630,11 @@
           "id": "ifna-c02",
           "mode": "empty cell",
           "formula": "=IFNA(F4,\"x\")",
-          "expected": "",
-          "status": "known_gap",
-          "note": "IronCalc returns 0, as a direct reference to an empty cell does. Microsoft's reference states the empty-string rule; confirm against Excel output before patching.",
+          "expected": "0",
+          "status": "verified",
+          "note": "",
           "group": "coercion",
-          "oracle": "Microsoft Excel IFNA function reference: An empty value is treated as the empty string."
+          "oracle": "Observed Excel and OpenOffice behaviour recorded in OASIS OpenFormula issue OFFICE-3468 (https://issues.oasis-open.org/browse/OFFICE-3468): an empty-cell argument evaluates to 0, as a direct reference does, so the result is 0; ODF 1.2 removed the empty-string rule. Microsoft's function reference says an empty value is treated as empty text; observed output takes precedence."
         }
       ],
       "arguments": [
@@ -8121,8 +8104,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Typed date/time helper; define units, serial conversion and timezone contract",
       "upstream": "Yes for general-purpose pure date functions",
       "verification_cases": []
@@ -8252,8 +8234,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify JSON paths/object types/parser modes; bounded pure expressions, no arbitrary evaluation",
       "upstream": "Optional pure functions; table-oriented JSON uses DuckDB",
       "verification_cases": []
@@ -8273,8 +8254,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify tagged value/error semantics and typed distinctness before API adoption",
       "upstream": "Discuss model compatibility first",
       "verification_cases": []
@@ -9028,8 +9008,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify tagged value/error semantics and typed distinctness before API adoption",
       "upstream": "Discuss model compatibility first",
       "verification_cases": []
@@ -10005,7 +9984,7 @@
           "formula": "=MONTH(0)",
           "expected": "1",
           "status": "known_gap",
-          "note": "IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0; Excel's 1900 date system numbers serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ. Serials from 61 (1900-03-01) agree. Not patched: the date system also affects formatting, parsing and XLSX round trips.",
+          "note": "Accepted gap (30 October 2026). IronCalc numbers serials below 61 one day later than Excel (serial 1 is 1899-12-31, serial 0 is rejected) and does so consistently: DATE(1900,1,1) is serial 2 and DAY reads it back as 1. Patching only DAY/MONTH/YEAR would break DAY(DATE(...)) for January-February 1900, so the fix belongs in IronCalc's date numbering (DATE, parsing, formatting, XLSX), proposed upstream (F.14). Serials from 61 (1900-03-01) agree.",
           "group": "coercion",
           "oracle": "Microsoft Excel MONTH function reference: Serial 0 is January 0, 1900."
         },
@@ -10081,8 +10060,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Typed multi-key lookup; deterministic duplicate winner; batched join on tuple keys",
       "upstream": "Optional pure range function upstream; DuckDB planner local",
       "verification_cases": []
@@ -10636,8 +10614,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Explicit timezone-aware types and calculation epoch; avoid loss in Excel serial conversion",
       "upstream": "Discuss type model first; no drop-in alias",
       "verification_cases": []
@@ -10701,8 +10678,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -10722,8 +10698,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify JSON paths/object types/parser modes; bounded pure expressions, no arbitrary evaluation",
       "upstream": "Optional pure functions; table-oriented JSON uses DuckDB",
       "verification_cases": []
@@ -10831,8 +10806,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -10852,8 +10826,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -10873,8 +10846,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -10894,8 +10866,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -11039,8 +11010,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify JSON paths/object types/parser modes; bounded pure expressions, no arbitrary evaluation",
       "upstream": "Optional pure functions; table-oriented JSON uses DuckDB",
       "verification_cases": []
@@ -12006,8 +11976,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -12780,8 +12749,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Typed date/time helper; define units, serial conversion and timezone contract",
       "upstream": "Yes for general-purpose pure date functions",
       "verification_cases": []
@@ -12801,8 +12769,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Array/reference adapter with shape rules and bounded spills; map only proven equivalent operations",
       "upstream": "Discuss pure array semantics upstream; table binding stays local",
       "verification_cases": []
@@ -13086,8 +13053,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Bounded seeded sampling with documented bias and reproducibility",
       "upstream": "No: analytical planner feature first",
       "verification_cases": []
@@ -13129,8 +13095,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -14280,8 +14245,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -14455,8 +14419,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -14476,8 +14439,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -14618,8 +14580,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -14661,8 +14622,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Typed date/time helper; define units, serial conversion and timezone contract",
       "upstream": "Yes for general-purpose pure date functions",
       "verification_cases": []
@@ -15062,8 +15022,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": []
@@ -15171,8 +15130,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Specify tagged value/error semantics and typed distinctness before API adoption",
       "upstream": "Discuss model compatibility first",
       "verification_cases": []
@@ -15192,8 +15150,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Explicit timezone-aware types and calculation epoch; avoid loss in Excel serial conversion",
       "upstream": "Discuss type model first; no drop-in alias",
       "verification_cases": []
@@ -15213,8 +15170,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Explicit timezone-aware types and calculation epoch; avoid loss in Excel serial conversion",
       "upstream": "Discuss type model first; no drop-in alias",
       "verification_cases": []
@@ -15234,8 +15190,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Explicit timezone-aware types and calculation epoch; avoid loss in Excel serial conversion",
       "upstream": "Discuss type model first; no drop-in alias",
       "verification_cases": []
@@ -15866,8 +15821,7 @@
       ],
       "evidence": [],
       "examples": [],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Pure evaluator implementation with independent domain-specific golden cases",
       "upstream": "Yes, bounded upstream function candidate",
       "verification_cases": []
@@ -16235,8 +16189,7 @@
           "expected": "2"
         }
       ],
-      "sources": [
-      ],
+      "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; compile supported table modes to batched deterministic lookup plans",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
       "verification_cases": [
@@ -16492,7 +16445,7 @@
           "formula": "=YEAR(F4)",
           "expected": "1900",
           "status": "known_gap",
-          "note": "IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0; Excel's 1900 date system numbers serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ. Serials from 61 (1900-03-01) agree. Not patched: the date system also affects formatting, parsing and XLSX round trips.",
+          "note": "Accepted gap (30 October 2026). IronCalc numbers serials below 61 one day later than Excel (serial 1 is 1899-12-31, serial 0 is rejected) and does so consistently: DATE(1900,1,1) is serial 2 and DAY reads it back as 1. Patching only DAY/MONTH/YEAR would break DAY(DATE(...)) for January-February 1900, so the fix belongs in IronCalc's date numbering (DATE, parsing, formatting, XLSX), proposed upstream (F.14). Serials from 61 (1900-03-01) agree.",
           "group": "coercion",
           "oracle": "Microsoft Excel YEAR function reference: Serial 0 is in year 1900 in the 1900 date system."
         },

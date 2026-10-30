@@ -186,6 +186,8 @@ export class Rpc {
   private pending = new Map<number, Pending>();
   /** Changes waiting for the connection to come back. */
   private kept: Pending[] = [];
+  /** Requests made while the socket was connecting, sent when it opens. */
+  private connecting: Pending[] = [];
   /** View ids of the old connection, mapped to their reopened replacements. */
   private viewAlias = new Map<number, number>();
   private timers = new Set<number>();
@@ -219,6 +221,7 @@ export class Rpc {
         this.opened = true;
         this.retry = 0;
         this.onStatus("open");
+        for (const p of this.connecting.splice(0)) this.send(p);
         resolve();
         if (!reconnecting) return;
         try { await this.onReconnect(); } catch { /* the screen reports its own errors */ }
@@ -228,6 +231,7 @@ export class Rpc {
       ws.onclose = () => {
         if (this.closed || this.ws !== ws) return;
         this.ws = null;
+        for (const p of this.connecting.splice(0)) p.reject(new RpcError("not connected", "unavailable"));
         this.dropped();
         this.onStatus("closed");
         if (!opened) {
@@ -261,6 +265,7 @@ export class Rpc {
     this.timers.clear();
     this.pending.clear();
     this.kept = [];
+    this.connecting = [];
     this.onEvent = () => {};
     this.onStatus = () => {};
     this.onReconnect = () => {};
@@ -299,6 +304,9 @@ export class Rpc {
       const p: Pending = { frame, mutation, attempt: 0, opts, resolve, reject };
       if (this.ws?.readyState === WebSocket.OPEN) this.send(p);
       else if (mutation && this.opened && !this.closed) this.keep(p);
+      // Still connecting (a just-loaded page, or a reconnect in progress): send it once the
+      // socket opens, or fail if this attempt fails.
+      else if (this.ws?.readyState === WebSocket.CONNECTING && !this.closed) this.connecting.push(p);
       else reject(new RpcError("not connected", "unavailable"));
     });
   }

@@ -144,3 +144,28 @@ test("a long SQL query can be cancelled", async ({ page }) => {
   await page.getByRole("button", { name: "Run", exact: true }).click();
   await expect(page.locator(".result-table")).toContainText("42");
 });
+
+test("a panel opened while the connection is still being made loads once it opens", async ({ page }) => {
+  const wb = await server.createWorkbook("Slow connect"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "sales", sql: "SELECT 1 AS id" });
+  ws.close();
+  // Hold the page's socket in CONNECTING for a while, as a slow network does.
+  await page.addInitScript(() => {
+    const Real = window.WebSocket;
+    const state = Object.getOwnPropertyDescriptor(Real.prototype, "readyState")!.get!;
+    window.WebSocket = class extends Real {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        let open = false, handler: ((e: Event) => void) | null = null;
+        Object.defineProperty(this, "readyState", { get: () => (open ? state.call(this) : Real.CONNECTING) });
+        Object.defineProperty(this, "onopen", { get: () => handler, set: (h) => { handler = h; } });
+        super.addEventListener("open", (e) => setTimeout(() => { open = true; handler?.call(this, e); }, 1500));
+      }
+    } as typeof WebSocket;
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "SQL" });
+  await expect(dialog.getByRole("treeitem", { name: /^sales/ })).toBeVisible();
+  await expect(dialog).not.toContainText("not connected");
+});

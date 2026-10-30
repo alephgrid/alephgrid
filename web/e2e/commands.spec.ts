@@ -45,7 +45,20 @@ test("one registry: no key bound twice in a context; layouts and IME", () => {
 });
 
 async function sheetPage(page: Page, name: string, inputs: { row: number; column: number; value: string }[]) {
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
+  // Only Chromium has grantable clipboard permissions; Firefox and WebKit allow clipboard
+  // access from user actions.
+  if (page.context().browser()?.browserType().name() === "chromium") {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
+  }
+  // Tests cannot read the system clipboard there without a user action, so remember what
+  // the app writes to it; `pasteClipboard` falls back to that.
+  await page.addInitScript(() => {
+    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = async (text: string) => {
+      (window as unknown as { __copied: string }).__copied = text;
+      return write(text);
+    };
+  });
   const wb = await server.createWorkbook(name), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Data" });
   await ws.call("sheet_set", { sheet: 0, inputs });
@@ -62,12 +75,14 @@ async function sheetPage(page: Page, name: string, inputs: { row: number; column
 
 /** The system clipboard's text, delivered as a paste event (what Mod+V does). */
 async function pasteClipboard(page: Page) {
-  await page.evaluate(async () => {
-    const text = await navigator.clipboard.readText();
+  const system = page.context().browser()?.browserType().name() === "chromium";
+  await page.evaluate(async (system) => {
+    const copied = (window as unknown as { __copied?: string }).__copied ?? "";
+    const text = system ? await navigator.clipboard.readText() : copied;
     const data = new DataTransfer();
     data.setData("text/plain", text);
     document.querySelector(".grid-host")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
-  });
+  }, system);
 }
 
 test("fill down and right translate formulas and undo as one step", async ({ page }) => {
@@ -97,7 +112,11 @@ test("fill down and right translate formulas and undo as one step", async ({ pag
   ws.close();
 });
 
-test("copy pastes formulas, cut moves cells and their references, paste special by keyboard", async ({ page }) => {
+test("copy pastes formulas, cut moves cells and their references, paste special by keyboard", async ({ page, browserName }) => {
+  // Playwright's Firefox drops data attached to script-made paste events and does not turn
+  // Mod+V into a paste either, so this cannot be driven there; it is a manual check in
+  // docs/ACCESSIBILITY_TESTING.md.
+  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
   const { ws, content, display } = await sheetPage(page, "Clipboard", [
     { row: 0, column: 0, value: "5" }, { row: 1, column: 0, value: "=A1*2" }, { row: 0, column: 1, value: "=A1+A2" },
   ]);
@@ -122,7 +141,10 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   expect(axe.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
   await page.keyboard.press("ArrowDown"); await page.keyboard.press("ArrowDown");
   await expect(dialog.getByLabel("Values only")).toBeChecked();
-  await page.keyboard.press("Tab"); await page.keyboard.press("Space");
+  // Safari's Tab reaches only text fields unless "Press Tab to highlight each item" is on;
+  // Option+Tab reaches every control.
+  const tab = page.context().browser()?.browserType().name() === "webkit" ? "Alt+Tab" : "Tab";
+  await page.keyboard.press(tab); await page.keyboard.press("Space");
   await expect(dialog.getByLabel("Transpose rows and columns")).toBeChecked();
   await page.keyboard.press("Enter");
   await expect.poll(() => content(0, 5)).toBe("10");
@@ -132,6 +154,7 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   await page.keyboard.press("ControlOrMeta+Home");
   await page.keyboard.press("Shift+ArrowDown");
   await page.keyboard.press("ControlOrMeta+x");
+  await expect(page.locator(".toast").last()).toContainText("Cut.");
   await page.keyboard.press("ControlOrMeta+Home");
   for (const k of ["ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowDown", "ArrowRight", "ArrowRight", "ArrowRight"]) await page.keyboard.press(k);
   await pasteClipboard(page);
@@ -142,7 +165,11 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(() => content(0, 1)).toBe("=A1+A2");
   // Text from elsewhere still pastes as values.
-  await page.evaluate(() => navigator.clipboard.writeText("7\t8"));
+  // Text copied in another app.
+  await page.evaluate(async () => {
+    (window as unknown as { __copied: string }).__copied = "7\t8";
+    await navigator.clipboard.writeText("7\t8").catch(() => undefined);
+  });
   await page.keyboard.press("ControlOrMeta+Home");
   for (let i = 0; i < 9; i++) await page.keyboard.press("ArrowDown");
   await pasteClipboard(page);
@@ -199,4 +226,20 @@ test("command palette, shortcut help, table context and other keyboard layouts",
   await page.keyboard.press("Enter");
   await expect(palette.getByRole("status")).toContainText("Paste special works in sheets");
   ws.close();
+});
+
+test("a dialog keeps Escape and Tab when focus has left it, as after a click in Safari", async ({ page }) => {
+  const wb = await server.createWorkbook("Dialog focus");
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("button", { name: "Formula help", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Formula help" });
+  await expect(dialog).toBeVisible();
+  // Safari leaves focus on the page body after a click on a button.
+  const blur = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await blur();
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => !!document.activeElement?.closest("[role=dialog]"))).toBe(true);
+  await blur();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });

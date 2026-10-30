@@ -3,7 +3,7 @@
 mod compile;
 mod parse;
 
-pub use compile::{column_type, compile, compile_full, compile_with_errors, referenced_columns, rename_column, Compiled, Relation, Relations, Stage, Ty};
+pub use compile::{column_type, compile, compile_full, compile_with_errors, referenced_columns, references, rename_column, rename_table, rename_table_column, valid_table_name, Compiled, Reference, Relation, Relations, Stage, Ty};
 pub use parse::{parse, ErrorCode, FormulaError, Span};
 
 #[cfg(test)]
