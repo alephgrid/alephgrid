@@ -105,6 +105,8 @@ pub enum ExprKind {
     Column { name: String, this_row: bool },
     /// A whole column of a (possibly other) table: `Orders[amount]`.
     TableColumn { table: String, column: String },
+    /// A whole table's data rows: `Customers`, `Customers[]` or `Customers[#Data]`.
+    Table { table: String },
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
     Call { name: String, args: Vec<Expr> },
@@ -470,7 +472,8 @@ impl Parser<'_> {
                     _ if name.eq_ignore_ascii_case("TRUE") => Ok(Expr { kind: ExprKind::Bool(true), span }),
                     _ if name.eq_ignore_ascii_case("FALSE") => Ok(Expr { kind: ExprKind::Bool(false), span }),
                     _ if looks_like_cell(&name) => err(format!("{name} is a sheet cell reference; table formulas refer to columns with [@column]"), span.start, span.end),
-                    _ => err(format!("{name} is not a function call or a column; write [@{name}] for a column of this row"), span.start, span.end),
+                    // A bare name is a table, as in spreadsheets; binding explains other uses.
+                    _ => Ok(Expr { kind: ExprKind::Table { table: name }, span }),
                 }
             }
             Tok::End => err("the formula ends too early", span.start, span.end),
@@ -526,6 +529,8 @@ fn this_table_reference(items: Vec<BracketItem>, span: Span) -> ParseResult<Expr
 /// `Table[col]`, `Table[[col]]`, `Table[[#This Row],[col]]`, `Table[@col]`.
 fn table_reference(table: &str, items: Vec<BracketItem>, span: Span) -> ParseResult<ExprKind> {
     match items.as_slice() {
+        [] => Ok(ExprKind::Table { table: table.to_string() }),
+        [BracketItem::Special(s)] if s.eq_ignore_ascii_case("#data") => Ok(ExprKind::Table { table: table.to_string() }),
         [BracketItem::Column(c)] => Ok(ExprKind::TableColumn { table: table.to_string(), column: c.clone() }),
         // This row of a named table: only meaningful for the formula's own table; checked when binding.
         [BracketItem::ThisRow, BracketItem::Column(c)] => Ok(ExprKind::Call {
@@ -555,6 +560,7 @@ mod tests {
             ExprKind::Error(c) => c.code().to_string(),
             ExprKind::Column { name, this_row } => format!("[{}{name}]", if *this_row { "@" } else { "" }),
             ExprKind::TableColumn { table, column } => format!("{table}[{column}]"),
+            ExprKind::Table { table } => format!("{table}[#Data]"),
             ExprKind::Unary { op, expr } => format!("({op:?} {})", shape(expr)),
             ExprKind::Binary { op, left, right } => format!("({op:?} {} {})", shape(left), shape(right)),
             ExprKind::Call { name, args } => format!("{}({})", name.replace('\u{0}', ""), args.iter().map(shape).collect::<Vec<_>>().join(",")),
@@ -596,6 +602,9 @@ mod tests {
         assert_eq!(p("=round( [@x] , 2 )"), "ROUND([@x],2)");
         assert_eq!(p("=ROUND([@x],)"), "ROUND([@x],_)");
         assert_eq!(p("=NOW()"), "NOW()");
+        // A bare name is a whole table, as in spreadsheets; so is Table[#Data].
+        assert_eq!(p("=VLOOKUP(1,Customers,2,FALSE)"), "VLOOKUP(1,Customers[#Data],2,false)");
+        assert_eq!(p("=Customers[#Data]"), "Customers[#Data]");
     }
 
     #[test]
@@ -607,7 +616,6 @@ mod tests {
         assert!(e("=SUM(A1:A3)").message.contains("ranges"));
         assert!(e("=[@a]:[@b]").message.contains("ranges"));
         assert!(e("=Sheet1!A1").message.contains("sheet cell references"));
-        assert!(e("=amount*2").message.contains("[@amount]"));
         assert!(e("=\"open").message.contains("closing quote"));
         assert!(e("=[@a").message.contains("closing ]"));
         assert!(e("=T[[#Headers],[a]]").message.contains("#Headers"));

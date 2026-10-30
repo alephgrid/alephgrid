@@ -223,6 +223,15 @@ fn refusals_explain_and_point_at_the_problem() {
     assert!(err("=ROUND(1)").message.contains("takes 2 arguments"));
     assert!(err("=AND(\"x\")").message.contains("not a condition"));
     assert!(err("=T[[#This Row],[amount]]").message.contains("[@column]"));
+    // A bare name reads as a table; used as a value it still points at [@name].
+    assert!(err("=amount*2").message.contains("[@amount]"));
+    assert!(err("=VLOOKUP([@amount],T[a],2,FALSE)").message.contains("whole table"));
+    assert!(err("=VLOOKUP([@amount],T,2)").message.contains("approximate"));
+    assert!(err("=VLOOKUP([@amount],T,2,TRUE)").message.contains("approximate"));
+    assert!(err("=VLOOKUP([@amount],T,[@amount],FALSE)").message.contains("written in the formula"));
+    assert!(err("=XLOOKUP(1,T[a]=[@amount],T[b])").message.contains("several keys"));
+    assert!(err("=XLOOKUP(2,(T[a]=[@amount])*(T[b]=1),T[b])").message.contains("several keys"));
+    assert!(err("=XLOOKUP(1,(T[a]=T[b])*(T[b]=1),T[b])").message.contains("several keys"));
     let e = err("=1+[@missing]");
     assert_eq!((e.span.start, e.span.end), (3, 13));
     // Column names resolve case-insensitively and are reported as named in the table.
@@ -235,17 +244,26 @@ fn refusals_explain_and_point_at_the_problem() {
 struct Lk;
 impl Relations for Lk {
     fn relation(&self, table: &str) -> Result<Option<Relation>, String> {
-        Ok((table == "lk").then(|| Relation {
-            sql: "SELECT kn, kt, r, o AS _rf_ord FROM lk".into(),
-            columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
-            errors: vec![],
-        }))
+        // `lt` is the same rows with the text key first, for VLOOKUP by text.
+        Ok(match table {
+            "lk" => Some(Relation {
+                sql: "SELECT kn, kt, r, o AS _rf_ord FROM lk".into(),
+                columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
+                errors: vec![],
+            }),
+            "lt" => Some(Relation {
+                sql: "SELECT kt, kn, r, o AS _rf_ord FROM lk".into(),
+                columns: vec![("kt".into(), "VARCHAR".into()), ("kn".into(), "DOUBLE".into()), ("r".into(), "VARCHAR".into())],
+                errors: vec![],
+            }),
+            _ => None,
+        })
     }
 }
 
-/// Exact XLOOKUP over another table versus the same lookup over a sheet range.
-#[test]
-fn table_lookups_agree_with_the_sheet_engine() {
+/// Lookups over another table versus the same lookups over sheet ranges: `lk` is H1:J7
+/// (kn, kt, r) and `lt` is L1:N7 (kt, kn, r).
+fn check_lookups(formulas: &[&str]) {
     let rows = rows();
     let conn = Connection::open_in_memory().unwrap();
     table(&conn, &rows);
@@ -261,24 +279,57 @@ fn table_lookups_agree_with_the_sheet_engine() {
     }
     let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let mut failures = Vec::new();
-    for f in [
-        "=XLOOKUP([@n],lk[kn],lk[r])", "=XLOOKUP([@i],lk[kn],lk[r],\"none\")", "=XLOOKUP([@s],lk[kt],lk[r])",
-        "=XLOOKUP([@s],lk[kt],lk[r],\"none\",0,-1)", "=XLOOKUP([@s],lk[kn],lk[r],\"none\")", "=XLOOKUP([@n],lk[kt],lk[r],\"none\")",
-        "=XLOOKUP([@b],lk[kn],lk[r],\"none\")", "=XLOOKUP([@i]*1,lk[kn],lk[r],\"none\",0,-1)", "=XLOOKUP([@n]/[@i],lk[kn],lk[r])",
-        "=IFNA(XLOOKUP(UPPER([@s]),lk[kt],lk[r]),\"?\")&\"!\"",
-    ] {
+    for f in formulas {
         let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap_or_else(|e| panic!("{f}: {e}"));
         let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM t"));
         let ours: Vec<Out> = conn.prepare(&sql).unwrap_or_else(|e| panic!("{f}: {e}\n{sql}")).query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)))
-            .unwrap().map(|r| match r.unwrap() { (_, Some(e)) => Out::Error(e), (Some(s), None) => Out::Text(s), (None, None) => Out::Blank }).collect();
+            .unwrap().map(|r| match r.unwrap() {
+                (_, Some(e)) => Out::Error(e),
+                (Some(s), None) if c.ty == Ty::Number => Out::Number(s.parse().unwrap()),
+                (Some(s), None) => Out::Text(s),
+                (None, None) => Out::Blank,
+            }).collect();
         assert_eq!(ours.len(), rows.len(), "{f}: one result per row");
-        let sheet_formula = f.replace("lk[kn]", "$H$1:$H$7").replace("lk[kt]", "$I$1:$I$7").replace("lk[r]", "$J$1:$J$7");
+        let sheet_formula = f.replace("lk[kn]", "$H$1:$H$7").replace("lk[kt]", "$I$1:$I$7").replace("lk[r]", "$J$1:$J$7")
+            .replace(",lk,", ",$H$1:$J$7,").replace(",lt,", ",$L$1:$N$7,");
         let theirs = ironcalc_with(&rows, &sheet_formula, &lk);
         for (k, (a, b)) in ours.iter().zip(&theirs).enumerate() {
             if !same(a, b) { failures.push(format!("{f} row {k} {:?}: table {a:?}, sheet {b:?}", rows[k])); }
         }
     }
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Exact XLOOKUP over another table versus the same lookup over a sheet range.
+#[test]
+fn table_lookups_agree_with_the_sheet_engine() {
+    check_lookups(&[
+        "=XLOOKUP([@n],lk[kn],lk[r])", "=XLOOKUP([@i],lk[kn],lk[r],\"none\")", "=XLOOKUP([@s],lk[kt],lk[r])",
+        "=XLOOKUP([@s],lk[kt],lk[r],\"none\",0,-1)", "=XLOOKUP([@s],lk[kn],lk[r],\"none\")", "=XLOOKUP([@n],lk[kt],lk[r],\"none\")",
+        "=XLOOKUP([@b],lk[kn],lk[r],\"none\")", "=XLOOKUP([@i]*1,lk[kn],lk[r],\"none\",0,-1)", "=XLOOKUP([@n]/[@i],lk[kn],lk[r])",
+        "=IFNA(XLOOKUP(UPPER([@s]),lk[kt],lk[r]),\"?\")&\"!\"",
+    ]);
+}
+
+/// Exact VLOOKUP over a whole table, including column numbers outside it.
+#[test]
+fn table_vlookups_agree_with_the_sheet_engine() {
+    check_lookups(&[
+        "=VLOOKUP([@n],lk,3,FALSE)", "=VLOOKUP([@i],lk,2,FALSE)", "=VLOOKUP([@s],lt,3,FALSE)", "=VLOOKUP([@s],lt,2,0)",
+        "=VLOOKUP([@b],lk,3,FALSE)", "=VLOOKUP([@n]/[@i],lk,3,FALSE)", "=IFNA(VLOOKUP([@s],lt,3,FALSE),\"none\")",
+        "=VLOOKUP([@n],lk,1,FALSE)", "=VLOOKUP([@n],lk,0,FALSE)", "=VLOOKUP([@n],lk,4,FALSE)", "=VLOOKUP([@n],lk,2.9,FALSE)",
+    ]);
+}
+
+/// Several keys, written as spreadsheets do: 1 against a product of comparisons, or TRUE
+/// against one comparison.
+#[test]
+fn multi_key_lookups_agree_with_the_sheet_engine() {
+    check_lookups(&[
+        "=XLOOKUP(1,(lk[kn]=[@n])*(lk[kt]=[@s]),lk[r],\"none\")", "=XLOOKUP(1,(lk[kt]=[@s])*(lk[kn]=[@i]),lk[r],\"none\",0,-1)",
+        "=XLOOKUP(1,([@i]=lk[kn])*(lk[kt]=[@s]),lk[r])", "=XLOOKUP(1,(lk[kn]=[@b])*(lk[kt]=[@s])*(lk[r]=\"c\"),lk[r],\"none\")",
+        "=XLOOKUP(TRUE,lk[kn]=[@n],lk[r],\"none\")", "=XLOOKUP(TRUE,lk[kt]=UPPER([@s]),lk[r],\"none\",0,-1)",
+    ]);
 }
 
 fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, &str)]) -> Vec<Out> {
@@ -288,6 +339,10 @@ fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, 
         if let Some(kn) = kn { m.set_user_input(0, rr, 8, format!("{kn}")).unwrap(); }
         match kt { Some("") => m.set_user_input(0, rr, 9, "=\"\"".into()).unwrap(), Some(t) => m.set_user_input(0, rr, 9, format!("'{t}")).unwrap(), None => {} }
         m.set_user_input(0, rr, 10, format!("'{v}")).unwrap();
+        // The same rows with the text key first (L:N), for VLOOKUP by text.
+        match kt { Some("") => m.set_user_input(0, rr, 12, "=\"\"".into()).unwrap(), Some(t) => m.set_user_input(0, rr, 12, format!("'{t}")).unwrap(), None => {} }
+        if let Some(kn) = kn { m.set_user_input(0, rr, 13, format!("{kn}")).unwrap(); }
+        m.set_user_input(0, rr, 14, format!("'{v}")).unwrap();
     }
     let mut out = Vec::new();
     // Rows go below the lookup block so ranges do not overlap.
@@ -316,4 +371,27 @@ fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, 
         });
     }
     out
+}
+
+/// Spreadsheet VLOOKUP reads `*`, `?` and `~` in a text value as a pattern even in exact
+/// mode; tables give #VALUE! for those rows until pattern matching exists. XLOOKUP's exact
+/// mode compares them literally. Expected values by hand from the `lk` rows.
+#[test]
+fn vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE lk (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT);
+         INSERT INTO lk VALUES (1, 'x', 'a', 0), (2, 'X', 'b', 10), (3, 'x*', 'c', 20), (4, 'xy', 'd', 30);
+         CREATE TABLE w (k INTEGER, s VARCHAR);
+         INSERT INTO w VALUES (0, 'X'), (1, 'x*'), (2, 'x?'), (3, '~x'), (4, 'none');",
+    ).unwrap();
+    let cols = vec![("k".to_string(), "INTEGER".to_string()), ("s".to_string(), "VARCHAR".to_string())];
+    let run = |f: &str| -> Vec<(Option<String>, Option<String>)> {
+        let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap();
+        let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM w"));
+        conn.prepare(&sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+    };
+    let (v, e) = (|s: &str| (Some(s.to_string()), None), |s: &str| (None, Some(s.to_string())));
+    assert_eq!(run("=VLOOKUP([@s],lt,3,FALSE)"), [v("a"), e("#VALUE!"), e("#VALUE!"), e("#VALUE!"), e("#N/A")]);
+    assert_eq!(run("=XLOOKUP([@s],lk[kt],lk[r],\"-\")"), [v("a"), v("c"), v("-"), v("-"), v("-")]);
 }

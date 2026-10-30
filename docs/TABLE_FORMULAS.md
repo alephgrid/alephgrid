@@ -38,6 +38,7 @@ refused with an explanation and the character position, never approximated.
 | Errors | `#N/A`, `#DIV/0!`, `#VALUE!`, `#NUM!`, `#REF!`, `#NAME?`, `#NULL!` | |
 | This row | `[@amount]`, `[@[unit price]]`, `[amount]`, `Orders[[#This Row],[amount]]` | `'` escapes `[`, `]`, `#` and `'` inside brackets |
 | Whole column | `Orders[amount]`, `Orders[[amount]]` | Only where a function expects a range (lookups F.06, conditional aggregates F.08) |
+| Whole table | `Customers`, `Customers[#Data]` | Only as VLOOKUP's table; a bare name is a table, as in spreadsheets |
 | Operators | `-x` `x%` `^` `*` `/` `+` `-` `&` `=` `<>` `<` `<=` `>` `>=` | Spreadsheet precedence: negation, percent, power, multiply/divide, add/subtract, join, compare. `-2^2` is 4 |
 | Calls | `NAME(arg, …)` | Allowlisted functions only |
 
@@ -115,9 +116,63 @@ blank values are skipped as a sheet skips them in referenced cells, while typed 
 converted. Volatile functions (`TODAY`, `NOW`, `RAND`) are refused until F.10 defines a
 calculation epoch.
 
-Lookups (`XLOOKUP`, `VLOOKUP`, `XMATCH`) over whole columns are F.06; conditional aggregates
-(`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`) are F.08; recalculation and dependencies across tables and
-sheets are F.09.
+Conditional aggregates (`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`) are F.08; recalculation and
+dependencies with sheets are F.09.
+
+## Lookups (F.06)
+
+A formula can look up rows of another table (or of its own table's stored columns):
+
+```text
+=XLOOKUP([@customer_id], Customers[id], Customers[name], "unknown")
+=XLOOKUP([@customer_id], Customers[id], Customers[name], , 0, -1)        last match
+=VLOOKUP([@customer_id], Customers, 3, FALSE)
+=XLOOKUP(1, (Prices[sku]=[@sku])*(Prices[region]=[@region]), Prices[price])
+=XLOOKUP(TRUE, Prices[sku]=[@sku], Prices[price])
+```
+
+| Form | Meaning |
+|---|---|
+| `XLOOKUP(value, T[key], T[result], [if_not_found], [0], [1 or -1])` | Exact match on one column. `if_not_found` defaults to `#N/A`; search mode 1 takes the first match, -1 the last. |
+| `VLOOKUP(value, T, n, FALSE)` | Exact match on `T`'s first column, returning its `n`th column in the table's column order (stored columns, then formula columns). `n` must be written in the formula; `n` < 1 is `#VALUE!` and `n` past the last column `#REF!`, as in sheets; a fractional `n` is truncated. |
+| `XLOOKUP(1, (T[a]=x)*(T[b]=y)…, T[result], …)` | Several keys, written as in spreadsheets: a row matches when every comparison is true. Each comparison keeps its own type rules, so `"1"` never equals `1` and keys are never glued into text. |
+| `XLOOKUP(TRUE, T[a]=x, T[result], …)` | One comparison, the same as `XLOOKUP(x, T[a], …)`. |
+
+`T` alone, or `T[#Data]`, is the whole table. Matching follows spreadsheet exact matching:
+numbers at 15 significant digits, text case-insensitively, a Date equal to its serial, values
+of different types never equal, and a blank matching `0`, `""`, `FALSE` and blank cells. Rows
+whose key holds an error never match. "First" and "last" mean the table's persisted row order
+(`_rf_ord`), never a view's sort, so a view cannot change a lookup's result.
+
+Not available yet, refused with a message: approximate and wildcard match modes, binary
+search, `VLOOKUP` without `FALSE` (spreadsheets default to approximate match), `HLOOKUP`,
+`XMATCH`, `MATCH`, `INDEX`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, and computed column
+numbers. Spreadsheet `VLOOKUP` treats `*`, `?` and `~` in a text value as a pattern even in
+exact mode; such values give `#VALUE!` here rather than a literal match (use `XLOOKUP`, whose
+exact mode compares them literally).
+
+**How it runs.** Each lookup compiles to one grouped relation of the other table, built in a
+single scan: every row contributes the keys it matches (its own value, plus the blank
+equivalents), `row_number()` over the persisted order keeps one row per key, and the result is
+left-joined to the formula's table on the row's key. Every row therefore gets at most one
+result, and no query runs per row or per cell.
+
+**Dependencies across tables.** Renaming a column or table rewrites `T[column]` and `T`
+references in every table's formulas. A table whose formulas are referenced can only be
+renamed to a name formulas can spell (letters, digits, `_`, `.`, not starting with a digit).
+Deleting a column that another table's formula reads is refused, and so is deleting a table
+that formulas read. Because `VLOOKUP` reads by position, deleting a column at or before the
+column it returns is refused too. Tables may look each other up (orders read customers, and
+customers read orders) as long as no column depends on itself; a formula that would close
+such a loop is refused with the path, e.g. `circular reference: customers.label →
+orders.label → customers.label`. While a lookup relation is built, a column that depends on
+the column being computed shows `#REF!` there instead of looping.
+
+A lookup into the formula's own table sees its stored columns only, not its formula columns.
+
+**Cost.** Lookups are evaluated when rows are read, like other formula columns: a read that
+uses a lookup scans the looked-up table once per lookup. See Verification for measured
+timings.
 
 ## Storage, reads and editing
 
@@ -136,7 +191,7 @@ cannot read its own column. **Add column** offers *Spreadsheet formula* (the def
 formula*; the formula bar edits either kind in its own language.
 
 Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output), and
-formulas reading other tables (F.06/F.08) or sheet cells (F.09).
+formulas reading sheet cells (F.09).
 
 ## Row identity and order
 
@@ -151,4 +206,8 @@ never a view's sort or DuckDB's physical order (F.06).
 golden values. A differential test evaluates every formula of a corpus on random typed rows in
 DuckDB and in IronCalc (the sheet engine, an independent implementation) and requires equal
 values and error codes after the documented normalizations (blank results, shortest decimal
-text). Differences found that are not documented above fail the test.
+text). Differences found that are not documented above fail the test. The same comparison
+covers XLOOKUP, VLOOKUP and multi-key lookups against sheet ranges with duplicate keys, a blank
+key, `0`, `""` and case variants. Workbook tests cover source edits, one result per row with
+duplicate keys, renames, refused deletes, tables that look each other up and refused circular
+references, before and after reopening.

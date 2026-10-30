@@ -545,6 +545,11 @@ impl Workbook {
         if !self.table_exists(table)? {
             bail!("unknown table {table:?}");
         }
+        let users: Vec<String> = self.cross_users(table, None)?.into_iter().filter(|u| u.contains('.')).collect();
+        if !users.is_empty() {
+            bail!("{table:?} is read by formula column{} {}; change or delete {} first",
+                if users.len() == 1 { "" } else { "s" }, users.join(", "), if users.len() == 1 { "it" } else { "them" });
+        }
         self.mutating("drop_table", None, |wb| {
             wb.conn.execute("DELETE FROM _rf_views WHERE table_name = ?", duckdb::params![table])?;
             wb.conn.execute_batch(&format!(
@@ -563,6 +568,15 @@ impl Workbook {
             bail!("unknown table {table:?}");
         }
         let new_name = self.unique_table_name(new_name)?;
+        let mut rewritten = Vec::new();
+        for (t, name, f) in self.all_sheet_formulas()? {
+            if let Some(updated) = crate::table_formula::rename_table(&f, table, &new_name).map_err(|e| anyhow!("formula error: {e}"))? {
+                rewritten.push((t, name, updated));
+            }
+        }
+        if !rewritten.is_empty() && !crate::table_formula::valid_table_name(&new_name) {
+            bail!("formulas refer to {table:?}, so its new name can only use letters, digits, _ and . (not {new_name:?})");
+        }
         self.mutating("rename_table", None, |wb| {
             wb.conn.execute_batch(&format!(
                 "ALTER TABLE {} RENAME TO {}; UPDATE _rf_columns SET table_name = {} WHERE table_name = {};",
@@ -571,6 +585,10 @@ impl Workbook {
                 lit(&new_name),
                 lit(table)
             ))?;
+            for (t, name, updated) in &rewritten {
+                let t = if t == table { new_name.as_str() } else { t.as_str() };
+                wb.conn.execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![updated, t, name])?;
+            }
             storage::rename_table(&wb.conn, table, &new_name)?;
             wb.rewrite_saved_views(table, |spec, _| {
                 spec.table = new_name.clone();
@@ -616,7 +634,7 @@ impl Workbook {
     /// docs/TABLE_FORMULAS.md) is compiled against the table's current columns first.
     pub fn add_formula_column_as(&mut self, table: &str, name: &str, formula: &str, language: FormulaLanguage) -> Result<()> {
         self.ensure_new_column(table, name, None)?;
-        self.check_formula(table, formula, language)?;
+        self.check_formula(table, name, formula, language)?;
         let language = match language { FormulaLanguage::Sql => "sql", FormulaLanguage::Sheet => "sheet" };
         self.mutating("add_formula_column", None, |wb| {
             wb.conn.execute(
@@ -628,15 +646,15 @@ impl Workbook {
         })
     }
 
-    /// Validate a formula against the table as it is now (before any change).
-    fn check_formula(&self, table: &str, formula: &str, language: FormulaLanguage) -> Result<()> {
+    /// Validate a formula for new column `name` against the table as it is now (before any change).
+    fn check_formula(&self, table: &str, name: &str, formula: &str, language: FormulaLanguage) -> Result<()> {
         match language {
             FormulaLanguage::Sql => {
                 formula::analyze(&self.conn, formula)?;
                 let probe = format!("SELECT ({}) AS v FROM ({}) LIMIT 1", formula_to_sql(formula), self.base_select(table)?);
                 self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
             }
-            FormulaLanguage::Sheet => self.db().check_sheet_formula(table, formula, None)?,
+            FormulaLanguage::Sheet => self.db().check_sheet_formula(table, formula, name)?,
         }
         Ok(())
     }
@@ -664,7 +682,7 @@ impl Workbook {
             formula::analyze(&self.conn, formula)?;
         } else {
             // Compile against the other columns: a formula cannot read itself.
-            self.db().check_sheet_formula(table, formula, Some(name))?;
+            self.db().check_sheet_formula(table, formula, name)?;
         }
         self.mutating("update_formula", None, |wb| {
             wb.conn.execute(
@@ -674,6 +692,47 @@ impl Workbook {
             wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
         })
+    }
+
+    /// Every spreadsheet formula in the workbook as (table, column, formula).
+    fn all_sheet_formulas(&self) -> Result<Vec<(String, String, String)>> {
+        let mut out = Vec::new();
+        for t in storage::user_tables(&self.conn)? {
+            let sheet = self.db().sheet_formulas(&t)?;
+            for (name, f) in self.formulas(&t)? {
+                if sheet.contains(&name) {
+                    out.push((t.clone(), name, f));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Spreadsheet formulas, in any table, that read `table` as a whole: its column `column`
+    /// (`Table[column]`), or with `column` set to None, the table at all. A VLOOKUP reads by
+    /// column number, so deleting a column before its returned column counts as reading it.
+    fn cross_users(&self, table: &str, column: Option<&str>) -> Result<Vec<String>> {
+        use crate::table_formula::Reference;
+        let position = match column {
+            Some(c) => self.db().layout(table)?.0.iter().position(|n| formula::same_name(n, c)).map(|p| p + 1),
+            None => None,
+        };
+        let mut out = Vec::new();
+        for (t, name, f) in self.all_sheet_formulas()? {
+            let Ok(refs) = crate::table_formula::references(&f) else { continue };
+            let uses = refs.iter().any(|r| match (r, column) {
+                (Reference::Column { table: rt, .. } | Reference::Table { table: rt, .. }, None) => rt.eq_ignore_ascii_case(table),
+                (Reference::Column { table: rt, column: rc, .. }, Some(c)) => rt.eq_ignore_ascii_case(table) && formula::same_name(rc, c),
+                (Reference::Table { table: rt, positions, .. }, Some(_)) => {
+                    rt.eq_ignore_ascii_case(table) && position.is_some_and(|p| positions.iter().any(|q| *q >= p))
+                }
+                _ => false,
+            });
+            if uses && !(t == table && Some(name.as_str()) == column) {
+                out.push(if t == table { format!("{name:?}") } else { format!("{t}.{name:?}") });
+            }
+        }
+        Ok(out)
     }
 
     /// Formula columns of `table`, other than `column` itself, that reference `column`.
@@ -692,11 +751,14 @@ impl Workbook {
         if !self.columns(table)?.iter().any(|c| c.name == name) {
             bail!("unknown column {name:?}");
         }
-        let users = self.dependents(table, name)?;
+        let mut users: Vec<String> = self.dependents(table, name)?.into_iter().map(|u| format!("{u:?}")).collect();
+        for u in self.cross_users(table, Some(name))? {
+            if !users.contains(&u) { users.push(u); }
+        }
         if !users.is_empty() {
             bail!("{name:?} is used by formula column{} {}; change or delete {} first",
                 if users.len() == 1 { "" } else { "s" },
-                users.iter().map(|u| format!("{u:?}")).collect::<Vec<_>>().join(", "),
+                users.join(", "),
                 if users.len() == 1 { "it" } else { "them" });
         }
         let in_views: Vec<String> = self
@@ -751,6 +813,19 @@ impl Workbook {
                 rewritten.push((fname.clone(), updated));
             }
         }
+        // Whole-column references `table[name]`, in any table's spreadsheet formulas.
+        let mut elsewhere = Vec::new();
+        for (t, fname, f) in self.all_sheet_formulas()? {
+            let current = if t == table { rewritten.iter().find(|(n, _)| *n == fname).map(|(_, u)| u.clone()).unwrap_or(f) } else { f };
+            if let Some(updated) = crate::table_formula::rename_table_column(&current, table, name, new_name).map_err(|e| anyhow!("formula error: {e}"))? {
+                if t == table {
+                    rewritten.retain(|(n, _)| *n != fname);
+                    rewritten.push((fname, updated));
+                } else {
+                    elsewhere.push((t, fname, updated));
+                }
+            }
+        }
         self.mutating("rename_column", None, |wb| {
             if is_formula {
                 wb.conn.execute(
@@ -771,6 +846,9 @@ impl Workbook {
                     "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
                     duckdb::params![updated, table, fname],
                 )?;
+            }
+            for (t, fname, updated) in &elsewhere {
+                wb.conn.execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![updated, t, fname])?;
             }
             wb.rewrite_saved_views(table, |spec, widths| {
                 for k in &mut spec.sort {
