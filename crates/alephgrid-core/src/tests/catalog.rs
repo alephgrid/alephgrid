@@ -29,7 +29,7 @@ fn compiles_in_tables(name: &str) -> bool {
     let cols = [("n".to_string(), "DOUBLE".to_string())];
     match crate::table_formula::compile(&format!("={name}([@n])"), &cols, "_rf_p_") {
         Ok(_) => true,
-        Err(e) => !(e.message.contains("is not available in table formulas") || e.message.contains("not available yet") || e.message.contains("changes on every calculation")),
+        Err(e) => !(e.message.contains("is not available in table formulas") || e.message.contains("is not available for tables") || e.message.contains("not available yet") || e.message.contains("changes on every calculation")),
     }
 }
 

@@ -334,6 +334,27 @@ impl Db<'_> {
         Ok((out?, mine.into_iter().collect()))
     }
 
+    /// Read grouped lookup relations (joins and ASOF joins) from the cache when it is fresh.
+    fn use_cached_stages(&self, stages: &mut [crate::table_formula::Stage]) -> Result<()> {
+        use crate::table_formula::Stage;
+        for stage in stages {
+            match stage {
+                Stage::Join { sql, reads, .. } => {
+                    if let Some(cached) = self.cached_lookup(sql, reads)? {
+                        *sql = format!("SELECT k, v, e FROM {cached}");
+                    }
+                }
+                Stage::Asof { sql, reads, .. } => {
+                    if let Some(cached) = self.cached_lookup(sql, reads)? {
+                        *sql = format!("SELECT r, n, t, v, e FROM {cached}");
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Whether scratch table `s` exists in this connection's snapshot.
     fn scratch_visible(&self, s: &crate::catalog::Scratch) -> Result<bool> {
         let n: i64 = self.conn.query_row(
@@ -440,13 +461,7 @@ impl Db<'_> {
             match compiled {
                 Ok(mut c) => {
                     // Grouped lookup relations come from the cache when it is fresh.
-                    for stage in &mut c.stages {
-                        if let crate::table_formula::Stage::Join { sql, reads, .. } = stage {
-                            if let Some(cached) = self.cached_lookup(sql, reads)? {
-                                *sql = format!("SELECT k, v, e FROM {cached}");
-                            }
-                        }
-                    }
+                    self.use_cached_stages(&mut c.stages)?;
                     let temps = c.temps().iter().map(|a| ident(a)).collect::<Vec<_>>().join(", ");
                     let exclude = if temps.is_empty() { String::new() } else { format!(" EXCLUDE ({temps})") };
                     select = format!(
@@ -516,13 +531,7 @@ impl Db<'_> {
         if c.tables.is_empty() {
             return Ok(Err(FormulaError { message: "this formula reads no table; the sheet can compute it".into(), span: crate::table_formula::Span { start: 0, end: formula.chars().count() } }));
         }
-        for stage in &mut c.stages {
-            if let crate::table_formula::Stage::Join { sql, reads, .. } = stage {
-                if let Some(cached) = self.cached_lookup(sql, reads)? {
-                    *sql = format!("SELECT k, v, e FROM {cached}");
-                }
-            }
-        }
+        self.use_cached_stages(&mut c.stages)?;
         let value = match c.ty {
             // Dates reach the sheet as serial numbers, as the sheet engine stores them.
             Ty::Date => format!("CAST(date_diff('day', DATE '1899-12-30', {}) AS DOUBLE)", c.value),

@@ -232,8 +232,15 @@ fn refusals_explain_and_point_at_the_problem() {
     // A bare name reads as a table; used as a value it still points at [@name].
     assert!(err("=amount*2").message.contains("[@amount]"));
     assert!(err("=VLOOKUP([@amount],T[a],2,FALSE)").message.contains("whole table"));
-    assert!(err("=VLOOKUP([@amount],T,2)").message.contains("approximate"));
-    assert!(err("=VLOOKUP([@amount],T,2,TRUE)").message.contains("approximate"));
+    // F.07: approximate VLOOKUP is supported; what stays refused says why.
+    assert!(err("=VLOOKUP([@amount],T,2,[@amount]>1)").message.contains("written in the formula"));
+    assert!(err("=XLOOKUP([@amount],T[a],T[b],,0,2)").message.contains("binary search"));
+    assert!(err("=XLOOKUP([@amount],T[a],T[b],,3)").message.contains("match_mode"));
+    assert!(err("=XMATCH([@amount],T[a],0,-2)").message.contains("binary search"));
+    assert!(err("=MATCH([@amount],T[a],2)").message.contains("match type"));
+    assert!(err("=HLOOKUP([@amount],T,2,FALSE)").message.contains("across a row"));
+    assert!(err("=LOOKUP([@amount],T[a],T[b])").message.contains("XLOOKUP"));
+    assert!(err("=INDEX(T[a],1,2)").message.contains("column number 1"));
     assert!(err("=VLOOKUP([@amount],T,[@amount],FALSE)").message.contains("written in the formula"));
     assert!(err("=XLOOKUP(1,T[a]=[@amount],T[b])").message.contains("several keys"));
     assert!(err("=XLOOKUP(2,(T[a]=[@amount])*(T[b]=1),T[b])").message.contains("several keys"));
@@ -264,6 +271,24 @@ impl Relations for Lk {
                 errors: vec![],
                 reads: vec![],
             }),
+            "ls" => Some(Relation {
+                sql: "SELECT kn, kt, r, o AS _rf_ord FROM ls".into(),
+                columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
+                errors: vec![],
+                reads: vec![],
+            }),
+            "lst" => Some(Relation {
+                sql: "SELECT kt, kn, r, o AS _rf_ord FROM ls".into(),
+                columns: vec![("kt".into(), "VARCHAR".into()), ("kn".into(), "DOUBLE".into()), ("r".into(), "VARCHAR".into())],
+                errors: vec![],
+                reads: vec![],
+            }),
+            "ld" => Some(Relation {
+                sql: "SELECT kn, kt, r, o AS _rf_ord FROM ld".into(),
+                columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("r".into(), "VARCHAR".into())],
+                errors: vec![],
+                reads: vec![],
+            }),
             "ag" => Some(Relation {
                 sql: "SELECT kn, kt, kb, kd, r, o AS _rf_ord FROM ag".into(),
                 columns: vec![("kn".into(), "DOUBLE".into()), ("kt".into(), "VARCHAR".into()), ("kb".into(), "BOOLEAN".into()), ("kd".into(), "DATE".into()), ("r".into(), "DOUBLE".into())],
@@ -274,6 +299,9 @@ impl Relations for Lk {
         })
     }
 }
+
+/// Sorted lookup rows (kn, kt, r): ascending by both keys, distinct.
+const SORTED: [(f64, &str, &str); 7] = [(-2.5, "a", "p"), (0.0, "abc", "q"), (1.0, "b", "r"), (2.0, "bc", "s"), (3.0, "m", "t"), (7.5, "x", "u"), (10.0, "z", "v")];
 
 /// Lookups over another table versus the same lookups over sheet ranges: `lk` is H1:J7
 /// (kn, kt, r) and `lt` is L1:N7 (kt, kn, r).
@@ -291,6 +319,13 @@ fn check_lookups(formulas: &[&str]) {
     for (o, (kn, kt, r)) in lk.iter().enumerate() {
         conn.execute("INSERT INTO lk VALUES (?, ?, ?, ?)", duckdb::params![kn, kt, r, (o as i64) * 10]).unwrap();
     }
+    // Sorted copies for VLOOKUP/MATCH without exact match: ascending and descending, by
+    // number and by text (distinct keys: binary search over duplicates is arbitrary).
+    conn.execute_batch("CREATE TABLE ls (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT); CREATE TABLE ld (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT);").unwrap();
+    for (o, (kn, kt, r)) in SORTED.iter().enumerate() {
+        conn.execute("INSERT INTO ls VALUES (?, ?, ?, ?)", duckdb::params![kn, kt, r, (o as i64) * 10]).unwrap();
+        conn.execute("INSERT INTO ld VALUES (?, ?, ?, ?)", duckdb::params![kn, kt, r, (6 - o as i64) * 10]).unwrap();
+    }
     let cols: Vec<(String, String)> = COLUMNS.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let mut failures = Vec::new();
     for f in formulas {
@@ -305,7 +340,9 @@ fn check_lookups(formulas: &[&str]) {
             }).collect();
         assert_eq!(ours.len(), rows.len(), "{f}: one result per row");
         let sheet_formula = f.replace("lk[kn]", "$H$1:$H$7").replace("lk[kt]", "$I$1:$I$7").replace("lk[r]", "$J$1:$J$7")
-            .replace(",lk,", ",$H$1:$J$7,").replace(",lt,", ",$L$1:$N$7,");
+            .replace(",lk,", ",$H$1:$J$7,").replace("(lk,", "($H$1:$J$7,").replace(",lt,", ",$L$1:$N$7,")
+            .replace("ls[kn]", "$P$1:$P$7").replace("ls[kt]", "$Q$1:$Q$7").replace("ls[r]", "$R$1:$R$7").replace(",lst,", ",$X$1:$Z$7,").replace(",ls,", ",$P$1:$R$7,")
+            .replace("ld[kn]", "$T$1:$T$7").replace("ld[kt]", "$U$1:$U$7").replace("ld[r]", "$V$1:$V$7");
         let theirs = ironcalc_with(&rows, &sheet_formula, &lk);
         for (k, (a, b)) in ours.iter().zip(&theirs).enumerate() {
             if !same(a, b) { failures.push(format!("{f} row {k} {:?}: table {a:?}, sheet {b:?}", rows[k])); }
@@ -346,6 +383,73 @@ fn multi_key_lookups_agree_with_the_sheet_engine() {
     ]);
 }
 
+/// F.07: XLOOKUP's nearest-match and wildcard modes, from the first or the last row, against
+/// unsorted keys with duplicates, a blank, 0, "" and case variants, by probes of every type.
+#[test]
+fn approximate_and_wildcard_lookups_agree_with_the_sheet_engine() {
+    check_lookups(&[
+        "=XLOOKUP([@n],lk[kn],lk[r],\"none\",-1)", "=XLOOKUP([@n],lk[kn],lk[r],\"none\",1)",
+        "=XLOOKUP([@n],lk[kn],lk[r],\"none\",-1,-1)", "=XLOOKUP([@n],lk[kn],lk[r],\"none\",1,-1)",
+        "=XLOOKUP([@i],lk[kn],lk[r],,-1)", "=XLOOKUP([@i]+0.5,lk[kn],lk[r],,1)",
+        "=XLOOKUP([@s],lk[kt],lk[r],\"none\",-1)", "=XLOOKUP([@s],lk[kt],lk[r],\"none\",1)", "=XLOOKUP([@s],lk[kt],lk[r],\"none\",1,-1)",
+        "=XLOOKUP([@s],lk[kn],lk[r],\"none\",-1)", "=XLOOKUP([@s],lk[kn],lk[r],\"none\",1)",
+        "=XLOOKUP([@n],lk[kt],lk[r],\"none\",1)", "=XLOOKUP([@n],lk[kt],lk[r],\"none\",-1)",
+        "=XLOOKUP([@b],lk[kn],lk[r],\"none\",-1)", "=XLOOKUP([@b],lk[kt],lk[r],\"none\",1)", "=XLOOKUP([@b],lk[kn],lk[r],\"none\",1)",
+        "=XLOOKUP([@s],lk[kt],lk[r],\"none\",2)", "=XLOOKUP([@s]&\"*\",lk[kt],lk[r],\"none\",2)", "=XLOOKUP(\"?\",lk[kt],lk[r],\"none\",2)",
+        "=XLOOKUP(\"*r*\",lk[kt],lk[r],\"none\",2,-1)", "=XLOOKUP([@n],lk[kn],lk[r],\"none\",2)", "=XLOOKUP(LEFT([@s],1)&\"*\",lk[kt],lk[r],\"none\",2)",
+        "=XLOOKUP(\"~*\",lk[kt],lk[r],\"none\",2)", "=XLOOKUP([@s],lk[kn],lk[r],\"none\",2)",
+    ]);
+}
+
+/// F.07: lookups over sorted keys (VLOOKUP without FALSE, MATCH 1 and -1) versus the sheet
+/// engine's binary search over the same sorted ranges, and MATCH 0, XMATCH and INDEX. `ls`
+/// is P1:R7 sorted ascending by both keys, `ld` is T1:V7 sorted descending.
+#[test]
+fn sorted_lookups_matches_and_positions_agree_with_the_sheet_engine() {
+    check_lookups(&[
+        "=VLOOKUP([@n],ls,3)", "=VLOOKUP([@n],ls,3,TRUE)", "=VLOOKUP([@i],ls,2,1)", "=VLOOKUP([@s],lst,3,TRUE)", "=VLOOKUP([@b],ls,3,TRUE)",
+        "=VLOOKUP([@n],ls,3,FALSE)", "=VLOOKUP([@s],lst,2,FALSE)",
+        "=MATCH([@n],ls[kn])", "=MATCH([@n],ls[kn],1)", "=MATCH([@i],ls[kn],1)", "=MATCH([@s],ls[kt],1)", "=MATCH([@n],ld[kn],-1)", "=MATCH([@s],ld[kt],-1)",
+        "=MATCH([@n],lk[kn],0)", "=MATCH([@s],lk[kt],0)", "=MATCH([@i],lk[kn],0)", "=MATCH([@b],lk[kn],0)", "=MATCH([@s]&\"*\",lk[kt],0)",
+        "=XMATCH([@n],lk[kn])", "=XMATCH([@n],lk[kn],-1)", "=XMATCH([@s],lk[kt],1,-1)", "=XMATCH([@s],lk[kt],2)",
+        // Row 0 (or a fraction below 1) spills the whole column in a sheet; see by hand below.
+        "=INDEX(lk[r],MAX(1,[@i]))", "=INDEX(lk[r],MAX(1,[@n]))", "=INDEX(lk,MAX(1,[@i]),3)", "=INDEX(lk[r],MATCH([@n],lk[kn],0))",
+        "=INDEX(ls[r],MATCH([@n],ls[kn],1))", "=IFNA(INDEX(lk[r],XMATCH([@s],lk[kt],0,-1)),\"-\")",
+        // Not sorted: the sheet engine's answer is arbitrary; tables say #N/A (checked by hand below).
+    ]);
+}
+
+/// Unsorted keys for a sorted lookup give #N/A on every row instead of an arbitrary match;
+/// blank keys count as unsorted. By hand from the `lk` rows (2, 1, 2, blank, 0, -2.5, 3).
+#[test]
+fn sorted_lookups_refuse_unsorted_keys() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE lk (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT);
+         INSERT INTO lk VALUES (2, 'x', 'a', 0), (1, 'X', 'b', 10), (2, '', 'c', 20), (NULL, NULL, 'd', 30), (0, 'abc', 'e', 40), (-2.5, 'ärger', 'f', 50), (3, 'x', 'g', 60);
+         CREATE TABLE w (k INTEGER, n DOUBLE);
+         INSERT INTO w VALUES (0, 2), (1, 10);",
+    ).unwrap();
+    let cols = vec![("k".to_string(), "INTEGER".to_string()), ("n".to_string(), "DOUBLE".to_string())];
+    let run = |f: &str| -> Vec<(Option<String>, Option<String>)> {
+        let c = compile_full(f, &cols, &[], &Lk, "_rf_t_").unwrap();
+        let sql = format!("SELECT CAST({} AS VARCHAR), {} FROM ({}) ORDER BY k", c.value, c.error, c.wrap("SELECT * FROM w"));
+        conn.prepare(&sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
+    };
+    let na = (None, Some("#N/A".to_string()));
+    let value = |s: &str| (Some(s.to_string()), None);
+    let error = |s: &str| (None, Some(s.to_string()));
+    // INDEX: row 0 or a fraction below 1 would be the whole column, which a table cell
+    // cannot hold (a sheet spills it): #VALUE!, as for negative rows; past the end #REF!.
+    assert_eq!(run("=INDEX(lk[r],[@n]-2)"), [error("#VALUE!"), error("#REF!")]);
+    // 2/4 is row 0; 10/4 = 2.5 is row 2.
+    assert_eq!(run("=INDEX(lk[r],[@n]/4)"), [error("#VALUE!"), value("b")]);
+    assert_eq!(run("=INDEX(lk[r],[@n]+0.9)"), [value("b"), error("#REF!")]);
+    assert_eq!(run("=VLOOKUP([@n],lk,3,TRUE)"), [na.clone(), na.clone()]);
+    assert_eq!(run("=MATCH([@n],lk[kn],1)"), [na.clone(), na.clone()]);
+    assert_eq!(run("=MATCH([@n],lk[kn],-1)"), [na.clone(), na]);
+}
+
 fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, &str)]) -> Vec<Out> {
     let mut m = Model::new_empty("diff", "en", "UTC", "en").unwrap();
     for (r, (kn, kt, v)) in lk.iter().enumerate() {
@@ -357,6 +461,18 @@ fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, 
         match kt { Some("") => m.set_user_input(0, rr, 12, "=\"\"".into()).unwrap(), Some(t) => m.set_user_input(0, rr, 12, format!("'{t}")).unwrap(), None => {} }
         if let Some(kn) = kn { m.set_user_input(0, rr, 13, format!("{kn}")).unwrap(); }
         m.set_user_input(0, rr, 14, format!("'{v}")).unwrap();
+    }
+    for (r, (kn, kt, v)) in SORTED.iter().enumerate() {
+        let (up, down) = (r as i32 + 1, 7 - r as i32);
+        for (row, col) in [(up, 16), (down, 20)] {
+            m.set_user_input(0, row, col, format!("{kn}")).unwrap();
+            m.set_user_input(0, row, col + 1, format!("'{kt}")).unwrap();
+            m.set_user_input(0, row, col + 2, format!("'{v}")).unwrap();
+        }
+        // Text key first (X:Z), for VLOOKUP by text.
+        m.set_user_input(0, up, 24, format!("'{kt}")).unwrap();
+        m.set_user_input(0, up, 25, format!("{kn}")).unwrap();
+        m.set_user_input(0, up, 26, format!("'{v}")).unwrap();
     }
     let mut out = Vec::new();
     // Rows go below the lookup block so ranges do not overlap.
@@ -388,10 +504,10 @@ fn ironcalc_with(rows: &[Row], formula: &str, lk: &[(Option<f64>, Option<&str>, 
 }
 
 /// Spreadsheet VLOOKUP reads `*`, `?` and `~` in a text value as a pattern even in exact
-/// mode; tables give #VALUE! for those rows until pattern matching exists. XLOOKUP's exact
-/// mode compares them literally. Expected values by hand from the `lk` rows.
+/// mode (F.07), and so do tables; XLOOKUP's exact mode compares them literally. Expected
+/// values by hand from the `lk` rows: keys x (a), X (b), x* (c), xy (d).
 #[test]
-fn vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally() {
+fn vlookup_reads_patterns_and_xlookup_compares_literally() {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE lk (kn DOUBLE, kt VARCHAR, r VARCHAR, o BIGINT);
@@ -406,7 +522,9 @@ fn vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally() {
         conn.prepare(&sql).unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect()
     };
     let (v, e) = (|s: &str| (Some(s.to_string()), None), |s: &str| (None, Some(s.to_string())));
-    assert_eq!(run("=VLOOKUP([@s],lt,3,FALSE)"), [v("a"), e("#VALUE!"), e("#VALUE!"), e("#VALUE!"), e("#N/A")]);
+    // X: x (case-insensitive); x*: x, the first key starting with x; x?: x*, the first of two
+    // characters; ~x: an escaped x; none: no match.
+    assert_eq!(run("=VLOOKUP([@s],lt,3,FALSE)"), [v("a"), v("a"), v("c"), v("a"), e("#N/A")]);
     assert_eq!(run("=XLOOKUP([@s],lk[kt],lk[r],\"-\")"), [v("a"), v("c"), v("-"), v("-"), v("-")]);
 }
 

@@ -206,12 +206,10 @@ of different types never equal, and a blank matching `0`, `""`, `FALSE` and blan
 whose key holds an error never match. "First" and "last" mean the table's persisted row order
 (`_rf_ord`), never a view's sort, so a view cannot change a lookup's result.
 
-Not available yet, refused with a message: approximate and wildcard match modes, binary
-search, `VLOOKUP` without `FALSE` (spreadsheets default to approximate match), `HLOOKUP`,
-`XMATCH`, `MATCH`, `INDEX`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, and computed column
-numbers. Spreadsheet `VLOOKUP` treats `*`, `?` and `~` in a text value as a pattern even in
-exact mode; such values give `#VALUE!` here rather than a literal match (use `XLOOKUP`, whose
-exact mode compares them literally).
+Approximate, wildcard and positional modes are described under
+[nearest, wildcard and sorted lookups](#nearest-wildcard-and-sorted-lookups-f07). Refused with
+a message: binary search, `HLOOKUP`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, computed
+column numbers, and several keys with anything but exact match.
 
 **How it runs.** Each lookup compiles to one grouped relation of the other table, built in a
 single scan: every row contributes the keys it matches (its own value, plus the blank
@@ -231,6 +229,50 @@ orders.label → customers.label`. While a lookup relation is built, a column th
 the column being computed shows `#REF!` there instead of looping.
 
 A lookup into the formula's own table sees its stored columns only, not its formula columns.
+
+### Nearest, wildcard and sorted lookups (F.07)
+
+```text
+=XLOOKUP([@amount], Tiers[min], Tiers[rate], , -1)          largest min at most the amount
+=XLOOKUP([@weight], Bands[upto], Bands[price], "too heavy", 1)   smallest upto at least it
+=XLOOKUP([@code] & "*", Products[code], Products[name], , 2)      wildcards
+=VLOOKUP([@amount], Tiers, 2)                                  sorted first column
+=INDEX(Customers[name], MATCH([@id], Customers[id], 0))
+=XMATCH([@sku], Prices[sku])                                   position from 1
+```
+
+Each mode follows the sheet engine (IronCalc) and is differential-tested against it over the
+same rows as sheet ranges:
+
+| Form | Meaning |
+|---|---|
+| `XLOOKUP`/`XMATCH` with `match_mode` -1 or 1 | An exact match if there is one, otherwise the largest smaller (-1) or smallest larger (1) key, searching from the first row (`search_mode` 1) or the last (-1); among equal keys the first in search order wins. The order is the sheet engine's: numbers at 15 digits, then text by its upper case, then logical values, then errors; keys need not be sorted. A blank key compares with the value as 0, "" or FALSE of the value's type, and with other keys as their type's zero, exactly as the engine's pairwise comparison does. |
+| `match_mode` 2 | Text values are wildcard patterns (`*`, `?`, `~` escapes), matched case-insensitively against text keys only; other values match exactly. |
+| `VLOOKUP(value, T, n)`, `VLOOKUP(…, TRUE)` | The last row whose first-column key is at most the value. The first column must be sorted ascending (in the engine's order) with no blanks or errors; otherwise every row gives `#N/A`, where a sheet would give an arbitrary row. A blank value reads as 0. `VLOOKUP(…, FALSE)` reads text values as wildcard patterns, as sheets do. |
+| `MATCH(value, T[k], 0)` | The position (from 1, in table row order) of the first exact match; text values are patterns, nothing converts between types (`1` never matches `"1"`, a blank never matches 0). |
+| `MATCH(value, T[k], [1])`, `MATCH(…, -1)` | The position of the last key at most (1, the default) or at least (-1) the value, in a column sorted ascending (descending) without blanks or errors, else `#N/A`. A blank value gives `#N/A`. |
+| `XMATCH(value, T[k], [mode], [1 or -1])` | XLOOKUP's search, giving the position. |
+| `INDEX(T[c], n)`, `INDEX(T, n, column)` | The value in row `n` (from 1, in table row order; fractions truncate). Row 0 or below gives `#VALUE!` (a sheet spills the whole column for 0; a table cell holds one value), past the end `#REF!`. The column number must be written in the formula; deleting that column is refused. |
+
+**Rejected modes.** Binary search (`search_mode` 2 and -2): on a table it would give the same
+results as a search from the first or last row, which the plans below already do in one pass,
+and on unsorted data it gives arbitrary ones. `HLOOKUP` searches across a row, and table rows
+are records. `LOOKUP`'s vector form depends on sorted data without saying so; XLOOKUP with
+`match_mode` -1 does the same without needing it.
+
+**How they run.** A nearest match is an ASOF join: the looked-up table is grouped once by key
+(first or last row per key, in the engine's order) and joined to each row's value on the
+nearest key, so a page reads only its own rows. Values of another type than the keys need no
+search: every key is on the same side, so the answer is one of a few extremes computed once.
+Both relations are cached like exact lookups. A sorted lookup checks the order of its keys in
+the same pass. Wildcard patterns are matched once per distinct pattern against the text keys
+(equality for patterns without `*`, `?` or `~`), so cost grows with the number of distinct
+patterns times keys. Measured at 1M orders / 100K customers (release build, cached): a page of
+100 rows with a nearest-match XLOOKUP column 56 ms.
+
+Sorted lookups over duplicate keys return the last row of the run; the sheet engine's binary
+search returns whichever duplicate it meets, so duplicates are not differential-tested (see
+[gaps](FORMULA_GAPS.md#sorted-lookups-over-duplicate-keys)).
 
 **Cached lookup results.** Building a grouped relation scans the whole looked-up table, which
 dominated every page read of a large table. Each grouped relation is therefore kept in the

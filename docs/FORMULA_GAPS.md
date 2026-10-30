@@ -104,3 +104,20 @@ way. Which one Excel does has not been verified here; Excel is generally describ
 short-circuiting `AND`/`OR`, which would make IronCalc the one to change. Until it is checked
 against Excel (F.14), the difference is documented in [table formulas](TABLE_FORMULAS.md#errors)
 and is the only `AND`/`OR` case the comparison accepts.
+
+## Sorted lookups over duplicate keys
+
+`VLOOKUP(…, TRUE)`, `MATCH(…, 1)` and `MATCH(…, -1)` over table columns return the **last** row
+of a run of equal keys (the last row whose key is at most, or at least, the value). The sheet
+engine's binary search (IronCalc `binary_search_on_array`) returns whichever equal element its
+midpoints reach, so the two engines can return different rows of the run. Excel's documented
+rule ("the largest value that is less than or equal to") does not say which duplicate; the
+choice of the last row is Alephgrid's and is not verified against Excel. Differential tests use
+sorted keys without duplicates; table tests check the documented choice by hand. Proposed for
+F.14: pin the sheet behaviour upstream (last duplicate) and verify against Excel output.
+
+## INDEX with row 0
+
+`INDEX(range, 0)` in a sheet returns the whole column, which spills. A table formula cell holds
+one value, so table `INDEX` with row 0 (or a fraction below 1) gives `#VALUE!`, as for negative
+rows. Accepted difference; not an engine defect.

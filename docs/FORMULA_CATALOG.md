@@ -26,7 +26,7 @@ There is no second manually maintained runtime catalog.
   available. Ordinary sheet text and quoted literals/references do not trigger suggestions.
 - Sheet built-ins are not offered as SQL expressions; DuckDB SQL functions and custom functions
   remain separate capabilities.
-- **Table support** (schema 4): `table_status` is `supported` for the 49 functions spreadsheet
+- **Table support** (schema 4): `table_status` is `supported` for the 52 functions spreadsheet
   table formulas compile ([table formulas](TABLE_FORMULAS.md)), each with `table_modes` (what is
   supported, e.g. exact-match XLOOKUP only, whole columns for SUMIFS) and `table_evidence`, the
   differential or golden tests that exercise it. A catalog test checks both directions: every

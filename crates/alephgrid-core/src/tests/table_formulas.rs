@@ -213,6 +213,15 @@ fn lookup_read_timings() {
     let mut view = 0;
     time("open view after the source edit", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
     time("first page after the source edit", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    // F.07: nearest-match lookups (one ASOF join per kind of key, no per-row work).
+    time("add nearest-smaller XLOOKUP column", &mut || {
+        t.wb.add_formula_column_as("orders", "near", "=XLOOKUP([@cid]+0.5,customers[id],customers[name],,-1)", FormulaLanguage::Sheet).unwrap();
+    });
+    let mut nview = 0;
+    time("open view with the nearest-match column", &mut || { nview = t.wb.open_view(spec("orders")).unwrap().view_id; });
+    time("first page with the nearest-match column", &mut || { t.wb.fetch(nview, 0, 100).unwrap(); });
+    time("middle page with the nearest-match column", &mut || { t.wb.fetch(nview, rows / 2, 100).unwrap(); });
+    t.wb.drop_column("orders", "near").unwrap();
     // Conditional aggregates the other way: each customer's order total and count.
     time("add SUMIFS and COUNTIFS columns on customers", &mut || {
         t.wb.add_formula_column_as("customers", "total", "=SUMIFS(orders[amount],orders[cid],[@id])", FormulaLanguage::Sheet).unwrap();
@@ -315,4 +324,44 @@ fn conditional_aggregates_across_tables_follow_edits_and_renames() {
     assert!(t.wb.drop_column("orders", "channel").unwrap_err().to_string().contains("customers.\"web\""));
     t.reopen();
     assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0", "30.0|1.0|30.0|30.0|3.0"]);
+}
+
+/// F.07 in a workbook: tiered rates by nearest match, a sorted VLOOKUP that stops answering
+/// when its keys are no longer sorted, INDEX/MATCH, and dependencies. By hand from the rows:
+/// tiers (min, rate) = (0, 0), (100, 0.05), (500, 0.1), (1000, 0.15); amounts 50, 100,
+/// 750, 2000 and blank.
+#[test]
+fn nearest_sorted_and_positional_lookups_in_a_workbook() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("tiers", "SELECT * FROM (VALUES (0, 0.0), (100, 0.05), (500, 0.1), (1000, 0.15)) v(min, rate)").unwrap();
+    t.wb.create_table_from_query("orders", "SELECT * FROM (VALUES (1, 50), (2, 100), (3, 750), (4, 2000), (5, NULL)) v(id, amount)").unwrap();
+    for (name, f) in [
+        ("rate", "=XLOOKUP([@amount],tiers[min],tiers[rate],,-1)"),
+        ("band", "=VLOOKUP([@amount],tiers,2)"),
+        ("pos", "=MATCH([@amount],tiers[min])"),
+        ("next", "=INDEX(tiers,MATCH([@amount],tiers[min])+1,2)"),
+        ("above", "=XLOOKUP([@amount]+1,tiers[min],tiers[min],-1,1)"),
+    ] {
+        t.wb.add_formula_column_as("orders", name, f, FormulaLanguage::Sheet).unwrap();
+    }
+    let rendered = |wb: &mut Workbook| rendered(&table_block(wb, "orders"));
+    // A blank amount: XLOOKUP's exact match of a blank is the 0 key, VLOOKUP reads it as 0,
+    // MATCH finds nothing.
+    assert_eq!(rendered(&mut t.wb), [
+        "1|50|0.0|0.0|1.0|0.05|100.0",
+        "2|100|0.05|0.05|2.0|0.1|500.0",
+        "3|750|0.1|0.1|3.0|0.15|1000.0",
+        "4|2000|0.15|0.15|4.0|#REF!|-1.0",
+        "5|null|0.0|0.0|#N/A|#N/A|100.0",
+    ].map(String::from));
+    // Unsorted keys: the sorted lookups say #N/A; the nearest match does not need sorting.
+    let v = t.wb.open_view(spec("tiers")).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "min".into(), value: Some("2000".into()), record: None }]).unwrap();
+    assert_eq!(rendered(&mut t.wb)[2], "3|750|0.1|#N/A|#N/A|#N/A|1000.0");
+    // Deleting a column the lookups read is refused, INDEX's column number included.
+    let e = t.wb.drop_column("tiers", "rate").unwrap_err().to_string();
+    assert!(e.contains("orders.\"rate\"") && e.contains("orders.\"next\""), "{e}");
+    // After reopening, with the unsorted mins 0, 2000, 500, 1000: 51 is nearest 500 above.
+    t.reopen();
+    assert_eq!(rendered(&mut t.wb)[0], "1|50|0.0|#N/A|#N/A|#N/A|500.0");
 }

@@ -190,7 +190,7 @@ fn classify_literal(kind: &ExprKind) -> (String, Option<f64>, Option<String>) {
 
 /// The sheet engine's wildcard-to-regex conversion (`from_wildcard_to_regex`, anchored):
 /// `?` one character, `*` any run, `~` escapes the next character.
-fn wildcard_regex(w: &str) -> String {
+pub(super) fn wildcard_regex(w: &str) -> String {
     // regex::escape: backslash before every meta character.
     let escaped = format!("regexp_replace({w}, '([\\\\.+*?()|\\[\\]{{}}^$#&\\-~])', '\\\\\\1', 'g')");
     let steps = [("\\?", "."), ("\\*", ".*"), ("\\~\\~", "??"), ("\\~.*", "\\*"), ("\\~.", "\\?"), ("\\~", ""), ("??", "\\~")];

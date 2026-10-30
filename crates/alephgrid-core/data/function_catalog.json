@@ -7584,12 +7584,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "INDEX(array, row_num, [column_num])",
       "summary": "Select an entry by position",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -7697,7 +7696,13 @@
             "index-c03"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys"
+      ],
+      "table_modes": "A whole column INDEX(T[c], n) or table INDEX(T, n, column) with the column written in the formula; row 0 or below gives #VALUE! (a table cell holds one value), past the end #REF!."
     },
     {
       "name": "INDIRECT",
@@ -9172,12 +9177,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MATCH(lookup_value, lookup_array, [match_type])",
       "summary": "Find a matching position",
       "argument_modes": "Per-argument rules below cite 9 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -9318,7 +9322,13 @@
             "match-c04"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys"
+      ],
+      "table_modes": "Type 0 (exact; text values are wildcard patterns), 1 and -1 over a column sorted ascending/descending without blanks or errors (otherwise #N/A); positions count rows in table order; a blank value gives #N/A."
     },
     {
       "name": "MAX",
@@ -15879,11 +15889,13 @@
           ]
         }
       ],
-      "table_modes": "Exact match (range_lookup FALSE) over a whole table; approximate match is refused (F.07).",
+      "table_modes": "Exact (FALSE; text values are wildcard patterns) or approximate (TRUE or omitted: the last row whose first-column key is at most the value, in a first column sorted ascending without blanks or errors; otherwise #N/A).",
       "table_evidence": [
         "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys",
         "table_vlookups_agree_with_the_sheet_engine",
-        "vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally"
+        "vlookup_reads_patterns_and_xlookup_compares_literally"
       ]
     },
     {
@@ -16354,12 +16366,13 @@
           ]
         }
       ],
-      "table_modes": "Exact match (match_mode 0) from the first or last match (search_mode 1/-1); lookup and return arrays are columns of one table, or a multi-key condition such as (T[a]=x)*(T[b]=y). Approximate, wildcard and binary search modes are refused (F.07).",
+      "table_modes": "match_mode 0 (exact), -1/1 (exact or next smaller/larger, in the sheet engine's comparison order) and 2 (wildcards), from the first or last row (search_mode 1/-1); lookup and return arrays are columns of one table, or exact multi-key conditions such as (T[a]=x)*(T[b]=y). Binary search (search_mode 2/-2) is refused.",
       "table_evidence": [
+        "approximate_and_wildcard_lookups_agree_with_the_sheet_engine",
         "multi_key_lookups_agree_with_the_sheet_engine",
         "refusals_explain_and_point_at_the_problem",
         "table_lookups_agree_with_the_sheet_engine",
-        "vlookup_patterns_are_refused_per_row_and_xlookup_compares_literally"
+        "vlookup_reads_patterns_and_xlookup_compares_literally"
       ]
     },
     {
@@ -16367,12 +16380,11 @@
       "category": "Other",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "XMATCH(lookup_value, lookup_array, [match_mode], [search_mode])",
       "summary": "Find a matching position with explicit modes",
       "argument_modes": "Per-argument rules below cite 11 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -16540,7 +16552,12 @@
             "xmatch-08"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine"
+      ],
+      "table_modes": "match_mode 0, -1, 1 and 2 from the first or last row, as XLOOKUP; positions count rows in table order. Binary search is refused."
     },
     {
       "name": "XNPV",
