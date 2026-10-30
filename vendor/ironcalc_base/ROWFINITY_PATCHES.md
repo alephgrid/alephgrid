@@ -13,6 +13,9 @@ Changes:
 - VLOOKUP distinguishes nonpositive indexes (#VALUE!) from out-of-bounds indexes (#REF!).
 - XLOOKUP accepts array-valued lookup vectors with same-shape array/range results,
   reusing the existing search algorithms. Existing range lookup behavior is retained.
+- LEFT, RIGHT and MID convert numeric text and logical count/position arguments, as
+  their other numeric arguments already did (`self.text_number`). The text argument is
+  still checked first, so its error wins. Added 30 October 2026 (coercion matrix).
 
 Regression evidence lives in rowfinity-engine tests::catalog. Keep the upstream
 source diff small; do not format or change unrelated dependency code.

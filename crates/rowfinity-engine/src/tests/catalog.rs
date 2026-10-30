@@ -9,7 +9,7 @@ fn catalog() -> Value {
 #[test]
 fn catalog_registry_and_metadata_match_the_pinned_engine() {
     let c = catalog();
-    assert_eq!(c["schema_version"], 2);
+    assert_eq!(c["schema_version"], 3);
     assert_eq!(c["engine"], "ironcalc-0.9.1");
     assert_eq!(c["engine_patch"], "rowfinity-compat-1");
     let lock = include_str!("../../../../Cargo.lock");
@@ -31,6 +31,22 @@ fn catalog_registry_and_metadata_match_the_pinned_engine() {
             assert!(!f["examples"].as_array().unwrap().is_empty());
             assert!(!f["evidence"].as_array().unwrap().is_empty());
             assert!(f["verification_cases"].as_array().unwrap().len() >= 2, "mode evidence: {name}");
+            // Every documented argument rule names cases of this function that exercise it.
+            let sig = f["signature"].as_str().unwrap();
+            let params: Vec<&str> = sig[sig.find('(').unwrap() + 1..sig.rfind(')').unwrap()]
+                .split(',').map(|p| p.trim_matches(|c: char| c == ' ' || c == '[' || c == ']' || c == '…'))
+                .filter(|p| !p.is_empty()).collect();
+            let args = f["arguments"].as_array().unwrap();
+            assert_eq!(args.iter().map(|a| a["name"].as_str().unwrap()).collect::<Vec<_>>(), params, "{name}");
+            let ids: BTreeSet<_> = f["verification_cases"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+            for a in args {
+                assert!(!a["rule"].as_str().unwrap().is_empty());
+                let cited = a["cases"].as_array().unwrap();
+                assert!(!cited.is_empty(), "{name} {}", a["name"]);
+                assert!(cited.iter().all(|c| ids.contains(c.as_str().unwrap())), "{name} {}", a["name"]);
+            }
+        } else {
+            assert!(f["signature"].is_null() && f.get("arguments").is_none(), "unreviewed entries stay explicit: {name}");
         }
     }
 }
@@ -44,17 +60,20 @@ fn certification_cases_match_independent_expectations() {
     let mut inputs: Vec<SheetInput> = serde_json::from_value(c["fixture"].clone()).unwrap();
     let cases: Vec<_> = c["functions"].as_array().unwrap().iter()
         .flat_map(|f| f["verification_cases"].as_array().unwrap()).collect();
-    assert_eq!(cases.len(), 121, "review certification case changes explicitly");
-    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 121);
+    assert_eq!(cases.len(), 277, "review certification case changes explicitly");
+    assert_eq!(cases.iter().filter(|c| c["group"] == "coercion").count(), 156);
+    assert_eq!(cases.iter().filter(|c| c["status"] == "verified").count(), 271);
     let gaps: BTreeSet<_> = cases.iter().filter(|c| c["status"] == "known_gap")
         .map(|c| c["id"].as_str().unwrap()).collect();
-    assert_eq!(gaps, BTreeSet::new(),
+    assert_eq!(gaps, BTreeSet::from(["day-c01", "day-c02", "iferror-c02", "ifna-c02", "month-c01", "year-c01"]),
         "changing the known-gap set requires review of the desired-result regressions");
     let mut ids = BTreeSet::new();
     for (row, case) in cases.iter().enumerate() {
         assert!(ids.insert(case["id"].as_str().unwrap()));
         assert!(!case["mode"].as_str().unwrap().is_empty());
         assert!(matches!(case["status"].as_str(), Some("verified" | "known_gap")));
+        assert!(matches!(case["group"].as_str(), Some("modes" | "coercion")));
+        assert!(!case["oracle"].as_str().unwrap().is_empty(), "every expected value names its source");
         if case["status"] == "known_gap" {
             assert!(!case["note"].as_str().unwrap().is_empty());
         }
@@ -65,14 +84,42 @@ fn certification_cases_match_independent_expectations() {
     for reopen in [false, true] {
         if reopen { t.reopen(); }
         for (row, case) in cases.iter().enumerate() {
-            if case["status"] == "known_gap" { continue; }
             let actual = cell_text(&t.wb, 0, row as u32, 3).expect("formula cell must survive, even with empty display text");
+            if case["status"] == "known_gap" {
+                // A gap that starts passing must be relabelled (with review), not left as a gap.
+                if Some(actual.as_str()) == case["expected"].as_str() {
+                    failures.push(format!("{} now matches its expected result; review and mark it verified", case["id"]));
+                }
+                continue;
+            }
             if Some(actual.as_str()) != case["expected"].as_str() {
                 failures.push(format!("{} {}: expected {}, received {actual:?}, reopened={reopen}", case["id"], case["formula"], case["expected"]));
             }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The coercion cases depend on these cell types; check them with type predicates
+/// so a changed input convention cannot silently change what the matrix certifies.
+#[test]
+fn coercion_fixture_has_the_documented_types() {
+    let c = catalog();
+    let mut inputs: Vec<SheetInput> = serde_json::from_value(c["fixture"].clone()).unwrap();
+    let checks = [
+        ("=ISNUMBER(F1)", "TRUE"), ("=ISTEXT(F2)", "TRUE"), ("=F2", "2"), ("=ISLOGICAL(F3)", "TRUE"),
+        ("=ISBLANK(F4)", "TRUE"), ("=ISNA(F5)", "TRUE"), ("=ISBLANK(F6)", "FALSE"), ("=ISTEXT(F6)", "TRUE"),
+        ("=LEN(F6)", "0"), ("=F7", "Ärger"), ("=F8", "-3.5"), ("=G1", "a*b"), ("=G2", "a?b"), ("=G3", "axb"),
+    ];
+    for (row, (formula, _)) in checks.iter().enumerate() { inputs.push(sheet_input(row as u32, 3, formula)); }
+    let mut t = TempWb::new();
+    t.wb.with_sheets(|s| { s.create("Fixture")?; s.set(0, &inputs) }).unwrap();
+    for reopen in [false, true] {
+        if reopen { t.reopen(); }
+        for (row, (formula, expected)) in checks.iter().enumerate() {
+            assert_eq!(cell_text(&t.wb, 0, row as u32, 3).as_deref(), Some(*expected), "{formula}, reopened={reopen}");
+        }
+    }
 }
 
 fn assert_compatibility_regression(id: &str) {

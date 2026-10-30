@@ -253,13 +253,14 @@ New planning work; phase 5 custom functions and phase 6 bounded analysis remain 
 
 Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on phases 2–6; team release also requires phases 7/9. S3, Python, MCP and Kubernetes do not block the local analyst gate. P2/deferred catalog rows are backlog proposals, not prerequisites for F.15.
 
-- [ ] **F.01** Maintain versioned function manifest from the comparison matrix: sheet/table support, signatures, argument modes, examples, limitations, evidence and unsupported behavior; generate searchable built-in help.
+- [x] **F.01** Maintain versioned function manifest from the comparison matrix: sheet/table support, signatures, argument modes, examples, limitations, evidence and unsupported behavior; generate searchable built-in help.
   - [x] Initial catalog: 562 registry-checked entries, searchable bounded help, 44 reviewed P0 signatures/examples and pinned-engine drift checks. See [catalog scope](FORMULA_CATALOG.md).
-  - [ ] Complete argument-mode documentation and evidence beyond the initial example baseline; retain explicit unreviewed entries.
+  - [x] Complete argument-mode documentation and evidence beyond the initial example baseline; retain explicit unreviewed entries. Schema 3: per-argument rules citing their cases for all 44 P0 entries, a source for every expected value, coercion inputs shown in help; 518 entries stay explicitly "Not reviewed". Tests: `tests::catalog` (12), `e2e/catalog.spec.ts` (3). Table status stays `not_supported` until F.06/F.08 add evidence.
 - [ ] **F.02** Certify P0 sheet functions, especially VLOOKUP/XLOOKUP/HLOOKUP, INDEX/MATCH/XMATCH, conditional aggregates, logic/error handling, text/date/math. Reuse pinned IronCalc and fix verified gaps rather than reimplementing existing functions.
   - [x] Add 121 mode-level golden cases across all 44 P0 functions, with reopen checks and searchable evidence: 121 pass with the documented local compatibility patch. See [reproducers](FORMULA_GAPS.md).
   - [x] Resolve the six pinned-engine gaps with a licensed, documented local dependency patch and enabled desired-result regressions.
-  - [ ] Finish the broader coercion/argument-mode matrix before claiming P0 certification.
+  - [x] Finish the broader coercion/argument-mode matrix: 156 coercion cases (150 pass) over typed F1:G8 inputs, sourced from documented Excel rules; LEFT/RIGHT/MID numeric-text counts fixed in the local patch. See [gaps](FORMULA_GAPS.md).
+  - [ ] Resolve or explicitly accept the six remaining known gaps (dates before 1900-03-01; IFERROR/IFNA of an empty cell) before claiming P0 certification. Needs independent Excel output and upstream discussion.
 - [ ] **F.03** Deliver built-in autocomplete, argument help, range picking, colored references, F4 locking, named ranges and meaningful formula error locations; preserve custom-function behavior.
   - [x] Initial built-in formula-bar completion and signature help for the 44 reviewed P0 entries, preserving workbook custom functions. Other F.03 editor features remain pending.
   - [x] A1 reference locking with F4 in both editors; same-sheet formula-bar range picking and bounded colored reference hints. See [editor scope](FORMULA_EDITOR.md); cross-sheet picking, named ranges and richer errors remain pending.

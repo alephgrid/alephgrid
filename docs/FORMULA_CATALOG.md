@@ -90,3 +90,27 @@ The local `rowfinity-compat-1` patch resolves the six original gaps: **all 121 c
 The original failures and remaining upstream work are recorded in the
 [minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
 receive a verified label; each has a separately runnable desired-result regression.
+
+## Coercion and argument-mode matrix (F.01/F.02, schema 3)
+
+Schema 3 adds per-case `group` (`modes` or `coercion`) and `oracle` (the rule the expected
+value comes from), and per-argument documentation for every P0 entry: each argument's
+`rule` cites the verification cases that exercise it. The test checks that argument names
+match the reviewed signature and that every cited case exists for that function. The 518
+entries without a reviewed signature remain explicitly "Not reviewed" with no argument data.
+
+Coercion inputs are F1:G8 of the shared fixture: number 2, text `'2`, TRUE, an empty cell,
+`=NA()`, `=""`, `Ärger`, -3.5, and `a*b`/`a?b`/`axb`. A separate test checks these types
+with ISTEXT/ISBLANK/ISLOGICAL/ISNA before and after reopen.
+
+The 156 coercion cases cover: numbers/text/logical/blank/error in ranges versus direct
+arguments for SUM, AVERAGE, COUNT, COUNTA, MIN and MAX; numeric-text and logical conversion
+in scalar functions; logical conditions given text, blanks and errors; criteria with empty
+strings, logical values, error text, numeric text, Unicode case folding, wildcards and `~`
+escapes; text conversion of numbers, logical values and blanks; Unicode character counts;
+date serial boundaries and truncated month arguments; and lookup keys that must not convert
+text to numbers. 150 pass. Six are known gaps, see [FORMULA_GAPS.md](FORMULA_GAPS.md).
+
+Totals: 277 cases (271 verified, 6 known gaps). Still not covered: locale-specific parsing,
+the 1904 date system, all optional-argument combinations, emoji/grapheme clusters,
+array/spill results of P0 functions, and numerical precision at extremes.

@@ -1,7 +1,9 @@
 # P0 formula compatibility gaps
 
 Pinned engine: IronCalc 0.9.1 with the local `rowfinity-compat-1` patch (29 October 2026).
-The six original desired-result regressions now pass and run without ignores.
+The six original desired-result regressions now pass and run without ignores. The coercion
+matrix (30 October 2026) found seven more differences: one is patched (LEFT/RIGHT/MID numeric
+text counts), six remain explicit known gaps (below).
 See [patch provenance and removal conditions](../vendor/ironcalc_base/ROWFINITY_PATCHES.md).
 The table below preserves the original unpatched observations. This resolves those
 specific defects, not complete P0 certification or all Excel compatibility.
@@ -41,8 +43,8 @@ as proof of scalar parity. The expected result remains an explicit product contr
 CARGO_INCREMENTAL=0 cargo test --workspace --lib tests::catalog -j 1
 ```
 
-All 121 catalog cases are enabled, alongside dedicated regressions and a 23-case
-boundary suite checked before and after reopening. The added XLOOKUP support covers
+All 277 catalog cases run (271 verified, 6 known gaps checked to still differ), alongside
+dedicated regressions and a 23-case boundary suite checked before and after reopening. The added XLOOKUP support covers
 one-dimensional inline lookup arrays and equally shaped inline/range results;
 multi-column result spills and range-lookup/inline-result combinations remain outside
 this patch. Binary searches retain IronCalc's sorted-input precondition.
@@ -52,3 +54,31 @@ and prepare focused upstream tests/proposals. Adopt an upstream release only aft
 these regressions pass. No upstream issue or PR was submitted by this change.
 TEXTJOIN scalar empty-string behavior remains a Rowfinity contract pending independent
 Excel/Sheets parity evidence. Broader coercion/argument-mode certification remains open.
+
+## Coercion matrix gaps (30 October 2026)
+
+The 156 coercion cases use typed inputs in F1:G8 (number, text `'2`, TRUE, empty, `=NA()`,
+`=""`, Unicode text, negative decimal, and three wildcard strings). Expected values cite the
+Microsoft Excel rule for each case (`oracle` in the catalog), not this engine's output.
+150 pass; these six are labelled `known_gap`:
+
+| Case ID | Formula | Expected | IronCalc 0.9.1 + patch | Decision |
+|---|---|---|---|---|
+| day-c01 | `=DAY(0)` | `0` | `#NUM!` | Date system, not patched |
+| day-c02 | `=DAY(F1)` (serial 2) | `2` | `1` | Date system, not patched |
+| month-c01 | `=MONTH(0)` | `1` | `#NUM!` | Date system, not patched |
+| year-c01 | `=YEAR(F4)` (empty → 0) | `1900` | `#NUM!` | Date system, not patched |
+| iferror-c02 | `=IFERROR(F4,"x")` | empty text | `0` | Confirm against Excel output first |
+| ifna-c02 | `=IFNA(F4,"x")` | empty text | `0` | Confirm against Excel output first |
+
+IronCalc numbers serial 1 as 1899-12-31 and rejects serial 0. Excel's 1900 system numbers
+serial 1 as 1900-01-01 and counts the fictitious 1900-02-29, so serials below 61 differ;
+from serial 61 (1900-03-01) the systems agree (`day-c03`, `month-c03`). Changing this would
+also change date formatting, parsing and XLSX round trips, so it needs upstream discussion
+rather than a local patch. For IFERROR/IFNA, Microsoft's reference says an empty value is
+treated as empty text; IronCalc returns 0, as for `=F4`. The expected value stays as
+documented until independent Excel output confirms or contradicts it.
+
+The test guards these gaps in both directions: a gap that starts matching its expected
+value fails the suite until it is reviewed and relabelled `verified`, and the gap set is
+listed explicitly. No ignored tests are used for them.
