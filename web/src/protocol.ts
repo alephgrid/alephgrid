@@ -1,5 +1,5 @@
-// Generated from the Rust types in crates/rowfinity-engine and crates/rowfinity-server.
-// Do not edit: run `UPDATE_BINDINGS=1 cargo test -p rowfinity-server --test protocol`.
+// Generated from the Rust types in crates/alephgrid-core and crates/alephgrid-server.
+// Do not edit: run `UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol`.
 
 /** A cell as sent by the server: integers beyond ±(2^53 - 1) and decimals arrive as exact strings. */
 export type CellValue = string | number | boolean | null;
@@ -377,7 +377,7 @@ export type Capability = "tables" | "sheets" | "sql" | "python";
 
 export type RuntimeSpec = { engine: string, engine_version: string, 
 /**
- * Workbook storage format the runtime reads and writes (`rowfinity_engine::storage`).
+ * Workbook storage format the runtime reads and writes (`alephgrid_core::storage`).
  */
 storage_format: number, 
 /**

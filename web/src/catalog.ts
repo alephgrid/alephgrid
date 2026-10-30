@@ -1,4 +1,4 @@
-import data from "../../crates/rowfinity-engine/data/function_catalog.json";
+import data from "../../crates/alephgrid-core/data/function_catalog.json";
 import { el, openModal } from "./ui";
 
 export const functionCatalog = data;
@@ -49,7 +49,7 @@ export function formulaHelp(): () => void {
       typed.append(typedBody);
       details.append(fixture, typed, ...f.examples.map(e => el("p", {}, el("code", {}, e.formula), " → ", el("strong", {}, e.expected))),
         el("p", {}, "Evidence: tested example, including workbook reopening. This is a baseline, not verification of every argument mode."));
-    } else details.append(el("p", {}, "No Rowfinity calculation example is certified by this catalog entry."));
+    } else details.append(el("p", {}, "No Alephgrid calculation example is certified by this catalog entry."));
     if (f.verification_cases.length) {
       const verified = f.verification_cases.filter(c => c.status === "verified").length;
       const evidence = el("details", {}, el("summary", {}, `Mode evidence: ${plural(verified, "verified case")}, ${plural(f.verification_cases.length - verified, "known gap")}`),

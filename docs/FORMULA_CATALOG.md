@@ -5,7 +5,7 @@ matches names, categories and reviewed descriptions; availability filters distin
 recognized by IronCalc from unrecognized names. Lists contain at most 40 entries per page.
 The help is read-only and available without SQL access.
 
-The single versioned source is `crates/rowfinity-engine/data/function_catalog.json`.
+The single versioned source is `crates/alephgrid-core/data/function_catalog.json`.
 It records schema/catalog versions, the pinned engine, competitor provenance, priority,
 registration status, table support, signature, argument-mode review, examples, limitations,
 evidence and planned implementation/upstream routes. The browser imports this source directly;
@@ -17,7 +17,7 @@ There is no second manually maintained runtime catalog.
 - All 562 names are checked against the English registry in IronCalc 0.9.1. Of these, 486
   are registered and 76 are not registered under the exact catalog name.
 - All 44 P0 entries have reviewed signatures, original descriptions and hand-calculated
-  examples. The examples use the displayed A1:C4 fixture and are checked through Rowfinity's
+  examples. The examples use the displayed A1:C4 fixture and are checked through Alephgrid's
   actual sheet adapter before and after reopening a file-backed workbook.
 - Additional lookup tests cover reverse duplicate selection, exact missing values, a next-larger
   match, wildcard matching, range/index errors, source recalculation and undo.
@@ -49,13 +49,13 @@ availability of similarly named SQL functions.
 
 Broader argument-mode coverage, reference picking/locking, named ranges, command shortcuts,
 large-table compilation, cross-engine recalculation and the analyst gate remain unchecked in
-[the implementation checklist](IMPLEMENTATION_CHECKLIST.md). Research context is in the
-[comparison matrix](FORMULA_COMPATIBILITY_MATRIX.md) and [execution design](SPREADSHEET_COMPETITIVENESS.md).
+[the implementation checklist](IMPLEMENTATION_CHECKLIST.md). Formulas over large tables are
+specified in [table formulas](TABLE_FORMULAS.md).
 
 ## XLOOKUP array-input gap (resolved locally)
 
 During the first increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
-the independent expected answer is `20`. The local `rowfinity-compat-1` patch now returns `20`
+the independent expected answer is `20`. The local `alephgrid-compat-1` patch now returns `20`
 and `xlookup_inline_arrays_should_find_a_present_key` runs without `--ignored`. The patch covers
 one-dimensional inline lookup arrays with equally shaped inline/range results only; see
 [FORMULA_GAPS.md](FORMULA_GAPS.md). [Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338)
@@ -86,7 +86,7 @@ BMP examples do not certify emoji/grapheme handling. Locale/date-system parity,
 complete coercion matrices, all optional arguments and broad performance certification
 remain future work. F.02 and F.T01 remain unchecked overall.
 
-The local `rowfinity-compat-1` patch resolves the six original gaps: **all 121 cases pass**. This certifies those inputs only; broader P0 mode/coercion coverage remains incomplete.
+The local `alephgrid-compat-1` patch resolves the six original gaps: **all 121 cases pass**. This certifies those inputs only; broader P0 mode/coercion coverage remains incomplete.
 The original failures and remaining upstream work are recorded in the
 [minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
 receive a verified label; each has a separately runnable desired-result regression.

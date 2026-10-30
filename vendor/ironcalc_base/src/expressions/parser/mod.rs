@@ -344,7 +344,7 @@ impl<'a> Parser<'a> {
         self.expecting_here = vec![ExpectedTokens::Range, ExpectedTokens::Other];
         self.trailing_name = None;
         let node = self.parse_expr();
-        // Rowfinity: input left after a complete expression (`=1 2`, `=1+2)`) is an
+        // Alephgrid: input left after a complete expression (`=1 2`, `=1+2)`) is an
         // error; it was silently dropped, so the cell showed a plausible wrong result.
         if !matches!(node, Node::ParseErrorKind { .. }) && self.lexer.peek_token() != TokenType::EOF {
             return Node::ParseErrorKind {
@@ -719,7 +719,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary(&mut self) -> Node {
-        // Rowfinity: report unexpected tokens where they start, not at position 0.
+        // Alephgrid: report unexpected tokens where they start, not at position 0.
         let token_start = self.lexer.get_position() as usize;
         let next_token = self.lexer.next_token();
         match next_token {

@@ -38,7 +38,7 @@ For a coordinated upgrade:
 
 The map changes all requested pins in one transaction or changes nothing. Registry, persistent SQL macros, sheet definitions, recalculated cells, revision and history commit together. Activating changed sheet definitions resets the cell undo history; use version pins for function rollback. Publishing an inactive version preserves cell undo history.
 
-Each version records the function adapter (`rowfinity-functions-v1/ironcalc-0.9.1`), actual DuckDB version and dependency pins. RuntimeSpec includes the adapter alongside DuckDB and IronCalc. Incompatible runtimes, missing pins or dependencies fail before serving calculations. There is no fallback to the latest available version. Storage format 4 adds this contract; older workbooks migrate with the existing backup procedure. Engine upgrades need an explicit future migration/compatibility process.
+Each version records the function adapter (`alephgrid-functions-v1/ironcalc-0.9.1`), actual DuckDB version and dependency pins. RuntimeSpec includes the adapter alongside DuckDB and IronCalc. Incompatible runtimes, missing pins or dependencies fail before serving calculations. There is no fallback to the latest available version. Storage format 4 adds this contract; older workbooks migrate with the existing backup procedure. Engine upgrades need an explicit future migration/compatibility process.
 
 ## Supported semantics
 
@@ -64,4 +64,4 @@ Limits: 4 MiB total serialized registry, 128 functions per workbook, 100 version
 
 The workbook database is the complete durable artifact: it contains definitions, tests, versions, exact pins, macros and sheet state. Back up the database using the documented workbook backup procedure.
 
-XLSX exports include active named LAMBDA formulas and their sheet cells. The tested IronCalc round trip preserves their results, but Rowfinity's registry, tests, history, inactive versions and SQL macros are **not** stored in XLSX. Excel requires a version with LAMBDA support; compatibility with every Excel build is not certified. An imported XLSX named function cannot silently replace a registry function. Exported CSV/Parquet contains data/results, not reusable function definitions.
+XLSX exports include active named LAMBDA formulas and their sheet cells. The tested IronCalc round trip preserves their results, but Alephgrid's registry, tests, history, inactive versions and SQL macros are **not** stored in XLSX. Excel requires a version with LAMBDA support; compatibility with every Excel build is not certified. An imported XLSX named function cannot silently replace a registry function. Exported CSV/Parquet contains data/results, not reusable function definitions.

@@ -1,5 +1,5 @@
 /target
-/rowfinity-data
+/alephgrid-data
 web/node_modules
 web/dist
 *.duckdb
@@ -9,4 +9,4 @@ web/test-results
 web/playwright-report
 
 # Test fixtures written by older versions (migration tests) are data, not build output.
-!crates/rowfinity-engine/tests/fixtures/**/*.duckdb
+!crates/alephgrid-core/tests/fixtures/**/*.duckdb

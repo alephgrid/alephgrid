@@ -5,7 +5,7 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci || npm install
 COPY web/ ./
-COPY crates/rowfinity-engine/data/ /src/crates/rowfinity-engine/data/
+COPY crates/alephgrid-core/data/ /src/crates/alephgrid-core/data/
 RUN npm run build
 
 FROM rust:1.97-bookworm AS server
@@ -14,17 +14,17 @@ COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
 COPY vendor ./vendor
 COPY --from=web /src/web/dist ./web/dist
-RUN cargo build --release --locked -p rowfinity-server || cargo build --release -p rowfinity-server
+RUN cargo build --release --locked -p alephgrid-server || cargo build --release -p alephgrid-server
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --uid 10001 rowfinity
-COPY --from=server /src/target/release/rowfinity /usr/local/bin/rowfinity
-USER rowfinity
-WORKDIR /home/rowfinity
-ENV ROWFINITY_HOST=0.0.0.0 \
-    ROWFINITY_PORT=7878 \
-    ROWFINITY_DATA_DIR=/data
+    && useradd --system --create-home --uid 10001 alephgrid
+COPY --from=server /src/target/release/alephgrid /usr/local/bin/alephgrid
+USER alephgrid
+WORKDIR /home/alephgrid
+ENV ALEPHGRID_HOST=0.0.0.0 \
+    ALEPHGRID_PORT=7878 \
+    ALEPHGRID_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 7878
-ENTRYPOINT ["rowfinity"]
+ENTRYPOINT ["alephgrid"]

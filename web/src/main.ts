@@ -26,7 +26,7 @@ async function route(): Promise<void> {
   } catch (e) {
     if (e instanceof HttpError && e.status === 401) {
       const v = await formDialog("Access token required", [
-        { name: "token", label: "Token", placeholder: "Ask whoever runs this Rowfinity server", hint: "It is stored in this browser only." },
+        { name: "token", label: "Token", placeholder: "Ask whoever runs this Alephgrid server", hint: "It is stored in this browser only." },
       ], "Continue");
       if (v?.token) {
         setToken(v.token.trim());
@@ -50,7 +50,7 @@ async function route(): Promise<void> {
 
 async function showWorkbook(id: string): Promise<void> {
   const { workbook } = await api.get(id);
-  document.title = `${workbook.name} · Rowfinity`;
+  document.title = `${workbook.name} · Alephgrid`;
   const screen = new WorkbookScreen(workbook, () => navigate(homeUrl()));
   current = screen;
   app.replaceChildren(screen.root);
@@ -152,7 +152,7 @@ function visibleWorkbooks(): WorkbookListing[] {
 }
 
 async function showHome(): Promise<void> {
-  document.title = "Rowfinity";
+  document.title = "Alephgrid";
   home.scope = new URLSearchParams(location.search).get("in") ?? "all";
   const [workbooks, workspaces, config, trash] = await Promise.all([api.list(), api.workspaces(), api.config(), api.trash()]);
   home.workbooks = workbooks;
@@ -195,7 +195,7 @@ function renderHome(): void {
   });
 
   const sidebar = el("aside", { class: "sidebar" },
-    el("div", { class: "brand big" }, el("span", { class: "logo" }), "Rowfinity"),
+    el("div", { class: "brand big" }, el("span", { class: "logo" }), "Alephgrid"),
     el("nav", { class: "nav", "aria-label": "Library" },
       navItem("all", "All workbooks", "◫"),
       navItem("recent", "Recent", "◷"),

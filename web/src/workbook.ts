@@ -420,7 +420,7 @@ export class WorkbookScreen {
     ];
     const root = el("div", { class: "workbook" },
       el("header", { class: "toolbar" },
-        el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks" }, el("span", { class: "logo" }), "Rowfinity"),
+        el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks" }, el("span", { class: "logo" }), "Alephgrid"),
         this.titleEl,
         this.statusDot,
         el("div", { class: "spacer" }),
@@ -1851,7 +1851,7 @@ export class WorkbookScreen {
     if (!v) return;
     this.meta = await api.rename(this.meta.id, v.name);
     this.titleEl.textContent = this.meta.name;
-    document.title = `${this.meta.name} · Rowfinity`;
+    document.title = `${this.meta.name} · Alephgrid`;
   }
 
   // ----------------------------------------------------------- import/demo
@@ -1960,7 +1960,7 @@ export class WorkbookScreen {
   private widthKey(): string {
     const a = this.active;
     const item = a?.kind === "sheet" ? `sheet:${a.name}` : a?.kind === "table" ? a.name : "";
-    return `rowfinity:widths:${this.meta.id}:${item}`;
+    return `alephgrid:widths:${this.meta.id}:${item}`;
   }
 
   private loadWidths(): Record<string, number> {
