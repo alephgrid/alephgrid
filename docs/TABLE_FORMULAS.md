@@ -116,8 +116,54 @@ blank values are skipped as a sheet skips them in referenced cells, while typed 
 converted. Volatile functions (`TODAY`, `NOW`, `RAND`) are refused until F.10 defines a
 calculation epoch.
 
-Conditional aggregates (`SUMIFS`, `COUNTIFS`, `AVERAGEIFS`) are F.08; recalculation and
-dependencies with sheets are F.09.
+Conditional aggregates are described below; recalculation and dependencies with sheets are
+F.09.
+
+## Conditional aggregates (F.08)
+
+```text
+=SUMIFS(Orders[amount], Orders[customer_id], [@id])
+=COUNTIFS(Orders[customer_id], [@id], Orders[amount], ">100")
+=AVERAGEIFS(Orders[amount], Orders[channel], "w*", Orders[day], ">="&[@start])
+=SUMIF(Orders[customer_id], [@id], Orders[amount])      COUNTIF, AVERAGEIF likewise
+```
+
+All ranges are whole columns of one table (another table, or the formula's own stored
+columns). The result is a Number: `SUMIFS` and `COUNTIFS` give 0 when nothing matches,
+`AVERAGEIFS` gives `#DIV/0!`. Only number and date cells are summed or averaged (text and
+logical cells are skipped); an error cell in the aggregated column of a matching row makes the
+result that error (the first in row order).
+
+**Criteria** follow the sheet engine's rules exactly (differential-tested):
+
+| Criterion | Matches |
+|---|---|
+| a number (or a date) | equal numbers, and text that reads as that number (`"2"`) |
+| `">5"`, `"<=5"`, `"<>5"`… | numbers only for `<`/`<=`/`>`/`>=`; `<>5` matches everything except 5 |
+| text, `"=text"` | text equal to it, case-insensitively; `""` also matches blank cells |
+| `"<>"` | every non-blank cell (`""` included) |
+| `"w*"`, `"?"`, `"a~*b"` | wildcards for `=` and `<>`: `*` any run, `?` one character, `~` escapes |
+| `"<b"`, `">=b"` | text ordering (lowercase code points); numbers never match |
+| `TRUE`, `"TRUE"` | logical values only |
+| an error value, `"#N/A"` | that error |
+| a blank criterion cell | numbers equal to 0 |
+| text that is a date (`"<7/31/2023"`, `">=2024-01-01"`, `"Feb/29/2024"`) | compared as that date: `yyyy-mm-dd`, otherwise month first, English month names |
+
+A criterion may come from the row (`[@id]`, `">"&[@limit]`; a date concatenated to an operator
+uses its serial number, as in sheets). Criteria written as literals filter the source once.
+
+**How it runs.** When every row criterion is a number, date or logical value, the criteria can
+only test equality: the source is grouped once by its cells' match keys (a cell contributes its
+own key and its blank equivalents) and left-joined on the row's keys, cached like a lookup.
+Text criteria may carry operators or wildcards from the data, so each *distinct* criterion
+value is matched once: equality ones through the grouped keys, the others by comparison
+against the source, then joined back to every row. No query runs per row or per cell.
+Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): a page of
+customers with equality `SUMIFS` and `COUNTIFS` columns takes 45–57 ms; with a text criterion
+taken from each row, 347 ms (not cached).
+
+Not available yet, refused with a message: `COUNT`, `COUNTA`, `MINIFS`, `MAXIFS`, ranges from
+different tables, and array criteria.
 
 ## Lookups (F.06)
 

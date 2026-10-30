@@ -201,6 +201,22 @@ fn lookup_read_timings() {
     let mut view = 0;
     time("open view after the source edit", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
     time("first page after the source edit", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    // Conditional aggregates the other way: each customer's order total and count.
+    time("add SUMIFS and COUNTIFS columns on customers", &mut || {
+        t.wb.add_formula_column_as("customers", "total", "=SUMIFS(orders[amount],orders[cid],[@id])", FormulaLanguage::Sheet).unwrap();
+        t.wb.add_formula_column_as("customers", "n", "=COUNTIFS(orders[cid],[@id],orders[amount],\">100\")", FormulaLanguage::Sheet).unwrap();
+    });
+    let mut cview = 0;
+    time("open customers view", &mut || { cview = t.wb.open_view(spec("customers")).unwrap().view_id; });
+    for label in ["customers first page", "customers first page again"] {
+        time(label, &mut || { t.wb.fetch(cview, 0, 100).unwrap(); });
+    }
+    time("add a text-criteria COUNTIFS (per distinct criterion)", &mut || {
+        t.wb.add_formula_column_as("customers", "named", "=COUNTIFS(orders[customer],[@name])", FormulaLanguage::Sheet).unwrap();
+    });
+    let mut cview = 0;
+    time("open customers view again", &mut || { cview = t.wb.open_view(spec("customers")).unwrap().view_id; });
+    time("customers first page with the text criterion", &mut || { t.wb.fetch(cview, 0, 100).unwrap(); });
 }
 
 
@@ -254,4 +270,37 @@ fn the_lookup_cache_drops_the_least_recently_used_beyond_its_budget() {
     cache.put("huge", revs(1), None, crate::limits::LOOKUP_CACHE_ROWS * 2);
     assert!(matches!(cache.get("huge", &revs(1)), Some(None)));
     assert!(cache.rows() <= crate::limits::LOOKUP_CACHE_ROWS);
+}
+
+#[test]
+fn conditional_aggregates_across_tables_follow_edits_and_renames() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("customers", "SELECT * FROM (VALUES (1, 'Ann'), (2, 'Bo'), (3, 'Cy')) v(id, name)").unwrap();
+    t.wb.create_table_from_query("orders", "SELECT * FROM (VALUES (10, 1, 100.0, 'web'), (11, 1, 50.0, 'shop'), (12, 2, 30.0, 'web')) v(id, cid, amount, channel)").unwrap();
+    for (name, f) in [
+        ("total", "=SUMIFS(orders[amount],orders[cid],[@id])"),
+        ("orders", "=COUNTIFS(orders[cid],[@id])"),
+        ("average", "=AVERAGEIFS(orders[amount],orders[cid],[@id])"),
+        ("web", "=SUMIFS(orders[amount],orders[cid],[@id],orders[channel],\"w*\")"),
+        ("by_name", "=COUNTIFS(orders[channel],\"<>\"&[@name])"),
+    ] {
+        t.wb.add_formula_column_as("customers", name, f, FormulaLanguage::Sheet).unwrap();
+    }
+    // Orders read a total that customers compute from orders: a chain, not a cycle.
+    t.wb.add_formula_column_as("orders", "share", "=[@amount]/XLOOKUP([@cid],customers[id],customers[total])", FormulaLanguage::Sheet).unwrap();
+    let customers = |wb: &mut Workbook| rendered(&table_block(wb, "customers")).iter().map(|r| r.split('|').skip(2).collect::<Vec<_>>().join("|")).collect::<Vec<_>>();
+    assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "30.0|1.0|30.0|30.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0"]);
+    let shares: Vec<String> = rendered(&table_block(&mut t.wb, "orders")).iter().map(|r| r.rsplit('|').next().unwrap().to_string()).collect();
+    assert_eq!(shares, ["0.6666666666666666", "0.3333333333333333", "1.0"]);
+    // An edit to orders moves the totals.
+    let v = t.wb.open_view(spec("orders")).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 2, column: "cid".into(), value: Some("3".into()), record: None }]).unwrap();
+    assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0", "30.0|1.0|30.0|30.0|3.0"]);
+    // Renames follow; a delete that a formula needs is refused.
+    t.wb.rename_column("orders", "amount", "net").unwrap();
+    let total = t.wb.columns("customers").unwrap().into_iter().find(|c| c.name == "total").unwrap().formula.unwrap();
+    assert_eq!(total, "=SUMIFS(orders[net],orders[cid],[@id])");
+    assert!(t.wb.drop_column("orders", "channel").unwrap_err().to_string().contains("customers.\"web\""));
+    t.reopen();
+    assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0", "30.0|1.0|30.0|30.0|3.0"]);
 }
