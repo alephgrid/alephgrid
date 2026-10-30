@@ -160,6 +160,17 @@ impl Workbook {
         &self.shared
     }
 
+    /// Tables whose stored formula results the committed data has made stale (F.09); the
+    /// server recalculates them in the background.
+    pub fn stale_results(&self) -> Result<Vec<String>> {
+        self.db().stale_results()
+    }
+
+    /// Bring a table's stored formula results up to date now (see [`Reader::recalculate`]).
+    pub fn recalculate(&self, table: &str) -> Result<bool> {
+        self.db().recalculate(table, None)
+    }
+
     /// Whether the last mutation changed table cells' values (sheets read tables it changed).
     pub fn changed_table_cells(&self) -> bool {
         self.derived_sheets
@@ -170,7 +181,7 @@ impl Workbook {
         if !in_txn {
             self.shared.sweep(&self.conn);
         }
-        Db { conn: &self.conn, shared: &self.shared, in_txn, keep: Default::default() }
+        Db { conn: &self.conn, shared: &self.shared, in_txn, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() }
     }
 
     /// Apply DuckDB settings such as `memory_limit` or `threads`.
@@ -1708,11 +1719,18 @@ impl Reader {
 
     fn db(&self) -> Db<'_> {
         self.shared.sweep(&self.conn);
-        Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default() }
+        Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() }
     }
 
     pub fn list_tables(&self) -> Result<Vec<TableInfo>> {
         self.db().list_tables()
+    }
+
+    /// Build a table's stored formula results from one snapshot and install them when
+    /// complete; `ticket` from [`Shared::results_queued`]. Interruptible: an interrupted or
+    /// failed build installs nothing. `Ok(false)` when they were already fresh.
+    pub fn recalculate(&self, table: &str, ticket: Option<u64>) -> Result<bool> {
+        self.db().recalculate(table, ticket)
     }
 
     /// Check a formula as if typed into a sheet cell: the sheet engine's parse, or for a

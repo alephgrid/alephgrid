@@ -252,8 +252,8 @@ one VLOOKUP column on orders, looking up customers, about 5% of orders without a
 | Rebuild both cached lookups | — | — | 120–420 ms, once per source change |
 | Open a view sorted by a lookup column | 258 ms | 3.1 s | 3.5 s |
 
-Sorting or filtering by a lookup column evaluates it for every row and is not sped up by the
-cache; that and persisted (materialized) lookup columns belong to F.09.
+Sorting or filtering by a lookup column used to evaluate it for every row; large tables now
+keep [stored formula results](#stored-formula-results-f09) for that.
 
 ## Storage, reads and editing
 
@@ -365,8 +365,36 @@ column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`
 value, and the export returns one note per such cell ("Report!B1: the table formula … is
 exported as its value "80" …"). Showing these notes in the download is F.13.
 
-Not yet: stored formula results with cancellable, atomic recalculation (sorting by a lookup
-column still evaluates every row).
+## Stored formula results (F.09)
+
+Pages are cheap to compute live, but sorting, filtering or summarizing a view by a formula
+column that reads other tables evaluates that column for every row. Tables of at least
+`RESULTS_MIN_ROWS` (200,000) rows with such formulas therefore keep their formula results in the
+workbook's scratch database:
+
+* **Built from one snapshot**, stamped with the generation and data revision, in that snapshot,
+  of every table they read: the table itself and every table its formulas look up or
+  aggregate, transitively. Results are fresh exactly while the stamp matches the reader's
+  snapshot; nothing is invalidated in place.
+* **Installed atomically**, once complete, and only over older results. A view sorted or
+  filtered by formula columns reads the result set its order was built from for all its pages,
+  so order and values agree; when newer results are installed, it is rebuilt on its next read.
+* **Recalculated in the background.** After a change commits, the server queues a bulk read job
+  for each table whose results it made stale and sends `table_changed` (`origin: 0`) when the
+  job ends. A newer change cancels the job still running for that table. `cancel_recalculation`
+  cancels it on request and `recalculate` queues it again.
+* **Visibly stale.** Meanwhile, and after a failed or cancelled build, sorted and filtered views
+  keep the last committed results and say why (`stale` on view info and row blocks:
+  `recalculating`, `recalculation failed: …`); the grid shows a notice with Cancel or
+  Recalculate. Unsorted views read pages live, exactly. Exports and copies never write stale
+  values: they read fresh results or compute live.
+
+Sorting or filtering only by stored columns reads the table alone. Sorting by formula columns
+with fresh results reads the stored results alone. Smaller tables compute everything live.
+Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): the first sort by
+a lookup column 303 ms (it stores the results), later sorts 151 ms, a filter by a lookup column
+26 ms, recalculation after a customer edit 165 ms; a sort while results are stale reads the last
+results in 247 ms. 10M-row figures are F.T04.
 
 ## Row identity and order
 

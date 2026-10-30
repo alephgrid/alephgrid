@@ -104,3 +104,32 @@ test("a sheet cell reads a table and follows its edits", async ({ page }) => {
   await expect(page.locator("body")).toContainText("no column named \"nope\"");
   ws.close();
 });
+
+test("a view sorted by a lookup column shows stale stored results while they are recalculated", async ({ page }) => {
+  test.setTimeout(120_000);
+  const wb = await server.createWorkbook("Stored results"), ws = await server.connect(wb);
+  // Large enough for stored results (200,000 rows), and slow enough to cancel.
+  await ws.call("create_table_from_query", { name: "customers", sql: "SELECT i AS id, 'c' || lpad(CAST(i AS VARCHAR), 6, '0') AS name FROM range(400000) t(i)" });
+  await ws.call("create_table_from_query", { name: "orders", sql: "SELECT i AS id, (i * 7919) % 400000 AS cid FROM range(4000000) t(i)" });
+  await ws.call("add_formula_column", { table: "orders", name: "who", formula: "=XLOOKUP([@cid],customers[id],customers[name])", language: "sheet" });
+  await ws.call("save_view", { name: "by customer", spec: { table: "orders", sort: [{ column: "who", desc: false }], filters: [], hidden: [] }, widths: {} });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /orders/ }).click();
+  await page.getByRole("button", { name: "Views ▾" }).click();
+  await page.getByRole("menuitem", { name: /by customer/ }).click();
+  await expect.poll(() => shown(page, 0, 2), { timeout: 60_000 }).toContain("c000000");
+  const note = page.locator(".stale-note");
+  await expect(note).toBeHidden();
+  // Another session renames a customer: orders' results are recalculated in the background.
+  const customers = await ws.call("open_view", { spec: { table: "customers", sort: [], filters: [] } });
+  await ws.call("edit", { view_id: customers.view_id, edits: [{ row: 0, column: "name", value: "zz" }] });
+  await expect(note).toContainText("recalculating");
+  await note.getByRole("button", { name: "Cancel" }).click();
+  await expect(note).toContainText("recalculation failed: cancelled");
+  // Still the last committed order, flagged.
+  expect(await shown(page, 0, 2)).toContain("c000000");
+  await note.getByRole("button", { name: "Recalculate" }).click();
+  await expect(note).toBeHidden({ timeout: 60_000 });
+  await expect.poll(() => shown(page, 0, 2)).toContain("c000001");
+  ws.close();
+});

@@ -157,6 +157,11 @@ pub struct ViewInfo {
     pub columns: Vec<Column>,
     /// True when rows can be appended by typing below the last row.
     pub can_append: bool,
+    /// Why the view's formula values are not current, when it is ordered or filtered by
+    /// formula columns whose stored results are being recalculated or failed to be (F.09).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stale: Option<String>,
 }
 
 /// A block of rows, row-major, in view order.
@@ -178,6 +183,10 @@ pub struct RowBlock {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<Vec<CellErrorMark>>")]
     pub errors: Vec<CellErrorMark>,
+    /// As [`ViewInfo::stale`]: the formula values are the last committed results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stale: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]

@@ -194,10 +194,22 @@ fn lookup_read_timings() {
     sorted.sort = vec![SortKey { column: "customer".into(), desc: false }];
     time("open view sorted by the lookup column", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
     time("first page of the sorted view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    // F.09: the first sort stored the formula results (tables of 200,000 rows or more).
+    let mut desc = sorted.clone();
+    desc.sort[0].desc = true;
+    time("sort by the lookup column again (stored)", &mut || { view = t.wb.open_view(desc.clone()).unwrap().view_id; });
+    let mut filtered = spec("orders");
+    filtered.filters = vec![Filter { column: "tier".into(), op: FilterOp::Eq, value: serde_json::json!(3) }];
+    time("filter by the lookup column (stored)", &mut || { view = t.wb.open_view(filtered.clone()).unwrap().view_id; });
+    time("first page of the filtered view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
     let cv = t.wb.open_view(spec("customers")).unwrap().view_id;
     time("edit one customer name", &mut || {
         t.wb.edit(cv, &[CellEdit { row: 0, column: "name".into(), value: Some("renamed".into()), record: None }]).unwrap();
     });
+    t.wb.shared().results_queued("orders");
+    time("sort while results are stale (last results)", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
+    time("recalculate stored results", &mut || { t.wb.recalculate("orders").unwrap(); });
+    time("sort with the new results", &mut || { view = t.wb.open_view(desc.clone()).unwrap().view_id; });
     let mut view = 0;
     time("open view after the source edit", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
     time("first page after the source edit", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });

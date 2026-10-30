@@ -266,7 +266,7 @@ fn compile(db: &Db, spec: &AnalysisSpec) -> Result<(String, Option<String>)> {
 }
 pub(crate) fn analyze(db: &Db, spec: &AnalysisSpec) -> Result<AnalysisResult> {
     db.snapshot(|| {
-        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default() };
+        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() };
         let (sql, diagnostics) = compile(&snap, spec)?;
         let diagnostics = diagnostics.map(|q| snap.run_query(&q, &[], 1)).transpose()?;
         Ok(AnalysisResult { result: snap.run_query(&sql, &[], OUTPUT_ROWS)?, diagnostics })
@@ -285,7 +285,7 @@ fn replace_parts(db: &Db, spec: &ReplaceSpec) -> Result<(String, String)> {
 }
 pub(crate) fn replace_preview(db: &Db, spec: &ReplaceSpec) -> Result<ReplacePreview> {
     db.snapshot(|| {
-        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default() };
+        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() };
         let (cond, expr) = replace_parts(&snap, spec)?;
         let count: u64 = snap.conn.query_row(&format!("SELECT count(*) FROM {} WHERE {cond}", ident(&spec.table)), [], |r| r.get(0))?;
         Ok(ReplacePreview {

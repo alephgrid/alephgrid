@@ -86,7 +86,7 @@ pub(crate) struct Build {
 }
 
 impl Build {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Build { in_progress: std::cell::RefCell::new(Vec::new()), graph: std::cell::OnceCell::new(), reads: std::cell::RefCell::new(Vec::new()) }
     }
 }
@@ -149,6 +149,20 @@ pub(crate) struct Db<'a> {
     pub in_txn: bool,
     /// Cached lookup tables this operation's SQL refers to, kept until it is done.
     pub keep: std::cell::RefCell<Vec<Arc<crate::catalog::Scratch>>>,
+    /// Lookup tables built inside this operation's snapshot. Other connections cannot see
+    /// them until it commits, so they join the shared cache only then (and are dropped if it
+    /// rolls back).
+    pub built: std::cell::RefCell<Vec<PendingLookup>>,
+    /// Inside [`Db::snapshot`].
+    pub in_snapshot: std::cell::Cell<bool>,
+}
+
+/// A lookup table built in a snapshot that has not committed yet.
+pub(crate) struct PendingLookup {
+    sql: String,
+    revisions: Vec<(String, u64)>,
+    table: Arc<crate::catalog::Scratch>,
+    rows: u64,
 }
 
 impl Db<'_> {
@@ -158,15 +172,24 @@ impl Db<'_> {
             return f();
         }
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
+        self.in_snapshot.set(true);
         let out = f().and_then(|v| {
             crate::faults::check("snapshot_commit")?;
             // An interrupt aimed at the read can land on its COMMIT instead.
             self.conn.execute_batch("COMMIT;")?;
             Ok(v)
         });
+        self.in_snapshot.set(false);
+        let built = std::mem::take(&mut *self.built.borrow_mut());
         if out.is_err() {
-            // Whatever failed, never leave this connection inside a transaction.
+            // Whatever failed, never leave this connection inside a transaction. Lookup
+            // tables built meanwhile went with it.
             let _ = self.conn.execute_batch("ROLLBACK;");
+        } else {
+            let mut cache = self.shared.lookups.lock().unwrap_or_else(|e| e.into_inner());
+            for p in built {
+                cache.put(&p.sql, p.revisions, Some(p.table), p.rows);
+            }
         }
         out
     }
@@ -301,7 +324,7 @@ impl Db<'_> {
     }
 
     /// [`Self::base_select_in`], with the tables the relation reads (lowercase).
-    fn base_select_tracked(&self, table: &str, build: &Build) -> Result<(String, Vec<String>)> {
+    pub(crate) fn base_select_tracked(&self, table: &str, build: &Build) -> Result<(String, Vec<String>)> {
         build.reads.borrow_mut().push(std::collections::BTreeSet::from([table.to_lowercase()]));
         let out = self.base_select_in(table, build);
         let mine = build.reads.borrow_mut().pop().unwrap_or_default();
@@ -309,6 +332,16 @@ impl Db<'_> {
             parent.extend(mine.iter().cloned());
         }
         Ok((out?, mine.into_iter().collect()))
+    }
+
+    /// Whether scratch table `s` exists in this connection's snapshot.
+    fn scratch_visible(&self, s: &crate::catalog::Scratch) -> Result<bool> {
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT count(*) FROM duckdb_tables() WHERE database_name = {} AND table_name = {}", lit(crate::catalog::SCRATCH), lit(&s.name)),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     /// The scratch table holding grouped lookup relation `sql` as of the current data of
@@ -323,10 +356,24 @@ impl Db<'_> {
             reads.iter().map(|r| all.iter().find(|(t, _)| t.eq_ignore_ascii_case(r)).map(|(_, v)| (r.clone(), *v))).collect()
         };
         let Some(revs) = revisions(&all) else { return Ok(None) };
+        // Built earlier in this snapshot.
+        if let Some(p) = self.built.borrow().iter().find(|p| p.sql == sql && p.revisions == revs) {
+            return Ok(Some(p.table.qualified()));
+        }
         let mut cache = self.shared.lookups.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(hit) = cache.get(sql, &revs) {
-            return Ok(hit.map(|s| { let name = s.qualified(); self.keep.borrow_mut().push(s); name }));
+            match hit {
+                None => return Ok(None),
+                // A table committed after this snapshot began is not visible in it.
+                Some(s) if self.scratch_visible(&s)? => {
+                    let name = s.qualified();
+                    self.keep.borrow_mut().push(s);
+                    return Ok(Some(name));
+                }
+                Some(_) => {}
+            }
         }
+        drop(cache);
         let scratch = self.shared.new_scratch("lk");
         self.conn.execute_batch(&format!("CREATE TABLE {} AS {sql};", scratch.qualified()))?;
         let rows: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {}", scratch.qualified()), [], |r| r.get(0))?;
@@ -335,6 +382,7 @@ impl Db<'_> {
             return Ok(None);
         }
         let rows = rows.max(0) as u64;
+        let mut cache = self.shared.lookups.lock().unwrap_or_else(|e| e.into_inner());
         if rows > limits::LOOKUP_CACHE_ROWS {
             cache.put(sql, revs, None, rows);
             return Ok(None);
@@ -342,7 +390,11 @@ impl Db<'_> {
         let scratch = Arc::new(scratch);
         let name = scratch.qualified();
         self.keep.borrow_mut().push(scratch.clone());
-        cache.put(sql, revs, Some(scratch), rows);
+        if self.in_snapshot.get() {
+            self.built.borrow_mut().push(PendingLookup { sql: sql.to_string(), revisions: revs, table: scratch, rows });
+        } else {
+            cache.put(sql, revs, Some(scratch), rows);
+        }
         Ok(Some(name))
     }
 
@@ -580,14 +632,19 @@ impl Db<'_> {
         let spec = entry.spec();
         let gen = storage::table_meta(self.conn, &spec.table)?.gen;
         let mut slot = entry.mat.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(m) = slot.as_ref().filter(|m| m.gen == gen && m.spec == spec) {
+        // A view built on stored results is rebuilt once newer results are installed.
+        let current = |m: &Materialized| match &m.results {
+            None => true,
+            Some(r) => self.shared.committed_results(&spec.table).is_none_or(|c| c.id == r.id),
+        };
+        if let Some(m) = slot.as_ref().filter(|m| m.gen == gen && m.spec == spec && current(m)) {
             return Ok(m.clone());
         }
         let all = self.validate_spec(&spec)?;
         let columns: Vec<Column> = all.iter().filter(|c| !spec.hidden.contains(&c.name)).cloned().collect();
         let built = if spec.is_identity() {
             let row_count = self.count_rows(&spec.table)?;
-            Materialized { gen, spec: spec.clone(), columns, row_count, perm: None }
+            Materialized { gen, spec: spec.clone(), columns, row_count, perm: None, results: None }
         } else {
             if self.in_txn {
                 bail!("view {} changed during this operation; try again", entry.id);
@@ -605,22 +662,34 @@ impl Db<'_> {
             // Ties keep display order.
             order.push(ORD.to_string());
             let where_sql = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
+            // What the order and filters read: stored columns only need the table itself;
+            // formula columns of a large table come from its stored results (see `results`).
+            let used: Vec<&str> = spec.sort.iter().map(|k| k.column.as_str()).chain(spec.filters.iter().map(|f| f.column.as_str())).collect();
+            let formulas: Vec<String> = self.formulas(&spec.table)?.into_iter().map(|(n, _)| n).collect();
+            let stored_only = used.iter().all(|c| !formulas.iter().any(|f| f == c));
+            let results = if stored_only { None } else { self.results_for_view(&spec.table)? };
             let perm = self.shared.new_scratch(&format!("v{}", entry.id));
             // Build from one snapshot and stamp it with that snapshot's generation.
             let (row_count, gen) = self.snapshot(|| {
                 let gen = storage::table_meta(self.conn, &spec.table)?.gen;
+                let source = match &results {
+                    _ if stored_only => format!("SELECT * FROM main.{}", ident(&spec.table)),
+                    // Fresh results holding every column used: the table itself is not read.
+                    Some((r, None)) if Self::only_results(r, &used) => format!("SELECT * FROM {}", r.scratch.qualified()),
+                    Some((r, _)) => self.results_select(&spec.table, r),
+                    None => self.base_select(&spec.table)?,
+                };
                 self.conn.execute_batch(&format!(
                     "CREATE TABLE {} AS
                      SELECT (row_number() OVER () - 1)::BIGINT AS _rf_pos, {ID}
-                     FROM (SELECT {ID} FROM ({}) {where_sql} ORDER BY {});",
+                     FROM (SELECT {ID} FROM ({source}) {where_sql} ORDER BY {});",
                     perm.qualified(),
-                    self.base_select(&spec.table)?,
                     order.join(", ")
                 ))?;
                 let n: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {}", perm.qualified()), [], |r| r.get(0))?;
                 Ok((n as u64, gen))
             })?;
-            Materialized { gen, spec: spec.clone(), columns, row_count, perm: Some(Arc::new(perm)) }
+            Materialized { gen, spec: spec.clone(), columns, row_count, perm: Some(Arc::new(perm)), results: results.map(|(r, _)| r) }
         };
         let built = Arc::new(built);
         if !self.in_txn {
@@ -647,6 +716,31 @@ impl Db<'_> {
         bail!("the table kept changing while it was being read; try again")
     }
 
+    /// The relation a view's pages read: the stored results its order was built from
+    /// (`allow_stale`: even when stale), fresh stored results, or the live relation.
+    pub(crate) fn view_base(&self, m: &Materialized, allow_stale: bool) -> Result<String> {
+        let table = &m.spec.table;
+        if let Some(r) = &m.results {
+            if allow_stale || self.results_fresh(r)? {
+                return Ok(self.results_select(table, r));
+            }
+        }
+        if let Some(r) = self.shared.committed_results(table) {
+            if self.results_fresh(&r)? {
+                return Ok(self.results_select(table, &r));
+            }
+        }
+        self.base_select(table)
+    }
+
+    /// Why the view's formula values are stale, if they are.
+    pub(crate) fn view_staleness(&self, m: &Materialized) -> Result<Option<String>> {
+        match &m.results {
+            Some(r) => self.staleness(&m.spec.table, r),
+            None => Ok(None),
+        }
+    }
+
     pub fn view_info(&self, id: u64) -> Result<ViewInfo> {
         self.with_view(id, |m| {
             Ok(ViewInfo {
@@ -655,6 +749,7 @@ impl Db<'_> {
                 row_count: m.row_count,
                 columns: m.columns.clone(),
                 can_append: m.perm.is_none(),
+                stale: self.view_staleness(m)?,
             })
         })
     }
@@ -696,7 +791,8 @@ impl Db<'_> {
             let cols = &m.columns[c0 as usize..c1 as usize];
             let rows_allowed = limits::fetch_rows(row_count, cols.len());
             let end = row_start.saturating_add(rows_allowed).min(m.row_count);
-            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false, errors: vec![] };
+            let stale = self.view_staleness(m)?;
+            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false, errors: vec![], stale: stale.clone() };
             if row_start >= end {
                 return Ok(empty);
             }
@@ -707,7 +803,7 @@ impl Db<'_> {
             let error_cols: Vec<u32> = cols.iter().enumerate().filter(|(_, c)| sheet.contains(&c.name)).map(|(i, _)| i as u32).collect();
             projection.extend(error_cols.iter().map(|&i| ident(&error_column(&cols[i as usize].name))));
             let projection = if projection.is_empty() { String::new() } else { format!(", {}", projection.join(", ")) };
-            let base = self.base_select(&m.spec.table)?;
+            let base = self.view_base(m, true)?;
             // Identity views: one ordered range scan. Permutations: ids first, then rows by id.
             let (ids, sql) = match &m.perm {
                 None => {
@@ -761,7 +857,7 @@ impl Db<'_> {
                 out_ids.push(*rid);
             }
             let truncated = out.len() < ids.len();
-            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated, errors })
+            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated, errors, stale })
         })
     }
 
@@ -781,7 +877,7 @@ impl Db<'_> {
                 self.range_condition(m, start, end)?
             };
             let c = ident(column);
-            let base = self.base_select(&m.spec.table)?;
+            let base = self.view_base(m, true)?;
             let codec = wire::codec(&col.sql_type);
             // Sums of integers and decimals stay exact (HUGEINT / DECIMAL(38,s)); doubles stay doubles.
             let (sum, sum_codec) = match (col.kind, codec) {
@@ -817,8 +913,10 @@ impl Db<'_> {
     }
 
     /// The view's visible columns in view order, optionally only its first `limit` rows.
+    /// The view's rows for export and copying, with exact values: stale stored results are
+    /// never written out.
     pub fn view_select(&self, m: &Materialized, limit: Option<usize>) -> Result<String> {
-        let base = self.base_select(&m.spec.table)?;
+        let base = self.view_base(m, false)?;
         let cols: Vec<String> = m.columns.iter().map(|c| format!("b.{}", ident(&c.name))).collect();
         let cols = cols.join(", ");
         Ok(match &m.perm {

@@ -385,6 +385,9 @@ dialog progress, .dialog progress { width: 100%; }
 .formula-problem { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--danger); border-bottom: 1px solid var(--border); }
 .cell-note { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
 .cell-note .btn-small { padding: 0 6px; font-size: 12px; }
+.stale-note { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--text); background: color-mix(in srgb, var(--warn) 14%, transparent); border-bottom: 1px solid var(--border); }
+.stale-note .btn-small { padding: 0 6px; font-size: 12px; }
+.stale-results { opacity: 0.75; }
 .names-table { border-collapse: collapse; width: 100%; margin: 8px 0; }
 .names-table th, .names-table td { padding: 4px 8px; text-align: left; border: 1px solid var(--border); vertical-align: top; }
 .names-table code { overflow-wrap: anywhere; }

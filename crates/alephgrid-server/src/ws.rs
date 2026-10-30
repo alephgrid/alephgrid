@@ -231,6 +231,12 @@ pub enum Op {
     /// Cancel this connection's request `request`: removed if it is waiting, interrupted if
     /// it runs. A change that already committed stays committed.
     Cancel { request: u64 },
+    /// Recalculate a table's stored formula results in the background (F.09); for retrying
+    /// after a failure or cancellation. Replies at once; `table_changed` follows when done.
+    Recalculate { table: String },
+    /// Cancel the background recalculation of a table's stored results; the last committed
+    /// results stay, flagged. False when none runs.
+    CancelRecalculation { table: String },
 }
 
 /// Default for the most rows copied from a table or query into a sheet (sheets keep every
@@ -270,7 +276,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
         Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
-        CloseView { .. } | Cancel { .. } => None,
+        CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
@@ -876,6 +882,19 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                     let found = cancels.lock().unwrap().get(&request).map(|c| c.send(true).is_ok()).unwrap_or(false);
                     json!(found)
                 }
+                Op::CancelRecalculation { table } => json!(handle.cancel_recalculation(&table)),
+                Op::Recalculate { table } => {
+                    let h = handle.clone();
+                    let t = table.clone();
+                    let ticket = tokio::task::spawn_blocking(move || h.with_reader(|r| Ok(r.shared().results_queued(&t)))).await;
+                    match ticket {
+                        Ok(Ok(k)) => {
+                            handle.recalculate_later(vec![(table, k)], 0, state.config.job_timeout);
+                            json!(true)
+                        }
+                        _ => json!(false),
+                    }
+                }
                 _ => unreachable!("classified as immediate"),
             };
             outbox.push(json!({ "id": id, "ok": true, "result": result }).to_string(), true);
@@ -905,6 +924,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             downloads: state.downloads.clone(),
         };
         let data_dir = state.config.data_dir.clone();
+        let recalc_timeout = state.config.job_timeout;
         let (handle, outbox, cancels) = (handle.clone(), outbox.clone(), cancels.clone());
         let progress: Option<Box<dyn Fn(f64) + Send>> = (class == Class::Bulk).then(|| {
             let outbox = outbox.clone();
@@ -941,10 +961,18 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         })
                     };
                     let sheets = !committed.replayed && wb.changed_table_cells();
-                    Ok((committed, event, derived, sheets))
+                    // Stored formula results this change made stale, queued at once so views
+                    // opened meanwhile show the last results, flagged, without rebuilding.
+                    let queued: Vec<(String, u64)> = if committed.replayed {
+                        Vec::new()
+                    } else {
+                        wb.stale_results().unwrap_or_default().into_iter().map(|t| { let k = wb.shared().results_queued(&t); (t, k) }).collect()
+                    };
+                    Ok((committed, event, derived, sheets, queued))
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
-                    Ok((c, event, derived, sheets)) => {
+                    Ok((c, event, derived, sheets, queued)) => {
+                        handle.recalculate_later(queued, c.revision, recalc_timeout);
                         if let Some(ev) = event.filter(|_| !c.replayed) {
                             let ev = with_revision(ev, c.revision);
                             let structural = ev.changes_structure();

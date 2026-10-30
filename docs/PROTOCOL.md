@@ -45,6 +45,13 @@ with `sheet: null` and `origin: 0`. `sheet_delete` is refused while table formul
 cells on other sheets read the sheet. `sheet_set` turns a formula naming a table into a table
 cell, and `sheet_check_formula` checks such formulas as table formulas.
 
+Large tables keep stored formula results (F.09). After a change makes them stale the server
+recalculates them in the background and sends `table_changed` (`origin: 0`) when done, failed
+or cancelled. Until then, views sorted or filtered by formula columns carry `stale` (on
+`ViewInfo` and `RowBlock`: `recalculating`, or `recalculation failed: …`) and keep the last
+committed results. `cancel_recalculation { table }` stops the running job; `recalculate
+{ table }` queues one; both reply at once.
+
 Requests can be pipelined; replies may arrive out of order and are matched by `id`. Requests of one
 connection are queued in the order they arrive.
 

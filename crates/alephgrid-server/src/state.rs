@@ -24,7 +24,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use alephgrid_core::{Reader, Workbook};
@@ -122,6 +122,9 @@ pub struct WorkbookHandle {
     pub sched: Arc<Scheduler>,
     /// Client-chosen id of the long job running now (an import), for progress and cancel.
     pub job: Mutex<Option<String>>,
+    /// Background recalculations of stored formula results, per table (F.09): the queue
+    /// ticket and the channel that cancels it.
+    recalcs: Mutex<std::collections::HashMap<String, (u64, tokio::sync::watch::Sender<bool>)>>,
     engine: Mutex<Option<Workbook>>,
     readers: Vec<Mutex<Option<Reader>>>,
     control: Mutex<Option<Reader>>,
@@ -170,6 +173,7 @@ impl WorkbookHandle {
             reader_interrupts,
             reader_progress: readers.iter().map(|r| r.progress_handle()).collect(),
             job: Mutex::new(None),
+            recalcs: Mutex::new(Default::default()),
             meta: Mutex::new(meta),
             engine: Mutex::new(Some(engine)),
             readers: readers.into_iter().map(|r| Mutex::new(Some(r))).collect(),
@@ -184,6 +188,52 @@ impl WorkbookHandle {
             temp_dir,
             ownership,
         })
+    }
+
+    /// Recalculate the stored formula results of `queued` tables (with their queue tickets,
+    /// see `Shared::results_queued`) in the background, one bulk read job each. A newer
+    /// request for a table cancels the one still running for it. When a job ends (done,
+    /// failed or cancelled) every session gets `table_changed`, so views built on the old
+    /// results reopen or show why they are stale.
+    pub fn recalculate_later(self: &Arc<Self>, queued: Vec<(String, u64)>, revision: u64, timeout: Duration) {
+        static N: AtomicU64 = AtomicU64::new(1);
+        for (table, ticket) in queued {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            if let Some((_, older)) = self.recalcs.lock().unwrap_or_else(|e| e.into_inner()).insert(table.clone(), (ticket, tx)) {
+                let _ = older.send(true);
+            }
+            let h = self.clone();
+            tokio::spawn(async move {
+                let job = Job { key: (0, N.fetch_add(1, Ordering::Relaxed)), class: Class::Bulk, deadline: Instant::now() + timeout };
+                let t = table.clone();
+                let out = h.run(job, Some(rx), None, Work::Read(Box::new(move |r: &Reader| r.recalculate(&t, Some(ticket))))).await;
+                {
+                    let mut running = h.recalcs.lock().unwrap_or_else(|e| e.into_inner());
+                    if running.get(&table).is_some_and(|(k, _)| *k == ticket) {
+                        running.remove(&table);
+                    }
+                }
+                match &out {
+                    Ok(false) => return,
+                    Ok(true) => {}
+                    Err(e) => {
+                        // Cancelled or timed out before it started: say so for this ticket.
+                        let why = match e.downcast_ref::<JobError>() { Some(JobError::Cancelled) => "cancelled".to_string(), _ => format!("{e:#}") };
+                        let _ = h.with_control(|r| {
+                            r.shared().results_failed(&table, ticket, &why);
+                            Ok(())
+                        });
+                    }
+                }
+                let _ = h.events.send(Event::TableChanged { table, origin: 0, revision });
+            });
+        }
+    }
+
+    /// Cancel the running recalculation of `table`'s stored results; false when none runs.
+    pub fn cancel_recalculation(&self, table: &str) -> bool {
+        let running = self.recalcs.lock().unwrap_or_else(|e| e.into_inner());
+        running.iter().find(|(t, _)| t.eq_ignore_ascii_case(table)).is_some_and(|(_, (_, tx))| tx.send(true).is_ok())
     }
 
     fn check_open(&self) -> Result<()> {

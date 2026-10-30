@@ -130,6 +130,8 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("materialized", "MaterializedTable[]"),
     ("refresh_materialized", "MaterializedTable"),
     ("cancel", "boolean"),
+    ("recalculate", "boolean"),
+    ("cancel_recalculation", "boolean"),
 ];
 
 /// Op names in the order `Op` declares them, read from its generated declaration.

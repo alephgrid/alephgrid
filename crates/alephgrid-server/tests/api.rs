@@ -450,6 +450,8 @@ async fn every_operation_replies_with_its_declared_type() {
         run("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
         run("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
         run("cancel", json!({ "request": 1 })),
+        run("recalculate", json!({ "table": "t" })),
+        run("cancel_recalculation", json!({ "table": "t" })),
     ];
     let mut saved_id = String::new();
     let mut query_id = String::new();
@@ -556,6 +558,51 @@ async fn sheet_cells_that_read_tables_follow_table_edits() {
         }
     }
     assert_eq!(cell(&a.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await), json!(["6", "right", "=SUM(orders[amount])"]));
+    a.close().await;
+    b.close().await;
+    server.stop().await;
+}
+
+/// F.09: after a change, a large table's stored formula results are recalculated in the
+/// background; sorted views keep the last results, flagged, until then, and every session
+/// hears when they are replaced. A cancelled recalculation says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn stored_results_are_recalculated_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("results").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    // 200,000 orders (the threshold for stored results) over 1,000 customers.
+    a.ok("create_table_from_query", json!({ "name": "customers", "sql": "SELECT i AS id, 'c' || lpad(CAST(i AS VARCHAR), 4, '0') AS name FROM range(1000) t(i)" })).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT i AS id, i % 1000 AS cid FROM range(200000) t(i)" })).await;
+    a.ok("add_formula_column", json!({ "table": "orders", "name": "who", "formula": "=XLOOKUP([@cid],customers[id],customers[name])", "language": "sheet" })).await;
+    let sorted = json!({ "spec": { "table": "orders", "sort": [{ "column": "who", "desc": true }] } });
+    let v = b.ok("open_view", sorted.clone()).await;
+    assert!(v.get("stale").is_none(), "{v}");
+    let first = b.ok("fetch", json!({ "view_id": v["view_id"], "row_start": 0, "row_count": 1 })).await;
+    assert_eq!(first["rows"][0], json!([999, 999, "c0999"]));
+    // Renaming customer 999 makes orders' stored results stale; they are rebuilt in the
+    // background and every session is told.
+    let c = a.ok("open_view", json!({ "spec": { "table": "customers" } })).await["view_id"].as_u64().unwrap();
+    let id = a.send("edit", json!({ "view_id": c, "edits": [{ "row": 999, "column": "name", "value": "a999" }] })).await;
+    let rev = a.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        loop {
+            let e = ws.event("table_changed").await.unwrap();
+            if e["table"] == "orders" && e["revision"] == rev {
+                assert_eq!(e["origin"], json!(0), "{e}");
+                break;
+            }
+        }
+    }
+    let v = b.ok("open_view", sorted.clone()).await;
+    assert!(v.get("stale").is_none(), "{v}");
+    let first = b.ok("fetch", json!({ "view_id": v["view_id"], "row_start": 0, "row_count": 1 })).await;
+    assert_eq!(first["rows"][0], json!([998, 998, "c0998"]), "the renamed customer sorts last now");
+    // Nothing to cancel now; a retry request is accepted.
+    assert_eq!(a.ok("cancel_recalculation", json!({ "table": "orders" })).await, json!(false));
+    assert_eq!(a.ok("recalculate", json!({ "table": "orders" })).await, json!(true));
     a.close().await;
     b.close().await;
     server.stop().await;

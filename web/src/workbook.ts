@@ -141,6 +141,8 @@ export class WorkbookScreen {
   private formulaOrigin: { index: number; r: number; c: number } | null = null;
   private formulaProblem = el("p", { class: "formula-problem", role: "alert", hidden: true });
   private cellNote = el("p", { class: "cell-note", role: "status", hidden: true });
+  /** Shown while a sorted or filtered view reads stored formula results that are stale. */
+  private staleNote = el("p", { class: "stale-note", role: "status", hidden: true });
   private cellNoteSeq = 0;
   /** The cell the note was last looked up for, so data loads do not repeat the request. */
   private cellNoteKey = "";
@@ -440,6 +442,7 @@ export class WorkbookScreen {
       el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput, this.referenceLegend),
       this.formulaProblem,
       this.cellNote,
+      this.staleNote,
       this.gridWrap,
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
@@ -799,10 +802,27 @@ export class WorkbookScreen {
     const saved = this.loadWidths();
     this.grid.setColumns(info.columns.map((c) => saved[c.name] ?? defaultWidth(c)));
     this.rowsEl.textContent = `${formatCount(info.row_count)} rows`;
+    this.renderStale(info);
     this.setKind("table");
     this.renderChips();
     this.grid.invalidate();
     this.onSelection(this.grid.selection(), this.grid.active);
+  }
+
+  /** Say when the view's order and formula values are the last committed results, with a
+   *  way to stop the recalculation or try it again. */
+  private renderStale(info: ViewInfo): void {
+    const why = info.stale;
+    this.gridWrap.classList.toggle("stale-results", !!why);
+    if (!why) { this.staleNote.hidden = true; this.staleNote.replaceChildren(); return; }
+    const table = info.spec.table;
+    const running = why === "recalculating";
+    const action = running
+      ? el("button", { class: "btn btn-small", onclick: () => this.rpc.call("cancel_recalculation", { table }).catch((e: Error) => toast(e.message, "error")) }, "Cancel")
+      : el("button", { class: "btn btn-small", onclick: () => this.rpc.call("recalculate", { table }).then(() => this.reopen()).catch((e: Error) => toast(e.message, "error")) }, "Recalculate");
+    this.staleNote.replaceChildren(
+      `Sorted and filtered by the last committed formula results: ${why}. Values may be out of date. `, action);
+    this.staleNote.hidden = false;
   }
 
   private async reopen(): Promise<void> {
@@ -1917,6 +1937,11 @@ export class WorkbookScreen {
         if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) {
           this.cache.refresh();
           this.grid.invalidate();
+        }
+        // A sorted or filtered view may now read stale stored results: say so.
+        if (a?.kind === "table" && e.table === a.name && this.view && !this.view.can_append) {
+          const id = this.view.view_id;
+          this.rpc.call("view_info", { view_id: id }).then((info) => { if (this.view?.view_id === id) { this.view = info; this.renderStale(info); } }).catch(() => {});
         }
         // A snapshot or one of its sources was edited.
         if (this.materialized.length) this.reloadMaterializedSoon();
