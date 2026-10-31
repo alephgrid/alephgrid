@@ -80,6 +80,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("test_function", "FunctionTestResult[]"),
     ("publish_function", "WorkbookFunction"),
     ("pin_functions", "WorkbookFunction[]"),
+    ("refresh_functions", "number"),
     ("tables", "TableInfo[]"),
     ("open_view", "ViewInfo"),
     ("update_view", "ViewInfo"),
@@ -158,6 +159,7 @@ pub fn bindings() -> String {
     decls!(
         &cfg, out,
         Rule, Validation, ValidationReport, Transform, TransformPreview, FormulaInspection, Aggregate, Pivot, Measure, Calculated, ChartKind, Slicer, Tile, Dashboard, TileResult, DashboardResult, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
+        alephgrid_core::external::ResultType, alephgrid_core::external::RuntimeIdentity, crate::python::Limits,
         FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,

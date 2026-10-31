@@ -8,7 +8,17 @@ export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
   const list = el("div", { class: "function-list" });
   const name = el("input", { "aria-label": "Function name", value: "MARGIN", maxlength: 64 });
   const kind = el("select", { "aria-label": "Function engine" }, el("option", { value: "formula" }, "Sheet formula (IronCalc)"),
-    allowSql ? el("option", { value: "sql" }, "SQL expression (DuckDB)") : null);
+    allowSql ? el("option", { value: "sql" }, "SQL expression (DuckDB)") : null,
+    el("option", { value: "python" }, "Python (isolated worker)"));
+  const returns = el("select", { "aria-label": "Python result type" },
+    el("option", { value: "number" }, "Number"), el("option", { value: "text" }, "Text"), el("option", { value: "boolean" }, "Logical"));
+  const volatile = el("input", { type: "checkbox", "aria-label": "Volatile: computed again only on Refresh" });
+  const pythonFields = el("div", { class: "function-python", hidden: true },
+    el("label", { class: "function-field" }, "Returns", returns),
+    el("label", { class: "function-field" }, volatile, " Volatile (reads the clock or randomness): computed again only on Refresh"),
+    el("p", { class: "muted" }, "Define def <name in lower case>(<arguments>): in the source. It runs in an isolated worker with no network or files; results are kept by their exact arguments."));
+  const showKind = () => { pythonFields.hidden = kind.value !== "python"; };
+  kind.addEventListener("change", showKind);
   const args = el("input", { "aria-label": "Arguments", value: "revenue, cost" });
   const source = el("textarea", { "aria-label": "Function source", rows: 4, spellcheck: false }, "IF(revenue=0,0,(revenue-cost)/revenue)");
   const documentation = el("textarea", { "aria-label": "Function documentation", rows: 2 }, "Profit as a fraction of revenue.");
@@ -22,15 +32,19 @@ export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
   const definition = (): FunctionDefinition => {
     const parsed: unknown = JSON.parse(tests.value);
     if (!Array.isArray(parsed)) throw new Error("Tests must be a JSON array");
-    return { name: name.value.trim(), kind: kind.value as FunctionKind, arguments: args.value.split(",").map(x => x.trim()), source: source.value, documentation: documentation.value, tests: parsed as FunctionTest[], dependencies: JSON.parse(dependencies.value) };
+    const d: FunctionDefinition = { name: name.value.trim(), kind: kind.value as FunctionKind, arguments: args.value.split(",").map(x => x.trim()), source: source.value, documentation: documentation.value, tests: parsed as FunctionTest[], dependencies: JSON.parse(dependencies.value) };
+    if (d.kind === "python") { d.returns = returns.value as FunctionDefinition["returns"]; d.volatile = volatile.checked; d.dependencies = {}; }
+    return d;
   };
   const load = (f: WorkbookFunction, version = f.pinned) => {
     selected = f;
     const v = f.versions.find(v => v.version === version)!;
     name.value = v.definition.name; kind.value = v.definition.kind; args.value = v.definition.arguments.join(", ");
+    returns.value = v.definition.returns ?? "number"; volatile.checked = !!v.definition.volatile; showKind();
     source.value = v.definition.source; documentation.value = v.definition.documentation; tests.value = JSON.stringify(v.definition.tests, null, 2); dependencies.value = JSON.stringify(v.dependencies);
     versions.replaceChildren(...f.versions.map(v => el("option", { value: v.version }, `v${v.version}${v.version === f.pinned ? " · active" : ""}`)));
-    versions.value = String(version); status.textContent = `${f.name} · workbook scope · pinned v${f.pinned}\n${v.adapter}\nDependencies: ${JSON.stringify(v.dependencies)}`;
+    const runtime = v.runtime ? `\nPython ${v.runtime.version} · runtime ${v.runtime.id}${v.runtime.packages.length ? " · " + v.runtime.packages.join(", ") : ""}` : "";
+    versions.value = String(version); status.textContent = `${f.name} · workbook scope · pinned v${f.pinned}\n${v.adapter}\nDependencies: ${JSON.stringify(v.dependencies)}${runtime}`;
   };
   async function refresh() {
     const items = await rpc.call("functions", {});
@@ -68,8 +82,8 @@ export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
     status.textContent += "\nVersion map activated atomically.";
   });
   const dialog = el("section", { class: "dialog function-dialog" }, el("h2", {}, "Function library"),
-    el("p", {}, "Workbook-scoped functions. Formula functions run in sheets; SQL functions run in queries and table columns. Publishing never updates another workbook."),
-    list, field("Name", name), field("Execution engine", kind), field("Arguments (comma separated)", args), field("Expression", source),
+    el("p", {}, "Workbook-scoped functions. Formula functions run in sheets; SQL functions run in queries and table columns; Python functions run in sheets and as a whole table column (=NAME([column])), in isolated workers. Publishing never updates another workbook."),
+    list, field("Name", name), field("Execution engine", kind), pythonFields, field("Arguments (comma separated)", args), field("Expression", source),
     field("Documentation and example usage", documentation), field("Dependency versions (optional JSON overrides)", dependencies), field("Tests: arguments and expected display values (JSON)", tests),
     el("p", {}, "SQL test inputs are strings; use explicit casts in SQL expressions. NULL binds SQL NULL. Sheet numbers use spreadsheet precision. XLSX compatibility depends on Excel LAMBDA support; SQL functions are not Excel formulas."),
     field("Active versions (edit together for dependent upgrades)", pins), group,
@@ -102,7 +116,8 @@ export function functionCompletion(input: HTMLInputElement, rpc: Rpc, engine: ()
     }
     if ((engine() === "formula" && !text.startsWith("=")) || quote) { matches = []; help.hidden = true; return; }
     const prefix = text.match(/([A-Za-z_][A-Za-z_0-9.]*)$/)?.[1]?.toUpperCase();
-    const active = functions.filter(f => f.versions.find(v => v.version === f.pinned)!.definition.kind === engine())
+    // Python functions are called from sheet cells and table columns alike.
+    const active = functions.filter(f => { const k = f.versions.find(v => v.version === f.pinned)!.definition.kind; return k === engine() || k === "python"; })
       .map(f => ({ name: f.name, help: signature(f) }));
     if (engine() === "formula") {
       const custom = new Set(active.map(f => f.name));
