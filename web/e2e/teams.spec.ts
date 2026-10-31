@@ -114,3 +114,73 @@ test("setup, sign-in, spaces, invitation, viewer limits, revocation and sign-out
   await expect(page.locator("a.wb-name", { hasText: "Budget" })).toBeVisible();
   await vera.context().close();
 });
+
+/** Call one WebSocket operation from the page (with its session cookie). */
+async function op(page: Page, workbook: string, name: string, params: Record<string, unknown> = {}): Promise<any> {
+  return page.evaluate(async ({ workbook, name, params }) => new Promise((ok, fail) => {
+    const ws = new WebSocket(`ws://${location.host}/ws/${workbook}`);
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(String(m.data));
+      if (msg.event === "hello") ws.send(JSON.stringify({ id: 1, op: name, ...params }));
+      else if (msg.id === 1) { ws.close(); msg.ok ? ok(msg.result) : fail(new Error(msg.error)); }
+    };
+    ws.onerror = () => fail(new Error("websocket failed"));
+  }), { workbook, name, params });
+}
+
+async function create(page: Page, name: string): Promise<string> {
+  return page.evaluate(async (name) => (await (await fetch("/api/workbooks", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+  })).json()).id, name);
+}
+
+// Its own server, with the admin created from the environment (as a deployment would).
+const second = new Server(["--auth", "accounts"], { ALEPHGRID_BOOTSTRAP_EMAIL: ADMIN.email, ALEPHGRID_BOOTSTRAP_PASSWORD: ADMIN.password });
+test.afterAll(async () => second.dispose());
+
+test("space library and quotas: publish a saved query, add it to another workbook, limit workbooks", async ({ page }) => {
+  await second.start();
+  await page.goto(`${second.url}/login`);
+  await signIn(page, ADMIN);
+  await expect(page.getByRole("navigation", { name: "Spaces" })).toContainText("General");
+  const a = await create(page, "Source");
+  const b = await create(page, "Target");
+  await op(page, a, "save_query", { name: "Answer", sql: "SELECT 42 AS answer" });
+  await page.reload();
+
+  const general = page.getByRole("navigation", { name: "Spaces" }).getByRole("button", { name: /^General/ }).first();
+  await general.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Library…" }).click();
+  await expect(page.getByText("Nothing published yet.")).toBeVisible();
+  await page.getByRole("button", { name: "Publish from a workbook…" }).click();
+  await page.getByRole("combobox", { name: /^Workbook/ }).selectOption({ label: "Source" });
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("combobox", { name: /^What/ }).selectOption({ label: "Query: Answer" });
+  await page.getByRole("button", { name: "Publish", exact: true }).click();
+  const table = page.getByRole("table", { name: "Library" });
+  await expect(table).toContainText("Answer");
+  await expect(table).toContainText("SELECT 42 AS answer");
+  await page.getByRole("button", { name: "Add Answer to a workbook" }).click();
+  await page.getByRole("combobox", { name: /^Workbook/ }).selectOption({ label: "Target" });
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByText("Added “Answer”")).toBeVisible();
+  const saved = await op(page, b, "saved_queries");
+  expect(saved.map((q: { name: string; sql: string }) => [q.name, q.sql])).toEqual([["Answer", "SELECT 42 AS answer"]]);
+  await page.getByLabel(/Only owners publish/).check();
+  await expect.poll(async () => page.evaluate(async () => (await (await fetch("/api/spaces")).json())
+    .find((s: { name: string }) => s.name === "General").publish_role)).toBe("owner");
+  await page.getByRole("button", { name: "Close" }).click();
+
+  // Limit General to the workbooks it has: a new one is refused with the reason.
+  await page.getByRole("button", { name: "Administrator" }).click();
+  await page.getByRole("menuitem", { name: "Usage and limits…" }).click();
+  await page.getByRole("button", { name: "Limits of General" }).click();
+  await page.getByRole("textbox", { name: "Workbooks", exact: true }).fill("2");
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByRole("table", { name: "Usage" })).toContainText("workbooks 2 of 2");
+  await page.getByRole("button", { name: "Close" }).click();
+  await general.click();
+  await page.getByRole("button", { name: "New workbook" }).click();
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByText(/holds 2 workbook\(s\), its limit/)).toBeVisible();
+});

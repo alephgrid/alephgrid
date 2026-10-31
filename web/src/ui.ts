@@ -173,11 +173,16 @@ export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dial
   });
   document.addEventListener("keydown", outside);
   dialog.addEventListener("mousedown", refocus);
+  // A dialog opened over another: the one beneath is inert (and out of the accessibility
+  // tree) until this one closes, so only the topmost modal is reachable.
+  const beneath = [...document.querySelectorAll<HTMLElement>(".backdrop")].filter((b) => !b.inert);
+  for (const b of beneath) b.inert = true;
   document.body.append(backdrop);
   return {
     close: () => {
       document.removeEventListener("keydown", outside);
       backdrop.remove();
+      for (const b of beneath) b.inert = false;
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     },
   };

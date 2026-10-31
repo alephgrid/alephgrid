@@ -3,7 +3,7 @@
 // only offer what the signed-in principal may do.
 
 import { api, HttpError, type InviteInfo, type Me, type SpaceListing } from "./api";
-import type { AuditEvent, Invite, OrgMember, OrgRole, SpaceMember, SpaceRole, Token } from "./types";
+import type { AuditEvent, Invite, LibraryKind, OrgMember, OrgRole, SpaceMember, SpaceRole, Token } from "./types";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast } from "./ui";
 
 type Navigate = (path: string) => void;
@@ -165,6 +165,7 @@ export function accountButton(me: Me, navigate: Navigate): HTMLElement | null {
     showMenu([
       ...admin.map((o) => ({ label: me.orgs.length > 1 ? `People of ${o.org.name}…` : "People…", action: () => peopleDialog(o.org.id, o.org.name, me) })),
       ...admin.map((o) => ({ label: me.orgs.length > 1 ? `Activity of ${o.org.name}…` : "Activity…", action: () => auditDialog(o.org.id) })),
+      ...admin.map((o) => ({ label: me.orgs.length > 1 ? `Usage of ${o.org.name}…` : "Usage and limits…", action: () => usageDialog(o.org.id) })),
       ...(me.user?.sign_in.includes("password") ? [{ label: "Change password…", action: changePassword }] : []),
       ...(admin.length || me.user?.sign_in.includes("password") ? ["sep" as const] : []),
       { label: "Sign out", action: async () => {
@@ -363,4 +364,94 @@ export function auditDialog(org: string): void {
 
 export function isUnauthenticated(e: unknown): boolean {
   return e instanceof HttpError && e.status === 401;
+}
+
+function bytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+/** Usage of each space against its limits; admins change a space's limits (7.07). */
+export function usageDialog(org: string): void {
+  panel("Usage and limits", async function render(body) {
+    const spaces = await api.usage(org);
+    const of = (used: string, limit: number | null | undefined, fmt: (n: number) => string = String) =>
+      limit === undefined || limit === null ? `${used} (no limit)` : `${used} of ${fmt(limit)}`;
+    const rows = spaces.map((u) => el("div", { class: "member-row", role: "row" },
+      el("span", { role: "cell" }, el("strong", {}, u.space.name)),
+      el("span", { role: "cell", class: "muted" },
+        `Storage ${of(bytes(u.storage_bytes), u.limits.storage_bytes, bytes)} · workbooks ${of(String(u.workbooks), u.limits.workbooks)} · `
+        + `open ${of(String(u.open_workbooks), u.limits.open_workbooks)} · jobs ${of(String(u.jobs), u.limits.jobs)}`),
+      el("span", { role: "cell" }, el("button", { class: "btn small", "aria-label": `Limits of ${u.space.name}`, onclick: async () => {
+        const o = u.overrides;
+        const gb = (n?: number | null) => (n === undefined || n === null ? "" : String(n / 2 ** 30));
+        const num = (n?: number | null) => (n === undefined || n === null ? "" : String(n));
+        const v = await formDialog(`Limits of “${u.space.name}”`, [
+          { name: "storage", label: "Storage (GB)", value: gb(o.storage_bytes), hint: "Leave empty for the server default." },
+          { name: "workbooks", label: "Workbooks", value: num(o.workbooks) },
+          { name: "jobs", label: "Bulk jobs at once", value: num(o.jobs) },
+          { name: "open", label: "Workbooks open at once", value: num(o.open_workbooks) },
+        ], "Save", (vals) => Object.values(vals).every((x) => x.trim() === "" || Number(x) >= 0) ? null : "Use numbers, or leave empty.");
+        if (!v) return;
+        const opt = (x: string, scale = 1) => (x.trim() === "" ? undefined : Math.round(Number(x) * scale));
+        try {
+          await api.setQuota(u.space.id, { storage_bytes: opt(v.storage, 2 ** 30), workbooks: opt(v.workbooks), jobs: opt(v.jobs), open_workbooks: opt(v.open) });
+          await render(body);
+        } catch (e) { toast((e as Error).message, "error"); }
+      } }, "Limits…"))));
+    fill(body, el("p", { class: "muted" }, "Storage counts each space's workbooks and its trash. Limits left empty use the server's defaults."),
+      el("div", { class: "member-table", role: "table", "aria-label": "Usage" }, ...rows));
+  });
+}
+
+const KIND_LABEL = { query: "Query", view: "View", function: "Function" } as const;
+
+/** A space's library (7.11): what its members published, to read and to add to a workbook. */
+export function libraryDialog(space: SpaceListing, workbooks: { id: string; name: string; role?: SpaceRole }[], me: Me): void {
+  const canPublish = space.role === "owner" || (space.role === "editor" && space.publish_role !== "owner");
+  const writable = workbooks.filter((w) => w.role !== "viewer");
+  panel(`Library of “${space.name}”`, async function render(body) {
+    const entries = await api.library(space.id);
+    const act = async (f: () => Promise<unknown>, done?: string) => {
+      try { await f(); if (done) toast(done, "success"); await render(body); } catch (e) { toast((e as Error).message, "error"); }
+    };
+    const rows = entries.map((e) => el("div", { class: "member-row", role: "row" },
+      el("span", { role: "cell" }, el("strong", {}, e.name), el("span", { class: "badge" }, KIND_LABEL[e.kind]), ` v${e.latest.version}`),
+      el("span", { role: "cell", class: "muted mono" }, e.kind === "query" ? String((e.latest.payload as { sql?: string }).sql ?? "").slice(0, 80) : ""),
+      el("span", { role: "cell" }, writable.length ? el("button", { class: "btn small", "aria-label": `Add ${e.name} to a workbook`, onclick: async () => {
+        const v = await formDialog(`Add “${e.name}” to a workbook`, [{ name: "workbook", label: "Workbook", type: "select",
+          options: writable.map((w) => ({ value: w.id, label: w.name })) }], "Add");
+        if (v) await act(() => api.useLibraryEntry(v.workbook, e.id), `Added “${e.name}”`);
+      } }, "Add to workbook…") : null),
+      el("span", { role: "cell" }, (space.role === "owner" || e.created_by === `user:${me.user?.id}` || me.kind === "local")
+        ? el("button", { class: "btn small", "aria-label": `Retire ${e.name}`, onclick: () => act(() => api.changeLibraryEntry(space.id, e.id, { retired: true })) }, "Retire")
+        : null)));
+    const publish = canPublish && workbooks.length ? el("button", { class: "btn btn-primary", onclick: async () => {
+      const w = await formDialog("Publish from a workbook", [{ name: "workbook", label: "Workbook", type: "select",
+        options: workbooks.map((w) => ({ value: w.id, label: w.name })) }], "Next");
+      if (!w) return;
+      const s = await api.shareable(w.workbook);
+      const options = [
+        ...s.queries.map((q) => ({ value: `query:${q.id}`, label: `Query: ${q.name}` })),
+        ...s.views.map((v) => ({ value: `view:${v.id}`, label: `View: ${v.name} (${v.spec.table})` })),
+        ...s.functions.map((f) => ({ value: `function:${f.name}`, label: `Function: ${f.name} v${f.pinned}` })),
+      ];
+      if (!options.length) { toast("That workbook has no saved queries, views or functions yet."); return; }
+      const o = await formDialog("Publish to the library", [{ name: "object", label: "What", type: "select", options }], "Publish");
+      if (!o) return;
+      const [kind, ...rest] = o.object.split(":");
+      await act(() => api.publishToLibrary(space.id, w.workbook, kind as LibraryKind, rest.join(":")), "Published");
+    } }, "Publish from a workbook…") : null;
+    const policy = space.role === "owner" ? el("label", { class: "field-inline" },
+      el("input", { type: "checkbox", checked: space.publish_role === "owner", onchange: async (ev: Event) => {
+        const only = (ev.target as HTMLInputElement).checked;
+        await act(async () => { await api.setPublishRole(space.id, only ? "owner" : "editor"); space.publish_role = only ? "owner" : "editor"; });
+      } }), " Only owners publish (functions and library entries)") : null;
+    fill(body,
+      el("p", { class: "muted" }, "Published versions never change. Anyone in the space can read them; adding one to a workbook needs edit access there."),
+      rows.length ? el("div", { class: "member-table", role: "table", "aria-label": "Library" }, ...rows) : el("p", {}, "Nothing published yet."),
+      publish, policy);
+  });
 }

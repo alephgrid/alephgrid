@@ -161,11 +161,68 @@ Removing someone from the identity provider, or from a group, takes effect at th
 Alephgrid does not poll the identity provider. Removing an organization member or a space role
 takes effect immediately.
 
+## Sharing: space libraries (7.11)
+
+Saved queries, saved views and function versions are shared within a space through its library
+(`library.rs`, *Library…* on a space). Entries live in the control database, so they outlive the
+workbook they came from; their versions never change.
+
+| Permission | Who | Route |
+|---|---|---|
+| publish an entry or a new version of it | the space's publish role (`editor` by default, `owner` if the space says *only owners publish*), and viewing the source workbook, which must be in the space | `POST /api/spaces/{id}/library` |
+| read entries and their versions (SQL, view spec, function source) | any role in the space | `GET /api/spaces/{id}/library[/{entry}]` |
+| use one: copy it into a workbook of the space, to run or adapt | `edit` on that workbook; for a function, `publish` there (it becomes that workbook's next version) | `POST /api/workbooks/{id}/library` |
+| rename or retire an entry | its publisher, or an owner | `PATCH /api/spaces/{id}/library/{entry}` |
+
+The publish role also governs `publish_function` and `pin_functions` in the space's workbooks, so
+publication stays separate from editing; owners set it with `PATCH /api/spaces/{id}`
+(`publish_role`). Executing a function needs only the right to read the workbook its formulas are
+in. Libraries do not cross spaces: publishing from, or using in, a workbook of another space is
+refused. Publishing, using, changing entries and the publish role are audited.
+
+## Quotas (7.07)
+
+Each space has four limits (`quota.rs`). A limit is the space's own override, set by an
+organization admin (`PUT /api/spaces/{id}/quota`; owners cannot raise their own), or else the server
+default (`--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks`); none
+means unlimited.
+
+| Limit | Counts | Refused when reached | Status / code |
+|---|---|---|---|
+| storage | bytes of the space's workbook directories, trash included | new, duplicated or moved-in workbooks; uploads (checked before and while they stream); staged imports; bulk changes (query tables, copies, transforms, refreshes) | 507 / `quota` |
+| workbooks | workbooks outside the trash | create, duplicate, move in, restore | 507 |
+| jobs | bulk requests (queries, exports, imports, copies) queued or running | the next bulk request of the space; other spaces are unaffected | 429 / `quota` |
+| open workbooks | live allocations of the space's workbooks, starts included | opening (or creating) another one | 429 |
+
+Small interactive edits still work over the storage limit, so people can delete data to get under
+it. Storage totals are measured from the files, cached for 2 seconds and remeasured after imports
+and bulk changes, so a burst of uploads can pass the limit by at most what arrives within that
+time. Usage with the limits in force: `GET /api/orgs/{id}/usage` (admins; *Usage and limits…* in
+the account menu) and `GET /api/admin/usage`. Quota changes are audited (`space_quota_changed`).
+
+## Audit log (7.10)
+
+The control database's `audit` table, newest first through `GET /api/orgs/{id}/audit`
+(organization admins; `?workbook=<id>`, `?before=<seq>`, `?limit=`) and `GET /api/admin/audit`
+(instance admin). Each event has its actor (`user:<id>`, `token:<id>`, `local`, `system` or
+`email:<address>` for a failed sign-in), action, organization, space, workbook, outcome and detail.
+
+| Recorded | Actions | Written |
+|---|---|---|
+| Access changes | `signed_in`, `sign_in_failed`, `signed_out`, `password_changed`, `instance_admin_created`, `organization_*`, `space_*`, `space_role_granted/removed`, `invitation_created/accepted/revoked`, `token_created/revoked`, `user_disabled/enabled`, `workbook_created/duplicated/moved/deleted/restored/purged`, `backup_created` | before the reply |
+| Workbook changes | `workbook_changed` (operation, revision, summary) for every committed change of every connection | batched within 250 ms |
+| Data in and out | `data_imported` (file, bytes, revision), `data_exported` (table/query/xlsx, bytes, rows), `export_downloaded` | batched |
+| Functions | `function_published` (name, version), `functions_pinned` | batched |
+
+Batched records do not delay the change they describe. Shutdown writes what is queued; a crash can
+lose the records of the last quarter second, but the workbook's own history (written in the same
+transaction as each change, last 10,000 revisions) names every change's actor too. Refused requests
+change nothing and are not `workbook_changed`. The log is not pruned yet.
+
 ## Limits and not yet done
 
 * One process serves every space (`shared_process`); roles are an authorization boundary, not a
-  resource-isolation boundary (see DURABILITY.md). Quotas are 7.07.
+  resource-isolation boundary (see DURABILITY.md). Quotas bound what a space uses; memory and
+  threads are still shared by the host budget (compute policies are 7.13).
 * No per-user stars, per-workbook grants, SCIM provisioning or identity-provider back-channel logout.
-* Audit records cover sign-in, setup, memberships, roles, invitations, tokens, spaces,
-  organizations and workbook create/move/delete/restore/purge and backups; mutations, exports and
-  function publication are 7.10.
+* The audit log has no retention limit or export yet.

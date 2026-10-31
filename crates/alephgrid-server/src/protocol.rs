@@ -24,6 +24,8 @@ use crate::runtime::{
 };
 use crate::auth::store::{AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
 use crate::auth::{AuthMode, Cap, OrgRole, SpaceRole};
+use crate::library::{LibraryEntry, LibraryKind, LibraryVersion};
+use crate::quota::{QuotaKind, QuotaLimits, SpaceUsage};
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch};
 use crate::ws::{Event, Op, QueryExport};
 
@@ -43,7 +45,7 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\"
   | \"not_allowed\" | \"sql_change\" | \"bad_parameter\" | \"schema_changed\"
-  | \"unauthenticated\" | \"forbidden\" | \"not_found\" | \"bad_request\";
+  | \"unauthenticated\" | \"forbidden\" | \"not_found\" | \"bad_request\" | \"quota\";
 
 /** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
 export type Reply =
@@ -157,7 +159,7 @@ pub fn bindings() -> String {
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
-        SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent,
+        SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
         HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,

@@ -583,6 +583,8 @@ pub struct Config {
     pub sheet_copy_rows: usize,
     /// Sign-in and sessions.
     pub auth: crate::auth::AuthConfig,
+    /// Default limits of every space (7.07); a space's own override wins.
+    pub quota: crate::quota::QuotaLimits,
     pub allow_sql: bool,
     /// Memory shared by every open workbook's DuckDB instance. Defaults to 80% of RAM (or
     /// of the container's limit).
@@ -621,6 +623,7 @@ impl Config {
             data_dir: data_dir.into(),
             sheet_copy_rows: crate::ws::SHEET_COPY_ROWS,
             auth: crate::auth::AuthConfig::default(),
+            quota: crate::quota::QuotaLimits::default(),
             allow_sql: true,
             memory_budget: None,
             threads: None,
@@ -725,6 +728,8 @@ pub struct AppState {
     pub auth: crate::auth::Auth,
     /// Serializes space deletion with workbooks moving into spaces.
     spaces: Mutex<()>,
+    /// Running jobs, starts and measured storage per space (quotas).
+    pub quota: crate::quota::Counters,
     next_session: AtomicU64,
     /// Exclusive lock on the data directory: one server per data directory.
     _dir_lock: File,
@@ -864,6 +869,7 @@ impl AppState {
             controller,
             auth,
             spaces: Mutex::new(()),
+            quota: crate::quota::Counters::default(),
             next_session: AtomicU64::new(1),
             _dir_lock: dir_lock,
             shutting_down: AtomicBool::new(false),
@@ -957,6 +963,11 @@ impl AppState {
         if self.auth.store.space(space)?.is_none() {
             bail!(crate::auth::not_found("space not found"));
         }
+        self.check_new_workbook(space, 0)?;
+        if let Some(limit) = self.limits(space)?.open_workbooks {
+            // A new workbook opens at once: refuse before making it rather than leave it closed.
+            drop(self.quota.opening(space, self.open_in(space), Some(limit))?);
+        }
         let id = new_id();
         let dir = self.workbook_dir(&id);
         std::fs::create_dir_all(&dir)?;
@@ -994,6 +1005,14 @@ impl AppState {
         if !self.workbook_dir(id).join("workbook.json").exists() {
             bail!("workbook {id} not found");
         }
+        if self.controller.handle(id).is_none() {
+            // A start: counted against the space's open workbooks until it is live.
+            let space = self.workbook_space(id)?;
+            if let Some(limit) = self.limits(&space)?.open_workbooks {
+                let _opening = self.quota.opening(&space, self.open_in(&space), Some(limit))?;
+                return Ok(self.controller.ensure(id, operation)?);
+            }
+        }
         Ok(self.controller.ensure(id, operation)?)
     }
 
@@ -1021,6 +1040,9 @@ impl AppState {
         if let Some(space) = &patch.space {
             if self.auth.store.space(space)?.is_none() {
                 bail!(crate::auth::not_found("space not found"));
+            }
+            if self.workbook_space(id)? != *space {
+                self.check_new_workbook(space, dir_size(&self.workbook_dir(id)))?;
             }
         }
         let moved = patch.space.is_some();
@@ -1052,6 +1074,7 @@ impl AppState {
     pub fn duplicate(&self, id: &str) -> Result<WorkbookMeta> {
         let src = self.get(id)?;
         let src_meta = src.meta.lock().unwrap().clone();
+        self.check_new_workbook(&src_meta.space, dir_size(&self.workbook_dir(id)))?;
         let new = new_id();
         let dir = self.workbook_dir(&new);
         std::fs::create_dir_all(&dir)?;
@@ -1150,6 +1173,9 @@ impl AppState {
         if self.auth.store.space(&meta.space)?.is_none() {
             bail!("the space of workbook {id} no longer exists");
         }
+        let limit = self.limits(&meta.space)?.workbooks;
+        let count = self.list()?.into_iter().filter(|w| w.meta.space == meta.space).count() as u64;
+        crate::quota::check_workbooks(count, limit)?;
         meta.deleted_at = None;
         write_meta(&from, &meta)?;
         std::fs::rename(&from, &to)?;
@@ -1187,6 +1213,7 @@ impl AppState {
     pub fn checkpoint_all(&self) {
         self.begin_shutdown();
         self.controller.shutdown();
+        self.auth.close_audit();
     }
 
     // ---------------------------------------------------------------- spaces

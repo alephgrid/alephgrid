@@ -75,6 +75,23 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_OIDC_JOIN", value_enum, default_value = "invite")]
     oidc_join: alephgrid_server::auth::oidc::OidcJoin,
 
+    /// Default storage limit of each space (its workbooks and trash), e.g. "500GB".
+    /// Organization admins can set other limits per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_STORAGE", value_parser = parse_size)]
+    space_storage: Option<u64>,
+
+    /// Default most workbooks per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_WORKBOOKS")]
+    space_workbooks: Option<u64>,
+
+    /// Default most bulk jobs (queries, imports, exports, copies) running at once per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_JOBS")]
+    space_jobs: Option<u64>,
+
+    /// Default most workbooks open at once per space (compute).
+    #[arg(long, env = "ALEPHGRID_SPACE_OPEN_WORKBOOKS")]
+    space_open_workbooks: Option<u64>,
+
     /// Serve a network interface without sign-in. Anyone who can reach the port can read,
     /// change and delete every workbook.
     #[arg(long, env = "ALEPHGRID_UNSAFE_NO_AUTH")]
@@ -224,6 +241,12 @@ async fn main() -> Result<()> {
 
     let mut config = Config::new(cli.data_dir.clone());
     config.sheet_copy_rows = cli.sheet_copy_rows.max(1);
+    config.quota = alephgrid_server::quota::QuotaLimits {
+        storage_bytes: cli.space_storage,
+        workbooks: cli.space_workbooks,
+        jobs: cli.space_jobs,
+        open_workbooks: cli.space_open_workbooks,
+    };
     config.auth = AuthConfig {
         mode: cli.auth,
         public_url: public_url.clone(),

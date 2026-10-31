@@ -13,7 +13,7 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = "overloaded" | "deadline_exceeded" | "cancelled" | "too_large" | "capacity" | "unavailable"
   | "not_allowed" | "sql_change" | "bad_parameter" | "schema_changed"
-  | "unauthenticated" | "forbidden" | "not_found" | "bad_request";
+  | "unauthenticated" | "forbidden" | "not_found" | "bad_request" | "quota";
 
 /** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
 export type Reply =
@@ -374,7 +374,12 @@ export type AuthMode = "local" | "accounts";
 
 export type Org = { id: string, name: string, created_at: number, };
 
-export type Space = { id: string, org_id: string, name: string, created_at: number, };
+export type Space = { id: string, org_id: string, name: string, created_at: number, 
+/**
+ * The least role that may publish: function versions and pins in the space's
+ * workbooks, and entries of its library (7.11). `editor` or `owner`.
+ */
+publish_role: SpaceRole, };
 
 export type PublicUser = { id: string, email: string, name: string, instance_admin: boolean, disabled: boolean, 
 /**
@@ -409,6 +414,35 @@ actor: string, action: string, org_id?: string, space_id?: string, workbook?: st
  * `ok` or `denied`.
  */
 outcome: string, detail: Record<string, unknown>, };
+
+export type QuotaLimits = { storage_bytes?: number, workbooks?: number, jobs?: number, open_workbooks?: number, };
+
+export type QuotaKind = "storage" | "workbooks" | "jobs" | "open_workbooks";
+
+export type SpaceUsage = { space: Space, 
+/**
+ * Bytes of its workbooks, the trash included.
+ */
+storage_bytes: number, trash_bytes: number, workbooks: number, open_workbooks: number, jobs: number, 
+/**
+ * The limits that apply.
+ */
+limits: QuotaLimits, 
+/**
+ * The space's own overrides of the server defaults.
+ */
+overrides: QuotaLimits, };
+
+export type LibraryKind = "query" | "view" | "function";
+
+export type LibraryVersion = { version: number, 
+/**
+ * The saved query (`name`, `kind`, `sql`, `params`), view (`name`, `spec`, `widths`) or
+ * function definition as published.
+ */
+payload: Record<string, unknown>, source_workbook: string, published_by: string, published_at: number, };
+
+export type LibraryEntry = { id: string, space_id: string, kind: LibraryKind, name: string, created_by: string, created_at: number, retired_at?: number, latest: LibraryVersion, };
 
 export type HistoryEntry = { revision: number, mutation_id?: string, op: string, actor?: string, at_ms: number, 
 /**

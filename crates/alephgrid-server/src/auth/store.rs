@@ -28,7 +28,13 @@ CREATE TABLE IF NOT EXISTS users(
     instance_admin BOOLEAN NOT NULL DEFAULT false, disabled BOOLEAN NOT NULL DEFAULT false,
     created_at BIGINT NOT NULL, last_login BIGINT);
 CREATE TABLE IF NOT EXISTS org_members(org_id VARCHAR NOT NULL, user_id VARCHAR NOT NULL, role VARCHAR NOT NULL, PRIMARY KEY(org_id, user_id));
-CREATE TABLE IF NOT EXISTS spaces(id VARCHAR PRIMARY KEY, org_id VARCHAR NOT NULL, name VARCHAR NOT NULL, created_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS spaces(id VARCHAR PRIMARY KEY, org_id VARCHAR NOT NULL, name VARCHAR NOT NULL, created_at BIGINT NOT NULL, publish_role VARCHAR NOT NULL DEFAULT 'editor');
+CREATE TABLE IF NOT EXISTS library_entries(
+    id VARCHAR PRIMARY KEY, space_id VARCHAR NOT NULL, kind VARCHAR NOT NULL, name VARCHAR NOT NULL, created_by VARCHAR NOT NULL,
+    created_at BIGINT NOT NULL, retired_at BIGINT);
+CREATE TABLE IF NOT EXISTS library_versions(
+    entry_id VARCHAR NOT NULL, version BIGINT NOT NULL, payload VARCHAR NOT NULL, source_workbook VARCHAR NOT NULL,
+    published_by VARCHAR NOT NULL, published_at BIGINT NOT NULL, PRIMARY KEY(entry_id, version));
 CREATE TABLE IF NOT EXISTS space_members(space_id VARCHAR NOT NULL, kind VARCHAR NOT NULL, principal VARCHAR NOT NULL, role VARCHAR NOT NULL, PRIMARY KEY(space_id, kind, principal));
 CREATE TABLE IF NOT EXISTS sessions(hash VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, via VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS tokens(
@@ -38,6 +44,7 @@ CREATE TABLE IF NOT EXISTS invites(
     id VARCHAR PRIMARY KEY, hash VARCHAR NOT NULL, org_id VARCHAR NOT NULL, email VARCHAR NOT NULL, org_role VARCHAR NOT NULL,
     space_id VARCHAR, space_role VARCHAR, created_by VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
     accepted_by VARCHAR, accepted_at BIGINT, revoked_at BIGINT);
+CREATE TABLE IF NOT EXISTS space_quotas(space_id VARCHAR PRIMARY KEY, storage_bytes BIGINT, workbooks BIGINT, jobs BIGINT, open_workbooks BIGINT);
 CREATE TABLE IF NOT EXISTS audit(
     seq BIGINT PRIMARY KEY, at_ms BIGINT NOT NULL, actor VARCHAR NOT NULL, action VARCHAR NOT NULL, org_id VARCHAR,
     space_id VARCHAR, workbook VARCHAR, outcome VARCHAR NOT NULL, detail VARCHAR NOT NULL);
@@ -56,6 +63,30 @@ pub struct Space {
     pub org_id: String,
     pub name: String,
     pub created_at: u64,
+    /// The least role that may publish: function versions and pins in the space's
+    /// workbooks, and entries of its library (7.11). `editor` or `owner`.
+    pub publish_role: SpaceRole,
+}
+
+impl Space {
+    /// Whether `role` may do `cap` here: publication follows the space's own setting.
+    pub fn allows(&self, role: SpaceRole, cap: super::Cap) -> bool {
+        match cap {
+            super::Cap::Publish => role >= self.publish_role.max(SpaceRole::Editor),
+            _ => role.allows(cap),
+        }
+    }
+}
+
+fn space_row(r: &duckdb::Row) -> duckdb::Result<Space> {
+    let publish: String = r.get(4)?;
+    Ok(Space {
+        id: r.get(0)?,
+        org_id: r.get(1)?,
+        name: r.get(2)?,
+        created_at: r.get::<_, i64>(3)? as u64,
+        publish_role: SpaceRole::parse(&publish).unwrap_or(SpaceRole::Editor),
+    })
 }
 
 /// A user as stored; [`User::public`] is what clients see.
@@ -232,6 +263,18 @@ pub struct Audit<'a> {
     pub space_id: Option<&'a str>,
     pub workbook: Option<&'a str>,
     pub denied: bool,
+    pub detail: serde_json::Value,
+}
+
+/// An audit record owned for writing later (see [`super::Auth::record`]).
+#[derive(Debug, Clone, Default)]
+pub struct AuditRecord {
+    pub actor: String,
+    pub action: String,
+    pub org_id: Option<String>,
+    pub space_id: Option<String>,
+    pub workbook: Option<String>,
+    pub at_ms: u64,
     pub detail: serde_json::Value,
 }
 
@@ -594,8 +637,8 @@ impl Store {
         if n > 0 {
             bail!("a space named {name:?} already exists");
         }
-        let s = Space { id: id.to_string(), org_id: org.to_string(), name: name.to_string(), created_at: now_ms() };
-        c.execute("INSERT INTO spaces VALUES (?, ?, ?, ?)", params![s.id, s.org_id, s.name, s.created_at as i64])?;
+        let s = Space { id: id.to_string(), org_id: org.to_string(), name: name.to_string(), created_at: now_ms(), publish_role: SpaceRole::Editor };
+        c.execute("INSERT INTO spaces VALUES (?, ?, ?, ?, 'editor')", params![s.id, s.org_id, s.name, s.created_at as i64])?;
         Ok(s)
     }
 
@@ -604,16 +647,13 @@ impl Store {
     }
 
     pub fn space_in(c: &Connection, id: &str) -> Result<Option<Space>> {
-        Ok(c.query_row("SELECT id, org_id, name, created_at FROM spaces WHERE id = ?", params![id], |r| {
-            Ok(Space { id: r.get(0)?, org_id: r.get(1)?, name: r.get(2)?, created_at: r.get::<_, i64>(3)? as u64 })
-        })
-        .optional()?)
+        Ok(c.query_row("SELECT id, org_id, name, created_at, publish_role FROM spaces WHERE id = ?", params![id], space_row).optional()?)
     }
 
     pub fn spaces(&self) -> Result<Vec<Space>> {
         self.read(|c| {
-            let mut s = c.prepare("SELECT id, org_id, name, created_at FROM spaces ORDER BY lower(name), id")?;
-            let rows = s.query_map([], |r| Ok(Space { id: r.get(0)?, org_id: r.get(1)?, name: r.get(2)?, created_at: r.get::<_, i64>(3)? as u64 }))?;
+            let mut s = c.prepare("SELECT id, org_id, name, created_at, publish_role FROM spaces ORDER BY lower(name), id")?;
+            let rows = s.query_map([], space_row)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
     }
@@ -635,14 +675,50 @@ impl Store {
         })
     }
 
+    pub fn set_publish_role(&self, id: &str, role: SpaceRole) -> Result<()> {
+        self.txn(|c| {
+            c.execute("UPDATE spaces SET publish_role = ? WHERE id = ?", params![role.as_str(), id])?;
+            Ok(())
+        })
+    }
+
     /// Remove a space record with its memberships and tokens (the caller checked it holds
     /// no workbooks).
     pub fn delete_space(&self, id: &str) -> Result<()> {
         self.txn(|c| {
             c.execute("DELETE FROM space_members WHERE space_id = ?", params![id])?;
+            c.execute("DELETE FROM space_quotas WHERE space_id = ?", params![id])?;
+            c.execute("DELETE FROM library_versions WHERE entry_id IN (SELECT id FROM library_entries WHERE space_id = ?)", params![id])?;
+            c.execute("DELETE FROM library_entries WHERE space_id = ?", params![id])?;
             c.execute("UPDATE tokens SET revoked_at = ? WHERE space_id = ? AND revoked_at IS NULL", params![now_ms() as i64, id])?;
             c.execute("UPDATE invites SET revoked_at = ? WHERE space_id = ? AND accepted_at IS NULL AND revoked_at IS NULL", params![now_ms() as i64, id])?;
             c.execute("DELETE FROM spaces WHERE id = ?", params![id])?;
+            Ok(())
+        })
+    }
+
+    // ---------------------------------------------------------- space quotas
+
+    /// A space's overrides of the default limits.
+    pub fn space_quota(&self, space: &str) -> Result<crate::quota::QuotaLimits> {
+        self.read(|c| {
+            let q = c
+                .query_row("SELECT storage_bytes, workbooks, jobs, open_workbooks FROM space_quotas WHERE space_id = ?", params![space], |r| {
+                    let v = |i: usize| r.get::<_, Option<i64>>(i).map(|v| v.map(|v| v as u64));
+                    Ok(crate::quota::QuotaLimits { storage_bytes: v(0)?, workbooks: v(1)?, jobs: v(2)?, open_workbooks: v(3)? })
+                })
+                .optional()?;
+            Ok(q.unwrap_or_default())
+        })
+    }
+
+    pub fn set_space_quota(&self, space: &str, q: &crate::quota::QuotaLimits) -> Result<()> {
+        let v = |x: Option<u64>| x.map(|v| v.min(i64::MAX as u64) as i64);
+        self.txn(|c| {
+            c.execute(
+                "INSERT INTO space_quotas VALUES (?, ?, ?, ?, ?) ON CONFLICT (space_id) DO UPDATE SET storage_bytes = excluded.storage_bytes, workbooks = excluded.workbooks, jobs = excluded.jobs, open_workbooks = excluded.open_workbooks",
+                params![space, v(q.storage_bytes), v(q.workbooks), v(q.jobs), v(q.open_workbooks)],
+            )?;
             Ok(())
         })
     }
@@ -854,14 +930,30 @@ impl Store {
         self.txn(|c| Self::audit_in(c, a))
     }
 
+    /// Append records in one transaction, keeping their order and times.
+    pub fn audit_many(&self, records: &[AuditRecord]) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.txn(|c| {
+            let base: i64 = c.query_row("SELECT coalesce(max(seq), 0) FROM audit", [], |r| r.get(0))?;
+            let mut stmt = c.prepare("INSERT INTO audit VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', ?)")?;
+            for (i, r) in records.iter().enumerate() {
+                let detail = if r.detail.is_null() { "{}".to_string() } else { r.detail.to_string() };
+                stmt.execute(params![base + 1 + i as i64, r.at_ms as i64, r.actor, r.action, r.org_id, r.space_id, r.workbook, detail])?;
+            }
+            Ok(())
+        })
+    }
+
     /// Audit events, newest first: of one organization (and its spaces), or all with `None`.
-    pub fn audit_events(&self, org: Option<&str>, before: Option<u64>, limit: usize) -> Result<Vec<AuditEvent>> {
+    pub fn audit_events(&self, org: Option<&str>, workbook: Option<&str>, before: Option<u64>, limit: usize) -> Result<Vec<AuditEvent>> {
         self.read(|c| {
             let mut s = c.prepare(
                 "SELECT seq, at_ms, actor, action, org_id, space_id, workbook, outcome, detail FROM audit
-                 WHERE (?1 IS NULL OR org_id = ?1) AND (?2 IS NULL OR seq < ?2) ORDER BY seq DESC LIMIT ?3",
+                 WHERE (?1 IS NULL OR org_id = ?1) AND (?2 IS NULL OR seq < ?2) AND (?4 IS NULL OR workbook = ?4) ORDER BY seq DESC LIMIT ?3",
             )?;
-            let rows = s.query_map(params![org, before.map(|b| b as i64), limit as i64], |r| {
+            let rows = s.query_map(params![org, before.map(|b| b as i64), limit as i64, workbook], |r| {
                 let detail: String = r.get(8)?;
                 Ok(AuditEvent {
                     seq: r.get::<_, i64>(0)? as u64,

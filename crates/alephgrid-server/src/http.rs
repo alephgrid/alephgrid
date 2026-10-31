@@ -54,6 +54,13 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(q) = e.chain().find_map(|c| c.downcast_ref::<crate::quota::QuotaExceeded>()) {
+            let status = match q.kind {
+                crate::quota::QuotaKind::Storage | crate::quota::QuotaKind::Workbooks => StatusCode::INSUFFICIENT_STORAGE,
+                crate::quota::QuotaKind::Jobs | crate::quota::QuotaKind::OpenWorkbooks => StatusCode::TOO_MANY_REQUESTS,
+            };
+            return ApiError::new(status, q.message.clone());
+        }
         if let Some(d) = e.chain().find_map(|c| c.downcast_ref::<Denied>()) {
             let status = match d {
                 Denied::Unauthenticated => StatusCode::UNAUTHORIZED,
@@ -179,6 +186,13 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/orgs/{id}/invites", get(crate::auth::routes::list_invites).post(crate::auth::routes::create_invite))
         .route("/api/orgs/{id}/invites/{invite}", axum::routing::delete(crate::auth::routes::revoke_invite))
         .route("/api/orgs/{id}/audit", get(crate::auth::routes::org_audit))
+        .route("/api/orgs/{id}/usage", get(crate::auth::routes::org_usage))
+        .route("/api/spaces/{id}/quota", axum::routing::put(crate::auth::routes::set_space_quota))
+        .route("/api/admin/usage", get(crate::auth::routes::instance_usage))
+        .route("/api/spaces/{id}/library", get(crate::library::list).post(crate::library::publish_entry))
+        .route("/api/spaces/{id}/library/{entry}", get(crate::library::entry).patch(crate::library::change_entry))
+        .route("/api/workbooks/{id}/library", post(crate::library::use_entry))
+        .route("/api/workbooks/{id}/shareable", get(shareable))
         .route("/api/users/{id}", patch(crate::auth::routes::update_user))
         .route(
             "/api/workbooks/{id}/import",
@@ -509,6 +523,24 @@ async fn delete_workbook(State(state): State<Shared>, Extension(p): Extension<Pr
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// What a workbook could publish to its space's library: its saved queries, views and
+/// functions (readers of the workbook may see them).
+async fn shareable(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::View).await?;
+    let h = open(&state, &id).await?;
+    let out = h
+        .run(
+            http_job(Class::Interactive, &state),
+            None,
+            None,
+            Work::Read(Box::new(|r: &alephgrid_core::Reader| {
+                Ok(json!({ "queries": r.saved_queries()?, "views": r.saved_views(None)?, "functions": r.functions()? }))
+            })),
+        )
+        .await?;
+    Ok(Json(out))
+}
+
 /// Trashed workbooks of the spaces where the principal may restore them.
 async fn list_trash(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
     Ok(Json(
@@ -575,18 +607,21 @@ async fn import_file(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
-    allowed(&state, &p, &id, Cap::Edit).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Edit).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (scratch, path, size) = receive(&state, &id, &file_name, &headers, body).await?;
     let import_path = path.clone();
+    let actor = p.actor();
     let result = h
         .run(
             http_job(Class::Bulk, &state),
             None,
             None,
             Work::Write(Box::new(move |wb| {
-                let imported = wb.import_any(&import_path, q.table.as_deref())?;
+                let imported = wb.acting_as(&actor, |wb| wb.import_any(&import_path, q.table.as_deref()))?;
                 Ok((imported, wb.revision()?))
             })),
         )
@@ -594,6 +629,8 @@ async fn import_file(
     let _ = tokio::fs::remove_dir_all(&scratch).await;
     state.controller.release_upload(size);
     let (imported, revision) = result?;
+    state.auth.record(&p, "data_imported", &space, &id, json!({ "file": file_name, "bytes": size, "revision": revision }));
+    state.quota.forget(&space.id);
     let h2 = h.clone();
     let _ = blocking(move || h2.refresh_summary()).await;
     let _ = h.events.send(ws::Event::TablesChanged { origin: 0, revision });
@@ -601,7 +638,7 @@ async fn import_file(
 }
 
 /// A scheduler job for an HTTP request (session 0, a request number of its own).
-fn http_job(class: Class, state: &Shared) -> crate::state::Job {
+pub(crate) fn http_job(class: Class, state: &Shared) -> crate::state::Job {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(1);
     let timeout = if class == Class::Bulk { state.config.job_timeout } else { state.config.request_timeout };
@@ -627,6 +664,25 @@ async fn receive(state: &Shared, workbook: &str, file_name: &str, headers: &Head
     if let Some(n) = declared.filter(|&n| n > max) {
         return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_big(n, max)));
     }
+    // The space's storage: what the file would add, before and while it arrives.
+    let space = {
+        let (s, w) = (state.clone(), workbook.to_string());
+        blocking(move || s.workbook_space(&w)).await?
+    };
+    let quota = {
+        let (s, sp) = (state.clone(), space.clone());
+        blocking(move || s.limits(&sp)).await?.storage_bytes
+    };
+    let used = match quota {
+        Some(_) => {
+            let (s, sp) = (state.clone(), space.clone());
+            Some(blocking(move || s.storage_used(&sp)).await?)
+        }
+        None => None,
+    };
+    if let Some(u) = used {
+        crate::quota::check_storage(u, declared.unwrap_or(0), quota).map_err(ApiError::from)?;
+    }
     let scratch = state.scratch_dir(".uploads", workbook)?;
     let path = scratch.join(file_name);
     let mut reserved = 0u64;
@@ -638,6 +694,9 @@ async fn receive(state: &Shared, workbook: &str, file_name: &str, headers: &Head
             let len = chunk.len() as u64;
             if reserved + len > max {
                 return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, too_big(reserved + len, max)));
+            }
+            if let Some(u) = used {
+                crate::quota::check_storage(u, reserved + len, quota).map_err(ApiError::from)?;
             }
             if let Err(left) = state.controller.reserve_upload(len) {
                 return Err(ApiError::new(
@@ -687,7 +746,9 @@ async fn stage_upload(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
-    allowed(&state, &p, &id, Cap::Edit).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Edit).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (dir, path, size_bytes) = receive(&state, &id, &file_name, &headers, body).await?;
@@ -718,7 +779,9 @@ async fn preview_upload(
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    allowed(&state, &p, &id, Cap::Edit).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Edit).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
     let work = Work::Write(Box::new(move |wb: &mut alephgrid_core::Workbook| wb.preview_any(&u.path, &req.types)));
@@ -733,18 +796,28 @@ async fn import_upload(
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    allowed(&state, &p, &id, Cap::Edit).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Edit).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
+    {
+        let (st, sp, n) = (state.clone(), space.id.clone(), u.size_bytes);
+        blocking(move || st.check_storage(&sp, n)).await?;
+    }
     let h2 = h.clone();
     let job = req.job.clone();
+    let actor = p.actor();
+    let (file, bytes) = (u.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), u.size_bytes);
     let work = Work::Write(Box::new(move |wb: &mut alephgrid_core::Workbook| {
         *h2.job.lock().unwrap() = job;
-        let out = wb.import_any_with(&u.path, req.table.as_deref(), &req.types).and_then(|i| Ok((i, wb.revision()?)));
+        let out = wb.acting_as(&actor, |wb| wb.import_any_with(&u.path, req.table.as_deref(), &req.types)).and_then(|i| Ok((i, wb.revision()?)));
         *h2.job.lock().unwrap() = None;
         out
     }));
     let (imported, revision) = h.run(http_job(Class::Bulk, &state), None, None, work).await?;
+    state.auth.record(&p, "data_imported", &space, &id, json!({ "file": file, "bytes": bytes, "revision": revision }));
+    state.quota.forget(&space.id);
     state.remove_upload(&upload);
     let h3 = h.clone();
     let _ = blocking(move || h3.refresh_summary()).await;
@@ -804,13 +877,16 @@ async fn export(
     Path(id): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> ApiResult<Response> {
-    allowed(&state, &p, &id, Cap::Export).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Export).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
     let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
+    let table = spec.table.clone();
     let scratch = state.scratch_dir(".exports", &id)?;
     let path = scratch.join("export");
-    let p = path.clone();
+    let out = path.clone();
     let format = q.format;
     let written = h
         .run(
@@ -819,9 +895,9 @@ async fn export(
             None,
             Work::Read(Box::new(move |r: &alephgrid_core::Reader| {
                 let view = r.open_view(spec)?;
-                let out = r.export_view(view.view_id, &p, format);
+                let done = r.export_view(view.view_id, &out, format);
                 r.close_view(view.view_id);
-                out
+                done
             })),
         )
         .await
@@ -834,6 +910,7 @@ async fn export(
     let _ = tokio::fs::remove_dir_all(&scratch).await;
     let file = opened?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "table", "table": table, "format": format.extension(), "bytes": len }));
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
@@ -844,7 +921,7 @@ async fn export(
 /// Stream a finished query export (`export_query`) once; the file is removed afterwards.
 async fn download(State(state): State<Shared>,
     Extension(p): Extension<Principal>, Path((id, download)): Path<(String, String)>) -> ApiResult<Response> {
-    allowed(&state, &p, &id, Cap::Export).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Export).await?;
     let d = state
         .downloads
         .take(&id, &download)
@@ -854,6 +931,7 @@ async fn download(State(state): State<Shared>,
     let _ = tokio::fs::remove_dir_all(&d.dir).await;
     let file = opened.map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    state.auth.record(&p, "export_downloaded", &space, &id, json!({ "download": download, "bytes": len }));
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
@@ -864,14 +942,16 @@ async fn download(State(state): State<Shared>,
 /// Download all sheets of a workbook as one .xlsx file.
 async fn export_xlsx(State(state): State<Shared>,
     Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<Response> {
-    allowed(&state, &p, &id, Cap::Export).await?;
+    let (space, _) = allowed(&state, &p, &id, Cap::Export).await?;
+    // One of the space's bulk-job slots while this runs (7.07).
+    let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
     let scratch = state.scratch_dir(".exports", &id)?;
     let path = scratch.join("sheets.xlsx");
-    let p = path.clone();
+    let out = path.clone();
     let written = h
-        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| r.sheets().export_xlsx(&p).map(|_| ()))))
+        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| r.sheets().export_xlsx(&out).map(|_| ()))))
         .await
         .map_err(ApiError::from);
     let opened = match written {
@@ -881,6 +961,7 @@ async fn export_xlsx(State(state): State<Shared>,
     let _ = tokio::fs::remove_dir_all(&scratch).await;
     let file = opened?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "xlsx", "bytes": len }));
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -897,11 +978,11 @@ async fn websocket(
     Path(id): Path<String>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    let (_, role) = allowed(&state, &p, &id, Cap::View).await?;
+    let (space, role) = allowed(&state, &p, &id, Cap::View).await?;
     let handle = open(&state, &id).await?;
     Ok(upgrade
         .max_message_size(state.config.max_message_bytes)
-        .on_upgrade(move |socket| ws::serve_socket(socket, state, handle, p, role)))
+        .on_upgrade(move |socket| ws::serve_socket(socket, state, handle, p, role, space)))
 }
 
 async fn static_asset(uri: axum::http::Uri) -> Response {

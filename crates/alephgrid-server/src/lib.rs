@@ -4,7 +4,9 @@
 pub mod auth;
 pub mod backup;
 pub mod http;
+pub mod library;
 pub mod protocol;
+pub mod quota;
 pub mod runtime;
 pub mod sched;
 pub mod state;

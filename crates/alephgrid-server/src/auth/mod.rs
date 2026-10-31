@@ -282,7 +282,10 @@ impl Default for AuthConfig {
 
 pub struct Auth {
     pub config: AuthConfig,
-    pub store: Store,
+    pub store: Arc<Store>,
+    /// Records of workbook changes, imports and exports waiting for the audit writer.
+    audit_tx: Mutex<std::sync::mpsc::Sender<AuditMessage>>,
+    audit_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Bumped by every change to identities, roles, sessions, tokens or a workbook's
     /// space; open connections recheck their access when it moves.
     generation: tokio::sync::watch::Sender<u64>,
@@ -366,7 +369,20 @@ pub fn now_ms() -> u64 {
 impl Auth {
     pub fn new(config: AuthConfig, store: Store) -> Result<Auth> {
         let oidc = config.oidc.clone().map(oidc::Oidc::new).transpose()?;
-        let auth = Auth { config, store, generation: tokio::sync::watch::Sender::new(1), failures: Mutex::new(HashMap::new()), setup_code: Mutex::new(None), oidc };
+        let store = Arc::new(store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = store.clone();
+        let thread = std::thread::Builder::new().name("audit".into()).spawn(move || audit_writer(&writer, rx))?;
+        let auth = Auth {
+            config,
+            store,
+            audit_tx: Mutex::new(tx),
+            audit_thread: Mutex::new(Some(thread)),
+            generation: tokio::sync::watch::Sender::new(1),
+            failures: Mutex::new(HashMap::new()),
+            setup_code: Mutex::new(None),
+            oidc,
+        };
         if auth.config.mode == AuthMode::Accounts && auth.store.user_count()? == 0 {
             match auth.config.bootstrap.clone() {
                 Some((email, password)) => {
@@ -609,7 +625,7 @@ impl Auth {
         let space = self.store.space(space_id)?.ok_or_else(|| not_found("space not found"))?;
         match self.space_role(p, &space)? {
             None => Err(not_found("space not found")),
-            Some(r) if r.allows(cap) => Ok((space, r)),
+            Some(r) if space.allows(r, cap) => Ok((space, r)),
             Some(_) => Err(forbidden(cap.describe())),
         }
     }
@@ -643,6 +659,41 @@ impl Auth {
         }
     }
 
+    /// Queue a record of what `p` did to a workbook (a change, an import, an export) for the
+    /// audit writer, which commits in batches within [`AUDIT_DELAY`]; the change itself does not
+    /// wait. A server crash can lose the records of the last fraction of a second; the
+    /// workbook's own history (same transaction as each change) still names their actors.
+    pub fn record(&self, p: &Principal, action: &str, space: &Space, workbook: &str, detail: serde_json::Value) {
+        let r = store::AuditRecord {
+            actor: p.actor(),
+            action: action.to_string(),
+            org_id: Some(space.org_id.clone()),
+            space_id: Some(space.id.clone()),
+            workbook: Some(workbook.to_string()),
+            at_ms: now_ms(),
+            detail,
+        };
+        let _ = self.audit_tx.lock().unwrap().send(AuditMessage::Record(Box::new(r)));
+    }
+
+    /// Wait until every record queued so far is written.
+    pub fn flush_audit(&self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.audit_tx.lock().unwrap().send(AuditMessage::Flush(tx)).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(30));
+        }
+    }
+
+    /// Write what is queued and stop the writer (shutdown).
+    pub fn close_audit(&self) {
+        self.flush_audit();
+        let (tx, _) = std::sync::mpsc::channel();
+        drop(std::mem::replace(&mut *self.audit_tx.lock().unwrap(), tx));
+        if let Some(t) = self.audit_thread.lock().unwrap().take() {
+            let _ = t.join();
+        }
+    }
+
     /// Append what `p` did to the audit log; a failure to record is logged, never hidden from
     /// the operator, but does not undo the action that already happened.
     pub fn audit(&self, p: &Principal, action: &str, org: Option<&str>, space: Option<&str>, workbook: Option<&str>, detail: serde_json::Value) {
@@ -652,6 +703,58 @@ impl Auth {
             tracing::error!("recording audit event {action}: {e:#}");
         }
     }
+}
+
+enum AuditMessage {
+    Record(Box<store::AuditRecord>),
+    Flush(std::sync::mpsc::Sender<()>),
+}
+
+/// Most records waiting before the writer commits them, and the longest wait.
+const AUDIT_BATCH: usize = 1000;
+const AUDIT_DELAY: Duration = Duration::from_millis(250);
+
+/// Writes audit records in batches until the sender is dropped. A batch that cannot be
+/// written is logged with its size and dropped; it never blocks the changes it records.
+fn audit_writer(store: &Store, rx: std::sync::mpsc::Receiver<AuditMessage>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut batch: Vec<store::AuditRecord> = Vec::new();
+    let mut waiting: Vec<std::sync::mpsc::Sender<()>> = Vec::new();
+    let write = |batch: &mut Vec<store::AuditRecord>, waiting: &mut Vec<std::sync::mpsc::Sender<()>>| {
+        if let Err(e) = store.audit_many(batch) {
+            tracing::error!("writing {} audit record(s): {e:#}", batch.len());
+        }
+        batch.clear();
+        for w in waiting.drain(..) {
+            let _ = w.send(());
+        }
+    };
+    loop {
+        let msg = if batch.is_empty() {
+            match rx.recv() {
+                Ok(m) => Some(m),
+                Err(_) => break,
+            }
+        } else {
+            match rx.recv_timeout(AUDIT_DELAY) {
+                Ok(m) => Some(m),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        };
+        match msg {
+            Some(AuditMessage::Record(r)) => {
+                batch.push(*r);
+                if batch.len() < AUDIT_BATCH {
+                    continue;
+                }
+            }
+            Some(AuditMessage::Flush(done)) => waiting.push(done),
+            None => {}
+        }
+        write(&mut batch, &mut waiting);
+    }
+    write(&mut batch, &mut waiting);
 }
 
 /// Requests that try to assert an identity through proxy headers.

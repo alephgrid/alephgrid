@@ -93,6 +93,9 @@ async fn every_http_route_follows_the_role_table() {
         Editor,
         Owner,
         OrgAdmin,
+        /// An admin of the space's organization; others in the space are refused, outsiders
+        /// do not see it.
+        SpaceOrgAdmin,
         InstanceAdmin,
     }
     use Least::*;
@@ -124,6 +127,15 @@ async fn every_http_route_follows_the_role_table() {
         (Method::DELETE, format!("/api/orgs/{org}/invites/none"), None, None, OrgAdmin),
         (Method::PATCH, format!("/api/users/{other}"), Some(json!({ "disabled": false })), None, InstanceAdmin),
         (Method::POST, "/api/admin/backups".into(), None, None, InstanceAdmin),
+        (Method::GET, format!("/api/orgs/{org}/usage"), None, None, OrgAdmin),
+        (Method::GET, "/api/admin/usage".into(), None, None, InstanceAdmin),
+        (Method::PUT, format!("/api/spaces/{alpha}/quota"), Some(json!({})), None, SpaceOrgAdmin),
+        (Method::GET, format!("/api/spaces/{alpha}/library"), None, None, Viewer),
+        (Method::GET, format!("/api/spaces/{alpha}/library/none"), None, None, Viewer),
+        (Method::PATCH, format!("/api/spaces/{alpha}/library/none"), Some(json!({})), None, Viewer),
+        (Method::POST, format!("/api/spaces/{alpha}/library"), Some(json!({ "workbook": wa, "kind": "query", "object": "none" })), None, Editor),
+        (Method::GET, format!("/api/workbooks/{wa}/shareable"), None, None, Viewer),
+        (Method::POST, format!("/api/workbooks/{wa}/library"), Some(json!({ "entry": "none" })), None, Editor),
         (Method::GET, format!("/api/workbooks/{wa}"), None, None, Viewer),
         (Method::GET, format!("/api/workbooks/{wa}/runtime"), None, None, Viewer),
         (Method::POST, format!("/api/workbooks/{wa}/runtime"), Some(json!({ "action": "start" })), None, Viewer),
@@ -168,6 +180,8 @@ async fn every_http_route_follows_the_role_table() {
         "DELETE /api/workbooks/{}/uploads/{}", "POST /api/workbooks/{}/uploads/{}/preview", "POST /api/workbooks/{}/uploads/{}/import",
         "GET /api/workbooks/{}/jobs/{}", "DELETE /api/workbooks/{}/jobs/{}", "GET /api/workbooks/{}/runtime", "POST /api/workbooks/{}/runtime",
         "GET /api/admin/resources", "GET /api/admin/sessions", "POST /api/admin/backups", "GET /api/admin/audit",
+        "GET /api/orgs/{}/usage", "GET /api/admin/usage", "PUT /api/spaces/{}/quota", "GET /api/spaces/{}/library", "POST /api/spaces/{}/library",
+        "GET /api/spaces/{}/library/{}", "PATCH /api/spaces/{}/library/{}", "GET /api/workbooks/{}/shareable", "POST /api/workbooks/{}/library",
     ];
     for r in api_routes {
         assert!(covered.contains(r), "route {r} is not in the matrix ({covered:?})");
@@ -187,13 +201,13 @@ async fn every_http_route_follows_the_role_table() {
         assert_eq!(status, 401, "anonymous {method} {path}: {v}");
         for (who, s, rank) in &principals {
             let (status, v) = send(s).await;
-            let space_scoped = matches!(least, Viewer | Editor | Owner);
+            let space_scoped = matches!(least, Viewer | Editor | Owner | SpaceOrgAdmin);
             let needed = match least {
                 Anyone => 0,
                 Viewer => 1,
                 Editor => 2,
                 Owner => 3,
-                OrgAdmin | InstanceAdmin => 9,
+                OrgAdmin | SpaceOrgAdmin | InstanceAdmin => 9,
             };
             if *rank >= needed {
                 assert!(!refused(status, &v), "{who} may {method} {path}, got {status} {v}");
@@ -511,7 +525,7 @@ async fn password_sign_in_refuses_guessing() {
     }
     let (_, locked) = server.login(ADMIN_EMAIL, ADMIN_PASSWORD).await.err().expect("locked out after 5 failures");
     assert!(locked["error"].as_str().unwrap().contains("too many failed sign-ins"), "{locked}");
-    let audit = server.state.auth.store.audit_events(None, None, 100).unwrap();
+    let audit = server.state.auth.store.audit_events(None, None, None, 100).unwrap();
     assert!(audit.iter().filter(|e| e.action == "sign_in_failed").count() >= 5);
     server.stop().await;
 }
@@ -649,7 +663,7 @@ async fn secrets_stay_out_of_replies_and_the_audit_log_attributes_actions() {
             assert!(!text.contains(secret_text), "{secret_text:?} leaked: {text}");
         }
     }
-    let events = t.server.state.auth.store.audit_events(Some(&t.org), None, 1000).unwrap();
+    let events = t.server.state.auth.store.audit_events(Some(&t.org), None, None, 1000).unwrap();
     // Oldest first: the first time each happened.
     let find = |action: &str| events.iter().rev().find(|e| e.action == action).unwrap_or_else(|| panic!("no {action} in {events:?}"));
     assert_eq!(find("token_created").actor, format!("user:{}", t.owner.user_id()));
@@ -954,5 +968,254 @@ async fn single_sign_on_maps_claims_to_users_and_roles() {
     assert_eq!(alephgrid_server::auth::oidc::safe_next("https://evil.example"), "/");
     assert_eq!(alephgrid_server::auth::oidc::safe_next("/w/1?x=2"), "/w/1?x=2");
     idp.task.abort();
+    t.server.stop().await;
+}
+
+/// 7.10: changes, imports, exports, downloads and function publication are attributed to who
+/// made them, filtered by workbook for admins, and survive a restart right after them.
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_imports_exports_and_publication_are_audited() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path()).await;
+    let wa = t.wa.clone();
+    let user = |s: &Session| format!("user:{}", s.user_id());
+    // An import over HTTP: audited, and the workbook's history names the importer.
+    let (s, v) = t.editor.send_bytes(Method::POST, &format!("/api/workbooks/{wa}/import?filename=more.csv"), csv()).await;
+    assert_eq!(s, 200, "{v}");
+    let mut editor = t.editor.ws(&wa).await.unwrap();
+    let history = editor.ok("history", json!({ "after": 0, "limit": 100 })).await;
+    let import = history.as_array().unwrap().iter().rev().find(|h| h["op"] == "import").unwrap().clone();
+    assert_eq!(import["actor"], user(&t.editor).as_str());
+    // A change, a function published and pinned.
+    let view = editor.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
+    editor.ok("edit", json!({ "view_id": view, "edits": [{ "row": 0, "column": "s", "value": "audited" }] })).await;
+    editor.ok("publish_function", json!({ "definition": { "name": "TWICE", "kind": "formula", "arguments": ["x"], "source": "x*2", "documentation": "", "tests": [] } })).await;
+    editor.ok("pin_functions", json!({ "pins": { "TWICE": 1 } })).await;
+    // A viewer's refused change leaves nothing; their exports are recorded.
+    let mut viewer = t.viewer.ws(&wa).await.unwrap();
+    let vview = viewer.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
+    assert_eq!(viewer.code("edit", json!({ "view_id": vview, "edits": [{ "row": 0, "column": "s", "value": "x" }] })).await.as_deref(), Some("forbidden"));
+    let export = viewer.ok("export_query", json!({ "sql": "SELECT * FROM t" })).await;
+    assert_eq!(t.viewer.get(&format!("/api/workbooks/{wa}/downloads/{}", export["download"].as_str().unwrap())).await.0, 200);
+    let spec = common::urlencode(&json!({ "table": "t" }).to_string());
+    assert_eq!(t.viewer.get(&format!("/api/workbooks/{wa}/export?spec={spec}&format=csv")).await.0, 200);
+    assert_eq!(t.viewer.get(&format!("/api/workbooks/{wa}/export.xlsx")).await.0, 200);
+    // One last change, then stop at once: it is recorded all the same.
+    editor.ok("edit", json!({ "view_id": view, "edits": [{ "row": 1, "column": "s", "value": "last" }] })).await;
+    editor.close().await;
+    viewer.close().await;
+    let (org, admin_email) = (t.org.clone(), ADMIN_EMAIL);
+    let (editor_actor, viewer_actor) = (user(&t.editor), user(&t.viewer));
+    t.server.stop().await;
+    let server = TestServer::start_accounts(dir.path(), |_| {}).await;
+    let admin = server.login(admin_email, ADMIN_PASSWORD).await.unwrap();
+    let (s, events) = admin.get(&format!("/api/orgs/{org}/audit?workbook={wa}&limit=1000")).await;
+    assert_eq!(s, 200, "{events}");
+    let events = events.as_array().unwrap();
+    assert!(events.iter().all(|e| e["workbook"] == wa.as_str()), "filtered by workbook");
+    let of = |actor: &str, action: &str| events.iter().filter(|e| e["actor"] == actor && e["action"] == action).cloned().collect::<Vec<_>>();
+    let imported = of(&editor_actor, "data_imported");
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0]["detail"]["file"], "more.csv");
+    assert_eq!(imported[0]["space_id"], t.alpha.as_str());
+    let changed = of(&editor_actor, "workbook_changed");
+    let ops: Vec<&str> = changed.iter().rev().map(|e| e["detail"]["op"].as_str().unwrap()).collect();
+    assert_eq!(ops, vec!["edit", "publish_function", "pin_functions", "edit"], "in order, the last one included");
+    assert_eq!(of(&editor_actor, "function_published")[0]["detail"]["function"], "TWICE");
+    assert_eq!(of(&editor_actor, "functions_pinned").len(), 1);
+    assert!(of(&viewer_actor, "workbook_changed").is_empty(), "refused changes are not changes");
+    let exported: BTreeSet<String> = of(&viewer_actor, "data_exported").iter().map(|e| e["detail"]["kind"].as_str().unwrap().to_string()).collect();
+    assert_eq!(exported, ["query", "table", "xlsx"].into_iter().map(String::from).collect());
+    assert_eq!(of(&viewer_actor, "export_downloaded").len(), 1);
+    server.stop().await;
+}
+
+const SLOW_SQL: &str = "SELECT sum(i) AS s FROM range(100000000000) r(i)";
+
+/// 7.07: per-space limits on storage, workbooks, bulk jobs and open workbooks, set by
+/// organization admins over server defaults, and the usage they see.
+#[tokio::test(flavor = "multi_thread")]
+async fn space_quotas_limit_storage_workbooks_jobs_and_open_workbooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team_with(dir.path(), |c| c.quota.workbooks = Some(2)).await;
+    let (alpha, beta, org) = (t.alpha.clone(), t.beta.clone(), t.org.clone());
+    let quota = |space: &str, q: Value| {
+        let (admin, space) = (t.admin.clone(), space.to_string());
+        async move { admin.ok(Method::PUT, &format!("/api/spaces/{space}/quota"), Some(q)).await }
+    };
+    // Workbooks: the default of 2 (Alpha holds one).
+    let new = |s: &Session, space: &str| {
+        let (s, space) = (s.clone(), space.to_string());
+        async move { s.post("/api/workbooks", json!({ "name": "n", "space": space })).await }
+    };
+    assert_eq!(new(&t.owner, &alpha).await.0, 200);
+    let (s, v) = new(&t.owner, &alpha).await;
+    assert_eq!(s, 507, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("holds 2 workbook(s)"), "{v}");
+    // Owners cannot raise their own limits; organization admins can.
+    assert_eq!(t.owner.send(Method::PUT, &format!("/api/spaces/{alpha}/quota"), Some(json!({ "workbooks": 10 }))).await.0, 403);
+    assert_eq!(t.outsider.send(Method::PUT, &format!("/api/spaces/{alpha}/quota"), Some(json!({ "workbooks": 10 }))).await.0, 404);
+    let u = quota(&alpha, json!({ "workbooks": 10 })).await;
+    assert_eq!(u["limits"]["workbooks"], 10);
+    assert_eq!(u["overrides"]["workbooks"], 10);
+    assert_eq!(new(&t.owner, &alpha).await.0, 200);
+
+    // Storage: over the limit, imports and bulk changes are refused and change nothing;
+    // small edits still work, so people can make room.
+    quota(&alpha, json!({ "workbooks": 10, "storage_bytes": 1 })).await;
+    let (s, v) = t.editor.send_bytes(Method::POST, &format!("/api/workbooks/{}/import?filename=big.csv", t.wa), csv()).await;
+    assert_eq!(s, 507, "{v}");
+    let mut ws = t.editor.ws(&t.wa).await.unwrap();
+    assert_eq!(ws.code("create_table_from_query", json!({ "name": "copy", "sql": "SELECT * FROM t" })).await.as_deref(), Some("quota"));
+    let tables: Vec<String> = ws.ok("tables", json!({})).await.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(tables, vec!["t"], "nothing was added");
+    let view = ws.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
+    ws.ok("edit", json!({ "view_id": view, "edits": [{ "row": 0, "column": "s", "value": "still editable" }] })).await;
+    assert_eq!(new(&t.owner, &alpha).await.0, 507, "no new workbooks either");
+    quota(&alpha, json!({ "workbooks": 10 })).await;
+    ws.ok("create_table_from_query", json!({ "name": "copy", "sql": "SELECT * FROM t" })).await;
+
+    // Jobs: one bulk job at a time in Alpha; other spaces are not affected.
+    quota(&alpha, json!({ "workbooks": 10, "jobs": 1 })).await;
+    let slow = ws.send("query", json!({ "sql": SLOW_SQL })).await;
+    let admin = t.admin.clone();
+    let running = || {
+        let admin = admin.clone();
+        let (org, alpha) = (org.clone(), alpha.clone());
+        async move {
+            let (_, usage) = admin.get(&format!("/api/orgs/{org}/usage")).await;
+            usage.as_array().unwrap().iter().find(|u| u["space"]["id"] == alpha.as_str()).unwrap()["jobs"].as_u64().unwrap()
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while running().await == 0 {
+        assert!(std::time::Instant::now() < deadline, "the slow query never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut other = t.viewer.ws(&t.wa).await.unwrap();
+    assert_eq!(other.code("query", json!({ "sql": "SELECT 1" })).await.as_deref(), Some("quota"));
+    other.ok("tables", json!({})).await;
+    let mut beta_ws = t.admin.ws(&t.wb).await.unwrap();
+    beta_ws.ok("query", json!({ "sql": "SELECT 1" })).await;
+    ws.ok("cancel", json!({ "request": slow })).await;
+    assert!(ws.reply(slow).await.unwrap()["ok"] == false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while running().await > 0 {
+        assert!(std::time::Instant::now() < deadline, "the job slot was not released");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    other.ok("query", json!({ "sql": "SELECT 1" })).await;
+
+    // Open workbooks: Beta may have one open at a time.
+    quota(&beta, json!({ "open_workbooks": 1 })).await;
+    let (s, v) = new(&t.admin, &beta).await;
+    assert_eq!(s, 429, "Beta's workbook is open: {v}");
+    beta_ws.close().await;
+    t.admin.ok(Method::POST, &format!("/api/workbooks/{}/runtime", t.wb), Some(json!({ "action": "stop" }))).await;
+    let (s, v) = new(&t.admin, &beta).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = t.admin.get(&format!("/api/workbooks/{}", t.wb)).await;
+    assert_eq!(s, 429, "the new one is open now: {v}");
+
+    // Usage as admins see it.
+    let (_, usage) = t.admin.get(&format!("/api/orgs/{org}/usage")).await;
+    let a = usage.as_array().unwrap().iter().find(|u| u["space"]["id"] == alpha.as_str()).unwrap().clone();
+    assert!(a["storage_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(a["workbooks"], 3);
+    assert_eq!(a["limits"]["jobs"], 1);
+    assert_eq!(t.owner.get(&format!("/api/orgs/{org}/usage")).await.0, 403);
+    let (_, all) = t.admin.get("/api/admin/usage").await;
+    assert_eq!(all["defaults"]["workbooks"], 2);
+    let events = t.server.state.auth.store.audit_events(Some(&org), None, None, 1000).unwrap();
+    assert!(events.iter().any(|e| e.action == "space_quota_changed" && e.space_id.as_deref() == Some(alpha.as_str())));
+    for w in [ws, other] {
+        w.close().await;
+    }
+    t.server.stop().await;
+}
+
+/// 7.11: a space library shares saved queries, views and function versions; publishing,
+/// changing entries and using them need different permissions, and a space can keep
+/// publishing to its owners.
+#[tokio::test(flavor = "multi_thread")]
+async fn space_libraries_share_saved_objects_with_distinct_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path()).await;
+    let (alpha, wa) = (t.alpha.clone(), t.wa.clone());
+    let lib = format!("/api/spaces/{alpha}/library");
+    // The editor saves a query and a view and publishes them.
+    let mut ed = t.editor.ws(&wa).await.unwrap();
+    let q = ed.ok("save_query", json!({ "name": "Big", "sql": "SELECT n FROM t WHERE n > 1" })).await;
+    let v = ed.ok("save_view", json!({ "name": "Desc", "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [] } })).await;
+    let published = t.editor.ok(Method::POST, &lib, Some(json!({ "workbook": wa, "kind": "query", "object": q["id"] }))).await;
+    assert_eq!((published["name"].as_str(), published["latest"]["version"].as_u64()), (Some("Big"), Some(1)));
+    assert_eq!(published["latest"]["payload"]["sql"], "SELECT n FROM t WHERE n > 1");
+    let view_entry = t.editor.ok(Method::POST, &lib, Some(json!({ "workbook": wa, "kind": "view", "object": v["id"] }))).await;
+    let entry = published["id"].as_str().unwrap().to_string();
+    // Everyone in the space reads it; a viewer neither publishes nor copies it in.
+    let (_, list) = t.viewer.get(&lib).await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(t.viewer.post(&lib, json!({ "workbook": wa, "kind": "query", "object": q["id"] })).await.0, 403);
+    assert_eq!(t.viewer.post(&format!("/api/workbooks/{wa}/library"), json!({ "entry": entry })).await.0, 403);
+    assert_eq!(t.outsider.get(&lib).await.0, 404);
+    // Another workbook of the space takes them in; the viewer runs the query there.
+    let wa2 = t.editor.ok(Method::POST, "/api/workbooks", Some(json!({ "name": "wa2", "space": alpha }))).await["id"].as_str().unwrap().to_string();
+    t.editor.send_bytes(Method::POST, &format!("/api/workbooks/{wa2}/import?filename=t.csv"), csv()).await;
+    let used = t.editor.ok(Method::POST, &format!("/api/workbooks/{wa2}/library"), Some(json!({ "entry": entry }))).await;
+    assert_eq!(used["result"]["sql"], "SELECT n FROM t WHERE n > 1");
+    t.editor.ok(Method::POST, &format!("/api/workbooks/{wa2}/library"), Some(json!({ "entry": view_entry["id"] }))).await;
+    let mut viewer = t.viewer.ws(&wa2).await.unwrap();
+    let saved = viewer.ok("saved_queries", json!({})).await;
+    assert_eq!(saved[0]["name"], "Big");
+    let rows = viewer.ok("query", json!({ "sql": saved[0]["sql"] })).await;
+    assert_eq!(rows["rows"].as_array().unwrap().len(), 2, "{rows}");
+    assert_eq!(viewer.ok("saved_views", json!({ "table": "t" })).await[0]["name"], "Desc");
+    let history = viewer.ok("history", json!({ "after": 0, "limit": 100 })).await;
+    let entry_use = history.as_array().unwrap().iter().find(|h| h["op"] == "use_library").unwrap().clone();
+    assert_eq!(entry_use["actor"], format!("user:{}", t.editor.user_id()).as_str());
+    // A new version; old versions stay usable.
+    ed.ok("save_query", json!({ "saved": q["id"], "name": "Big", "sql": "SELECT n FROM t WHERE n > 2" })).await;
+    let v2 = t.editor.ok(Method::POST, &lib, Some(json!({ "workbook": wa, "kind": "query", "object": q["id"] }))).await;
+    assert_eq!((v2["id"].as_str(), v2["latest"]["version"].as_u64()), (Some(entry.as_str()), Some(2)));
+    let (_, detail) = t.viewer.get(&format!("{lib}/{entry}")).await;
+    assert_eq!(detail["versions"].as_array().unwrap().iter().map(|v| v["payload"]["sql"].as_str().unwrap()).collect::<Vec<_>>(), vec!["SELECT n FROM t WHERE n > 1", "SELECT n FROM t WHERE n > 2"]);
+    let old = t.editor.ok(Method::POST, &format!("/api/workbooks/{wa2}/library"), Some(json!({ "entry": entry, "version": 1, "name": "Big v1" }))).await;
+    assert_eq!(old["result"]["sql"], "SELECT n FROM t WHERE n > 1");
+    // Publishing kept to owners: the editor's open connection follows at once.
+    t.owner.ok(Method::PATCH, &format!("/api/spaces/{alpha}"), Some(json!({ "publish_role": "owner" }))).await;
+    assert_eq!(t.editor.post(&lib, json!({ "workbook": wa, "kind": "query", "object": q["id"] })).await.0, 403);
+    let fdef = json!({ "definition": { "name": "TRIPLE", "kind": "formula", "arguments": ["x"], "source": "x*3", "documentation": "", "tests": [] } });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while ed.code("publish_function", fdef.clone()).await.as_deref() != Some("forbidden") {
+        assert!(std::time::Instant::now() < deadline, "the editor's connection kept publishing");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ed.ok("save_query", json!({ "name": "Still editing", "sql": "SELECT 1" })).await;
+    let mut owner = t.owner.ws(&wa).await.unwrap();
+    owner.ok("publish_function", fdef.clone()).await;
+    let f = t.owner.ok(Method::POST, &lib, Some(json!({ "workbook": wa, "kind": "function", "object": "TRIPLE" }))).await;
+    assert_eq!(f["latest"]["payload"]["definition"]["source"], "x*3");
+    assert_eq!(t.editor.post(&format!("/api/workbooks/{wa2}/library"), json!({ "entry": f["id"] })).await.0, 403, "a function becomes a published version");
+    t.owner.ok(Method::POST, &format!("/api/workbooks/{wa2}/library"), Some(json!({ "entry": f["id"] }))).await;
+    assert_eq!(viewer.ok("functions", json!({})).await[0]["name"], "TRIPLE");
+    // Changing entries: their publisher or an owner.
+    assert_eq!(t.viewer.send(Method::PATCH, &format!("{lib}/{entry}"), Some(json!({ "name": "Mine" }))).await.0, 403);
+    t.editor.ok(Method::PATCH, &format!("{lib}/{entry}"), Some(json!({ "name": "Bigger" }))).await;
+    t.owner.ok(Method::PATCH, &format!("{lib}/{}", view_entry["id"].as_str().unwrap()), Some(json!({ "retired": true }))).await;
+    let names: Vec<String> = t.viewer.get(&lib).await.1.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, vec!["TRIPLE", "Bigger"]);
+    assert_eq!(t.editor.post(&format!("/api/workbooks/{wa2}/library"), json!({ "entry": view_entry["id"] })).await.0, 400, "retired");
+    // Libraries do not cross spaces.
+    let (s, v) = t.admin.post(&lib, json!({ "workbook": t.wb, "kind": "query", "object": "x" })).await;
+    assert_eq!(s, 400, "{v}");
+    assert_eq!(t.admin.post(&format!("/api/workbooks/{}/library", t.wb), json!({ "entry": entry })).await.0, 404);
+    t.server.state.auth.flush_audit();
+    let events = t.server.state.auth.store.audit_events(Some(&t.org), None, None, 1000).unwrap();
+    for action in ["library_published", "library_used", "library_changed", "space_publish_role_changed"] {
+        assert!(events.iter().any(|e| e.action == action), "{action}");
+    }
+    for w in [ed, viewer, owner] {
+        w.close().await;
+    }
     t.server.stop().await;
 }

@@ -1,5 +1,5 @@
 import "./styles.css";
-import { accountButton, invitePage, isUnauthenticated, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
+import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
 import { api, isRuntimeFailure, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
 import { formatCount } from "./format";
@@ -355,7 +355,13 @@ async function newWorkbook(): Promise<void> {
     ...(spaces.length > 1 ? [{ name: "space", label: "Space", type: "select" as const, value: targetSpace() ?? spaces[0].id,
       options: spaces.map((s) => ({ value: s.id, label: s.name })) }] : []),
   ], "Create");
-  if (v) navigate(`/w/${(await api.create(v.name, v.space ?? targetSpace())).id}`);
+  if (!v) return;
+  try {
+    navigate(`/w/${(await api.create(v.name, v.space ?? targetSpace())).id}`);
+  } catch (e) {
+    // Refused (a quota, a role): say why.
+    toast((e as Error).message, "error");
+  }
 }
 
 async function newSpace(): Promise<void> {
@@ -385,6 +391,8 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
     { label: "New workbook here", disabled: sp.role === "viewer", action: async () => navigate(`/w/${(await api.create("Untitled workbook", sp.id)).id}`) },
+    { label: "Library…", action: () => libraryDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, role: w.role ?? undefined })),
+      home.me ?? { kind: "local", instance_admin: true, orgs: [] }) },
   ];
   if (!local) {
     items.push("sep",

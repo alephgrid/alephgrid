@@ -108,6 +108,7 @@ machine), there is no sign-in and the server only listens on 127.0.0.1.
 | `--public-url` | `ALEPHGRID_PUBLIC_URL` | how people reach the server (needed for SSO; https makes cookies Secure) |
 | `--oidc-issuer`, `--oidc-client-id` | `ALEPHGRID_OIDC_*` (secret: `ALEPHGRID_OIDC_CLIENT_SECRET`) | no single sign-on |
 | `--session-hours` | `ALEPHGRID_SESSION_HOURS` | 12 |
+| `--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks` | `ALEPHGRID_SPACE_*` | no limits (admins can set them per space) |
 | `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
 | `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL console enabled |

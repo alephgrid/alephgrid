@@ -683,6 +683,9 @@ pub fn error_code(e: &anyhow::Error) -> Option<&'static str> {
         if let Some(d) = c.downcast_ref::<crate::auth::Denied>() {
             return Some(d.code());
         }
+        if c.downcast_ref::<crate::quota::QuotaExceeded>().is_some() {
+            return Some("quota");
+        }
         if c.downcast_ref::<alephgrid_core::limits::TooLarge>().is_some() {
             return Some("too_large");
         }
@@ -808,13 +811,28 @@ pub struct SessionInfo {
 
 /// Recheck a connection's access: its credential is still valid and it still sees the
 /// workbook's space. Returns the current principal and role.
-fn recheck(state: &Shared, principal: &Principal, workbook: &str) -> Result<(Principal, SpaceRole)> {
+fn recheck(state: &Shared, principal: &Principal, workbook: &str) -> Result<(Principal, SpaceRole, crate::auth::Space)> {
     let p = state.auth.still_valid(principal)?;
-    let (_, role) = state.require_workbook(&p, workbook, Cap::View)?;
-    Ok((p, role))
+    let (space, role) = state.require_workbook(&p, workbook, Cap::View)?;
+    Ok((p, role, space))
 }
 
-pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>, principal: Principal, role: SpaceRole) {
+/// What a committed change, an export or a publication puts in the audit log (7.10).
+fn audit(state: &Shared, p: &Principal, space: &crate::auth::Space, workbook: &str, (op, summary): (&str, String), c: &alephgrid_core::Committed) {
+    let (revision, result) = (c.revision, &c.result);
+    let detail = json!({ "op": op, "revision": revision, "summary": summary });
+    state.auth.record(p, "workbook_changed", space, workbook, detail);
+    match op {
+        "publish_function" => {
+            let versions = result["versions"].as_array().map(|v| v.len()).unwrap_or(0);
+            state.auth.record(p, "function_published", space, workbook, json!({ "function": result["name"], "version": versions, "revision": revision }));
+        }
+        "pin_functions" => state.auth.record(p, "functions_pinned", space, workbook, json!({ "revision": revision })),
+        _ => {}
+    }
+}
+
+pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>, principal: Principal, role: SpaceRole, space: crate::auth::Space) {
     let session = state.next_session_id();
     // Subscribe before anything else, so an event during setup (a deletion) is not missed.
     let mut events = handle.events.subscribe();
@@ -914,7 +932,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
 
     // Access: rechecked whenever identities or roles change and when the credential expires.
     // Losing it ends the connection; a changed role applies to the next request.
-    let access = Arc::new(Mutex::new((principal, role)));
+    let access = Arc::new(Mutex::new((principal, role, space)));
     let guard = {
         let (outbox, stop_tx, access, state, workbook) = (outbox.clone(), stop_tx.clone(), access.clone(), state.clone(), handle.id.clone());
         let mut changes = state.auth.subscribe();
@@ -928,12 +946,12 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                     _ = tokio::time::sleep(until) => {}
                     _ = stop.changed() => break,
                 }
-                let (p, before) = access.lock().unwrap().clone();
+                let (p, before, _) = access.lock().unwrap().clone();
                 let (s, w) = (state.clone(), workbook.clone());
                 let checked = tokio::task::spawn_blocking(move || recheck(&s, &p, &w)).await;
                 match checked {
-                    Ok(Ok((p, role))) => {
-                        *access.lock().unwrap() = (p, role);
+                    Ok(Ok((p, role, space))) => {
+                        *access.lock().unwrap() = (p, role, space);
                         if role != before {
                             outbox.push(serde_json::to_string(&Event::RoleChanged { role }).unwrap(), true);
                         }
@@ -993,16 +1011,16 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         let id = envelope.id;
         // Authorization of this request: the role as last rechecked, and an expired
         // credential refuses everything (its revocation follows from the guard).
-        let (expired, role) = {
+        let (expired, role, space_now) = {
             let a = access.lock().unwrap();
-            (a.0.expires_at().is_some_and(|e| e <= crate::auth::now_ms()), a.1)
+            (a.0.expires_at().is_some_and(|e| e <= crate::auth::now_ms()), a.1, a.2.clone())
         };
         if expired {
             let e = anyhow::Error::new(crate::auth::Denied::Unauthenticated);
             outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
             continue;
         }
-        if let Some(cap) = required_caps(&envelope.op).iter().find(|c| !role.allows(**c)) {
+        if let Some(cap) = required_caps(&envelope.op).iter().find(|c| !space_now.allows(role, **c)) {
             let e = crate::auth::forbidden(cap.describe());
             outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
             continue;
@@ -1043,6 +1061,30 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             outbox.push(json!({ "id": id, "ok": true, "result": result }).to_string(), true);
             continue;
         };
+        // Bulk work holds one of the space's job slots while queued and running, and bulk
+        // changes are refused once the space is at its storage limit (7.07).
+        let slot = if class == Class::Bulk {
+            let space_id = access.lock().unwrap().2.id.clone();
+            let s = state.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                if is_write {
+                    s.check_storage(&space_id, 0)?;
+                }
+                s.job_slot(&space_id)
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+            match checked {
+                Ok(slot) => Some(slot),
+                Err(e) => {
+                    outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let limit = if class == Class::Bulk { state.config.job_timeout } else { state.config.request_timeout };
         let timeout = envelope.timeout_ms.map(Duration::from_millis).unwrap_or(limit).min(limit);
         let job = Job { key: (session, id), class, deadline: Instant::now() + timeout };
@@ -1074,13 +1116,21 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             Box::new(move |p: f64| outbox.push(serde_json::to_string(&Event::Progress { request: id, percentage: p }).unwrap(), false))
                 as Box<dyn Fn(f64) + Send>
         });
-        let actor = access.lock().unwrap().0.actor();
+        let (principal, space) = {
+            let a = access.lock().unwrap();
+            (a.0.clone(), a.2.clone())
+        };
+        let actor = principal.actor();
+        let audit_state = state.clone();
         let op = envelope.op;
         let mutation_id = envelope.mutation_id;
         jobs.spawn(async move {
+            let _slot = slot;
             let reply = if is_write {
                 let name = op_name(&op);
+                let audit_op = name.clone();
                 let summary = summary(&op);
+                let audit_summary = summary.clone();
                 let view = view_of(&op);
                 let work = Work::Write(Box::new(move |wb: &mut Workbook| {
                     let mut event = None;
@@ -1115,6 +1165,12 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
                     Ok((c, event, derived, sheets, queued)) => {
+                        if !c.replayed {
+                            audit(&audit_state, &principal, &space, &handle.id, (&audit_op, audit_summary), &c);
+                            if class == Class::Bulk {
+                                audit_state.quota.forget(&space.id);
+                            }
+                        }
                         handle.recalculate_later(queued, c.revision, recalc_timeout);
                         if let Some(ev) = event.filter(|_| !c.replayed) {
                             let ev = with_revision(ev, c.revision);
@@ -1156,6 +1212,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                 }
             } else {
                 let downloads = ctx.downloads.clone();
+                let exporting = matches!(op, Op::ExportQuery { .. });
                 let cancelled = cancel_rx.clone();
                 let work = Work::Read(Box::new(move |r: &Reader| read(r, op, &ctx)));
                 let result = handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await;
@@ -1175,7 +1232,13 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         }
                         error_reply(id, &anyhow::Error::new(JobError::Cancelled), &data_dir)
                     }
-                    Ok(v) => json!({ "id": id, "ok": true, "result": v }),
+                    Ok(v) => {
+                        if exporting {
+                            let detail = json!({ "kind": "query", "rows": v["rows"], "bytes": v["bytes"], "revision": v["revision"] });
+                            audit_state.auth.record(&principal, "data_exported", &space, &handle.id, detail);
+                        }
+                        json!({ "id": id, "ok": true, "result": v })
+                    }
                     Err(e) => error_reply(id, &e, &data_dir),
                 }
             };

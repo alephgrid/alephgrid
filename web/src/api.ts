@@ -2,11 +2,11 @@ import type { ErrorCode } from "./protocol";
 import type {
   AuditEvent, AuthMode, ImportProblem, ImportRequest, Imported, Invite, JobStatus, MemberKind, Org, OrgMember, OrgRole, OpName, Params,
   PublicUser, Results, ServerEvent, SheetInfo, Space, SpaceMember, SpaceRole, TableInfo, Token, UploadCreated, UploadPreview,
-  WorkbookListing, WorkbookMeta, WorkbookPatch,
+  WorkbookListing, WorkbookMeta, WorkbookPatch, QuotaLimits, SpaceUsage, LibraryEntry, LibraryKind, SavedQuery, SavedView, WorkbookFunction,
 } from "./types";
 
 /** A space as listed for the signed-in principal. */
-export type SpaceListing = { id: string; name: string; org_id: string; org_name: string | null; created_at: number; role: SpaceRole };
+export type SpaceListing = { id: string; name: string; org_id: string; org_name: string | null; created_at: number; role: SpaceRole; publish_role: SpaceRole };
 
 /** Who is signed in (`/api/me`). */
 export type Me = {
@@ -99,6 +99,16 @@ export const api = {
     http<{ invite: Invite; code: string; path: string }>("POST", `/api/orgs/${org}/invites`, { email, org_role, space, space_role, days }),
   revokeInvite: (org: string, invite: string) => http<void>("DELETE", `/api/orgs/${org}/invites/${invite}`),
   audit: (org: string, before?: number) => http<AuditEvent[]>("GET", `/api/orgs/${org}/audit${before ? `?before=${before}` : ""}`),
+  library: (space: string) => http<LibraryEntry[]>("GET", `/api/spaces/${space}/library`),
+  publishToLibrary: (space: string, workbook: string, kind: LibraryKind, object: string) =>
+    http<LibraryEntry>("POST", `/api/spaces/${space}/library`, { workbook, kind, object }),
+  changeLibraryEntry: (space: string, entry: string, patch: { name?: string; retired?: boolean }) =>
+    http<void>("PATCH", `/api/spaces/${space}/library/${entry}`, patch),
+  useLibraryEntry: (workbook: string, entry: string) => http<{ result: unknown; revision: number }>("POST", `/api/workbooks/${workbook}/library`, { entry }),
+  shareable: (workbook: string) => http<{ queries: SavedQuery[]; views: SavedView[]; functions: WorkbookFunction[] }>("GET", `/api/workbooks/${workbook}/shareable`),
+  setPublishRole: (space: string, role: SpaceRole) => http<Space>("PATCH", `/api/spaces/${space}`, { publish_role: role }),
+  usage: (org: string) => http<SpaceUsage[]>("GET", `/api/orgs/${org}/usage`),
+  setQuota: (space: string, limits: QuotaLimits) => http<SpaceUsage | null>("PUT", `/api/spaces/${space}/quota`, limits),
   setUserDisabled: (user: string, disabled: boolean) => http<PublicUser | null>("PATCH", `/api/users/${user}`, { disabled }),
   previewUpload: (id: string, upload: string, req: ImportRequest) =>
     http<UploadPreview>("POST", `/api/workbooks/${id}/uploads/${upload}/preview`, req),

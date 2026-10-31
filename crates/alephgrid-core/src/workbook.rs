@@ -47,6 +47,8 @@ pub struct Workbook {
     /// Tables changed in the transaction in progress whose table cells are up to date.
     pub(crate) settled: std::collections::BTreeSet<String>,
     report: OpenReport,
+    /// Who changes made without an explicit [`Mutation`] (imports, refreshes) are recorded as.
+    actor: Option<String>,
 }
 
 /// In-memory updates that may only happen once the transaction has committed.
@@ -140,7 +142,7 @@ impl Workbook {
         crate::functions::check_runtime(&conn, &crate::functions::list(&conn)?)?;
         let mut sheets = Sheets::from_bytes(bytes)?;
         sheets.set_table_cells(storage::table_cells(&conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
-        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report })
+        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report, actor: None })
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -268,8 +270,18 @@ impl Workbook {
         if self.txn_depth > 0 {
             return f(self);
         }
-        let m = Mutation { id: None, op, actor: None, summary: op.to_string() };
+        let actor = self.actor.clone();
+        let m = Mutation { id: None, op, actor: actor.as_deref(), summary: op.to_string() };
         Ok(self.run_mutation(&m, view, f, |_| None)?.1)
+    }
+
+    /// Run `f` with changes it makes without a [`Mutation`] (imports, say) attributed to
+    /// `actor` in the history.
+    pub fn acting_as<T>(&mut self, actor: &str, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let before = self.actor.replace(actor.to_string());
+        let out = f(self);
+        self.actor = before;
+        out
     }
 
     fn run_mutation<T>(

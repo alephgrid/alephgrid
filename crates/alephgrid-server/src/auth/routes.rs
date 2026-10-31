@@ -579,6 +579,9 @@ pub async fn update_user(State(state): State<Shared>, Extension(p): Extension<Pr
 pub struct AuditQuery {
     #[serde(default)]
     before: Option<u64>,
+    /// Only events about this workbook.
+    #[serde(default)]
+    workbook: Option<String>,
     #[serde(default = "hundred")]
     limit: usize,
 }
@@ -591,7 +594,8 @@ pub async fn org_audit(State(state): State<Shared>, Extension(p): Extension<Prin
     Ok(Json(
         blocking(move || {
             state.auth.require_org_admin(&p, &org)?;
-            state.auth.store.audit_events(Some(&org), q.before, q.limit.clamp(1, 1000))
+            state.auth.flush_audit();
+            state.auth.store.audit_events(Some(&org), q.workbook.as_deref(), q.before, q.limit.clamp(1, 1000))
         })
         .await?,
     ))
@@ -601,7 +605,8 @@ pub async fn instance_audit(State(state): State<Shared>, Extension(p): Extension
     Ok(Json(
         blocking(move || {
             state.auth.require_instance_admin(&p)?;
-            state.auth.store.audit_events(None, q.before, q.limit.clamp(1, 1000))
+            state.auth.flush_audit();
+            state.auth.store.audit_events(None, q.workbook.as_deref(), q.before, q.limit.clamp(1, 1000))
         })
         .await?,
     ))
@@ -618,7 +623,7 @@ pub async fn list_spaces(State(state): State<Shared>, Extension(p): Extension<Pr
                 .auth
                 .visible_spaces(&p)?
                 .into_iter()
-                .map(|(s, r)| json!({ "id": s.id, "name": s.name, "org_id": s.org_id, "org_name": orgs.get(&s.org_id), "created_at": s.created_at, "role": r }))
+                .map(|(s, r)| json!({ "id": s.id, "name": s.name, "org_id": s.org_id, "org_name": orgs.get(&s.org_id), "created_at": s.created_at, "role": r, "publish_role": s.publish_role }))
                 .collect::<Vec<_>>())
         })
         .await?,
@@ -661,13 +666,33 @@ pub async fn create_space(State(state): State<Shared>, Extension(p): Extension<P
     ))
 }
 
-pub async fn rename_space(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>, Json(b): Json<NameBody>) -> ApiResult<impl IntoResponse> {
+#[derive(Deserialize)]
+pub struct SpacePatch {
+    #[serde(default)]
+    name: Option<String>,
+    /// The least role that may publish (7.11): `editor` or `owner`.
+    #[serde(default)]
+    publish_role: Option<SpaceRole>,
+}
+
+/// Rename a space, or change who may publish in it (owners).
+pub async fn rename_space(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>, Json(b): Json<SpacePatch>) -> ApiResult<impl IntoResponse> {
     Ok(Json(
         blocking(move || {
             let (space, _) = state.auth.require_space(&p, &id, Cap::ManageSpace)?;
-            let renamed = state.auth.store.rename_space(&id, &b.name).map_err(|e| bad(format!("{e:#}")))?;
-            state.auth.audit(&p, "space_renamed", Some(&space.org_id), Some(&id), None, json!({ "from": space.name, "to": renamed.name }));
-            Ok(renamed)
+            if let Some(name) = &b.name {
+                let renamed = state.auth.store.rename_space(&id, name).map_err(|e| bad(format!("{e:#}")))?;
+                state.auth.audit(&p, "space_renamed", Some(&space.org_id), Some(&id), None, json!({ "from": space.name, "to": renamed.name }));
+            }
+            if let Some(role) = b.publish_role {
+                if role == SpaceRole::Viewer {
+                    return Err(bad("publishing needs at least an editor"));
+                }
+                state.auth.store.set_publish_role(&id, role)?;
+                state.auth.bump();
+                state.auth.audit(&p, "space_publish_role_changed", Some(&space.org_id), Some(&id), None, json!({ "role": role }));
+            }
+            state.auth.store.space(&id)?.ok_or_else(|| not_found("space not found"))
         })
         .await?,
     ))
@@ -820,4 +845,51 @@ pub async fn revoke_token(State(state): State<Shared>, Extension(p): Extension<P
     })
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------- quotas (7.07)
+
+/// Usage and limits of every space of an organization (admins).
+pub async fn org_usage(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(org): Path<String>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        blocking(move || {
+            state.auth.require_org_admin(&p, &org)?;
+            state.usage(Some(&org))
+        })
+        .await?,
+    ))
+}
+
+pub async fn instance_usage(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        blocking(move || {
+            state.auth.require_instance_admin(&p)?;
+            Ok(json!({ "defaults": state.config.quota, "spaces": state.usage(None)? }))
+        })
+        .await?,
+    ))
+}
+
+/// Set a space's own limits (organization admins; owners cannot raise their own). A missing
+/// or null field uses the server default.
+pub async fn set_space_quota(
+    State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(q): Json<crate::quota::QuotaLimits>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        blocking(move || {
+            let space = state.auth.store.space(&id)?.ok_or_else(|| not_found("space not found"))?;
+            if state.auth.space_role(&p, &space)?.is_none() {
+                return Err(not_found("space not found"));
+            }
+            state.auth.require_org_admin(&p, &space.org_id)?;
+            state.auth.store.set_space_quota(&id, &q)?;
+            state.quota.forget(&id);
+            state.auth.audit(&p, "space_quota_changed", Some(&space.org_id), Some(&id), None, json!(q));
+            Ok(state.usage(Some(&space.org_id))?.into_iter().find(|u| u.space.id == id))
+        })
+        .await?,
+    ))
 }
