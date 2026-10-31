@@ -56,7 +56,8 @@ export function icon(name: IconName, size = 16): SVGSVGElement {
   return svg;
 }
 
-/** The Alephgrid mark: an open cell with its fill handle. Colors come from CSS. */
+/** The Alephgrid mark, geometry from brand-kit-v1 `icons/favicon.svg` (the open cell and its
+ *  fill handle) without the tile; colors come from CSS so it works on both themes. */
 export function brandMark(size = 22): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 32 32");
@@ -64,7 +65,7 @@ export function brandMark(size = 22): SVGSVGElement {
   svg.setAttribute("height", String(size));
   svg.setAttribute("aria-hidden", "true");
   svg.classList.add("brand-mark");
-  svg.innerHTML = '<path class="brand-mark-cell" d="M21 24H9a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v11" fill="none" stroke-width="3.2" stroke-linejoin="round"/>'
-    + '<rect class="brand-mark-handle" x="22.5" y="22.5" width="6" height="6" rx=".8"/>';
+  svg.innerHTML = '<path class="brand-mark-cell" d="M22 24H9V9h15v12" fill="none" stroke-width="3" stroke-linejoin="round"/>'
+    + '<rect class="brand-mark-handle" x="23" y="23" width="5" height="5"/>';
   return svg;
 }

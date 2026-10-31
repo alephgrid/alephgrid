@@ -27,8 +27,9 @@ colors (blue, purple, orange, cyan) stay distinct from the accent. The type is M
 
 ## Workbook layout
 
-1. **Top bar**: the mark (back to all workbooks), the workbook name (click to rename), save
-   status, the menu bar, and on the right command search (⌘K), history, compute and theme.
+1. **Top bar**: the mark (back to all workbooks), the workbook name (click to rename), the
+   connection state, the menu bar, and on the right command search (⌘K), history, compute and
+   theme. It says "Connected", not "Saved": "Saved" is reserved for acknowledged revisions (U.11).
 2. **Menu bar**: File, Edit, View, Insert, Format, Data, Tools, Help. Every workbook command
    is in a menu; commands that only apply to tables or sheets are disabled, not hidden, so the
    menus keep their shape.
@@ -38,8 +39,11 @@ colors (blue, purple, orange, cyan) stay distinct from the accent. The type is M
 4. **Formula bar**: name box, `fx`, the cell's value or formula.
 5. **Grid**, then the **tab bar** with the selection's statistics and the row count.
 
-Advanced work (functions, SQL, analysis, import) opens in dialogs; calling a function happens
-directly in the cell editor.
+Advanced work (functions, SQL, analysis, import) opens in dialogs; the SQL workspace lives under
+Tools and in the toolbar, closed by default. Calling a function happens directly in the cell editor.
+
+The mark is the brand-kit-v1 favicon geometry without its tile, colored by `--brand-ink` and
+`--accent` so it reads on both themes.
 
 ## Hub
 

@@ -66,6 +66,39 @@
   --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
+/* Before theme.ts runs (first paint), follow the system so dark users see no white flash. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --reference-0: #93c5fd; --reference-1: #f0abfc; --reference-2: #fdba74; --reference-3: #67e8f9;
+    --brand-ink: #FAFAFA;
+    --canvas: #111113;
+    --bg: #18181B;
+    --panel: #18181B;
+    --control: #27272A;
+    --border: #2E2E33;
+    --border-strong: #3F3F46;
+    --text: #FAFAFA;
+    --muted: #A1A1AA;
+    --accent: #34D399;
+    --accent-hover: #6EE7B7;
+    --accent-strong: #6EE7B7;
+    --accent-text: #111113;
+    --accent-soft: rgba(52, 211, 153, 0.12);
+    --danger: #FDA29B;
+    --success: #34D399;
+    --warn: #FCD34D;
+    --grid-bg: #111113;
+    --grid-line: #26262A;
+    --grid-header-bg: #18181B;
+    --grid-header-active: #183B2E;
+    --grid-placeholder: #1E1E22;
+    --grid-formula-bg: #141716;
+    --sel-fill: rgba(16, 185, 129, 0.16);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+}
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font-ui); -webkit-font-smoothing: antialiased; }

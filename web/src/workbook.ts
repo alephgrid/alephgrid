@@ -306,7 +306,8 @@ export class WorkbookScreen {
   private setStatus(s: "connecting" | "open" | "closed" | "paused"): void {
     this.statusDot.className = `status-dot status-${s}`;
     this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused — resumes when you continue" : "Disconnected — retrying";
-    this.statusText.textContent = s === "open" ? "Saved" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused" : "Reconnecting…";
+    // Connection state only: "Saved" would claim a durable acknowledgement this label does not track (U.11).
+    this.statusText.textContent = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused" : "Reconnecting…";
     this.statusText.title = this.statusDot.title;
   }
 
@@ -573,10 +574,9 @@ export class WorkbookScreen {
         { label: "Analyze…", hint: "Pivot · chart · join", action: act.analyze },
         { label: "Dashboards…", action: act.dashboards },
         { label: "Data tools…", disabled: tableOnly(), action: act.dataTools },
-        "sep",
-        { label: "SQL workspace", disabled: !this.allowSql, action: act.sql },
       ]],
       ["Tools", () => [
+        { label: "SQL workspace", disabled: !this.allowSql, action: act.sql },
         { label: "Functions…", action: act.functions },
         { label: "Change history…", action: act.history },
         { label: "Compute and size…", action: act.compute },
