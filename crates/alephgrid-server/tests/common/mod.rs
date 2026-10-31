@@ -33,6 +33,8 @@ impl TestServer {
         config.memory_budget = Some(1 << 30);
         config.threads = Some(2);
         config.temp_budget = Some(4 << 30);
+        // Tests take backups back to back.
+        config.backup_interval = std::time::Duration::ZERO;
         configure(&mut config);
         let state = AppState::new(config).unwrap();
         let janitor = alephgrid_server::state::start_janitor(&state);

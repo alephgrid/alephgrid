@@ -1,7 +1,7 @@
 import "./styles.css";
 import "./theme";
 import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
-import { api, isRuntimeFailure, type Me, type SpaceListing } from "./api";
+import { api, isRuntimeFailure, seg, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
 import { formatCount } from "./format";
 import type { WorkbookListing } from "./types";
@@ -321,7 +321,7 @@ function renderHome(): void {
             el("button", { class: `star${w.starred ? " on" : ""}`, title: w.starred ? "Unstar" : "Star", disabled: w.role === "viewer",
               "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
               onclick: () => toggleStar(w) }, w.starred ? "★" : "☆")),
-          el("a", { role: "cell", class: "wb-name", href: `/w/${w.id}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
+          el("a", { role: "cell", class: "wb-name", href: `/w/${seg(w.id)}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${seg(w.id)}`); } },
             el("span", { class: "wb-icon" }, icon(w.summary?.tables ? "table" : "sheet")),
             el("strong", {}, w.name),
             space ? el("span", { class: "badge" }, space) : null,
@@ -356,8 +356,8 @@ function renderHome(): void {
       : home.workbooks.filter((w) => inScope(w, home.scope) && w.opened_at)
         .sort((a, b) => (b.opened_at ?? 0) - (a.opened_at ?? 0)).slice(0, 4);
     cards.hidden = recent.length < 2;
-    cards.replaceChildren(...recent.map((w) => el("a", { class: "wb-card", href: `/w/${w.id}`, title: `Open ${w.name}`,
-      onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
+    cards.replaceChildren(...recent.map((w) => el("a", { class: "wb-card", href: `/w/${seg(w.id)}`, title: `Open ${w.name}`,
+      onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${seg(w.id)}`); } },
       el("span", { class: "wb-card-preview", "aria-hidden": "true" }, icon(w.summary?.tables ? "table" : "sheet", 20)),
       el("span", { class: "wb-card-name" }, w.name, w.starred ? el("span", { class: "wb-card-star", "aria-label": "starred" }, icon("star", 13)) : null),
       el("span", { class: "wb-card-meta" }, spaceName(w.space) ?? describeContents(w)),
@@ -437,7 +437,7 @@ async function newWorkbook(): Promise<void> {
   ], "Create");
   if (!v) return;
   try {
-    navigate(`/w/${(await api.create(v.name, v.space ?? targetSpace())).id}`);
+    navigate(`/w/${seg((await api.create(v.name, v.space ?? targetSpace())).id)}`);
   } catch (e) {
     // Refused (a quota, a role): say why.
     toast((e as Error).message, "error");
@@ -470,7 +470,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       if (!v) return;
       try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: "New workbook here", disabled: sp.role === "viewer", action: async () => navigate(`/w/${(await api.create("Untitled workbook", sp.id)).id}`) },
+    { label: "New workbook here", disabled: sp.role === "viewer", action: async () => navigate(`/w/${seg((await api.create("Untitled workbook", sp.id)).id)}`) },
     { label: "Library…", action: () => libraryDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, role: w.role ?? undefined })),
       home.me ?? { kind: "local", instance_admin: true, orgs: [] }) },
   ];
@@ -508,8 +508,8 @@ async function toggleStar(w: WorkbookListing): Promise<void> {
 function workbookMenu(w: WorkbookListing, x: number, y: number): void {
   const viewer = w.role === "viewer";
   const items: MenuItem[] = [
-    { label: "Open", action: () => navigate(`/w/${w.id}`) },
-    { label: "Open in new tab", action: () => window.open(`/w/${w.id}`, "_blank") },
+    { label: "Open", action: () => navigate(`/w/${seg(w.id)}`) },
+    { label: "Open in new tab", action: () => window.open(`/w/${seg(w.id)}`, "_blank") },
     "sep",
     { label: "Rename…", disabled: viewer, action: async () => {
       const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename");
@@ -579,12 +579,12 @@ async function openFile(file: File): Promise<void> {
   toast(result.kind === "table"
     ? `${formatCount(result.table.row_count)} rows imported`
     : `${result.sheets.length} sheet(s) imported`, "success");
-  navigate(`/w/${wb.id}`);
+  navigate(`/w/${seg(wb.id)}`);
 }
 
 async function createDemo(rows: number): Promise<void> {
   const wb = await api.create("Demo: US flights", targetSpace());
-  navigate(`/w/${wb.id}?demo=${rows}`);
+  navigate(`/w/${seg(wb.id)}?demo=${rows}`);
 }
 
 route();

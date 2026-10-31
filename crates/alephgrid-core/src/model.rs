@@ -292,7 +292,13 @@ pub struct QueryPreview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportFormat {
+    /// The data as it is: faithful round trip (the default).
     Csv,
+    /// CSV for opening in a spreadsheet application: a text value starting with `=`, `+`,
+    /// `-`, `@`, a tab or a carriage return gets a leading `'`, so the application shows it
+    /// as text instead of running it as a formula (SEC.13). Numbers are unchanged.
+    #[serde(rename = "csv_excel")]
+    CsvExcel,
     Parquet,
     Json,
 }
@@ -300,7 +306,7 @@ pub enum ExportFormat {
 impl ExportFormat {
     pub fn extension(self) -> &'static str {
         match self {
-            ExportFormat::Csv => "csv",
+            ExportFormat::Csv | ExportFormat::CsvExcel => "csv",
             ExportFormat::Parquet => "parquet",
             ExportFormat::Json => "jsonl",
         }

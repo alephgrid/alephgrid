@@ -260,7 +260,7 @@ fn exports_hold_every_row_of_one_snapshot() {
         assert_eq!(revision, t.wb.revision().unwrap());
         // Read back with DuckDB's readers (unrestricted in this test) and compare with closed forms.
         let reader = match format {
-            ExportFormat::Csv => "read_csv",
+            ExportFormat::Csv | ExportFormat::CsvExcel => "read_csv",
             ExportFormat::Parquet => "read_parquet",
             ExportFormat::Json => "read_json",
         };

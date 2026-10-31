@@ -276,7 +276,19 @@ pub struct Parser<'a> {
     /// function/name completion even when the surrounding parse succeeds (`SU`,
     /// `A1+F`) or fails for an unrelated reason (`IF(VLOOK`). See that method.
     trailing_name: Option<(String, usize)>,
+    /// How deep the parse is nested (parentheses, arguments, arrays), and how
+    /// many operators it has read (Alephgrid patch, SEC.09): a formula can make
+    /// neither the parser nor the evaluation recurse without bound.
+    depth: usize,
+    operators: usize,
 }
+
+/// The most a formula may nest: parentheses, function arguments and arrays.
+pub const MAX_NESTING: usize = 100;
+/// The most operators a formula may have; each one deepens its tree.
+pub const MAX_OPERATORS: usize = 1000;
+/// The longest formula, in characters (as in other spreadsheets).
+pub const MAX_FORMULA_CHARS: usize = 8192;
 
 pub fn new_parser_english<'a>(
     worksheets: Vec<String>,
@@ -312,7 +324,26 @@ impl<'a> Parser<'a> {
             language,
             expecting_here: vec![ExpectedTokens::Other],
             trailing_name: None,
+            depth: 0,
+            operators: 0,
         }
+    }
+
+    fn limit_error(&self, message: &str) -> Node {
+        Node::ParseErrorKind {
+            formula: self.lexer.get_formula(),
+            expecting: vec![ExpectedTokens::Other],
+            position: self.lexer.get_position() as usize,
+            message: message.to_string(),
+        }
+    }
+
+    /// Counts one more operator; an error node once there are too many.
+    fn operator(&mut self) -> Option<Node> {
+        self.operators += 1;
+        (self.operators > MAX_OPERATORS).then(|| {
+            self.limit_error(&format!("The formula has more than {MAX_OPERATORS} operators"))
+        })
     }
     pub fn set_lexer_mode(&mut self, mode: lexer::LexerMode) {
         self.lexer.set_lexer_mode(mode)
@@ -338,11 +369,23 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self, formula: &str, context: &CellReferenceRC) -> Node {
+        self.depth = 0;
+        self.operators = 0;
+        if formula.chars().count() > MAX_FORMULA_CHARS {
+            return Node::ParseErrorKind {
+                formula: String::new(),
+                expecting: vec![ExpectedTokens::Other],
+                position: 0,
+                message: format!("The formula is longer than {MAX_FORMULA_CHARS} characters"),
+            };
+        }
         self.lexer.set_formula(formula);
         self.context = context.clone();
         // At the top level a formula may start with an expression or a range.
         self.expecting_here = vec![ExpectedTokens::Range, ExpectedTokens::Other];
         self.trailing_name = None;
+        self.depth = 0;
+        self.operators = 0;
         let node = self.parse_expr();
         // Alephgrid: input left after a complete expression (`=1 2`, `=1+2)`) is an
         // error; it was silently dropped, so the cell showed a plausible wrong result.
@@ -452,6 +495,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Node {
+        if self.depth >= MAX_NESTING {
+            return self.limit_error(&format!("The formula nests more than {MAX_NESTING} levels deep"));
+        }
+        self.depth += 1;
+        let node = self.parse_expr_nested();
+        self.depth -= 1;
+        node
+    }
+
+    fn parse_expr_nested(&mut self) -> Node {
         let mut t = self.parse_concat();
         if let Node::ParseErrorKind { .. } = t {
             return t;
@@ -459,6 +512,9 @@ impl<'a> Parser<'a> {
         let mut next_token = self.lexer.peek_token();
         while let TokenType::Compare(op) = next_token {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             let p = self.parse_concat();
             if let Node::ParseErrorKind { .. } = p {
                 return p;
@@ -481,6 +537,9 @@ impl<'a> Parser<'a> {
         let mut next_token = self.lexer.peek_token();
         while next_token == TokenType::And {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             let p = self.parse_term();
             if let Node::ParseErrorKind { .. } = p {
                 return p;
@@ -502,6 +561,9 @@ impl<'a> Parser<'a> {
         let mut next_token = self.lexer.peek_token();
         while let TokenType::Addition(op) = next_token {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             let p = self.parse_factor();
             if let Node::ParseErrorKind { .. } = p {
                 return p;
@@ -525,6 +587,9 @@ impl<'a> Parser<'a> {
         let mut next_token = self.lexer.peek_token();
         while let TokenType::Product(op) = next_token {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             let p = self.parse_prod();
             if let Node::ParseErrorKind { .. } = p {
                 return p;
@@ -547,6 +612,9 @@ impl<'a> Parser<'a> {
         let mut next_token = self.lexer.peek_token();
         while next_token == TokenType::Power {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             let p = self.parse_power();
             if let Node::ParseErrorKind { .. } = p {
                 return p;
@@ -568,6 +636,9 @@ impl<'a> Parser<'a> {
         let mut minus_count = 0;
         while let TokenType::Addition(op) = next_token {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             if op == token::OpSum::Minus {
                 minus_count += 1;
             }
@@ -587,6 +658,9 @@ impl<'a> Parser<'a> {
         next_token = self.lexer.peek_token();
         while next_token == TokenType::Percent {
             self.lexer.advance_token();
+            if let Some(e) = self.operator() {
+                return e;
+            }
             t = Node::UnaryKind {
                 kind: token::OpUnary::Percentage,
                 right: Box::new(t),

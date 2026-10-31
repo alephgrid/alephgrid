@@ -534,14 +534,14 @@ export class SqlWorkspace {
   private async exportResult(): Promise<void> {
     const v = await formDialog("Export the query result", [
       { name: "format", label: "Format", type: "select", value: "csv", options: [
-        { value: "csv", label: "CSV" }, { value: "parquet", label: "Parquet" }, { value: "json", label: "JSON lines" },
-      ], hint: "Writes every row of the result (not only the preview) from one consistent snapshot, then downloads the file once." },
+        { value: "csv", label: "CSV" }, { value: "csv_excel", label: "CSV for Excel or Sheets" }, { value: "parquet", label: "Parquet" }, { value: "json", label: "JSON lines" },
+      ], hint: "Writes every row of the result (not only the preview) from one consistent snapshot, then downloads the file once. \"CSV for Excel or Sheets\" puts a ' before text that a spreadsheet would run as a formula." },
     ], "Export");
     if (!v || !this.claim()) return;
     const sql = this.editor.value;
     const params = this.params();
     this.paramError.textContent = "";
-    const format = v.format as "csv" | "parquet" | "json";
+    const format = v.format as "csv" | "csv_excel" | "parquet" | "json";
     const out = await this.track("Exporting", "other", (opts) => this.rpc.request("export_query", { sql, params, format }, opts));
     if (!this.current(out.seq)) return;
     if ("error" in out) {

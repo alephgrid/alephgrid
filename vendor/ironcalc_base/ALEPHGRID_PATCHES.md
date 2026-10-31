@@ -63,3 +63,20 @@ Review this patch before each dependency upgrade and before the F.15 release gat
 Original crates.io archive checksum recorded in the pre-patch lockfile:
 `ecf55ea346dcda5e0f0034d8300dc2d40ffbcb64e7c4db23bfa1d8a0cf11c738`.
 This identifies the original archive, not the patched directory.
+
+## Security limits (SEC.07, SEC.09, SEC.12; 1 November 2026)
+
+- `evaluation.rs`, `model.rs`: an evaluation reads at most `visit_budget` cells
+  (`DEFAULT_VISIT_BUDGET`, set by Alephgrid through `set_evaluation_limits`), a range may
+  declare at most `MAX_RANGE_CELLS` and become an array of at most `MAX_ARRAY_CELLS`; a
+  `cancel` flag stops a running evaluation; `evaluation_stopped()` says why. `clip_to_used_area`
+  clips every range, not only whole rows and columns, and the COUNT/COUNTA/COUNTBLANK/AVERAGE/
+  AVERAGEA/MIN/MAX/AND/OR/XOR/CONCAT/MULTINOMIAL walkers clip through `clip_range`
+  (COUNTBLANK adds the skipped area as blanks).
+- `expressions/parser/mod.rs`: at most `MAX_FORMULA_CHARS` characters, `MAX_NESTING` levels
+  and `MAX_OPERATORS` operators per formula; beyond, a parse error node.
+- `user_model/common.rs`, `user_model/history.rs`: `set_queue_changes(false)` keeps no queue
+  for remote models; `forget_oldest_undo`, `undo_len`, `clear_history` let the host bound
+  the history.
+
+Regression evidence: alephgrid-core `tests::security`. These are not upstream behaviour.

@@ -236,13 +236,29 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
     std::fs::create_dir_all(&parent)?;
     let staging = parent.join(format!(".alephgrid-restore-{}", alephgrid_core::storage::now_ms()));
     let result = (|| -> Result<()> {
-        std::fs::create_dir_all(&staging)?;
+        // A new directory of its own: create_dir fails if anything is already there (SEC.14).
+        std::fs::create_dir(&staging).with_context(|| format!("cannot create the staging directory {}", staging.display()))?;
         for e in &manifest.workbooks {
+            for f in ["data.duckdb", "workbook.json"] {
+                let from = src.join(&e.id).join(f);
+                // Only plain files are restored: a link could point anywhere (SEC.14).
+                if std::fs::symlink_metadata(&from).map(|m| !m.file_type().is_file()).unwrap_or(true) {
+                    bail!("workbook {}'s {f} in the backup is not a plain file", e.id);
+                }
+            }
             let to = staging.join(&e.id);
             std::fs::create_dir_all(&to)?;
             alephgrid_core::storage::copy_durably(&src.join(&e.id).join("data.duckdb"), &to.join("data.duckdb"))?;
             alephgrid_core::storage::copy_durably(&src.join(&e.id).join("workbook.json"), &to.join("workbook.json"))?;
-            let wb = alephgrid_core::Workbook::open(&to.join("data.duckdb")).with_context(|| format!("restored workbook {} does not open", e.id))?;
+            // workbook.json must name the workbook the manifest and the database are bound to (SEC.02).
+            let meta: crate::state::WorkbookMeta = serde_json::from_slice(&std::fs::read(to.join("workbook.json"))?)
+                .with_context(|| format!("workbook {} has an unreadable workbook.json", e.id))?;
+            if meta.id != e.id {
+                bail!("workbook {}'s workbook.json names a different workbook ({:?})", e.id, meta.id);
+            }
+            // Opened with the engine locked down: nothing in the file runs with file or network access (SEC.01).
+            let wb = alephgrid_core::Workbook::open_locked(&to.join("data.duckdb"), &alephgrid_core::storage::Lockdown::default())
+                .with_context(|| format!("restored workbook {} does not open", e.id))?;
             let revision = wb.revision()?;
             if revision != e.revision {
                 bail!("restored workbook {} is at revision {revision}, the manifest says {}", e.id, e.revision);
@@ -274,4 +290,52 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
         return Err(e);
     }
     Ok(manifest)
+}
+
+/// Free bytes on the file system holding `dir`, when the platform says.
+pub fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `path` is a valid C string and `st` a writable statvfs.
+    let rc = unsafe { libc::statvfs(path.as_ptr(), &mut st) };
+    (rc == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+/// An online backup on disk.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupListing {
+    pub name: String,
+    pub created_at_ms: u64,
+    pub workbooks: usize,
+    pub bytes: u64,
+}
+
+/// The complete backups under `root`, newest first.
+pub fn list(root: &Path) -> Result<Vec<BackupListing>> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else { return Ok(out) };
+    for e in entries {
+        let dir = e?.path();
+        let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let Some(ms) = name.strip_prefix("backup-").and_then(|m| m.parse::<u64>().ok()) else { continue };
+        let Ok(bytes) = std::fs::read(dir.join("manifest.json")) else { continue };
+        let Ok(manifest) = serde_json::from_slice::<BackupManifest>(&bytes) else { continue };
+        let size = manifest.workbooks.iter().map(|w| w.bytes).sum();
+        out.push(BackupListing { name, created_at_ms: ms, workbooks: manifest.workbooks.len(), bytes: size });
+    }
+    out.sort_by_key(|b| std::cmp::Reverse(b.created_at_ms));
+    Ok(out)
+}
+
+/// Remove all but the newest `keep` complete backups under `root` (and any incomplete one
+/// older than the newest). Returns how many were removed.
+pub fn prune(root: &Path, keep: usize) -> Result<usize> {
+    let all = list(root)?;
+    let mut removed = 0;
+    for b in all.iter().skip(keep.max(1)) {
+        std::fs::remove_dir_all(root.join(&b.name))?;
+        removed += 1;
+    }
+    Ok(removed)
 }

@@ -67,6 +67,7 @@ impl From<anyhow::Error> for ApiError {
                 Denied::Forbidden(_) | Denied::Refused(_) => StatusCode::FORBIDDEN,
                 Denied::NotFound(_) => StatusCode::NOT_FOUND,
                 Denied::BadRequest(_) => StatusCode::BAD_REQUEST,
+                Denied::Conflict(_) => StatusCode::CONFLICT,
             };
             return ApiError::new(status, d.to_string());
         }
@@ -241,7 +242,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/workbooks/{id}/runtime", get(runtime_status_handler).post(runtime_action))
         .route("/api/admin/resources", get(resources))
         .route("/api/admin/sessions", get(sessions))
-        .route("/api/admin/backups", post(create_backup))
+        .route("/api/admin/backups", post(create_backup).get(list_backups))
+        .route("/api/admin/backups/{name}", axum::routing::delete(delete_backup))
         .route("/api/admin/audit", get(crate::auth::routes::instance_audit))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
@@ -266,9 +268,35 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         None => app.fallback(static_asset),
     };
     app.layer(middleware::from_fn_with_state(state.clone(), guard))
+        .layer(middleware::from_fn(browser_headers))
         .with_state(state)
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+/// The browser boundary on every response (SEC.03): pages run only this server's own
+/// scripts, connect only back to it, cannot be framed, and send no referrer.
+async fn browser_headers(req: Request, next: Next) -> Response {
+    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let mut res = next.run(req).await;
+    // WebSockets back to the page's own host; 'self' does not cover ws: in every browser.
+    let sockets = if !host.is_empty() && host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b)) {
+        format!(" ws://{host} wss://{host}")
+    } else {
+        String::new()
+    };
+    let csp = format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; \
+         connect-src 'self'{sockets}; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    );
+    let h = res.headers_mut();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&csp) {
+        h.insert(header::CONTENT_SECURITY_POLICY, v);
+    }
+    h.insert(header::REFERRER_POLICY, axum::http::HeaderValue::from_static("no-referrer"));
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff"));
+    h.insert(header::X_FRAME_OPTIONS, axum::http::HeaderValue::from_static("DENY"));
+    res
 }
 
 /// Host part of a `Host` header or URL authority, lower case, without the port.
@@ -582,13 +610,62 @@ async fn runtime_action(
 async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
     state.auth.require_instance_admin(&p)?;
     let out = blocking(move || {
-        let dest = state.config.data_dir.join(".backups").join(format!("backup-{}", alephgrid_core::storage::now_ms()));
-        let manifest = crate::backup::backup_online(&state, &dest)?;
-        state.auth.audit(&p, "backup_created", None, None, None, json!({ "workbooks": manifest.workbooks.len() }));
-        Ok(json!({ "path": dest, "manifest": manifest }))
+        // One at a time, not too often, only with room for it, and only the newest few kept (SEC.11).
+        let Ok(_running) = state.backup_running.try_lock() else {
+            bail!(crate::auth::Denied::Conflict("a backup is already running; wait for it to finish".into()));
+        };
+        if let Some(at) = *state.last_backup.lock().unwrap() {
+            let wait = state.config.backup_interval.saturating_sub(at.elapsed());
+            if !wait.is_zero() {
+                bail!(crate::auth::Denied::Conflict(format!("the last backup finished moments ago; try again in {} s", wait.as_secs().max(1))));
+            }
+        }
+        let root = state.config.data_dir.join(".backups");
+        std::fs::create_dir_all(&root)?;
+        let needed: u64 = state.list()?.iter().map(|w| crate::state::database_bytes(&state.workbook_dir(&w.meta.id))).sum();
+        if let Some(free) = crate::backup::free_bytes(&root) {
+            if free < needed + needed / 10 + (64 << 20) {
+                bail!(alephgrid_core::limits::TooLarge(format!(
+                    "not enough free disk for a backup: it needs about {} MiB, {} MiB are free",
+                    needed >> 20,
+                    free >> 20
+                )));
+            }
+        }
+        let dest = root.join(format!("backup-{}", alephgrid_core::storage::now_ms()));
+        let manifest = crate::backup::backup_online(&state, &dest);
+        *state.last_backup.lock().unwrap() = Some(std::time::Instant::now());
+        let manifest = manifest?;
+        let removed = crate::backup::prune(&root, state.config.backups_kept)?;
+        state.auth.audit(&p, "backup_created", None, None, None, json!({ "workbooks": manifest.workbooks.len(), "removed": removed }));
+        Ok(json!({ "path": dest, "name": dest.file_name().map(|n| n.to_string_lossy().to_string()), "manifest": manifest }))
     })
     .await?;
     Ok(Json(out))
+}
+
+/// The online backups under `<data-dir>/.backups`, newest first.
+async fn list_backups(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    state.auth.require_instance_admin(&p)?;
+    Ok(Json(blocking(move || crate::backup::list(&state.config.data_dir.join(".backups"))).await?))
+}
+
+async fn delete_backup(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
+    state.auth.require_instance_admin(&p)?;
+    blocking(move || {
+        if !name.starts_with("backup-") || !crate::state::valid_id(&name) {
+            bail!(crate::auth::not_found("backup not found"));
+        }
+        let dir = state.config.data_dir.join(".backups").join(&name);
+        if !dir.join("manifest.json").exists() {
+            bail!(crate::auth::not_found("backup not found"));
+        }
+        std::fs::remove_dir_all(&dir)?;
+        state.auth.audit(&p, "backup_deleted", None, None, None, json!({ "name": name }));
+        Ok(())
+    })
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Open connections with their unsent bytes (to see slow clients).
@@ -606,7 +683,12 @@ async fn sessions(State(state): State<Shared>, Extension(p): Extension<Principal
 
 async fn resources(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
     state.auth.require_instance_admin(&p)?;
-    Ok(Json(blocking(move || Ok(state.controller.usage())).await?))
+    Ok(Json(blocking(move || {
+        let mut usage = state.controller.usage();
+        usage.workbook_size_limit = state.config.max_workbook_bytes;
+        Ok(usage)
+    })
+    .await?))
 }
 
 /// Rename, star or move a workbook. Moving needs `delete` where it is and `create` where it goes.
@@ -738,6 +820,7 @@ async fn import_file(
     // One of the space's bulk-job slots while this runs (7.07).
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
+    state.check_workbook_size(&id)?;
     let file_name = upload_name(&q.filename)?;
     let (scratch, path, size) = receive(&state, &id, &file_name, &headers, body).await?;
     let import_path = path.clone();
@@ -880,10 +963,16 @@ async fn stage_upload(
     // One of the space's bulk-job slots while this runs (7.07).
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
+    state.check_workbook_size(&id)?;
     let file_name = upload_name(&q.filename)?;
     let (dir, path, size_bytes) = receive(&state, &id, &file_name, &headers, body).await?;
     let p = path.clone();
-    let preview = h.run(http_job(Class::Bulk, &state), None, None, Work::Write(Box::new(move |wb| wb.preview_any(&p, &[])))).await;
+    let xlsx = alephgrid_core::Workbook::is_xlsx(&path);
+    let preview = if xlsx {
+        preview_xlsx(path.clone()).await
+    } else {
+        h.run(http_job(Class::Bulk, &state), None, None, Work::Write(Box::new(move |wb| wb.preview_any(&p, &[])))).await.map_err(ApiError::from)
+    };
     match preview {
         Ok(preview) => {
             let upload_id = state.add_upload(crate::state::Upload {
@@ -892,13 +981,14 @@ async fn stage_upload(
                 dir,
                 size_bytes,
                 touched: std::time::Instant::now(),
+                preview: xlsx.then(|| preview.clone()),
             });
             Ok(Json(UploadCreated { upload_id, filename: file_name, size_bytes, preview }))
         }
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&dir).await;
             state.controller.release_upload(size_bytes);
-            Err(e.into())
+            Err(e)
         }
     }
 }
@@ -914,8 +1004,22 @@ async fn preview_upload(
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
+    if let Some(preview) = u.preview {
+        return Ok(Json(preview));
+    }
     let work = Work::Write(Box::new(move |wb: &mut alephgrid_core::Workbook| wb.preview_any(&u.path, &req.types)));
     Ok(Json(h.run(http_job(Class::Bulk, &state), None, None, work).await?))
+}
+
+/// Parse an .xlsx for its preview off every workbook's writer, a few at a time across the
+/// server, so a large or hostile file cannot hold a workbook's lock (SEC.08).
+async fn preview_xlsx(path: std::path::PathBuf) -> ApiResult<alephgrid_core::UploadPreview> {
+    static PARSERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let _permit = PARSERS.acquire().await.map_err(|e| ApiError::from(anyhow::anyhow!(e)))?;
+    tokio::task::spawn_blocking(move || alephgrid_core::Workbook::preview_xlsx_file(&path))
+        .await
+        .map_err(|e| ApiError::from(anyhow::anyhow!("the preview stopped: {e}")))?
+        .map_err(ApiError::from)
 }
 
 /// Import a staged upload. On failure the upload is kept, so the user can change column
@@ -930,6 +1034,7 @@ async fn import_upload(
     // One of the space's bulk-job slots while this runs (7.07).
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
+    state.check_workbook_size(&id)?;
     let u = state.upload(&id, &upload)?;
     {
         let (st, sp, n) = (state.clone(), space.id.clone(), u.size_bytes);

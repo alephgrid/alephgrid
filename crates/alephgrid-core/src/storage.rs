@@ -170,10 +170,70 @@ pub(crate) const V8_SCHEMA: &str = "
         undoes BIGINT, undone_by BIGINT, before_rows VARCHAR NOT NULL, after_rows VARCHAR NOT NULL, cells VARCHAR NOT NULL
     );";
 
+/// How the engine is closed to the outside world from the moment a workbook file is opened
+/// (SEC.01): a file can carry views and macros, so nothing in it may run with the engine's
+/// permissive defaults. No files or URLs other than under `allowed`, no extension installs
+/// or loads, plus engine `settings` such as `temp_directory`.
+#[derive(Debug, Clone, Default)]
+pub struct Lockdown {
+    pub allowed: Vec<PathBuf>,
+    pub settings: Vec<(String, String)>,
+}
+
+impl Lockdown {
+    /// The `allowed_directories` list as a SQL list literal.
+    pub fn allowed_list(&self) -> String {
+        let dirs: Vec<String> = self
+            .allowed
+            .iter()
+            .map(|p| {
+                let mut s = p.to_string_lossy().to_string();
+                if !s.ends_with(std::path::MAIN_SEPARATOR) {
+                    s.push(std::path::MAIN_SEPARATOR);
+                }
+                lit(&s)
+            })
+            .collect();
+        format!("[{}]", dirs.join(", "))
+    }
+
+    fn config(&self) -> Result<duckdb::Config> {
+        let mut c = duckdb::Config::default()
+            .enable_autoload_extension(false)?
+            .with("autoinstall_known_extensions", "false")?
+            .with("allow_community_extensions", "false")?;
+        for (k, v) in &self.settings {
+            c = c.with(k, v)?;
+        }
+        if self.allowed.is_empty() {
+            c = c.enable_external_access(false)?;
+        }
+        Ok(c)
+    }
+}
+
+fn connect(path: &Path, lock: Option<&Lockdown>) -> Result<Connection> {
+    let Some(l) = lock else {
+        return Connection::open(path).with_context(|| format!("opening workbook {}", path.display()));
+    };
+    let conn = Connection::open_with_flags(path, l.config()?).with_context(|| format!("opening workbook {}", path.display()))?;
+    // The engine cannot take a directory list as a startup option: the very first statements
+    // on the connection, before anything stored in the file is read, close it instead.
+    if !l.allowed.is_empty() {
+        conn.execute_batch(&format!("SET allowed_directories = {}; SET enable_external_access = false;", l.allowed_list()))?;
+    }
+    Ok(conn)
+}
+
 /// Bring a database at `path` to [`FORMAT`], copying it first when it is migrated.
 /// Returns the open connection.
 pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {
-    let conn = Connection::open(path).with_context(|| format!("opening workbook {}", path.display()))?;
+    open_with(path, None)
+}
+
+/// [`open`] with the engine locked down before the file is read (see [`Lockdown`]).
+pub fn open_with(path: &Path, lock: Option<&Lockdown>) -> Result<(Connection, OpenReport)> {
+    let conn = connect(path, lock)?;
     let found = format_of(&conn)?;
     if found > FORMAT {
         bail!(TooNew { found });
@@ -190,7 +250,7 @@ pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {
     drop(conn);
     let backup = backup_path(path, found);
     copy_durably(path, &backup)?;
-    let conn = Connection::open(path)?;
+    let conn = connect(path, lock)?;
     migrate(&conn, found)?;
     conn.execute_batch("CHECKPOINT;")?;
     Ok((conn, OpenReport { migrated_from: Some(found), backup: Some(backup) }))

@@ -104,6 +104,8 @@ pub struct Sheets {
     layouts: Vec<u64>,
     /// Worker (Python) functions, evaluated from their result cache (phase 8).
     external: Option<ironcalc::base::external::ExternalHook>,
+    /// Set from outside (a deadline or cancel) to stop a running evaluation (SEC.07).
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -131,6 +133,7 @@ impl Sheets {
             stamp: 0,
             layouts: vec![],
             external: None,
+            cancel: None,
         })
     }
 
@@ -140,9 +143,19 @@ impl Sheets {
         self.attach();
     }
 
+    /// Stop evaluations when `flag` becomes true (see [`crate::Workbook::sheet_cancel`]).
+    pub fn set_cancel(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.cancel = Some(flag);
+        self.attach();
+    }
+
     fn attach(&mut self) {
         if let Some(m) = self.model.as_mut() {
             m.set_external_functions(self.external.clone());
+            // Every evaluation is bounded (SEC.07): cells read, arrays held, and a cancel.
+            m.set_evaluation_limits(crate::limits::SHEET_EVALUATION_CELLS, self.cancel.clone());
+            // Nothing reads the engine's queue of changes for a remote copy: keep none (SEC.12).
+            m.set_queue_changes(false);
         }
     }
 
@@ -161,6 +174,9 @@ impl Sheets {
 
     /// Start a change made by `actor` that will commit as revision `stamp`.
     pub fn begin(&mut self, stamp: u64, actor: Option<String>) {
+        if let Some(c) = &self.cancel {
+            c.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         self.sync_history();
         self.actor = actor;
         self.stamp = stamp;
@@ -257,6 +273,40 @@ impl Sheets {
             self.undo_groups.push(entries);
             self.redo_groups.clear();
         }
+        self.trim_history();
+    }
+
+    /// Keep the undo history within [`crate::limits::SHEET_UNDO_STEPS`] steps and
+    /// [`crate::limits::SHEET_UNDO_ENTRIES`] cell changes, forgetting the oldest (SEC.12).
+    fn trim_history(&mut self) {
+        let mut dropped = false;
+        while self.undo_groups.len() > 1
+            && (self.undo_groups.len() > crate::limits::SHEET_UNDO_STEPS
+                || self.undo_groups.iter().map(|&n| n as usize).sum::<usize>() > crate::limits::SHEET_UNDO_ENTRIES)
+        {
+            self.undo_groups.remove(0);
+            if !self.undo_actors.is_empty() {
+                self.undo_actors.remove(0);
+            }
+            dropped = true;
+        }
+        if dropped {
+            let kept: usize = self.undo_groups.iter().map(|&n| n as usize).sum();
+            if let Some(m) = self.model.as_mut() {
+                let extra = m.undo_len().saturating_sub(kept);
+                m.forget_oldest_undo(extra);
+            }
+        }
+    }
+
+    /// Undo steps the engine keeps (for tests of the trim).
+    pub fn engine_undo_len(&self) -> usize {
+        self.model.as_ref().map(|m| m.undo_len()).unwrap_or(0)
+    }
+
+    /// Changes queued for a remote model (always none: nothing is sent, SEC.12).
+    pub fn queued_changes(&self) -> usize {
+        self.model.as_ref().map(|m| m.queued_changes()).unwrap_or(0)
     }
 
     pub fn has_function_name(&self, name: &str) -> bool {
@@ -280,7 +330,10 @@ impl Sheets {
         if exists { model.update_defined_name(&d.name, None, &d.name, None, &formula).map_err(|e| anyhow!(e))?; }
         else { model.new_defined_name(&d.name, None, &formula).map_err(|e| anyhow!(e))?; }
         model.evaluate();
+        // The engine's history would otherwise keep steps no undo group reaches (SEC.12).
+        model.clear_history();
         self.undo_groups.clear(); self.redo_groups.clear();
+        self.undo_actors.clear(); self.redo_actors.clear();
         Ok(())
     }
 
@@ -511,6 +564,17 @@ impl Sheets {
         })();
         m.resume_evaluation();
         m.evaluate();
+        // An edit whose formulas cannot be evaluated within the limits is taken back
+        // whole: its cells return to what they held, and nothing enters the history (SEC.07).
+        if let Some(reason) = m.evaluation_stopped().map(str::to_string) {
+            for _ in 0..entries {
+                m.undo().map_err(|e| anyhow!(e))?;
+            }
+            m.evaluate();
+            self.redo_groups.clear();
+            self.redo_actors.clear();
+            bail!(crate::limits::TooLarge(format!("this edit was not applied: {reason}")));
+        }
         self.record(entries);
         result
     }
@@ -519,7 +583,12 @@ impl Sheets {
     /// prefix is added when IronCalc would otherwise read them as numbers, dates or
     /// booleans). Used when copying query results, where `"00123"` must not become 123.
     pub fn set_values(&mut self, index: u32, inputs: &[(SheetInput, bool)]) -> Result<()> {
-        let plain: Vec<SheetInput> = inputs.iter().map(|(i, _)| i.clone()).collect();
+        // Text that looks like a formula is written as text from the start: written as it
+        // is, a formula whose result is text would stay a live formula (SEC.13).
+        let plain: Vec<SheetInput> = inputs
+            .iter()
+            .map(|(i, text)| if *text && i.value.starts_with('=') { SheetInput { value: format!("'{}", i.value), ..i.clone() } } else { i.clone() })
+            .collect();
         self.set(index, &plain)?;
         let m = self.model()?;
         let fix: Vec<SheetInput> = inputs
@@ -652,12 +721,25 @@ impl Sheets {
     pub fn import_xlsx(&mut self, path: &std::path::Path) -> Result<(Vec<SheetInfo>, Vec<String>)> {
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "import".into());
         let bytes = std::fs::read(path)?;
+        check_xlsx_size(&bytes)?;
         let mut warnings = xlsx_part_warnings(&bytes);
         let workbook = ironcalc::import::load_from_xlsx_bytes(&bytes, &name, "en", "UTC")
             .map_err(|e| anyhow!("could not read xlsx: {e}"))?;
+        drop(bytes);
+        let cells: usize = workbook.worksheets.iter().map(|w| w.sheet_data.cells().count()).sum();
+        if cells > crate::limits::XLSX_MAX_CELLS {
+            bail!(crate::limits::TooLarge(format!(
+                "this .xlsx holds {cells} cells; sheets take at most {} (import large data as a table from CSV or Parquet)",
+                crate::limits::XLSX_MAX_CELLS
+            )));
+        }
         let imported = ironcalc::base::Model::from_workbook(workbook, LANG).map_err(|e| anyhow!(e))?;
         let mut imported = UserModel::from_model(imported);
+        imported.set_evaluation_limits(crate::limits::SHEET_EVALUATION_CELLS, self.cancel.clone());
         imported.evaluate();
+        if let Some(reason) = imported.evaluation_stopped() {
+            bail!(crate::limits::TooLarge(format!("this .xlsx could not be calculated: {reason}")));
+        }
         warnings.extend(unsupported_function_warning(&imported));
         if self.model.is_none() {
             self.changes += 1;
@@ -987,6 +1069,26 @@ const UNSUPPORTED_PARTS: &[(&str, &str)] = &[
     ("xl/threadedComments/", "Threaded comments were not imported."),
     ("xl/slicers/", "Slicers were not imported."),
 ];
+
+/// Refuse an .xlsx before it is parsed when its parts would expand beyond what a sheet
+/// import may hold (SEC.08): the archive must state its sizes, and they must stay within
+/// [`crate::limits::XLSX_MAX_EXPANDED_BYTES`] and a ratio of the file's own size.
+fn check_xlsx_size(bytes: &[u8]) -> Result<()> {
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| anyhow!("could not read xlsx: {e}"))?;
+    let Some(expanded) = archive.decompressed_size() else {
+        bail!("could not read xlsx: the archive does not state the size of its parts");
+    };
+    let cap = (crate::limits::XLSX_MAX_EXPANDED_BYTES as u128)
+        .min((bytes.len() as u128).saturating_mul(crate::limits::XLSX_MAX_RATIO as u128).max(crate::limits::XLSX_MIN_ALLOWANCE as u128));
+    if expanded > cap {
+        bail!(crate::limits::TooLarge(format!(
+            "this .xlsx expands to {} MB, more than a sheet import may hold ({} MB); import large data as a table from CSV or Parquet",
+            expanded >> 20,
+            cap >> 20
+        )));
+    }
+    Ok(())
+}
 
 fn xlsx_part_warnings(bytes: &[u8]) -> Vec<String> {
     let Ok(archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return vec![] };

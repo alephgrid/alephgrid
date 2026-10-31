@@ -22,11 +22,11 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       - uses: Swatinem/rust-cache@v2
       - name: Property and state-machine tests, 2000 cases
-        run: cargo test -p alephgrid-core --lib props
+        run: cargo test --locked -p alephgrid-core --lib props
         env:
           PROPTEST_CASES: "2000"
       - name: Integration and crash suites, repeated to surface flakiness
-        run: for i in 1 2 3 4 5; do cargo test -p alephgrid-server || exit 1; done
+        run: for i in 1 2 3 4 5; do cargo test --locked -p alephgrid-server || exit 1; done
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

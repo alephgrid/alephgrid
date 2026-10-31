@@ -133,6 +133,13 @@ impl Workbook {
         Self::init(conn, report)
     }
 
+    /// [`Workbook::open`] with the engine locked down before anything in the file is read
+    /// (SEC.01). The server opens every workbook this way.
+    pub fn open_locked(path: &Path, lock: &storage::Lockdown) -> Result<Workbook> {
+        let (conn, report) = storage::open_with(path, Some(lock))?;
+        Self::init(conn, report)
+    }
+
     pub fn open_in_memory() -> Result<Workbook> {
         Self::init(storage::open_in_memory()?, OpenReport::default())
     }
@@ -154,6 +161,12 @@ impl Workbook {
         // cached results show at once.
         wb.set_function_runtime(None, None)?;
         Ok(wb)
+    }
+
+    /// Set to true to stop the sheet evaluation running for this workbook (SEC.07); the
+    /// edit that started it is taken back. Reset at the start of each change.
+    pub fn sheet_cancel(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.shared.sheet_cancel.clone()
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -498,6 +511,18 @@ impl Workbook {
         Ok(())
     }
 
+    /// The sheets an .xlsx upload would add, without a workbook: the server runs this off
+    /// the workbook's writer (SEC.08).
+    pub fn preview_xlsx_file(path: &Path) -> Result<UploadPreview> {
+        let (sheets, warnings) = Sheets::preview_xlsx(path)?;
+        Ok(UploadPreview::Sheets { sheets, warnings })
+    }
+
+    /// Whether an upload is an .xlsx (previewed and imported into sheets).
+    pub fn is_xlsx(path: &Path) -> bool {
+        path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx")
+    }
+
     /// Preview any supported upload: a table preview, or the sheets an .xlsx would add.
     pub fn preview_any(&self, path: &Path, types: &[ColumnType]) -> Result<UploadPreview> {
         if path.to_string_lossy().to_ascii_lowercase().ends_with(".xlsx") {
@@ -689,7 +714,8 @@ impl Workbook {
     pub fn add_column(&mut self, table: &str, name: &str, sql_type: &str) -> Result<()> {
         self.ensure_new_column(table, name, None)?;
         let ty = sql_type.trim();
-        if ty.is_empty() || !ty.chars().all(|c| c.is_ascii_alphanumeric() || " (),".contains(c)) {
+        // One of the types an import override may name, never an expression (SEC.10).
+        if !import::valid_override_type(ty) {
             bail!("invalid column type {sql_type:?}");
         }
         self.mutating("add_column", None, |wb| {
@@ -751,6 +777,11 @@ impl Workbook {
                 .iter()
                 .any(|(n, _)| formula::same_name(n, column)),
         })
+    }
+
+    /// The language a formula column is written in (the server gates SQL ones, SEC.10).
+    pub fn formula_language(&self, table: &str, name: &str) -> Result<FormulaLanguage> {
+        self.language_of(table, name)
     }
 
     pub fn update_formula(&mut self, table: &str, name: &str, formula: &str) -> Result<()> {
@@ -1596,6 +1627,7 @@ impl Workbook {
         let layouts = storage::meta_get(&self.conn, SHEET_LAYOUTS)?.and_then(|v| serde_json::from_str(&v).ok());
         sheets.set_layouts(layouts, storage::revision(&self.conn)?);
         sheets.set_external(Some(self.shared.external_hook()));
+        sheets.set_cancel(self.shared.sheet_cancel.clone());
         Ok(sheets)
     }
 
@@ -1770,25 +1802,23 @@ impl Workbook {
     /// `allowed` (the workbook's own scratch directories), no extension installs or loads.
     /// Once applied it cannot be undone from SQL, or at all while the database is open.
     pub fn restrict_access(&self, allowed: &[&Path]) -> Result<()> {
-        let dirs: Vec<String> = allowed
-            .iter()
-            .map(|p| {
-                let mut s = p.to_string_lossy().to_string();
-                if !s.ends_with(std::path::MAIN_SEPARATOR) {
-                    s.push(std::path::MAIN_SEPARATOR);
-                }
-                lit(&s)
-            })
-            .collect();
+        let lock = storage::Lockdown { allowed: allowed.iter().map(|p| p.to_path_buf()).collect(), settings: vec![] };
         self.conn.execute_batch(&format!(
-            "SET allowed_directories = [{}];
+            "SET allowed_directories = {};
              SET autoinstall_known_extensions = false;
              SET autoload_known_extensions = false;
              SET allow_community_extensions = false;
              SET enable_external_access = false;",
-            dirs.join(", ")
+            lock.allowed_list()
         ))?;
         Ok(())
+    }
+
+    /// Whether the engine refuses files, URLs and extensions outside its allowed directories.
+    pub fn is_locked_down(&self) -> Result<bool> {
+        Ok(self.setting("enable_external_access")? == "false"
+            && self.setting("autoload_known_extensions")? == "false"
+            && self.setting("autoinstall_known_extensions")? == "false")
     }
 
     /// Run SQL directly, bypassing the policy (tests inspect internals with it).

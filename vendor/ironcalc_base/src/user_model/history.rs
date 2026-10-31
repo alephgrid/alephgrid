@@ -326,6 +326,18 @@ pub(crate) struct History {
 }
 
 impl History {
+    /// Forget the oldest `count` undo steps (Alephgrid patch, SEC.12).
+    pub(crate) fn forget_oldest(&mut self, count: usize) {
+        let n = count.min(self.undo_stack.len());
+        self.undo_stack.drain(..n);
+    }
+
+    /// Forget every undo and redo step.
+    pub(crate) fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
     pub fn push(&mut self, diff_list: DiffList) {
         self.undo_stack.push(diff_list);
         self.redo_stack = vec![];

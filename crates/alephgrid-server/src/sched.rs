@@ -163,6 +163,9 @@ impl Inner {
 pub struct Scheduler {
     inner: Mutex<Inner>,
     limits: Limits,
+    /// Stops a sheet evaluation running on the writer lane (SEC.07); DuckDB's interrupt
+    /// does not reach it.
+    sheet_cancel: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// A job's place in the scheduler. Dropping it withdraws the job or frees its slot.
@@ -185,7 +188,13 @@ impl Scheduler {
                 total: 0,
             }),
             limits,
+            sheet_cancel: Mutex::new(None),
         })
+    }
+
+    /// Interrupting the writer also sets `flag` (see [`Scheduler::interrupt`]).
+    pub fn set_sheet_cancel(&self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        *self.sheet_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(flag);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -270,6 +279,11 @@ impl Scheduler {
         for l in [&inner.read, &inner.write] {
             if let Some(s) = l.slots.iter().position(|s| s.is_some_and(|(k, _)| k == key)) {
                 l.interrupts[s].interrupt();
+                if std::ptr::eq(l, &inner.write) {
+                    if let Some(f) = self.sheet_cancel.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                        f.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
                 return true;
             }
         }

@@ -259,7 +259,9 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
   owner/editor/viewer roles are enforced on every HTTP route and WebSocket operation, and service
   tokens act for one space. See [TEAMS.md](TEAMS.md).
 * User SQL and formulas are checked by the SQL policy (below) and run in a database that is
-  closed to the outside world. `--disable-sql` additionally refuses every user-SQL operation.
+  closed to the outside world. `--disable-sql` additionally refuses every operation that runs
+  user-written SQL: the console, saved queries, tables from queries, SQL formula columns and SQL
+  functions (spreadsheet formulas, analysis and Python functions stay).
 * Saved queries live in the workbook and are visible to anyone who can open it (any role in its
   space); the unsaved editor draft stays in the browser that typed it.
 * All workbooks of a server share one process (`shared_process`): resource limits are DuckDB-level,

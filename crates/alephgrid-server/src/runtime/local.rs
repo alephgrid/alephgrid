@@ -75,24 +75,29 @@ impl LocalProvider {
         std::fs::create_dir_all(&temp).map_err(|e| startup(e.into()))?;
         let result = (|| {
             crate::state::fault_at("open_workbook", req.workbook_dir).map_err(startup)?;
-            let engine = Workbook::open(&req.workbook_dir.join("data.duckdb")).map_err(startup)?;
+            // The engine is locked down before it reads anything in the file (SEC.01): the
+            // database may read and write only this workbook's scratch directories; user SQL
+            // and anything stored in the file cannot reach files, URLs or extensions (4.07).
+            let data_dir = req.workbook_dir.parent().unwrap_or(req.workbook_dir);
+            let dirs = crate::state::allowed_dirs(data_dir, req.workbook, &temp).map_err(startup)?;
+            let lockdown = alephgrid_core::storage::Lockdown {
+                allowed: dirs,
+                settings: vec![
+                    ("memory_limit".into(), format!("{}B", req.engine_memory_bytes)),
+                    ("threads".into(), req.reservation.threads.max(1).to_string()),
+                    ("temp_directory".into(), temp.to_string_lossy().to_string()),
+                    ("max_temp_directory_size".into(), format!("{}B", req.reservation.temp_disk_bytes.max(1 << 20))),
+                ],
+            };
+            let engine = Workbook::open_locked(&req.workbook_dir.join("data.duckdb"), &lockdown).map_err(startup)?;
             if let Some(from) = engine.open_report().migrated_from {
                 tracing::info!(workbook = req.workbook, "migrated storage format {from} → {}", alephgrid_core::storage::FORMAT);
             }
             engine.bind_identity(req.workbook).map_err(startup)?;
             (req.checkpoint)(AllocationState::Running)?;
-            let settings = vec![
-                ("memory_limit", format!("{}B", req.engine_memory_bytes)),
-                ("threads", req.reservation.threads.max(1).to_string()),
-                ("temp_directory", temp.to_string_lossy().to_string()),
-                ("max_temp_directory_size", format!("{}B", req.reservation.temp_disk_bytes.max(1 << 20))),
-            ];
-            engine.configure(&settings).map_err(startup)?;
-            // The database may read and write only this workbook's scratch directories; user
-            // SQL cannot reach files, URLs or extensions (4.07).
-            let data_dir = req.workbook_dir.parent().unwrap_or(req.workbook_dir);
-            let dirs = crate::state::allowed_dirs(data_dir, req.workbook, &temp).map_err(startup)?;
-            engine.restrict_access(&dirs.iter().map(|d| d.as_path()).collect::<Vec<_>>()).map_err(startup)?;
+            if !engine.is_locked_down().map_err(startup)? {
+                return Err(startup(anyhow::anyhow!("the engine did not apply its access restrictions")));
+            }
             // Health check before serving.
             engine.revision().map_err(startup)?;
             let ownership = OwnershipAssignment {
@@ -136,7 +141,8 @@ impl RuntimeProvider for LocalProvider {
 
     fn stop(&self, handle: &WorkbookHandle) -> Result<()> {
         handle.close()?;
-        let _ = std::fs::remove_dir_all(self.temp_dir(&handle.id));
+        // The scratch directory recorded at start, derived from the validated request id (SEC.02).
+        let _ = std::fs::remove_dir_all(&handle.temp_dir);
         Ok(())
     }
 

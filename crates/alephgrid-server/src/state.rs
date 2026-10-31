@@ -132,6 +132,10 @@ pub struct WorkbookHandle {
     /// without the engine lock (which that statement holds).
     pub progress: duckdb_handles::ProgressHandle,
     pub interrupt: Arc<duckdb_handles::InterruptHandle>,
+    /// Stops a running sheet evaluation (SEC.07).
+    sheet_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The sheets' change count at the last memory estimate (SEC.12).
+    sheet_seen: AtomicU64,
     reader_interrupts: Vec<Arc<duckdb_handles::InterruptHandle>>,
     reader_progress: Vec<duckdb_handles::ProgressHandle>,
     /// Orders and bounds the work on this workbook (see `sched.rs`).
@@ -238,11 +242,16 @@ impl WorkbookHandle {
         let control = engine.reader()?;
         let (events, _) = broadcast::channel(256);
         let reader_interrupts: Vec<_> = readers.iter().map(|r| r.interrupt_handle()).collect();
+        let sched = Scheduler::new(engine.interrupt_handle(), reader_interrupts.clone(), crate::sched::Limits::default());
+        sched.set_sheet_cancel(engine.sheet_cancel());
+        let sheet_cancel = engine.sheet_cancel();
         Ok(WorkbookHandle {
             id: meta.id.clone(),
             progress: engine.progress_handle(),
             interrupt: engine.interrupt_handle(),
-            sched: Scheduler::new(engine.interrupt_handle(), reader_interrupts.clone(), crate::sched::Limits::default()),
+            sched,
+            sheet_cancel,
+            sheet_seen: AtomicU64::new(u64::MAX),
             reader_interrupts,
             reader_progress: readers.iter().map(|r| r.progress_handle()).collect(),
             job: Mutex::new(None),
@@ -706,6 +715,7 @@ impl WorkbookHandle {
         if self.active() > 0 {
             tracing::warn!(workbook = self.id.as_str(), active = self.active(), "drain deadline passed; interrupting");
             self.interrupt.interrupt();
+            self.sheet_cancel.store(true, Ordering::SeqCst);
             for i in &self.reader_interrupts {
                 i.interrupt();
             }
@@ -749,7 +759,19 @@ impl WorkbookHandle {
     /// Rough memory the sheet model takes: 8 × its serialized size (IronCalc keeps parsed
     /// formulas, styles and indexes in memory). An estimate for the budget, not a measurement.
     pub fn sheet_memory_estimate(&self) -> u64 {
-        self.with_control(|c| Ok(c.sheets().to_bytes().map(|b| b.len() as u64 * 8).unwrap_or(0))).unwrap_or(0)
+        self.with_control(|c| {
+            let s = c.sheets();
+            self.sheet_seen.store(s.changes(), Ordering::SeqCst);
+            Ok(s.to_bytes().map(|b| b.len() as u64 * 8).unwrap_or(0))
+        })
+        .unwrap_or(0)
+    }
+
+    /// [`WorkbookHandle::sheet_memory_estimate`] again when the sheets changed since the
+    /// last estimate (SEC.12).
+    pub fn sheet_estimate_if_changed(&self) -> Option<u64> {
+        let changes = self.with_control(|c| Ok(c.sheets().changes())).ok()?;
+        (changes != self.sheet_seen.load(Ordering::SeqCst)).then(|| self.sheet_memory_estimate())
     }
 
     pub fn expire_views(&self, ttl_ms: u64) -> usize {
@@ -850,6 +872,13 @@ pub struct Config {
     pub max_message_bytes: usize,
     /// Largest file upload.
     pub max_upload_bytes: u64,
+    /// Largest a workbook's database may grow; operations that add data are refused past
+    /// it (deleting stays possible). None: no limit (SEC.11).
+    pub max_workbook_bytes: Option<u64>,
+    /// Online backups kept under `<data-dir>/.backups` (older ones are removed), and the
+    /// least time between two (SEC.11).
+    pub backups_kept: usize,
+    pub backup_interval: Duration,
     /// Default and longest time an interactive request may take (waiting included).
     pub request_timeout: Duration,
     /// Default and longest time a bulk job (import, query, sort, copy) may take.
@@ -883,6 +912,9 @@ impl Config {
             stage_hook: None,
             max_message_bytes: 16 << 20,
             max_upload_bytes: 100 << 30,
+            max_workbook_bytes: None,
+            backups_kept: 5,
+            backup_interval: Duration::from_secs(60),
             request_timeout: Duration::from_secs(30),
             job_timeout: Duration::from_secs(3600),
             outbox_pause_bytes: 16 << 20,
@@ -899,6 +931,8 @@ pub struct Upload {
     pub dir: PathBuf,
     pub size_bytes: u64,
     pub touched: std::time::Instant,
+    /// An .xlsx preview, parsed once when the file was staged (SEC.08).
+    pub preview: Option<alephgrid_core::UploadPreview>,
 }
 
 /// Unclaimed uploads are removed after this long.
@@ -982,6 +1016,9 @@ pub struct AppState {
     /// Exclusive lock on the data directory: one server per data directory.
     _dir_lock: File,
     pub shutting_down: AtomicBool,
+    /// Online backups: one at a time, and when the last one finished (SEC.11).
+    pub backup_running: Mutex<()>,
+    pub last_backup: Mutex<Option<std::time::Instant>>,
     /// Open WebSocket sessions (for `/api/admin/sessions`).
     pub sessions: Mutex<HashMap<u64, crate::ws::SessionInfo>>,
     /// Exported query results waiting to be downloaded.
@@ -1000,6 +1037,12 @@ pub fn now() -> u64 {
 
 /// Directories a workbook's database may touch: its upload and export scratch
 /// directories and its spill directory. Created here, so DuckDB can resolve them.
+/// Bytes of a workbook's database (with its write-ahead log).
+pub fn database_bytes(workbook_dir: &Path) -> u64 {
+    let db = workbook_dir.join("data.duckdb");
+    std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(db.with_extension("duckdb.wal")).map(|m| m.len()).unwrap_or(0)
+}
+
 pub fn allowed_dirs(data_dir: &Path, workbook: &str, temp: &Path) -> Result<Vec<PathBuf>> {
     let dirs = vec![data_dir.join(".uploads").join(workbook), data_dir.join(".exports").join(workbook), temp.to_path_buf()];
     for d in &dirs {
@@ -1008,13 +1051,11 @@ pub fn allowed_dirs(data_dir: &Path, workbook: &str, temp: &Path) -> Result<Vec<
     Ok(dirs)
 }
 
+/// A new id for a workbook, upload, export or download: 64 random bits from the operating
+/// system's source, as 16 hex digits (SEC.14). Ids name directories and one-time downloads,
+/// so they must not be guessable.
 pub fn new_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let mixed = (nanos as u64)
-        ^ (std::process::id() as u64).rotate_left(32)
-        ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    format!("{:012x}", mixed & 0xffff_ffff_ffff)
+    crate::auth::random_id()
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -1150,6 +1191,8 @@ impl AppState {
             next_session: AtomicU64::new(1),
             _dir_lock: dir_lock,
             shutting_down: AtomicBool::new(false),
+            backup_running: Mutex::new(()),
+            last_backup: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             downloads: Arc::new(Downloads::default()),
             python,
@@ -1161,7 +1204,7 @@ impl AppState {
         self.next_session.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn workbook_dir(&self, id: &str) -> PathBuf {
+    pub fn workbook_dir(&self, id: &str) -> PathBuf {
         self.config.data_dir.join(id)
     }
 
@@ -1186,6 +1229,20 @@ impl AppState {
     }
 
     /// A staged upload of `workbook`, marked as used now.
+    /// Refuse adding data to a workbook at its size limit (SEC.11).
+    pub fn check_workbook_size(&self, id: &str) -> Result<()> {
+        let Some(limit) = self.config.max_workbook_bytes else { return Ok(()) };
+        let size = database_bytes(&self.workbook_dir(id));
+        if size >= limit {
+            bail!(alephgrid_core::limits::TooLarge(format!(
+                "this workbook holds {} MiB, its limit is {} MiB; delete tables or rows first, or ask an admin to raise the limit",
+                size >> 20,
+                limit >> 20
+            )));
+        }
+        Ok(())
+    }
+
     pub fn upload(&self, workbook: &str, id: &str) -> Result<Upload> {
         let mut uploads = self.uploads.lock().unwrap();
         match uploads.get_mut(id) {
@@ -1449,7 +1506,7 @@ impl AppState {
             let _ = std::fs::remove_dir_all(&scratch);
             copied?;
             // The copy is a new workbook: bind it to its own id.
-            Workbook::open(&target)?.rebind_identity(&new)?;
+            Workbook::open_locked(&target, &alephgrid_core::storage::Lockdown::default())?.rebind_identity(&new)?;
             Ok(())
         })();
         if let Err(e) = copied {
@@ -1661,6 +1718,10 @@ pub fn migrate_to_spaces(data_dir: &Path, store: &crate::auth::Store) -> Result<
         })?,
     };
     let legacy_path = data_dir.join("workspaces.json");
+    // A list of workspace names: anything large is not one (SEC.14).
+    if std::fs::metadata(&legacy_path).is_ok_and(|m| m.len() > 1 << 20) {
+        bail!("workspaces.json is larger than 1 MiB; it is not a workspace list");
+    }
     let legacy: Vec<LegacyWorkspace> = match std::fs::read(&legacy_path) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("reading workspaces.json")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -1703,7 +1764,12 @@ pub fn migrate_to_spaces(data_dir: &Path, store: &crate::auth::Store) -> Result<
             if (hidden && parent == data_dir) || !dir.join("workbook.json").exists() {
                 continue;
             }
-            let mut meta = read_meta(&dir)?;
+            // A workbook whose workbook.json does not match its directory stays unplaced (and
+            // unopenable) rather than stopping the server (SEC.02).
+            let Ok(mut meta) = read_meta(&dir) else {
+                tracing::warn!("skipping {}: its workbook.json does not name it", dir.display());
+                continue;
+            };
             if !meta.space.is_empty() && store.space(&meta.space)?.is_some() {
                 continue;
             }
@@ -1743,6 +1809,7 @@ pub fn start_janitor(state: &Shared) -> tokio::task::JoinHandle<()> {
                     tracing::info!("closed {} idle workbook(s)", evicted.len());
                 }
                 s.controller.expire_views(ttl);
+                s.controller.refresh_sheet_estimates();
                 s.downloads.expire(DOWNLOAD_TTL);
             })
             .await;
@@ -1766,7 +1833,12 @@ pub struct WorkbookPatch {
 pub fn read_meta(dir: &Path) -> Result<WorkbookMeta> {
     let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let bytes = std::fs::read(dir.join("workbook.json")).with_context(|| format!("workbook {id} not found"))?;
-    Ok(serde_json::from_slice(&bytes)?)
+    let meta: WorkbookMeta = serde_json::from_slice(&bytes)?;
+    // The id is the workbook's filesystem key: it must be the directory's own name (SEC.02).
+    if !valid_id(&meta.id) || meta.id != id {
+        bail!("workbook {id}'s workbook.json names a different workbook ({:?})", meta.id);
+    }
+    Ok(meta)
 }
 
 pub fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
