@@ -276,6 +276,14 @@ Auth: `Authorization: Bearer <token>` or `?token=<token>`.
 | `test_function` | `definition: FunctionDefinition` | `FunctionTestResult[]` |
 | `publish_function` | `definition: FunctionDefinition` | `WorkbookFunction` |
 | `pin_functions` | `pins: Record<string, number>` | `WorkbookFunction[]` |
+| `refresh_functions` | — | `number` (the new refresh epoch): compute volatile Python functions again and retry calls that ran out of time, memory or a worker (needs `edit`) |
+
+Python functions (`kind: "python"`, phase 8, docs/PYTHON_FUNCTIONS.md) also declare `returns`
+(`number`, `text`, `boolean`) and may be `volatile`; each version records the `runtime`
+(`RuntimeIdentity {kind, id, version, packages}`) it was published with. Running their tests
+needs `publish`. Their results arrive as `sheet_changed` (sheet `null`) and `table_changed`
+events with origin 0. `GET /api/workbooks/{id}/export.xlsx?values=python` writes cells that call
+them as their current values.
 
 `FunctionDefinition` has `name`, `kind` (`formula` or `sql`), `arguments` (names), `source`,
 `documentation`, `tests` (`{arguments: string[], expected: string}`), and optional `dependencies`

@@ -50,24 +50,35 @@ as real calls, and publishing needs them to pass, as for other functions.
 | logical | `bool` |
 | an empty cell or `NULL` | `None` |
 | a date (`DATE` column) | `datetime.date` |
+| other column types (timestamps…) | `str`, as DuckDB writes them |
 | a range or array (sheets) | `list` of rows, each a `list` of the values above |
 | an error | not called: the result is that error |
 
 | Return (`returns`) | Accepted | Becomes |
 |---|---|---|
-| `number` | `int`, `float`, `Decimal`, `bool` refused | a number; NaN or infinity → `#NUM!`; an integer beyond 2^53 → `#NUM!` in sheets |
+| `number` | `int`, `float`, `Decimal` (`bool` is refused) | a number; NaN or infinity → `#NUM!`; an integer beyond 2^53 → `#NUM!` |
 | `text` | `str` | text (at most 32,767 characters, else `#VALUE!`) |
 | `boolean` | `bool` | a logical |
-| any | `None` | an empty value |
+| any | `None` | empty text in a sheet, `NULL` in a table |
 | any | anything else | `#VALUE!` "returned a list, expected number" |
 
 An exception becomes `#VALUE!` with the exception's type and first line as the cell's message,
 and is cached like any result (the function is pure). Running out of time, memory or output, or a
-worker crash, becomes `#CALC!` with the reason; those are not cached for good: **Recalculate**
-tries again.
+worker crash, becomes `#CALC!` with the reason; those are not cached for good: **Refresh**
+(`refresh_functions`) tries again. In a table, a pending call or an error is `NULL`.
+
+**Where they can be called.** In sheet cells, anywhere in a formula. In a table, as the whole
+formula of a calculated column (SQL language), `=NORMALIZE_SKU([sku])`, whose arguments may be
+any SQL expressions over the row; a formula that uses the call inside a larger expression is
+refused, so every call can be found and computed. SQL queries can call the function too but
+read only results already computed.
 
 ## Isolation and limits
 
+* **Who may run them.** Publishing, pinning and running tests need the space's publish role.
+  An organization admin can turn Python off for a space (`PATCH /api/spaces/{id}`
+  `{python: false}`): open workbooks stop at once, results still being computed are not
+  stored, and cells say why.
 * **Isolated worker processes.** Each job runs one worker process under an OS sandbox: Seatbelt
   (`sandbox-exec`) on macOS, bubblewrap on Linux. The sandbox allows reading only the Python
   runtime and the worker's private, empty working directory, writing nothing outside it, no
@@ -111,6 +122,9 @@ Python functions are not Excel functions. An XLSX export keeps formulas by defau
 ## Limits
 
 * Python functions return one value per call (no arrays that spill).
-* The cache keeps every result of the pinned versions; unpinned versions' results are removed
-  when a version is pinned. There is no size-based eviction yet.
+* The cache keeps the results of every version, so pinning an older version again does not
+  compute again; there is no size-based eviction yet. Pinned versions' results are loaded into
+  memory when the workbook opens.
+* Throughput (debug build, Apple M-series): a column over 1,000,000 rows with 100,000 distinct
+  values fills in about 12 s (100 batches, 2 workers); reading it afterwards takes about 60 ms.
 * The Linux sandbox needs `bwrap` on the host (or in the image).
