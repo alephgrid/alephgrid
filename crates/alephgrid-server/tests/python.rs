@@ -69,6 +69,11 @@ async fn computed(ws: &mut Ws, row: u32, column: u32) -> String {
         if v != "#CALC!" {
             return v;
         }
+        // `#CALC!` is also a final answer (a limit reached); pending cells say "Calculating".
+        let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": row, "column": column })).await;
+        if !detail.to_string().contains("Calculating") {
+            return v;
+        }
         assert!(Instant::now() < deadline, "cell ({row}, {column}) still calculating");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -89,6 +94,182 @@ async fn a_python_function_runs_from_sheet_cells() {
         { "row": 0, "column": 1, "value": "=NORMALIZE_SKU(A1)" },
     ] })).await;
     assert_eq!(computed(&mut ws, 0, 1).await, "AB12");
+    ws.close().await;
+    server.stop().await;
+}
+
+async fn publish(ws: &mut Ws, name: &str, args: &[&str], returns: &str, source: &str) -> Value {
+    ws.ok("publish_function", function(name, args, returns, source, json!([]))).await
+}
+
+async fn set(ws: &mut Ws, inputs: Value) {
+    ws.ok("sheet_set", json!({ "sheet": 0, "inputs": inputs })).await;
+}
+
+fn started(server: &TestServer) -> u64 {
+    server.state.python.as_ref().unwrap().started.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ------------------------------------------------------------- 8.01, 8.02
+
+#[tokio::test(flavor = "multi_thread")]
+async fn values_ranges_and_errors_follow_the_contract() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("values").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "KIND", &["x"], "text", "def kind(x):\n    return type(x).__name__\n").await;
+    publish(&mut ws, "TOTAL", &["r"], "number", "def total(r):\n    return sum(v for row in r for v in row if isinstance(v, float))\n").await;
+    publish(&mut ws, "FAILS", &["x"], "text", "def fails(x):\n    raise ValueError('bad sku ' + str(x))\n").await;
+    publish(&mut ws, "WRONG", &["x"], "number", "def wrong(x):\n    return [x]\n").await;
+    publish(&mut ws, "NOTNUM", &["x"], "number", "def notnum(x):\n    return float('nan')\n").await;
+    publish(&mut ws, "HUGE", &["x"], "number", "def huge(x):\n    return 2 ** 60\n").await;
+    publish(&mut ws, "LIMIT53", &["x"], "number", "def limit53(x):\n    return 2 ** 53\n").await;
+    publish(&mut ws, "NOTHING", &["x"], "text", "def nothing(x):\n    return None\n").await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([
+        { "row": 0, "column": 0, "value": "1.5" }, { "row": 1, "column": 0, "value": "2" }, { "row": 2, "column": 0, "value": "text" },
+        { "row": 0, "column": 1, "value": "=KIND(A1)" }, { "row": 1, "column": 1, "value": "=KIND(A3)" }, { "row": 2, "column": 1, "value": "=KIND(TRUE)" },
+        { "row": 3, "column": 1, "value": "=KIND(A9)" }, { "row": 4, "column": 1, "value": "=KIND(A1:A3)" }, { "row": 5, "column": 1, "value": "=TOTAL(A1:A3)" },
+        { "row": 6, "column": 1, "value": "=FAILS(A1)" }, { "row": 7, "column": 1, "value": "=WRONG(1)" }, { "row": 8, "column": 1, "value": "=NOTNUM(1)" },
+        { "row": 9, "column": 1, "value": "=HUGE(1)" }, { "row": 10, "column": 1, "value": "=LIMIT53(1)=9007199254740992" }, { "row": 11, "column": 1, "value": "=KIND(1/0)" },
+        { "row": 12, "column": 1, "value": "=NOTHING(1)" }, { "row": 13, "column": 1, "value": "=LEN(KIND(A1))+1" },
+    ])).await;
+    let want = [
+        "float", "str", "bool", "NoneType", "list", "3.5", "#VALUE!", "#VALUE!", "#NUM!", "#NUM!", "TRUE", "#DIV/0!", "", "6",
+    ];
+    for (row, w) in want.iter().enumerate() {
+        assert_eq!(computed(&mut ws, row as u32, 1).await, *w, "row {}", row + 1);
+    }
+    // The exception's type and message are the cell's.
+    let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": 6, "column": 1 })).await;
+    assert!(detail.to_string().contains("ValueError: bad sku 1.5"), "{detail}");
+    let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": 7, "column": 1 })).await;
+    assert!(detail.to_string().contains("returned a list, expected a number"), "{detail}");
+    // A test that fails stops publication.
+    let r = ws.call("publish_function", function("TWICE", &["x"], "number", "def twice(x):\n    return x * 3\n", json!([{ "arguments": ["2"], "expected": "4" }]))).await;
+    assert!(r.unwrap_err().contains("tests failed"));
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------- 8.06, 8.08
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_columns_are_computed_in_batches_and_kept_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("table").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "NORMALIZE_SKU", &["sku"], "text", "def normalize_sku(sku):\n    return sku.strip().upper().replace('-', '')\n").await;
+    ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT i AS n, ' ab-' || (i % 50) || ' ' AS sku FROM range(20000) r(i)" })).await;
+    let before = started(&server);
+    ws.ok("add_formula_column", json!({ "table": "t", "name": "clean", "formula": "NORMALIZE_SKU([sku])" })).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let r = ws.ok("query", json!({ "sql": "SELECT count(*) FILTER (WHERE clean IS NULL), count(DISTINCT clean), min(clean) FROM t" })).await["rows"].clone();
+        if r[0][0] == json!(0) {
+            assert_eq!(r[0][1], json!(50));
+            assert_eq!(r[0][2], json!("AB0"));
+            break;
+        }
+        assert!(Instant::now() < deadline, "{r}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(started(&server) - before, 1, "50 distinct values: one batch, not one call per row");
+    // Another arrangement of the same values computes nothing new.
+    let r = ws.ok("query", json!({ "sql": "SELECT clean FROM t WHERE n = 12345" })).await;
+    assert_eq!(r["rows"], json!([["AB45"]]));
+    ws.close().await;
+    // Reopened: the results are there at once, without a worker.
+    let (code, _) = server.send(reqwest::Method::POST, &format!("/api/workbooks/{wb}/runtime"), Some(json!({ "action": "stop" }))).await;
+    assert_eq!(code, 200);
+    let before = started(&server);
+    let mut ws = server.ws(&wb).await;
+    let r = ws.ok("query", json!({ "sql": "SELECT count(*) FILTER (WHERE clean IS NULL) FROM t" })).await;
+    assert_eq!(r["rows"], json!([[0]]));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(started(&server), before, "nothing computed again");
+    // Only a whole-formula call is accepted for a column.
+    let e = ws.call("add_formula_column", json!({ "table": "t", "name": "bad", "formula": "NORMALIZE_SKU([sku]) || 'x'" })).await.unwrap_err();
+    assert!(e.contains("whole formula"), "{e}");
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------- 8.03, 8.04
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workers_cannot_reach_files_network_processes_or_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("ALEPHGRID_TEST_SECRET", "s3cret");
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("escape").await;
+    let mut ws = server.ws(&wb).await;
+    let secret_file = dir.path().join("secret.txt");
+    std::fs::write(&secret_file, "top secret").unwrap();
+    let source = format!(
+        "import os, socket, subprocess\ndef escape(what):\n    tries = {{\n        'read': lambda: open({:?}).read(),\n        'passwd': lambda: open('/etc/passwd').read(),\n        'list': lambda: os.listdir({:?}),\n        'write': lambda: open('/tmp/alephgrid-escape.txt', 'w').write('x'),\n        'connect': lambda: socket.create_connection(('127.0.0.1', {}), timeout=2),\n        'dns': lambda: socket.getaddrinfo('example.com', 80),\n        'spawn': lambda: subprocess.run(['/bin/echo', 'hi'], check=True),\n        'fork': lambda: os.fork(),\n    }}\n    if what == 'env':\n        return ','.join(sorted(k for k in os.environ if not k.startswith('__CF')))\n    try:\n        tries[what]()\n        return 'ALLOWED'\n    except BaseException as e:\n        return 'denied ' + type(e).__name__\n",
+        secret_file.to_string_lossy(),
+        dir.path().to_string_lossy(),
+        server.addr.port(),
+    );
+    publish(&mut ws, "ESCAPE", &["what"], "text", &source).await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    let tries = ["read", "passwd", "list", "write", "connect", "dns", "spawn", "fork", "env"];
+    let inputs: Vec<Value> = tries.iter().enumerate().map(|(i, t)| json!({ "row": i, "column": 0, "value": format!("=ESCAPE(\"{t}\")") })).collect();
+    set(&mut ws, json!(inputs)).await;
+    for (i, t) in tries.iter().enumerate() {
+        let v = computed(&mut ws, i as u32, 0).await;
+        if *t == "env" {
+            assert!(!v.contains("ALEPHGRID_TEST_SECRET") && !v.contains("HOME") && !v.contains("PATH"), "environment inherited: {v}");
+        } else {
+            assert!(v.starts_with("denied"), "{t}: {v}");
+        }
+    }
+    assert!(!Path::new("/tmp/alephgrid-escape.txt").exists());
+    ws.close().await;
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_stop_runaway_functions_without_hanging_other_workbooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |c| {
+        c.python_limits.timeout_ms = 1_500;
+        c.python_limits.cpu_ms = 1_500;
+        c.python_limits.memory_bytes = 200 << 20;
+        c.python_limits.output_bytes = 4096;
+    })
+    .await;
+    let wb = server.create_workbook("limits").await;
+    let other = server.create_workbook("other").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "SPIN", &["x"], "number", "def spin(x):\n    while True:\n        pass\n").await;
+    publish(&mut ws, "HOG", &["x"], "number", "def hog(x):\n    b = []\n    while True:\n        b.append(bytearray(16 << 20))\n").await;
+    publish(&mut ws, "LOUD", &["x"], "text", "def loud(x):\n    return 'x' * 8000\n").await;
+    publish(&mut ws, "CRASH", &["x"], "number", "import os\ndef crash(x):\n    os._exit(3)\n").await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    let t0 = Instant::now();
+    set(&mut ws, json!([
+        { "row": 0, "column": 0, "value": "=SPIN(1)" }, { "row": 1, "column": 0, "value": "=HOG(1)" },
+        { "row": 2, "column": 0, "value": "=LOUD(1)" }, { "row": 3, "column": 0, "value": "=CRASH(1)" },
+    ])).await;
+    // Meanwhile another workbook answers at once.
+    let mut o = server.ws(&other).await;
+    let q = Instant::now();
+    o.ok("query", json!({ "sql": "SELECT 1" })).await;
+    assert!(q.elapsed() < Duration::from_secs(1), "{:?}", q.elapsed());
+    o.close().await;
+    let reasons = ["more than 1.5 s", "MiB of memory", "bytes of results", "worker stopped"];
+    for row in 0..reasons.len() {
+        assert_eq!(computed(&mut ws, row as u32, 0).await, "#CALC!", "row {row}");
+    }
+    eprintln!("limits reached in {:?}", t0.elapsed());
+    for (row, why) in reasons.iter().enumerate() {
+        let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": row, "column": 0 })).await;
+        assert!(detail.to_string().contains(why), "row {row}: {detail}");
+    }
     ws.close().await;
     server.stop().await;
 }
