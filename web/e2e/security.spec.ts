@@ -32,10 +32,9 @@ test("a hostile id in a listing is dropped, and no request reaches /api/trash", 
   await expect(page.locator(".wb-row", { hasText: "Dots" })).toHaveCount(0);
 
   // Deleting the real workbook sends exactly its own request.
-  await page.locator(".wb-row", { hasText: "Real one" }).click({ button: "right" });
+  await page.getByRole("button", { name: "Real one options" }).click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
-  const confirm = page.getByRole("dialog");
-  if (await confirm.isVisible().catch(() => false)) await confirm.getByRole("button", { name: /Delete|Move/ }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Delete" }).click();
   await expect.poll(() => requests.filter((r) => r.startsWith("DELETE"))).toEqual([`DELETE /api/workbooks/${real}`]);
   expect(requests.some((r) => r.includes("/api/trash") && r.startsWith("DELETE"))).toBe(false);
   const trash = await (await fetch(`${server.url}/api/trash`)).json();
