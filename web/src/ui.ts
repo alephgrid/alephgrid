@@ -58,10 +58,19 @@ export function closeMenu(): void {
   menuOpener = null;
 }
 
-export function showMenu(items: MenuItem[], x: number, y: number): void {
+export interface MenuOptions {
+  /** ArrowLeft / ArrowRight in the menu: move to the neighbouring menu of a menu bar. */
+  onArrow?: (direction: -1 | 1) => void;
+  /** Called however the menu closes. */
+  onClose?: () => void;
+  /** Accessible name of the menu (the menu bar item that opened it). */
+  label?: string;
+}
+
+export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOptions = {}): void {
   closeMenu();
   menuOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const menu = el("div", { class: "menu", role: "menu" });
+  const menu = el("div", { class: "menu", role: "menu", "aria-label": opts.label ?? false });
   menu.addEventListener("keydown", (e) => {
     const buttons = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item:not(:disabled)")];
     const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
@@ -72,6 +81,10 @@ export function showMenu(items: MenuItem[], x: number, y: number): void {
     } else if (e.key === "Home" || e.key === "End") {
       e.preventDefault();
       buttons[e.key === "Home" ? 0 : buttons.length - 1]?.focus();
+    } else if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && opts.onArrow) {
+      e.preventDefault();
+      e.stopPropagation();
+      opts.onArrow(e.key === "ArrowLeft" ? -1 : 1);
     } else if (e.key === "Tab" || e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
@@ -111,6 +124,7 @@ export function showMenu(items: MenuItem[], x: number, y: number): void {
     document.addEventListener("keydown", esc, true);
   });
   menuCleanup = () => {
+    opts.onClose?.();
     clearTimeout(timer);
     document.removeEventListener("mousedown", outside, true);
     document.removeEventListener("keydown", esc, true);

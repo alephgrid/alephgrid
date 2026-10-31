@@ -626,14 +626,32 @@ export class WorkbookScreen {
         { label: "Keyboard shortcuts", hint: "⌘/", action: act.shortcuts },
       ]],
     ];
+    // A menu bar of menu buttons: click or ArrowDown opens a menu; ArrowLeft/Right move between
+    // the buttons, or between open menus (U.12).
+    const menuButtons: HTMLButtonElement[] = [];
+    const openMenuAt = (i: number) => {
+      const b = menuButtons[(i + menuButtons.length) % menuButtons.length];
+      const [label, items] = menus[menuButtons.indexOf(b)];
+      this.menuAnchor = b;
+      b.focus({ preventScroll: true });
+      const r = b.getBoundingClientRect();
+      b.setAttribute("aria-expanded", "true");
+      showMenu(items(), r.left, r.bottom + 2, { label,
+        onArrow: (d) => openMenuAt(menuButtons.indexOf(b) + d),
+        onClose: () => b.setAttribute("aria-expanded", "false") });
+    };
     const menubar = el("nav", { class: "menubar", "aria-label": "Workbook menus" },
-      ...menus.map(([label, items]) => {
-        const b = el("button", { class: "menubar-item", "aria-haspopup": "menu" }, label);
-        b.addEventListener("click", () => {
-          this.menuAnchor = b;
-          const r = b.getBoundingClientRect();
-          showMenu(items(), r.left, r.bottom + 2);
+      ...menus.map(([label], i) => {
+        const b = el("button", { class: "menubar-item", "aria-haspopup": "menu", "aria-expanded": "false" }, label);
+        b.addEventListener("click", () => openMenuAt(i));
+        b.addEventListener("keydown", (e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); openMenuAt(i); }
+          else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+            e.preventDefault();
+            menuButtons[(i + (e.key === "ArrowRight" ? 1 : -1) + menuButtons.length) % menuButtons.length].focus();
+          }
         });
+        menuButtons.push(b);
         return b;
       }));
     this.themeBtn = themeButton();

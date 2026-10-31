@@ -106,3 +106,45 @@ test("the SQL workspace docks under the grid: resize, maximize, restore and clos
   await page.keyboard.press("Escape");
   await expect(sql).toBeHidden();
 });
+
+test("the menu bar works from the keyboard: arrows move between menus, Escape returns focus", async ({ page }) => {
+  const wb = await workbook("Menu keys");
+  await open(page, wb);
+  const bar = page.getByRole("navigation", { name: "Workbook menus" });
+  const file = bar.getByRole("button", { name: "File", exact: true });
+  await file.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(bar.getByRole("button", { name: "Edit", exact: true })).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("menu", { name: "Edit" })).toBeVisible();
+  await expect(bar.getByRole("button", { name: "Edit", exact: true })).toHaveAttribute("aria-expanded", "true");
+  // Focus moves into the menu, on its first enabled item (Undo is disabled for tables).
+  await expect(page.getByRole("menu", { name: "Edit" }).getByRole("menuitem", { disabled: false }).first()).toBeFocused();
+  // ArrowRight in an open menu opens the next one.
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("menu", { name: "View" })).toBeVisible();
+  await expect(bar.getByRole("button", { name: "Edit", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(bar.getByRole("button", { name: "View", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByRole("menu", { name: "File" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(file).toBeFocused();
+  await expect(file).toHaveAttribute("aria-expanded", "false");
+});
+
+test("at phone width every menu stays reachable and the page does not scroll sideways", async ({ page }) => {
+  const wb = await workbook("Narrow");
+  await page.setViewportSize({ width: 390, height: 800 });
+  await open(page, wb);
+  const help = page.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "Help", exact: true });
+  await help.scrollIntoViewIfNeeded();
+  await help.click();
+  await expect(page.getByRole("menuitem", { name: /Keyboard shortcuts/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  // The theme and history stay available from the menus when their top-bar buttons hide.
+  await page.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "View", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /Dark theme/ })).toBeVisible();
+});

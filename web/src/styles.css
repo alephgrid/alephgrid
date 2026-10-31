@@ -428,7 +428,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   .wb-row { grid-template-columns: 36px minmax(0, 1fr) 36px; }
   .search { width: 100%; }
   .home-top { margin-bottom: 18px; }
-  .menubar { display: none; }
+  .menubar { max-width: calc(100vw - 80px); overflow-x: auto; scrollbar-width: none; }
+  .appbar .tool, .theme-btn { display: none; }
 }
 .fatal { max-width: 560px; margin: 15vh auto; padding: 0 16px; }
 .workbook-failure .empty-actions { justify-content: flex-start; }
@@ -638,4 +639,9 @@ dialog progress, .dialog progress { width: 100%; }
   .workbook-body { position: relative; }
   .sql-docked .sql-body { grid-template-columns: 1fr; }
   .sql-docked .sql-side { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation-duration: 0s !important; scroll-behavior: auto !important; }
+  .wb-card:hover { transform: none; }
 }
