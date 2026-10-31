@@ -1,4 +1,5 @@
 import "./styles.css";
+import "./theme";
 import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
 import { api, isRuntimeFailure, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
@@ -7,6 +8,8 @@ import type { WorkbookListing } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
 import { waitForCompute } from "./compute";
+import { brandMark, icon, type IconName } from "./icons";
+import { themeButton } from "./theme";
 
 const app = document.getElementById("app")!;
 let current: WorkbookScreen | null = null;
@@ -194,16 +197,16 @@ function renderHome(): void {
     } });
 
   const count = (scope: Scope) => scope === "trash" ? home.trash.length : home.workbooks.filter((w) => inScope(w, scope)).length;
-  const navItem = (scope: Scope, label: string, icon: string) =>
+  const navItem = (scope: Scope, label: string, glyph: IconName) =>
     el("button", {
       class: `nav-item${home.scope === scope ? " active" : ""}`,
       "aria-current": home.scope === scope ? "page" : false,
       onclick: () => setScope(scope),
-    }, el("span", { class: "nav-icon", "aria-hidden": "true" }, icon), el("span", { class: "nav-label" }, label),
+    }, el("span", { class: "nav-icon" }, icon(glyph)), el("span", { class: "nav-label" }, label),
     el("span", { class: "nav-count" }, String(count(scope))));
 
   const spaceItems = home.spaces.map((sp) => {
-    const item = navItem(sp.id, sp.name, "▤");
+    const item = navItem(sp.id, sp.name, "folder");
     if (sp.role === "viewer") item.querySelector(".nav-label")?.append(el("span", { class: "role-tag" }, "view only"));
     item.addEventListener("contextmenu", (e) => { e.preventDefault(); spaceMenu(sp, e.clientX, e.clientY); });
     item.append(el("span", { class: "nav-more", role: "button", tabindex: "0", "aria-label": `${sp.name} options`, title: "Options",
@@ -212,22 +215,22 @@ function renderHome(): void {
   });
 
   const sidebar = el("aside", { class: "sidebar" },
-    el("div", { class: "brand big" }, el("span", { class: "logo" }), "Alephgrid"),
+    el("div", { class: "brand big" }, brandMark(26), el("span", { class: "wordmark" }, "alephgrid")),
     el("nav", { class: "nav", "aria-label": "Library" },
-      navItem("all", "All workbooks", "◫"),
-      navItem("recent", "Recent", "◷"),
-      navItem("starred", "Starred", "★"),
+      navItem("all", "All workbooks", "home"),
+      navItem("recent", "Recent", "clock"),
+      navItem("starred", "Starred", "star"),
     ),
     el("div", { class: "nav-heading" },
       el("span", {}, "Spaces"),
       home.me?.kind === "token" ? null
-        : el("button", { class: "icon-btn small", title: "New space", "aria-label": "New space", onclick: newSpace }, "+")),
+        : el("button", { class: "icon-btn small", title: "New space", "aria-label": "New space", onclick: newSpace }, icon("plus", 14))),
     el("nav", { class: "nav", "aria-label": "Spaces" },
       ...spaceItems,
       home.spaces.length ? null : el("p", { class: "nav-empty" }, "You have no spaces yet. Ask an admin to add you to one."),
     ),
-    el("nav", { class: "nav nav-bottom", "aria-label": "Trash" }, navItem("trash", "Trash", "🗑")),
-    el("div", { class: "sidebar-foot muted" }, `v${home.version} · data stays on this server`),
+    el("nav", { class: "nav nav-bottom", "aria-label": "Trash" }, navItem("trash", "Trash", "trash")),
+    el("div", { class: "sidebar-foot" }, themeButton(), el("span", { class: "muted" }, `v${home.version} · data stays on this server`)),
   );
 
   const spaceName = (id?: string | null) => home.spaces.find((s) => s.id === id)?.name;
@@ -283,6 +286,7 @@ function renderHome(): void {
               "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
               onclick: () => toggleStar(w) }, w.starred ? "★" : "☆")),
           el("a", { role: "cell", class: "wb-name", href: `/w/${w.id}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
+            el("span", { class: "wb-icon" }, icon(w.summary?.tables ? "table" : "sheet")),
             el("strong", {}, w.name),
             space ? el("span", { class: "badge" }, space) : null,
             w.role === "viewer" ? el("span", { class: "badge" }, "view only") : null),
@@ -291,7 +295,7 @@ function renderHome(): void {
           el("span", { role: "cell", class: "muted hide-xs", title: w.opened_at ? new Date(w.opened_at * 1000).toLocaleString() : "" }, relativeTime(w.opened_at)),
           el("span", { role: "cell", class: "cell-center" },
             el("button", { class: "icon-btn", title: "More", "aria-label": `${w.name} options`,
-              onclick: (e: MouseEvent) => workbookMenu(w, e.clientX, e.clientY) }, "⋯")),
+              onclick: (e: MouseEvent) => workbookMenu(w, e.clientX, e.clientY) }, icon("more"))),
         );
       }),
     );
@@ -299,7 +303,7 @@ function renderHome(): void {
   renderList();
 
   const search = el("input", { type: "search", class: "search", placeholder: "Search workbooks", "aria-label": "Search workbooks",
-    value: home.query, oninput: (e: Event) => { home.query = (e.target as HTMLInputElement).value; renderList(); } });
+    value: home.query, oninput: (e: Event) => { home.query = (e.target as HTMLInputElement).value; renderCards(); renderList(); } });
   const sort = el("select", { class: "sort", "aria-label": "Sort by",
     onchange: (e: Event) => { home.sort = (e.target as HTMLSelectElement).value as SortKey; renderList(); } },
     el("option", { value: "recent" }, "Last opened"),
@@ -308,28 +312,61 @@ function renderHome(): void {
     el("option", { value: "size" }, "Size"));
   sort.value = home.sort;
 
+  // The few most recently opened workbooks, as cards above the full list.
+  const cards = el("section", { class: "wb-cards", "aria-label": "Recently opened" });
+  function renderCards(): void {
+    const recent = home.scope === "trash" || home.query ? []
+      : home.workbooks.filter((w) => inScope(w, home.scope) && w.opened_at)
+        .sort((a, b) => (b.opened_at ?? 0) - (a.opened_at ?? 0)).slice(0, 4);
+    cards.hidden = recent.length < 2;
+    cards.replaceChildren(...recent.map((w) => el("a", { class: "wb-card", href: `/w/${w.id}`, title: `Open ${w.name}`,
+      onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
+      el("span", { class: "wb-card-preview", "aria-hidden": "true" }, icon(w.summary?.tables ? "table" : "sheet", 20)),
+      el("span", { class: "wb-card-name" }, w.name, w.starred ? el("span", { class: "wb-card-star", "aria-label": "starred" }, icon("star", 13)) : null),
+      el("span", { class: "wb-card-meta" }, spaceName(w.space) ?? describeContents(w)),
+      el("span", { class: "wb-card-meta" }, icon("clock", 12), relativeTime(w.opened_at)))));
+  }
+  renderCards();
+
+  const subtitle: Record<string, string> = {
+    all: "Every workbook you can open. Drop a CSV, Parquet, JSON or XLSX file anywhere on this page to import it.",
+    recent: "Opened in the last two weeks.",
+    starred: "Workbooks you pinned with a star.",
+    trash: "Deleted workbooks stay here until you delete them forever.",
+  };
+  const actions = home.scope === "trash"
+    ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, onclick: emptyTrash }, "Empty trash")]
+    : writableSpaces().length
+      ? [el("button", { class: "btn", onclick: () => fileInput.click() }, icon("upload"), "Open file"),
+        el("button", { class: "btn btn-primary", onclick: newWorkbook }, icon("plus"), "New workbook")]
+      : [];
+
   const main = el("main", { class: "home-main" },
+    el("div", { class: "home-top" },
+      el("label", { class: "search-box" }, icon("search", 15), search),
+      el("div", { class: "spacer" }),
+      home.me ? accountButton(home.me, navigate) : null,
+    ),
     home.workbooks.length === 0
       ? el("section", { class: "hero" },
         el("h1", {}, "A spreadsheet for data that doesn't fit in a spreadsheet."),
         el("p", {}, "Open billion-row CSV and Parquet files, sort, filter, add formulas, build Excel-style sheets and query with SQL. Runs on your own machine or server — your data never leaves it."),
         el("div", { class: "hero-actions" },
-          el("button", { class: "btn btn-primary", onclick: () => fileInput.click() }, "Open a file"),
+          el("button", { class: "btn btn-primary", onclick: () => fileInput.click() }, icon("upload"), "Open a file"),
           el("button", { class: "btn", onclick: () => createDemo(10_000_000) }, "Try 10M demo rows"),
           el("button", { class: "btn", onclick: newWorkbook }, "New blank workbook")))
       : null,
+    el("div", { class: "home-head" },
+      el("div", {},
+        el("h2", {}, scopeTitle(home.scope)),
+        el("p", { class: "muted" }, subtitle[home.scope] ?? "Workbooks in this space.")),
+      el("div", { class: "home-actions" }, ...actions),
+    ),
+    cards,
     el("div", { class: "home-bar" },
-      el("h2", {}, scopeTitle(home.scope)),
+      el("h3", {}, home.scope === "trash" ? "Deleted" : "Workbooks"),
       el("div", { class: "spacer" }),
-      search,
       sort,
-      ...(home.scope === "trash"
-        ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, onclick: emptyTrash }, "Empty trash")]
-        : writableSpaces().length
-          ? [el("button", { class: "btn", onclick: () => fileInput.click() }, "Open file"),
-            el("button", { class: "btn btn-primary", onclick: newWorkbook }, "New workbook")]
-          : []),
-      home.me ? accountButton(home.me, navigate) : null,
       fileInput,
     ),
     list,

@@ -1,6 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 
 const server = new Server();
 test.beforeAll(async () => server.start());
@@ -9,7 +9,7 @@ test.afterAll(async () => server.dispose());
 test("formula help searches a bounded catalog and distinguishes registry evidence", async ({ page }) => {
   const wb = await server.createWorkbook("Catalog");
   await page.goto(`${server.url}/w/${wb}`);
-  await page.getByRole("button", { name: "Formula help", exact: true }).click();
+  await menuCommand(page, "Help", "Formula help");
   const dialog = page.getByRole("dialog", { name: "Formula help" });
   const search = dialog.getByRole("searchbox", { name: "Search built-in formulas" });
   await expect(search).toBeFocused();

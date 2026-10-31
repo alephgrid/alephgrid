@@ -116,3 +116,9 @@ export type WsClient = {
   call<T = any>(op: string, params?: Record<string, unknown>): Promise<T>;
   close(): void;
 };
+
+/** Run a command from the workbook's menu bar (File, Edit, View, Insert, Format, Data, Tools, Help). */
+export async function menuCommand(page: import("@playwright/test").Page, menu: string, item: string | RegExp): Promise<void> {
+  await page.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: menu, exact: true }).click();
+  await page.getByRole("menuitem", { name: item }).click();
+}
