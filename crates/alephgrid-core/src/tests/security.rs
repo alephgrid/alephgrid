@@ -130,20 +130,36 @@ fn a_formula_over_a_huge_range_is_refused_and_taken_back() {
     assert_eq!(cell_text(&t.wb, 0, 0, 0).as_deref(), Some("1"));
 }
 
-/// SEC.07: a cancel stops the evaluation and takes the edit back.
+/// SEC.07: a cancel that arrives while an evaluation runs stops it and takes the edit back;
+/// a cancel left over from before does not stop the next one.
 #[test]
 fn a_cancelled_evaluation_takes_the_edit_back() {
     let mut s = crate::sheets::Sheets::from_bytes(None).unwrap();
     s.create("S").unwrap();
     let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     s.set_cancel(flag.clone());
-    s.set(0, &[sheet_input(0, 0, "1")]).unwrap();
+    let data: Vec<SheetInput> = (0..2000).map(|r| sheet_input(r, 0, &r.to_string())).collect();
+    s.set(0, &data).unwrap();
+    // A stale cancel (nothing was running) does not stop the next edit.
     flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    let inputs: Vec<SheetInput> = (0..5000).map(|r| sheet_input(r, 1, &format!("=A1+{r}"))).collect();
-    let err = s.set(0, &inputs).unwrap_err();
-    assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
-    flag.store(false, std::sync::atomic::Ordering::SeqCst);
     s.set(0, &[sheet_input(0, 2, "=A1*2")]).unwrap();
+    // A cancel during a long evaluation stops it.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (f, d) = (flag.clone(), done.clone());
+    let setter = std::thread::spawn(move || {
+        while !d.load(std::sync::atomic::Ordering::SeqCst) {
+            f.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+    let heavy: Vec<SheetInput> = (0..3000).map(|r| sheet_input(r, 1, "=SUM($A$1:$A$2000)")).collect();
+    let err = s.set(0, &heavy);
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    setter.join().unwrap();
+    let err = err.unwrap_err();
+    assert!(format!("{err:#}").contains("cancelled"), "{err:#}");
+    let v = s.fetch(0, 0, 1, 2).unwrap().rows[0].get(1).cloned().flatten();
+    assert!(v.is_none(), "the edit was taken back: {v:?}");
 }
 
 /// SEC.07: whole-column functions walk only the used area, so a far-corner value cannot
