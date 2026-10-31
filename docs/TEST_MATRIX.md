@@ -711,3 +711,28 @@ provider that signs ID tokens with a fixture RSA key and checks PKCE.
 
 Not covered yet: TLS termination and `Secure` cookies behind a real https proxy are configured by
 `--public-url` but only checked by reading the cookie attributes over http.
+
+## Phase 8 (8.01–8.13; 8.T01–8.T02, 8.12)
+
+Tests run real sandboxed workers (Seatbelt on macOS) in a runtime made offline by
+`python::create` from the machine's CPython (`ALEPHGRID_TEST_PYTHON`, else /opt/homebrew or
+/usr); they fail, not skip, without one. Expected values come from docs/PYTHON_FUNCTIONS.md.
+
+| Requirement | Evidence |
+|---|---|
+| **8.01** engine hook, scalar and range arguments | `python::a_python_function_runs_from_sheet_cells`, `values_ranges_and_errors_follow_the_contract` (`=KIND(A1:A3)` is a list, `=TOTAL(A1:A3)` sums its numbers, nested in `LEN(…)+1`); IronCalc patch 2 (`vendor/ironcalc_base/ALEPHGRID_PATCHES.md`) |
+| **8.02** typed values and errors | `values_ranges_and_errors_follow_the_contract`: float/str/bool/None/list arguments, an error argument returned without a call (`#DIV/0!`), an exception's type and message on the cell (`ValueError: bad sku 1.5`), wrong result type and a list → `#VALUE!`, NaN and 2^60 → `#NUM!`, 2^53 exact, `None` → empty text; failing tests stop publication |
+| **8.03** isolation | `workers_cannot_reach_files_network_processes_or_credentials`: reading a file beside the data, `/etc/passwd`, listing a directory, writing `/tmp`, connecting to the server's own port, DNS, `subprocess`, `fork` all refused, no environment inherited (a secret set in the server's environment is absent); checked to fail with the sandbox off (`Isolation::None`: "read: ALLOWED") |
+| **8.04** limits and cancellation | `limits_stop_runaway_functions_without_hanging_other_workbooks`: an endless loop (time), 16 MiB allocations without end (memory watchdog), 8,000 characters over a 4 KiB output limit and `os._exit` each end as `#CALC!` with the reason, within 1.8 s, while another workbook answers a query in under 1 s. Closing a workbook or turning Python off cancels its worker (the watchdog kills it); only the second is tested, by its result not being stored |
+| **8.05** pinned runtimes, offline packages | `runtimes_install_pinned_packages_offline`: a hand-made wheel installed with `--no-index --require-hashes`, its name, version and SHA-256 in `runtime.json`, a different runtime id than without it, a wrong hash refused, the package importable from a function; versions record their runtime (`a_python_function_runs_from_sheet_cells`) |
+| **8.06** batches, benchmark | `table_columns_are_computed_in_batches_and_kept_across_reopen` (20,000 rows, 50 distinct values: one worker); `bench_a_million_rows_with_100k_distinct_values` (ignored by default): 1,000,000 rows, 100,000 distinct, 100 batches, 11.9 s to fill (163 s before results were stored one statement per batch), 58 ms to read the column again |
+| **8.07** no lock held, revision checks | `workers_run_outside_the_lock_and_stale_versions_are_discarded`: a change and a read while a worker sleeps answer in under 0.7 s; version 2 pinned while version 1 computes: only version 2's result shows, version 1's late result is not stored and is computed afresh when pinned again. Publishing runs a Python definition's tests before taking the writer (`ws.rs`); no test times that |
+| **8.08** cache, volatile, reopen | reopen shows a table column's results with no worker started; `volatile_functions_change_only_on_refresh` (other changes keep the value, `refresh_functions` changes it) |
+| **8.09** library, tests, autocomplete | `e2e/python.spec.ts` (define in the Function library, run tests, publish, call, recalculate on input change, reload with the result) |
+| **8.10** crash, duplicates, revocation, unavailable | crash in the limits test; `revocation_duplicates_and_a_missing_runtime_are_handled`: Python turned off for the space during a call (result not stored, `#NAME?` "turned off for this space", earlier results kept, back on computes), the same result delivered twice stored once with the first standing, a server without a runtime showing cached results and `#NAME?` "no Python runtime" for new calls |
+| **8.11** XLSX | `xlsx_keeps_formulas_or_exports_cached_values` (compatibility note, formula kept by default, `?values=python` writes the value and no formula) |
+| **8.13** FunctionRuntime, RuntimeSpec, policy | `FunctionRuntime` trait in `alephgrid_core::external`; the smoke test checks the runtime id in `RuntimeSpec.components.python` and the worker limits in `ComputePolicy.python` |
+| **8.12** gate | define → test → publish → call → recalculate → reopen in the browser (`e2e/python.spec.ts`) and over the protocol (`python.rs`); isolation and failure tests pass without hanging other workbooks |
+
+Not covered: the bubblewrap (Linux) sandbox is implemented but was not run on this machine;
+macOS ignores `RLIMIT_AS`, so memory is enforced by the watchdog (5 ms sampling) there.

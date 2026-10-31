@@ -52,6 +52,8 @@ pub struct Workbook {
     /// The change in progress: who makes it and the revision it will commit as.
     pub(crate) txn_actor: Option<String>,
     pub(crate) txn_revision: u64,
+    /// Where worker (Python) functions run; set by the server (phase 8).
+    pub(crate) function_runtime: Option<Arc<dyn crate::external::FunctionRuntime>>,
 }
 
 /// In-memory updates that may only happen once the transaction has committed.
@@ -147,7 +149,11 @@ impl Workbook {
         sheets.set_table_cells(storage::table_cells(&conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
         let layouts = storage::meta_get(&conn, SHEET_LAYOUTS)?.and_then(|v| serde_json::from_str(&v).ok());
         sheets.set_layouts(layouts, storage::revision(&conn)?);
-        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report, actor: None, txn_actor: None, txn_revision: 0 })
+        let mut wb = Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report, actor: None, txn_actor: None, txn_revision: 0, function_runtime: None };
+        // Worker functions: unavailable until the server registers a runtime, but their
+        // cached results show at once.
+        wb.set_function_runtime(None, None)?;
+        Ok(wb)
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -349,6 +355,12 @@ impl Workbook {
                         Ok(s) => *self.shared.sheets.lock().unwrap_or_else(|e| e.into_inner()) = s,
                         Err(re) => eprintln!("alephgrid-core: could not reload sheets after a failed change: {re:#}"),
                     }
+                }
+                // Pins and the volatile epoch may have changed in memory: back to the committed ones.
+                let runtime = self.function_runtime.clone();
+                let disabled = self.shared.functions.disabled.read().unwrap().clone();
+                if let Err(re) = self.set_function_runtime(runtime, disabled) {
+                    eprintln!("alephgrid-core: could not restore worker functions after a failed change: {re:#}");
                 }
                 Err(e)
             }
@@ -713,6 +725,12 @@ impl Workbook {
         match language {
             FormulaLanguage::Sql => {
                 formula::analyze(&self.conn, formula)?;
+                let cache = self.shared.functions.clone();
+                if let Some(name) = crate::external::mentions_worker(formula, &cache) {
+                    if crate::external::parse_column_call(formula, |n| cache.is_worker_function(n)).is_none() {
+                        bail!("a column calls a Python function as its whole formula, like ={name}([column]); use another column for the rest of the expression");
+                    }
+                }
                 let probe = format!("SELECT ({}) AS v FROM ({}) LIMIT 1", formula_to_sql(formula), self.base_select(table)?);
                 self.conn.execute_batch(&probe).map_err(|e| anyhow!("formula error: {e}"))?;
             }
@@ -1577,6 +1595,7 @@ impl Workbook {
         sheets.set_table_cells(storage::table_cells(&self.conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
         let layouts = storage::meta_get(&self.conn, SHEET_LAYOUTS)?.and_then(|v| serde_json::from_str(&v).ok());
         sheets.set_layouts(layouts, storage::revision(&self.conn)?);
+        sheets.set_external(Some(self.shared.external_hook()));
         Ok(sheets)
     }
 
@@ -1841,8 +1860,6 @@ impl Reader {
     pub fn presentation(&self,table:&str)->Result<crate::Presentation>{crate::analysis::presentation(&self.db(),table)}
     pub fn replace_preview(&self,spec:&crate::ReplaceSpec)->Result<crate::ReplacePreview>{crate::analysis::replace_preview(&self.db(),spec)}
 
-    pub fn test_function(&self, definition: &crate::FunctionDefinition) -> Result<Vec<crate::FunctionTestResult>> { crate::functions::test_definition(&self.conn, definition) }
-    pub fn functions(&self) -> Result<Vec<crate::WorkbookFunction>> { crate::functions::list(&self.conn) }
     /// Apply DuckDB settings; settings such as `memory_limit` and `threads` belong to the
     /// database instance, so this changes them for the writer and every reader.
     pub fn configure(&self, settings: &[(&str, String)]) -> Result<()> {
@@ -1880,6 +1897,14 @@ impl Reader {
     /// [`crate::sheets::Sheets::xlsx_compatibility`]), and tables, which are not part of the file.
     pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
         let mut notes = self.sheets().xlsx_compatibility()?;
+        let workers: Vec<String> = self.shared.functions.active.read().unwrap().keys().cloned().collect();
+        let calling = self.sheets().cells_calling(&workers);
+        if !calling.is_empty() {
+            notes.push(format!(
+                "{} cell(s) call Python functions, which Excel does not have: Excel shows #NAME? there. Export with cached values to keep their results",
+                calling.len()
+            ));
+        }
         for t in self.db().list_tables()? {
             notes.push(format!("table {} ({} rows) is not in the file: download it as CSV or Parquet; formulas over it are exported as values", t.name, t.row_count));
         }

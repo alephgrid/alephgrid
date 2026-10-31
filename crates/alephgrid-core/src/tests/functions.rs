@@ -8,6 +8,8 @@ fn definition(kind: FunctionKind, source: &str) -> FunctionDefinition {
         source: source.into(),
         documentation: "Profit margin".into(),
         dependencies: Default::default(),
+        returns: None,
+        volatile: false,
         tests: vec![FunctionTest { arguments: vec!["100".into(), "60".into()], expected: "0.4".into() }],
     }
 }
@@ -78,6 +80,8 @@ fn unary(name: &str, kind: FunctionKind, source: &str) -> FunctionDefinition {
         documentation: String::new(),
         tests: vec![],
         dependencies: Default::default(),
+        returns: None,
+        volatile: false,
     }
 }
 

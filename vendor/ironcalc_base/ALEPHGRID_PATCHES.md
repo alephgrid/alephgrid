@@ -36,6 +36,16 @@ Changes:
   cells while undoing a user's change never undoes that bookkeeping. Additions only; no
   existing behavior changes. Added 30 October 2026 (F.09).
 
+- External functions (patch set 2, phase 8): `Model::set_external_functions` /
+  `UserModel::set_external_functions` register a host hook (`src/external.rs`). A call of a
+  name the hook claims (not a built-in, not bound by LET) evaluates its arguments (ranges and
+  arrays as rows of values, whole rows and columns trimmed to the used area, at most 100,000
+  cells) and returns what the hook answers. Without a hook nothing changes. Alephgrid answers
+  from its cache of Python results and says "Calculating" (`#CALC!`) for the rest. Maintenance:
+  one new module and about 130 lines in `model.rs` (`call_external`, `external_value` and the
+  check in `NamedFunctionKind`) to carry to each IronCalc upgrade; an upstream
+  custom-function API would replace it. Added 31 October 2026.
+
 Upstream test suite (`cargo test --lib` in a copy of this directory with the repository's
 rust-toolchain.toml): original 0.9.1 passes 2765 (8 ignored); patched passes 2765 after the
 two test updates above (rerun 30 October 2026 with the F.09 additions: 2765 pass).

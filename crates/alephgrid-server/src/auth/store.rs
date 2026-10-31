@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users(
     created_at BIGINT NOT NULL, last_login BIGINT);
 CREATE TABLE IF NOT EXISTS org_members(org_id VARCHAR NOT NULL, user_id VARCHAR NOT NULL, role VARCHAR NOT NULL, PRIMARY KEY(org_id, user_id));
 CREATE TABLE IF NOT EXISTS spaces(id VARCHAR PRIMARY KEY, org_id VARCHAR NOT NULL, name VARCHAR NOT NULL, created_at BIGINT NOT NULL, publish_role VARCHAR NOT NULL DEFAULT 'editor');
+ALTER TABLE spaces ADD COLUMN IF NOT EXISTS python BOOLEAN DEFAULT true;
 CREATE TABLE IF NOT EXISTS library_entries(
     id VARCHAR PRIMARY KEY, space_id VARCHAR NOT NULL, kind VARCHAR NOT NULL, name VARCHAR NOT NULL, created_by VARCHAR NOT NULL,
     created_at BIGINT NOT NULL, retired_at BIGINT);
@@ -68,6 +69,9 @@ pub struct Space {
     /// The least role that may publish: function versions and pins in the space's
     /// workbooks, and entries of its library (7.11). `editor` or `owner`.
     pub publish_role: SpaceRole,
+    /// Whether Python functions may run for its workbooks (phase 8); organization admins
+    /// turn it off.
+    pub python: bool,
 }
 
 impl Space {
@@ -88,6 +92,7 @@ fn space_row(r: &duckdb::Row) -> duckdb::Result<Space> {
         name: r.get(2)?,
         created_at: r.get::<_, i64>(3)? as u64,
         publish_role: SpaceRole::parse(&publish).unwrap_or(SpaceRole::Editor),
+        python: r.get::<_, Option<bool>>(5)?.unwrap_or(true),
     })
 }
 
@@ -639,8 +644,8 @@ impl Store {
         if n > 0 {
             bail!("a space named {name:?} already exists");
         }
-        let s = Space { id: id.to_string(), org_id: org.to_string(), name: name.to_string(), created_at: now_ms(), publish_role: SpaceRole::Editor };
-        c.execute("INSERT INTO spaces VALUES (?, ?, ?, ?, 'editor')", params![s.id, s.org_id, s.name, s.created_at as i64])?;
+        let s = Space { id: id.to_string(), org_id: org.to_string(), name: name.to_string(), created_at: now_ms(), publish_role: SpaceRole::Editor, python: true };
+        c.execute("INSERT INTO spaces (id, org_id, name, created_at, publish_role, python) VALUES (?, ?, ?, ?, 'editor', true)", params![s.id, s.org_id, s.name, s.created_at as i64])?;
         Ok(s)
     }
 
@@ -649,12 +654,12 @@ impl Store {
     }
 
     pub fn space_in(c: &Connection, id: &str) -> Result<Option<Space>> {
-        Ok(c.query_row("SELECT id, org_id, name, created_at, publish_role FROM spaces WHERE id = ?", params![id], space_row).optional()?)
+        Ok(c.query_row("SELECT id, org_id, name, created_at, publish_role, python FROM spaces WHERE id = ?", params![id], space_row).optional()?)
     }
 
     pub fn spaces(&self) -> Result<Vec<Space>> {
         self.read(|c| {
-            let mut s = c.prepare("SELECT id, org_id, name, created_at, publish_role FROM spaces ORDER BY lower(name), id")?;
+            let mut s = c.prepare("SELECT id, org_id, name, created_at, publish_role, python FROM spaces ORDER BY lower(name), id")?;
             let rows = s.query_map([], space_row)?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
@@ -674,6 +679,13 @@ impl Store {
             c.execute("UPDATE spaces SET name = ? WHERE id = ?", params![name, id])?;
             s.name = name.to_string();
             Ok(s)
+        })
+    }
+
+    pub fn set_space_python(&self, id: &str, allowed: bool) -> Result<()> {
+        self.txn(|c| {
+            c.execute("UPDATE spaces SET python = ? WHERE id = ?", params![allowed, id])?;
+            Ok(())
         })
     }
 

@@ -135,6 +135,33 @@ struct Cli {
     #[arg(long = "profile", value_parser = alephgrid_server::runtime::ComputeProfile::parse)]
     profiles: Vec<alephgrid_server::runtime::ComputeProfile>,
 
+    /// A Python runtime directory made with `alephgrid python-runtime create`. Without one,
+    /// Python functions cannot run (their cached results still show).
+    #[arg(long, env = "ALEPHGRID_PYTHON_RUNTIME")]
+    python_runtime: Option<PathBuf>,
+
+    /// How Python workers are isolated: "auto" (the host's sandbox: sandbox-exec on macOS,
+    /// bwrap on Linux; Python is refused without one) or "none" (no sandbox; only with
+    /// --auth local, for one trusted person).
+    #[arg(long, env = "ALEPHGRID_PYTHON_ISOLATION", default_value = "auto")]
+    python_isolation: String,
+
+    /// Seconds one Python worker may run (wall and CPU time).
+    #[arg(long, env = "ALEPHGRID_PYTHON_TIMEOUT", default_value_t = 30)]
+    python_timeout: u64,
+
+    /// Memory one Python worker may use, e.g. "512MiB".
+    #[arg(long, env = "ALEPHGRID_PYTHON_MEMORY", value_parser = parse_size, default_value = "512MiB")]
+    python_memory: u64,
+
+    /// Bytes of results one Python worker may write.
+    #[arg(long, env = "ALEPHGRID_PYTHON_OUTPUT", value_parser = parse_size, default_value = "16MiB")]
+    python_output: u64,
+
+    /// Python workers running at once on the server.
+    #[arg(long, env = "ALEPHGRID_PYTHON_WORKERS", default_value_t = 2)]
+    python_workers: u64,
+
     /// Seconds a workbook start waits in line when the server is at capacity.
     #[arg(long, env = "ALEPHGRID_START_QUEUE_TIMEOUT", default_value_t = 60)]
     start_queue_timeout: u64,
@@ -190,6 +217,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "alephgrid=info,tower_http=warn".into()))
         .init();
+    if std::env::args().nth(1).as_deref() == Some("python-runtime") {
+        return python_runtime_command();
+    }
     let cli = Cli::parse();
 
     if let Some(dest) = &cli.backup_to {
@@ -278,6 +308,19 @@ async fn main() -> Result<()> {
     config.min_workbook_memory = cli.min_workbook_memory;
     config.idle_timeout = Duration::from_secs(cli.idle_timeout);
     config.profiles = cli.profiles.clone();
+    config.python_runtime = cli.python_runtime.clone();
+    config.python_isolation = match cli.python_isolation.as_str() {
+        "auto" => None,
+        "none" => Some(alephgrid_server::python::Isolation::None),
+        other => anyhow::bail!("--python-isolation is auto or none, not {other:?}"),
+    };
+    config.python_limits = alephgrid_server::python::Limits {
+        timeout_ms: cli.python_timeout.max(1) * 1000,
+        cpu_ms: cli.python_timeout.max(1) * 1000,
+        memory_bytes: cli.python_memory,
+        output_bytes: cli.python_output,
+        workers: cli.python_workers.max(1),
+    };
     config.start_queue_timeout = Duration::from_secs(cli.start_queue_timeout);
     config.view_ttl = Duration::from_secs(cli.view_ttl);
     config.shutdown_grace = Duration::from_secs(cli.shutdown_grace);
@@ -381,4 +424,47 @@ async fn shutdown_signal() {
         _ = term => {},
     }
     tracing::info!("shutting down");
+}
+
+/// `alephgrid python-runtime create --python <interpreter> [--wheels DIR --requirements FILE] DIR`
+#[derive(Parser, Debug)]
+#[command(name = "alephgrid python-runtime", about = "Make a pinned Python runtime for Python functions, offline.")]
+struct PythonRuntimeCli {
+    #[command(subcommand)]
+    command: PythonRuntimeCommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum PythonRuntimeCommand {
+    /// Create a runtime directory: the interpreter, packages installed from local wheels
+    /// (hashes required, nothing downloaded) and runtime.json.
+    Create {
+        /// The Python interpreter to build on (CPython 3.9 or later).
+        #[arg(long)]
+        python: PathBuf,
+        /// A folder of wheels to install from.
+        #[arg(long)]
+        wheels: Option<PathBuf>,
+        /// Requirements with hashes (`name==version --hash=sha256:…`).
+        #[arg(long)]
+        requirements: Option<PathBuf>,
+        /// The new runtime directory.
+        dir: PathBuf,
+    },
+}
+
+fn python_runtime_command() -> Result<()> {
+    let args = std::iter::once("alephgrid python-runtime".to_string()).chain(std::env::args().skip(2));
+    let cli = PythonRuntimeCli::parse_from(args);
+    match cli.command {
+        PythonRuntimeCommand::Create { python, wheels, requirements, dir } => {
+            let m = alephgrid_server::python::create::create(&alephgrid_server::python::create::Options { python, wheels, requirements, dir: dir.clone() })?;
+            println!("Created Python runtime {} (Python {}, {} package(s)) in {}", m.id(), m.python, m.packages.len(), dir.display());
+            for p in &m.packages {
+                println!("  {}=={} sha256:{}", p.name, p.version, p.sha256);
+            }
+            println!("Start the server with --python-runtime {}", dir.display());
+        }
+    }
+    Ok(())
 }

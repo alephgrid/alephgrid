@@ -359,6 +359,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "TransformPreview" => conforms::<alephgrid_core::tools::TransformPreview>(op, v),
         "FormulaInspection" => conforms::<alephgrid_core::tools::FormulaInspection>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
+        "number" => assert!(v.is_u64(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
         other => panic!("no checker for result type {other}"),

@@ -218,6 +218,20 @@ impl Db<'_> {
         Ok(n as u64)
     }
 
+    /// Calculated columns (SQL language) whose formula is one call of a worker function.
+    pub(crate) fn worker_columns(&self, cache: &crate::external::ResultCache) -> Result<Vec<crate::external::ColumnCall>> {
+        let mut stmt = self.conn.prepare("SELECT table_name, name, formula FROM _rf_columns WHERE language = 'sql' ORDER BY table_name, position")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (table, column, formula) = row?;
+            if let Some((function, args)) = crate::external::parse_column_call(&formula, |n| cache.is_worker_function(n)) {
+                out.push(crate::external::ColumnCall { table, column, function, args });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn formulas(&self, table: &str) -> Result<Vec<(String, String)>> {
         Ok(self
             .conn

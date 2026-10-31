@@ -121,15 +121,54 @@ export type ColorRule = { column: string, condition: Condition, value: number, c
 
 export type Presentation = { hidden: Array<string>, frozen: number, formats: { [key in string]: DisplayFormat }, rules: Array<ColorRule>, };
 
-export type FunctionDefinition = { name: string, kind: FunctionKind, arguments: Array<string>, source: string, documentation: string, tests: Array<FunctionTest>, dependencies: { [key in string]: number }, };
+export type ResultType = "number" | "text" | "boolean";
 
-export type FunctionKind = "formula" | "sql";
+export type RuntimeIdentity = { 
+/**
+ * `python`.
+ */
+kind: string, 
+/**
+ * Content hash of its manifest (interpreter version, packages and their hashes).
+ */
+id: string, 
+/**
+ * The interpreter's version.
+ */
+version: string, 
+/**
+ * Packages and versions, `name==version`.
+ */
+packages: Array<string>, };
+
+export type Limits = { timeout_ms: number, cpu_ms: number, memory_bytes: number, output_bytes: number, 
+/**
+ * Workers running at once on the server.
+ */
+workers: number, };
+
+export type FunctionDefinition = { name: string, kind: FunctionKind, arguments: Array<string>, source: string, documentation: string, tests: Array<FunctionTest>, dependencies: { [key in string]: number }, 
+/**
+ * Python: what the function returns (required).
+ */
+returns?: ResultType, 
+/**
+ * Python: the result may change with the same arguments (clock, randomness); computed
+ * again only on `refresh_functions`.
+ */
+volatile?: boolean, };
+
+export type FunctionKind = "formula" | "sql" | "python";
 
 export type FunctionTest = { arguments: Array<string>, expected: string, };
 
 export type FunctionTestResult = { actual: string, expected: string, passed: boolean, };
 
-export type FunctionVersion = { version: number, definition: FunctionDefinition, adapter: string, duckdb_version: string, dependencies: { [key in string]: number }, };
+export type FunctionVersion = { version: number, definition: FunctionDefinition, adapter: string, duckdb_version: string, dependencies: { [key in string]: number }, 
+/**
+ * Python: the runtime it was published with; calls need exactly this runtime.
+ */
+runtime?: RuntimeIdentity, };
 
 export type WorkbookFunction = { name: string, pinned: number, versions: Array<FunctionVersion>, };
 
@@ -420,7 +459,12 @@ export type Space = { id: string, org_id: string, name: string, created_at: numb
  * The least role that may publish: function versions and pins in the space's
  * workbooks, and entries of its library (7.11). `editor` or `owner`.
  */
-publish_role: SpaceRole, };
+publish_role: SpaceRole, 
+/**
+ * Whether Python functions may run for its workbooks (phase 8); organization admins
+ * turn it off.
+ */
+python: boolean, };
 
 export type PublicUser = { id: string, email: string, name: string, instance_admin: boolean, disabled: boolean, 
 /**
@@ -580,7 +624,7 @@ space?: string, starred?: boolean, };
 
 export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", revision?: number, } | { "event": "committed", origin: number, revision: number, } | { "event": "access_revoked", reason: string, } | { "event": "role_changed", role: SpaceRole, } | { "event": "progress", request: number, percentage: number, };
 
-export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, generation?: number, } | { "op": "insert_rows", view_id: number, at: number, count: number, generation?: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, generation?: number, } | { "op": "undo", revision?: number, redo?: boolean, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, layout?: number, } | { "op": "sheet_delete", sheet: number, layout?: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, layout?: number, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, layout?: number, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, 
+export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "refresh_functions" } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, generation?: number, } | { "op": "insert_rows", view_id: number, at: number, count: number, generation?: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, generation?: number, } | { "op": "undo", revision?: number, redo?: boolean, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, layout?: number, } | { "op": "sheet_delete", sheet: number, layout?: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, layout?: number, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, layout?: number, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, 
 /**
  * Layouts (see `SheetInfo::layout`) of the target sheet and of `from_sheet`.
  */
@@ -686,7 +730,11 @@ profiles: Array<ComputeProfile>,
 /**
  * How long a start waits for host capacity before failing with `capacity`.
  */
-queue_timeout_ms: number, };
+queue_timeout_ms: number, 
+/**
+ * Limits of Python workers, when this server runs Python functions (phase 8).
+ */
+python?: Limits, };
 
 export type ProfileChoice = { profile: ComputeProfile, 
 /**
@@ -835,6 +883,7 @@ export interface Results {
   test_function: FunctionTestResult[];
   publish_function: WorkbookFunction;
   pin_functions: WorkbookFunction[];
+  refresh_functions: number;
   tables: TableInfo[];
   open_view: ViewInfo;
   update_view: ViewInfo;

@@ -145,6 +145,9 @@ pub enum Op {
     TestFunction { definition: alephgrid_core::FunctionDefinition },
     PublishFunction { definition: alephgrid_core::FunctionDefinition },
     PinFunctions { pins: std::collections::BTreeMap<String,u32> },
+    /// Compute volatile Python functions again and retry calls that ran out of time,
+    /// memory or a worker (docs/PYTHON_FUNCTIONS.md).
+    RefreshFunctions,
     Tables,
     OpenView { spec: ViewSpec },
     UpdateView { view_id: u64, spec: ViewSpec },
@@ -353,10 +356,13 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
+        // Running Python is publishing-level: it executes the code (in a worker).
+        TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Python => &[Cap::Publish],
         TestFunction { .. } => VIEW,
         Query { .. } => QUERY,
         ExportQuery { .. } => &[Cap::Query, Cap::Export],
         PublishFunction { .. } | PinFunctions { .. } => &[Cap::Publish],
+        RefreshFunctions => &[Cap::Edit],
         CreateTableFromQuery { .. } | CreateSheetFromQuery { .. } | SqlChange { .. } | RefreshMaterialized { .. } => EDIT_QUERY,
         SaveAnalysis { .. } | DeleteAnalysis { .. } | SaveDashboard { .. } | DeleteDashboard { .. } | SetValidations { .. }
         | ApplyTransform { .. } | MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | SavePresentation { .. }
@@ -379,7 +385,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
-        MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
+        MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
     }
@@ -431,6 +437,8 @@ struct Ctx {
     /// Where `export_query` writes: this workbook's export scratch directory.
     export_dir: std::path::PathBuf,
     downloads: Arc<crate::state::Downloads>,
+    /// Python tests of a definition being published, run before the writer was taken (8.07).
+    tested: Option<alephgrid_core::TestedPython>,
 }
 
 /// A query result written to a file, ready to download once.
@@ -539,8 +547,9 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SavePresentation { table, presentation } => (json!(wb.save_presentation(&table,presentation)?),Some(Event::Resync { revision: None })),
         Op::PublishFunction { definition } => {
             if definition.kind == alephgrid_core::FunctionKind::Sql { require_sql(ctx)?; }
-            (json!(wb.publish_function(definition)?), Some(Event::Resync { revision: None }))
+            (json!(wb.publish_function_tested(definition, ctx.tested.clone())?), Some(Event::Resync { revision: None }))
         }
+        Op::RefreshFunctions => (json!(wb.refresh_functions()?), Some(Event::Resync { revision: None })),
         Op::PinFunctions { pins } => {
             if wb.functions()?.iter().any(|f| pins.contains_key(&f.name) && f.versions.iter().any(|v| v.definition.kind == alephgrid_core::FunctionKind::Sql)) { require_sql(ctx)?; }
             (json!(wb.pin_functions(&pins)?), Some(Event::Resync { revision: None }))
@@ -1252,6 +1261,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
             workbook: handle.id.clone(),
             export_dir: state.workbook_scratch(".exports", &handle.id),
             downloads: state.downloads.clone(),
+            tested: None,
         };
         let data_dir = state.config.data_dir.clone();
         let recalc_timeout = state.config.job_timeout;
@@ -1281,6 +1291,15 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
         jobs.spawn(async move {
             let _slot = slot;
             let _lease = op_lease;
+            let mut ctx = ctx;
+            // A Python definition's tests run now, in a worker, not under the writer.
+            if let Op::PublishFunction { definition } = &op {
+                if let (alephgrid_core::FunctionKind::Python, Some(rt)) = (&definition.kind, handle.functions.runtime_impl()) {
+                    let d = definition.clone();
+                    let tested = tokio::task::spawn_blocking(move || alephgrid_core::functions::test_python(&d, rt.as_ref(), &AtomicBool::new(false))).await;
+                    ctx.tested = tested.ok().and_then(|t| t.ok());
+                }
+            }
             let reply = if is_write {
                 let name = op_name(&op);
                 let audit_op = name.clone();
@@ -1330,6 +1349,8 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
                             }
                         }
                         handle.recalculate_later(queued, c.revision, recalc_timeout);
+                        // New sheet cells or columns may call Python functions not computed yet.
+                        handle.compute_functions_later();
                         if let Some(structural) = structural {
                             let h = handle.clone();
                             tokio::task::spawn_blocking(move || {

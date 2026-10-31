@@ -623,7 +623,7 @@ pub async fn list_spaces(State(state): State<Shared>, Extension(p): Extension<Pr
                 .auth
                 .visible_spaces(&p)?
                 .into_iter()
-                .map(|(s, r)| json!({ "id": s.id, "name": s.name, "org_id": s.org_id, "org_name": orgs.get(&s.org_id), "created_at": s.created_at, "role": r, "publish_role": s.publish_role }))
+                .map(|(s, r)| json!({ "id": s.id, "name": s.name, "org_id": s.org_id, "org_name": orgs.get(&s.org_id), "created_at": s.created_at, "role": r, "publish_role": s.publish_role, "python": s.python }))
                 .collect::<Vec<_>>())
         })
         .await?,
@@ -673,6 +673,9 @@ pub struct SpacePatch {
     /// The least role that may publish (7.11): `editor` or `owner`.
     #[serde(default)]
     publish_role: Option<SpaceRole>,
+    /// Whether Python functions may run (organization admins).
+    #[serde(default)]
+    python: Option<bool>,
 }
 
 /// Rename a space, or change who may publish in it (owners).
@@ -691,6 +694,13 @@ pub async fn rename_space(State(state): State<Shared>, Extension(p): Extension<P
                 state.auth.store.set_publish_role(&id, role)?;
                 state.auth.bump();
                 state.auth.audit(&p, "space_publish_role_changed", Some(&space.org_id), Some(&id), None, json!({ "role": role }));
+            }
+            if let Some(allowed) = b.python {
+                state.auth.require_org_admin(&p, &space.org_id)?;
+                state.auth.store.set_space_python(&id, allowed)?;
+                state.auth.audit(&p, "space_python_changed", Some(&space.org_id), Some(&id), None, json!({ "python": allowed }));
+                // Open workbooks of the space stop (or may start) running Python at once.
+                state.python_policy_changed(&id);
             }
             state.auth.store.space(&id)?.ok_or_else(|| not_found("space not found"))
         })

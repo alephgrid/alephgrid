@@ -357,21 +357,36 @@ Gate 7.12 includes policy-managed local execution and its lifecycle tests; it do
 
 Core product scope. Prototype after phase 5; shared release depends on phases 3 and 7.
 
-- [ ] **8.01** Prove an engine integration for `=NORMALIZE_SKU(A2)` and range arguments; decide on a supported upstream hook or maintained extension and document its maintenance cost.
-- [ ] **8.02** Define typed worker input/output contracts and exact scalar, range and error semantics.
-- [ ] **8.03** Run Python in isolated workers with no inherited credentials, denied host mounts and network disabled by default; a subprocess alone is insufficient isolation.
-- [ ] **8.04** Enforce execution time, CPU, memory, output and concurrency limits with cancellation.
-- [ ] **8.05** Pin runtime images and package dependencies; provide offline installation and an optional local/team worker profile.
-- [ ] **8.06** Execute table calculations in bounded batches and benchmark the bridge; avoid one network/process call per cell.
-- [ ] **8.07** Avoid holding the workbook lock during worker execution; commit results only when input and function revisions still match.
-- [ ] **8.08** Cache pure functions by exact inputs/version; define explicit refresh semantics for volatile functions and keep side effects out of automatic recalculation.
-- [ ] **8.09** Integrate Python editing, test runs, documentation, version publishing and formula autocomplete into the function library.
-- [ ] **8.10** Handle worker crash, duplicate job delivery, permission revocation and unavailable functions explicitly.
-- [ ] **8.11** Explain XLSX compatibility and offer an explicit cached-value export option; custom Python code does not become an Excel-native function.
-- [ ] **8.13** Implement a versioned internal FunctionRuntime adapter with capability declarations, typed batch schemas and explicit runtime identity; integrate it with RuntimeSpec and ComputePolicy.
-- [ ] **8.T01** Test 8.01–8.02, 8.05–8.09 and 8.11–8.13: scalar/range/batch equivalence, errors/precision, dependency versions, offline installation, caching, recalculation, reopen and export compatibility in engine/API/browser paths.
-- [ ] **8.T02** Test 8.03–8.04 and 8.10: filesystem/network/credential escape attempts, child processes, timeout/memory/output exhaustion, crash, cancellation, duplicate jobs, revoked permission and stale results; assert other workbooks remain responsive and durable state is unchanged on failure.
-- [ ] **8.12 — Gate:** Define → test → publish → call from cells → recalculate → reopen works; worker isolation and failure tests pass without hanging other workbooks.
+- [x] **8.01** Prove an engine integration for `=NORMALIZE_SKU(A2)` and range arguments; decide on a supported upstream hook or maintained extension and document its maintenance cost.
+  - Maintained extension: IronCalc patch set 2 (external-function hook, about 130 lines; maintenance in `vendor/ironcalc_base/ALEPHGRID_PATCHES.md`) answering from a result cache; table columns call a DuckDB lookup macro. [PYTHON_FUNCTIONS.md](PYTHON_FUNCTIONS.md). `tests/python.rs`.
+- [x] **8.02** Define typed worker input/output contracts and exact scalar, range and error semantics.
+  - `WorkerValue`/`CallResult` (`alephgrid_core::external`), the value tables in PYTHON_FUNCTIONS.md; `values_ranges_and_errors_follow_the_contract`.
+- [x] **8.03** Run Python in isolated workers with no inherited credentials, denied host mounts and network disabled by default; a subprocess alone is insufficient isolation.
+  - Seatbelt deny-by-default profile (macOS) or bubblewrap namespaces (Linux), cleared environment, private empty directory, no network or processes; fail closed without a sandbox (`--python-isolation none` only with `--auth local`). Escape test checked to fail without the sandbox. Linux bubblewrap path not run on this machine.
+- [x] **8.04** Enforce execution time, CPU, memory, output and concurrency limits with cancellation.
+  - `--python-timeout/-memory/-output/-workers`; RLIMIT_CPU, RLIMIT_AS (Linux), a watchdog for wall time, resident memory, output and cancellation; worker slots. `limits_stop_runaway_functions_without_hanging_other_workbooks`.
+- [x] **8.05** Pin runtime images and package dependencies; provide offline installation and an optional local/team worker profile.
+  - `alephgrid python-runtime create --python … [--wheels DIR --requirements FILE] DIR`: offline pip with required hashes, `runtime.json` with every package's SHA-256, a content-hash id recorded by each function version. Worker profile: the `--python-*` limits (in `ComputePolicy.python`). `runtimes_install_pinned_packages_offline`.
+- [x] **8.06** Execute table calculations in bounded batches and benchmark the bridge; avoid one network/process call per cell.
+  - Distinct missing argument tuples in batches of ≤1,000 calls/4 MiB, as many at once as there are workers; 1M rows with 100k distinct values fill in 11.9 s (debug build). TEST_MATRIX.md.
+- [x] **8.07** Avoid holding the workbook lock during worker execution; commit results only when input and function revisions still match.
+  - Workers run with no lock; results are keyed by exact inputs and stored only if the version is still pinned and Python still allowed. `workers_run_outside_the_lock_and_stale_versions_are_discarded`.
+- [x] **8.08** Cache pure functions by exact inputs/version; define explicit refresh semantics for volatile functions and keep side effects out of automatic recalculation.
+  - `_rf_fn_results` (storage format 9), loaded on open; volatile functions keyed by a refresh epoch bumped only by `refresh_functions`; workers cannot have side effects. Reopen and volatile tests.
+- [x] **8.09** Integrate Python editing, test runs, documentation, version publishing and formula autocomplete into the function library.
+  - Python engine, result type and volatility in the Function library; tests, publish, versions and runtime shown; completion in sheets and SQL columns. `e2e/python.spec.ts`.
+- [x] **8.10** Handle worker crash, duplicate job delivery, permission revocation and unavailable functions explicitly.
+  - Crash/limit → transient `#CALC!` with the reason; duplicates stored once; a space's Python setting (organization admins) stops work and discards late results; a missing or different runtime shows cached results and `#NAME?` with the reason, and the workbook still opens. `revocation_duplicates_and_a_missing_runtime_are_handled`.
+- [x] **8.11** Explain XLSX compatibility and offer an explicit cached-value export option; custom Python code does not become an Excel-native function.
+  - Compatibility note; `export.xlsx?values=python`. `xlsx_keeps_formulas_or_exports_cached_values`.
+- [x] **8.13** Implement a versioned internal FunctionRuntime adapter with capability declarations, typed batch schemas and explicit runtime identity; integrate it with RuntimeSpec and ComputePolicy.
+  - `FunctionRuntime` (`identity`, `run`, `parallelism`), `WorkerJob` batches, `RuntimeIdentity`; the runtime id is a `RuntimeSpec` component (not a required capability, so workbooks still open without it) and worker limits are `ComputePolicy.python`.
+- [x] **8.T01** Test 8.01–8.02, 8.05–8.09 and 8.11–8.13: scalar/range/batch equivalence, errors/precision, dependency versions, offline installation, caching, recalculation, reopen and export compatibility in engine/API/browser paths.
+  - `tests/python.rs` (10 tests + 1 benchmark), `e2e/python.spec.ts`. TEST_MATRIX.md.
+- [x] **8.T02** Test 8.03–8.04 and 8.10: filesystem/network/credential escape attempts, child processes, timeout/memory/output exhaustion, crash, cancellation, duplicate jobs, revoked permission and stale results; assert other workbooks remain responsive and durable state is unchanged on failure.
+  - Escape, limits, revocation/duplicates and stale-version tests in `tests/python.rs`.
+- [x] **8.12 — Gate:** Define → test → publish → call from cells → recalculate → reopen works; worker isolation and failure tests pass without hanging other workbooks.
+  - `e2e/python.spec.ts` and `tests/python.rs`; isolation checked to fail without the sandbox.
 
 ## 9. Package and release the single-node product
 
@@ -485,3 +500,4 @@ Add one row when starting work, encountering a blocker or completing a task. Kee
 | 2026-10-31 | 7.07, 7.10, 7.11, 7.T01 | Complete | Per-space quotas with admin usage, audit of changes/imports/exports/publication (batched writer), space libraries with a per-space publish role. Stacked dialogs now make the lower one inert. Next: 7.08–7.09 (stale edits, resync, undo under concurrency). |
 | 2026-10-31 | 7.08, 7.09, 7.T02 | Complete | Stale-edit checks (cell bases, table generations, sheet layouts) refused as `conflict` with Overwrite; every revision announced in order from the writer, client gap detection; table undo/redo with conflict checks (storage format 8) and a History dialog; sheet undo limited to the step's author (docs/COLLABORATION.md). Browser: Chromium 79/79; WebKit and Firefox each had one failure under heavy machine load (journey toast, analysis gate timeout) that passed on rerun. Next: 7.13–7.16. |
 | 2026-10-31 | 7.13–7.16, 7.T03, 7.12 | Complete | Compute profiles and entitlements, space compute budgets and host reservations made at admission, capacity queue, opening/paused/failure screens, controlled restart with the lock handed over, idle shutdown on meaningful activity (docs/COMPUTE.md). Gate test found withdrawn work answering `cancelled` (fixed) and the runtime status leaking the data directory in failure messages (fixed). A test process that panics while starts are held can crash with SIGSEGV at exit (DuckDB threads at process teardown); seen only after a failed assertion. Next: phase 8. |
+| 2026-10-31 | 8.01–8.13, 8.T01–8.T02, 8.12 | Complete | Python functions in sheet cells and table columns through a result cache (IronCalc patch 2, DuckDB lookup macros, storage format 9), computed in Seatbelt/bubblewrap-isolated workers in batches outside the workbook lock, pinned offline runtimes, volatile refresh, per-space Python setting, XLSX cached values (docs/PYTHON_FUNCTIONS.md). Benchmark: 1M rows, 100k distinct, 11.9 s. Gaps: the Linux sandbox was not run here; memory is watched, not limited, on macOS. |

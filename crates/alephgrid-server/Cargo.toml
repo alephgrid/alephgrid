@@ -18,6 +18,7 @@ anyhow.workspace = true
 argon2 = "0.5"
 base64 = "0.22"
 getrandom = "0.3"
+libc = "0.2"
 jsonwebtoken = { version = "9", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 serde.workspace = true
@@ -40,7 +41,9 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]
 base64 = "0.22"
+libc = "0.2"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 tempfile = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
