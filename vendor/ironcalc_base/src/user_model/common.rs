@@ -394,6 +394,11 @@ impl<'a> UserModel<'a> {
         self.model.evaluate()
     }
 
+    /// Register (or remove) functions evaluated by the host (Alephgrid patch 2).
+    pub fn set_external_functions(&mut self, hook: Option<crate::external::ExternalHook>) {
+        self.model.set_external_functions(hook);
+    }
+
     /// Returns the list of pending diffs and removes them from the queue
     ///
     /// This is used together with [apply_external_diffs](UserModel::apply_external_diffs) to keep two remote models

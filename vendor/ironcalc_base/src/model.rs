@@ -231,6 +231,8 @@ pub struct Model<'a> {
     /// (`parse_formulas`), extended when a formula is added. See
     /// `shared_formula_index`.
     pub(crate) shared_formula_lookup: Vec<SharedFormulaLookup>,
+    /// Functions evaluated by the host (Alephgrid patch 2, see `external.rs`).
+    pub(crate) external: Option<crate::external::ExternalHook>,
 }
 
 /// Formula text to index in `Worksheet::shared_formulas`, for one sheet.
@@ -657,6 +659,130 @@ impl<'a> Model<'a> {
         }
     }
 
+    /// Register (or remove) the host's external functions (Alephgrid patch 2).
+    pub fn set_external_functions(&mut self, hook: Option<crate::external::ExternalHook>) {
+        self.external = hook;
+    }
+
+    fn call_external(
+        &mut self,
+        hook: &crate::external::ExternalHook,
+        name: &str,
+        args: &[Node],
+        cell: CellReferenceIndex,
+    ) -> CalcResult {
+        use crate::external::{ExternalResult, ExternalValue};
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            let result = self.evaluate_node_in_context(arg, cell);
+            match self.external_value(result, cell) {
+                Ok(v) => values.push(v),
+                Err(e) => return e,
+            }
+        }
+        match hook.call(name, &values) {
+            ExternalResult::Value(ExternalValue::Number(n)) => CalcResult::Number(n),
+            ExternalResult::Value(ExternalValue::Text(s)) => CalcResult::String(s),
+            ExternalResult::Value(ExternalValue::Boolean(b)) => CalcResult::Boolean(b),
+            ExternalResult::Value(ExternalValue::Empty) => CalcResult::String(String::new()),
+            ExternalResult::Value(ExternalValue::Error(error)) => {
+                CalcResult::new_error(error, cell, String::new())
+            }
+            ExternalResult::Value(ExternalValue::Array(_)) => CalcResult::new_error(
+                Error::VALUE,
+                cell,
+                format!("{name} returned an array; it must return one value"),
+            ),
+            ExternalResult::Error { error, message } => CalcResult::new_error(error, cell, message),
+        }
+    }
+
+    fn external_value(
+        &mut self,
+        result: CalcResult,
+        cell: CellReferenceIndex,
+    ) -> Result<crate::external::ExternalValue, CalcResult> {
+        use crate::external::{ExternalValue, MAX_EXTERNAL_CELLS};
+        let scalar = |r: CalcResult| match r {
+            CalcResult::Number(n) => ExternalValue::Number(n),
+            CalcResult::String(s) => ExternalValue::Text(s),
+            CalcResult::Boolean(b) => ExternalValue::Boolean(b),
+            CalcResult::EmptyCell | CalcResult::EmptyArg => ExternalValue::Empty,
+            CalcResult::Error { error, .. } => ExternalValue::Error(error),
+            CalcResult::Range { .. } | CalcResult::Array(_) | CalcResult::Lambda(_) => {
+                ExternalValue::Error(Error::VALUE)
+            }
+        };
+        Ok(match result {
+            CalcResult::Range { left, mut right } => {
+                if left.sheet != right.sheet {
+                    return Err(CalcResult::new_error(
+                        Error::VALUE,
+                        cell,
+                        "A range across sheets cannot be passed to a function".to_string(),
+                    ));
+                }
+                if right.row == LAST_ROW || right.column == LAST_COLUMN {
+                    if let Some(sheet) = self.workbook.worksheets.get(left.sheet as usize) {
+                        let used = sheet.dimension();
+                        if right.row == LAST_ROW {
+                            right.row = used.max_row.max(left.row);
+                        }
+                        if right.column == LAST_COLUMN {
+                            right.column = used.max_column.max(left.column);
+                        }
+                    }
+                }
+                let rows = (right.row - left.row + 1).max(0) as usize;
+                let columns = (right.column - left.column + 1).max(0) as usize;
+                if rows.saturating_mul(columns) > MAX_EXTERNAL_CELLS {
+                    return Err(CalcResult::new_error(
+                        Error::VALUE,
+                        cell,
+                        format!("A range passed to a function may have at most {MAX_EXTERNAL_CELLS} cells"),
+                    ));
+                }
+                let mut out = Vec::with_capacity(rows);
+                for row in left.row..=right.row {
+                    let mut values = Vec::with_capacity(columns);
+                    for column in left.column..=right.column {
+                        let v = self.evaluate_cell(CellReferenceIndex {
+                            sheet: left.sheet,
+                            row,
+                            column,
+                        });
+                        values.push(scalar(v));
+                    }
+                    out.push(values);
+                }
+                ExternalValue::Array(out)
+            }
+            CalcResult::Array(rows) => ExternalValue::Array(
+                rows.into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|n| match n {
+                                ArrayNode::Number(x) => ExternalValue::Number(x),
+                                ArrayNode::String(s) => ExternalValue::Text(s),
+                                ArrayNode::Boolean(b) => ExternalValue::Boolean(b),
+                                ArrayNode::Error(e) => ExternalValue::Error(e),
+                                ArrayNode::Empty => ExternalValue::Empty,
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            CalcResult::Lambda(_) => {
+                return Err(CalcResult::new_error(
+                    Error::VALUE,
+                    cell,
+                    "A LAMBDA cannot be passed to an external function".to_string(),
+                ))
+            }
+            other => scalar(other),
+        })
+    }
+
     pub(crate) fn evaluate_node_in_context(
         &mut self,
         node: &Node,
@@ -761,6 +887,14 @@ impl<'a> Model<'a> {
             OpPowerKind { left, right } => self.handle_arithmetic(left, right, cell, &power),
             FunctionKind { kind, args } => self.evaluate_function(kind, args, cell),
             NamedFunctionKind { name, args, id } => {
+                if id.is_none() {
+                    if let Some(hook) = self.external.clone() {
+                        let upper = name.to_uppercase();
+                        if hook.has(&upper) {
+                            return self.call_external(&hook, &upper, args, cell);
+                        }
+                    }
+                }
                 let lambda_result = if let Some(var_id) = id {
                     // Bound by LET — look up the variable, which should be a Lambda.
                     match self.variable_stack.get(&(*var_id as usize)) {
@@ -1840,6 +1974,7 @@ impl<'a> Model<'a> {
             workbook,
             parsed_formulas,
             shared_formula_lookup: Vec::new(),
+            external: None,
             shared_strings,
             parsed_defined_names: HashMap::new(),
             parser,

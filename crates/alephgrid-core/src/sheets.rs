@@ -102,6 +102,8 @@ pub struct Sheets {
     stamp: u64,
     /// [`SheetInfo::layout`] of every worksheet, by index (the hidden link sheet included).
     layouts: Vec<u64>,
+    /// Worker (Python) functions, evaluated from their result cache (phase 8).
+    external: Option<ironcalc::base::external::ExternalHook>,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -128,7 +130,33 @@ impl Sheets {
             actor: None,
             stamp: 0,
             layouts: vec![],
+            external: None,
         })
+    }
+
+    /// Evaluate worker functions in cells through `hook` (on every model this holds).
+    pub fn set_external(&mut self, hook: Option<ironcalc::base::external::ExternalHook>) {
+        self.external = hook;
+        self.attach();
+    }
+
+    fn attach(&mut self) {
+        if let Some(m) = self.model.as_mut() {
+            m.set_external_functions(self.external.clone());
+        }
+    }
+
+    /// Evaluate every formula again (worker results arrived). No input changes, nothing
+    /// enters the undo history. False when there are no sheets.
+    pub fn reevaluate(&mut self) -> bool {
+        self.attach();
+        match self.model.as_mut() {
+            Some(m) => {
+                m.evaluate();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Start a change made by `actor` that will commit as revision `stamp`.
@@ -278,6 +306,7 @@ impl Sheets {
 
     fn model_mut(&mut self) -> Result<&mut UserModel<'static>> {
         self.changes += 1;
+        self.attach();
         self.model.as_mut().ok_or_else(|| anyhow!("this workbook has no sheets"))
     }
 
@@ -319,6 +348,7 @@ impl Sheets {
         let index = match &mut self.model {
             None => {
                 self.model = Some(UserModel::new_empty("workbook", "en", "UTC", LANG).map_err(|e| anyhow!(e))?);
+                self.attach();
                 self.undo_groups.clear();
                 self.redo_groups.clear();
                 self.moved_all();
@@ -632,6 +662,7 @@ impl Sheets {
         if self.model.is_none() {
             self.changes += 1;
             self.model = Some(imported);
+            self.attach();
             self.undo_groups.clear();
             self.redo_groups.clear();
             self.moved_all();

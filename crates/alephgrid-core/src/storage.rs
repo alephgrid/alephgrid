@@ -39,7 +39,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 8;
+pub const FORMAT: u32 = 9;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -162,6 +162,8 @@ const V7_SCHEMA: &str = "
 /// `after_rows` name the tables holding the rows it touched as they were before and after
 /// it; `cells` is a JSON object of the columns whose values it set, each with the records
 /// (`null`: every row in both copies).
+use crate::external::V9_SCHEMA;
+
 pub(crate) const V8_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS _rf_undo (
         revision BIGINT NOT NULL, table_name VARCHAR NOT NULL, actor VARCHAR, kind VARCHAR NOT NULL,
@@ -229,7 +231,7 @@ pub fn sync_dir(dir: &Path) {
 
 fn create_fresh(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
-        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA} {V7_SCHEMA} {V8_SCHEMA}
+        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA} {V7_SCHEMA} {V8_SCHEMA} {V9_SCHEMA}
          ALTER TABLE _rf_tables ADD COLUMN data_rev BIGINT NOT NULL DEFAULT 0;
          INSERT INTO _rf_meta VALUES ('format', '{FORMAT}'), ('revision', '0');
          COMMIT;"
@@ -268,6 +270,10 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
         if from < 8 {
             conn.execute_batch(V8_SCHEMA)?;
             meta_set(conn, "format", "8")?;
+        }
+        if from < 9 {
+            conn.execute_batch(V9_SCHEMA)?;
+            meta_set(conn, "format", "9")?;
         }
         faults::check("migrate")?;
         Ok(())

@@ -148,6 +148,12 @@ pub struct WorkbookHandle {
     sessions: AtomicU64,
     /// Leases held now (requests, operations, sessions setting up).
     uses: AtomicUsize,
+    /// Background work besides scheduled jobs (computing worker functions); keeps the
+    /// allocation from being idle.
+    background: AtomicUsize,
+    /// Results of worker (Python) functions and the calls still to compute (phase 8).
+    pub functions: Arc<alephgrid_core::external::ResultCache>,
+    fn_job: Mutex<FnJob>,
     /// Whether any session has connected to this allocation.
     had_session: AtomicBool,
     last_activity_ms: AtomicU64,
@@ -191,6 +197,15 @@ impl Drop for Lease {
     }
 }
 
+/// The background computation of worker functions of one allocation.
+#[derive(Default)]
+struct FnJob {
+    running: bool,
+    /// Asked again while running: look for missing calls once more when done.
+    again: bool,
+    cancel: Arc<AtomicBool>,
+}
+
 /// Counts an operation as active for as long as it lives.
 struct Active<'a>(&'a WorkbookHandle);
 
@@ -212,6 +227,7 @@ impl WorkbookHandle {
         ownership: OwnershipAssignment,
     ) -> Result<WorkbookHandle> {
         let readers: Vec<Reader> = (0..readers).map(|_| engine.reader()).collect::<Result<_>>()?;
+        let functions = engine.function_results();
         let control = engine.reader()?;
         let (events, _) = broadcast::channel(256);
         let reader_interrupts: Vec<_> = readers.iter().map(|r| r.interrupt_handle()).collect();
@@ -232,6 +248,9 @@ impl WorkbookHandle {
             active: AtomicUsize::new(0),
             sessions: AtomicU64::new(0),
             uses: AtomicUsize::new(0),
+            background: AtomicUsize::new(0),
+            functions,
+            fn_job: Mutex::new(FnJob::default()),
             had_session: AtomicBool::new(false),
             last_activity_ms: AtomicU64::new(alephgrid_core::storage::now_ms()),
             events,
@@ -280,6 +299,136 @@ impl WorkbookHandle {
                 let _ = h.events.send(Event::TableChanged { table, origin: 0, revision });
             });
         }
+    }
+
+    /// Compute the calls of worker (Python) functions this workbook is missing, in the
+    /// background (docs/PYTHON_FUNCTIONS.md): batches of at most
+    /// [`alephgrid_core::external::BATCH_CALLS`] calls, run by the runtime's isolated
+    /// workers with no lock held, each stored only if its version is still the pinned one.
+    /// One job per allocation; a request while it runs makes it look again when done.
+    pub fn compute_functions_later(self: &Arc<Self>) {
+        if self.functions.runtime_impl().is_none() || self.is_closing() {
+            return;
+        }
+        let cancel = {
+            let mut j = self.fn_job.lock().unwrap();
+            if j.running {
+                j.again = true;
+                return;
+            }
+            j.running = true;
+            j.again = false;
+            j.cancel = Arc::new(AtomicBool::new(false));
+            j.cancel.clone()
+        };
+        let h = self.clone();
+        h.background.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            let done = h.compute_functions(&cancel);
+            if let Err(e) = done {
+                if !h.is_closing() {
+                    tracing::warn!(workbook = h.id.as_str(), "computing Python functions: {e:#}");
+                }
+            }
+            h.fn_job.lock().unwrap().running = false;
+            h.background.fetch_sub(1, Ordering::SeqCst);
+            h.touch_activity();
+        });
+    }
+
+    fn compute_functions(self: &Arc<Self>, cancel: &AtomicBool) -> Result<()> {
+        use alephgrid_core::external::{check_result, CallContext, CallResult, PendingCall, WorkerFailureKind, WorkerJob, BATCH_BYTES, BATCH_CALLS};
+        let Some(runtime) = self.functions.runtime_impl() else { return Ok(()) };
+        loop {
+            if cancel.load(Ordering::SeqCst) || self.is_closing() || self.functions.is_disabled() {
+                return Ok(());
+            }
+            let mut work: Vec<(CallContext, Vec<PendingCall>)> = Vec::new();
+            let sheet = self.functions.take_pending();
+            if !sheet.is_empty() {
+                work.push((CallContext::Sheet, sheet));
+            }
+            for (_, calls) in self.with_reader(|r| r.missing_table_calls(BATCH_CALLS))? {
+                work.push((CallContext::Table, calls));
+            }
+            if work.is_empty() {
+                let mut j = self.fn_job.lock().unwrap();
+                if j.again {
+                    j.again = false;
+                    continue;
+                }
+                return Ok(());
+            }
+            let registry = self.with_reader(|r| r.functions())?;
+            for (context, calls) in work {
+                // Group by version, then cut into batches by count and size.
+                let mut groups: std::collections::BTreeMap<(String, u32), Vec<PendingCall>> = Default::default();
+                for c in calls {
+                    groups.entry((c.function.clone(), c.version)).or_default().push(c);
+                }
+                for ((name, version), calls) in groups {
+                    let Some(v) = registry.iter().find(|f| f.name == name).and_then(|f| f.versions.iter().find(|v| v.version == version)) else { continue };
+                    let d = &v.definition;
+                    let returns = d.returns.unwrap_or(alephgrid_core::external::ResultType::Text);
+                    let mut batch: Vec<PendingCall> = Vec::new();
+                    let mut bytes = 0;
+                    let flush = |batch: &mut Vec<PendingCall>| -> Result<bool> {
+                        if batch.is_empty() {
+                            return Ok(true);
+                        }
+                        let calls = std::mem::take(batch);
+                        let job = WorkerJob {
+                            function: name.clone(),
+                            version,
+                            source: d.source.clone(),
+                            entry: alephgrid_core::functions::python_entry(&name),
+                            arguments: d.arguments.clone(),
+                            returns,
+                            context,
+                            calls: calls.iter().map(|c| c.args.clone()).collect(),
+                        };
+                        let results: Vec<CallResult> = match runtime.run(&job, cancel) {
+                            Ok(r) => r.into_iter().map(|r| check_result(r, returns, context)).collect(),
+                            Err(f) if matches!(f.kind, WorkerFailureKind::Cancelled | WorkerFailureKind::Unavailable) => return Ok(false),
+                            // Out of time, memory or output, or a crash: every call of the
+                            // batch says why, until it is recalculated.
+                            Err(f) => vec![CallResult::error("#CALC!", f.message, true); calls.len()],
+                        };
+                        let pairs: Vec<(String, CallResult)> = calls.into_iter().map(|c| c.key).zip(results).collect();
+                        let stored = self.with_engine(|wb| wb.store_function_results(&name, version, &pairs))?;
+                        if stored.applied {
+                            let revision = self.with_reader(|r| r.revision()).unwrap_or(0);
+                            if stored.sheets {
+                                let _ = self.events.send(Event::SheetChanged { sheet: None, origin: 0, revision });
+                            }
+                            for table in stored.tables {
+                                let _ = self.events.send(Event::TableChanged { table, origin: 0, revision });
+                            }
+                        }
+                        Ok(true)
+                    };
+                    for c in calls {
+                        let size = serde_json::to_vec(&c.args).map(|v| v.len()).unwrap_or(0);
+                        if batch.len() >= BATCH_CALLS || (bytes + size > BATCH_BYTES && !batch.is_empty()) {
+                            if !flush(&mut batch)? {
+                                return Ok(());
+                            }
+                            bytes = 0;
+                        }
+                        bytes += size;
+                        batch.push(c);
+                    }
+                    if !flush(&mut batch)? {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop the worker computing functions for this allocation, if one runs.
+    pub fn cancel_functions(&self) {
+        self.fn_job.lock().unwrap().cancel.store(true, Ordering::SeqCst);
     }
 
     /// Cancel the running recalculation of `table`'s stored results; false when none runs.
@@ -470,7 +619,10 @@ impl WorkbookHandle {
 
     /// No operation running or waiting and no job (used with the controller's reference count).
     pub fn is_quiet(&self) -> bool {
-        self.active.load(Ordering::SeqCst) == 0 && self.job.lock().unwrap().is_none() && self.sched.load() == 0
+        self.active.load(Ordering::SeqCst) == 0
+            && self.background.load(Ordering::SeqCst) == 0
+            && self.job.lock().unwrap().is_none()
+            && self.sched.load() == 0
     }
 
     pub fn active(&self) -> usize {
@@ -520,6 +672,9 @@ impl WorkbookHandle {
         if c.is_none() {
             *c = Some(reason);
         }
+        drop(c);
+        // A worker computing functions for this allocation is stopped.
+        self.fn_job.lock().unwrap().cancel.store(true, Ordering::SeqCst);
     }
 
     /// Wait for running operations, up to `deadline`; then interrupt what still runs and
@@ -658,6 +813,12 @@ pub struct Config {
     pub idle_timeout: Duration,
     /// Compute profiles besides `standard` (7.13).
     pub profiles: Vec<crate::runtime::ComputeProfile>,
+    /// A Python runtime directory (`alephgrid python-runtime create`); none: Python
+    /// functions cannot run (phase 8).
+    pub python_runtime: Option<PathBuf>,
+    /// `None`: the host's sandbox. `Some(Isolation::None)` only with `--auth local`.
+    pub python_isolation: Option<crate::python::Isolation>,
+    pub python_limits: crate::python::Limits,
     /// How long a start waits in line for host capacity.
     pub start_queue_timeout: Duration,
     /// Drop sorted/filtered view materializations unused for this long.
@@ -694,6 +855,9 @@ impl Config {
             min_workbook_memory: 256 << 20,
             idle_timeout: Duration::from_secs(600),
             profiles: Vec::new(),
+            python_runtime: None,
+            python_isolation: None,
+            python_limits: crate::python::Limits::default(),
             start_queue_timeout: Duration::from_secs(60),
             view_ttl: Duration::from_secs(900),
             shutdown_grace: Duration::from_secs(30),
@@ -803,6 +967,10 @@ pub struct AppState {
     pub sessions: Mutex<HashMap<u64, crate::ws::SessionInfo>>,
     /// Exported query results waiting to be downloaded.
     pub downloads: Arc<Downloads>,
+    /// The Python runtime workers run in (phase 8), and why there is none when one was
+    /// configured but cannot run.
+    pub python: Option<Arc<crate::python::PythonRuntime>>,
+    pub python_problem: Option<String>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -921,7 +1089,28 @@ impl AppState {
             profiles: std::iter::once(crate::runtime::ComputeProfile::standard()).chain(config.profiles.iter().cloned()).collect(),
             queue_timeout_ms: config.start_queue_timeout.as_millis() as u64,
         };
+        let (python, python_problem) = match &config.python_runtime {
+            None => (None, None),
+            Some(dir) => {
+                if config.python_isolation == Some(crate::python::Isolation::None) && config.auth.mode != crate::auth::AuthMode::Local {
+                    bail!("--python-isolation none runs Python without a sandbox and is allowed only with --auth local");
+                }
+                let scratch = config.data_dir.join(".python");
+                let _ = std::fs::remove_dir_all(&scratch);
+                match crate::python::PythonRuntime::load(dir, config.python_isolation.clone(), config.python_limits, &scratch) {
+                    Ok(rt) => {
+                        tracing::info!(runtime = rt.manifest.id(), python = rt.manifest.python, isolation = rt.isolation.name(), "Python functions run in isolated workers");
+                        (Some(Arc::new(rt)), None)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Python functions cannot run: {e:#}");
+                        (None, Some(format!("Python functions cannot run on this server: {e:#}")))
+                    }
+                }
+            }
+        };
         let mut controller = Controller::new(&config.data_dir, budget, policy, config.stage_hook.clone())?;
+        controller.function_runtime = python.clone().map(|p| p as Arc<dyn alephgrid_core::external::FunctionRuntime>);
         controller.drain_grace = config.shutdown_grace;
         let fixed = controller.reconcile()?;
         if !fixed.is_empty() {
@@ -942,6 +1131,8 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             sessions: Mutex::new(HashMap::new()),
             downloads: Arc::new(Downloads::default()),
+            python,
+            python_problem,
         }))
     }
 
@@ -1039,6 +1230,7 @@ impl AppState {
             compute_memory_bytes: limits.compute_memory_bytes,
             profile: crate::runtime::ComputeProfile::standard(),
             note: None,
+            python_off: None,
         })?;
         let id = new_id();
         let dir = self.workbook_dir(&id);
@@ -1095,7 +1287,42 @@ impl AppState {
         let limits = self.limits(&meta.space)?;
         let wanted = profile.map(str::to_string).or(meta.profile).unwrap_or_else(|| STANDARD.to_string());
         let (profile, note) = self.entitled_profile(&meta.space, &wanted)?;
-        Ok(Admission { space: meta.space, open_workbooks: limits.open_workbooks, compute_memory_bytes: limits.compute_memory_bytes, profile, note })
+        let python_off = self.python_off(&meta.space)?;
+        Ok(Admission { space: meta.space, open_workbooks: limits.open_workbooks, compute_memory_bytes: limits.compute_memory_bytes, profile, note, python_off })
+    }
+
+    /// Why Python functions may not run for workbooks of `space`, if so.
+    pub fn python_off(&self, space: &str) -> Result<Option<String>> {
+        if let Some(problem) = &self.python_problem {
+            return Ok(Some(problem.clone()));
+        }
+        Ok(match self.auth.store.space(space)? {
+            Some(s) if !s.python => Some("Python functions are turned off for this space".to_string()),
+            _ => None,
+        })
+    }
+
+    /// A space's Python setting changed: apply it to its open workbooks at once (running
+    /// work stops and its results are not stored, 8.10).
+    pub fn python_policy_changed(&self, space: &str) {
+        let off = self.python_off(space).unwrap_or_else(|e| Some(format!("{e:#}")));
+        for id in self.controller.live() {
+            if self.workbook_space(&id).ok().as_deref() != Some(space) {
+                continue;
+            }
+            if let Some(h) = self.controller.handle(&id) {
+                if off.is_some() {
+                    h.cancel_functions();
+                }
+                let runtime = self.controller.function_runtime.clone();
+                let off = off.clone();
+                if let Err(e) = h.with_engine(move |wb| wb.set_function_runtime(runtime, off)) {
+                    tracing::warn!(workbook = id.as_str(), "applying the Python setting: {e:#}");
+                }
+                let _ = h.events.send(crate::ws::Event::SheetChanged { sheet: None, origin: 0, revision: 0 });
+                h.compute_functions_later();
+            }
+        }
     }
 
     fn entitled_profile(&self, space: &str, wanted: &str) -> Result<(ComputeProfile, Option<String>)> {

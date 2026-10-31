@@ -44,6 +44,8 @@ pub type StageHook = Arc<dyn Fn(&str, AllocationState) -> std::result::Result<()
 /// What a start is admitted under: its space's compute quotas and its profile (7.13).
 #[derive(Debug, Clone)]
 pub struct Admission {
+    /// Why Python functions may not run for it (phase 8), if so.
+    pub python_off: Option<String>,
     pub space: String,
     /// Most live allocations of the space.
     pub open_workbooks: Option<u64>,
@@ -133,6 +135,8 @@ pub struct Controller {
     hook: Option<StageHook>,
     /// Grace period for draining before an allocation is stopped.
     pub drain_grace: Duration,
+    /// Where worker (Python) functions run (phase 8).
+    pub function_runtime: Option<Arc<dyn alephgrid_core::external::FunctionRuntime>>,
 }
 
 fn new_id(prefix: &str) -> String {
@@ -173,6 +177,7 @@ impl Controller {
             changed: Condvar::new(),
             hook,
             drain_grace: Duration::from_secs(30),
+            function_runtime: None,
         })
     }
 
@@ -494,6 +499,13 @@ impl Controller {
                 self.changed.notify_all();
                 drop(slots);
                 self.pin_spec(&handle);
+                // Worker functions run in the server's runtime, unless off for this space;
+                // calls the open found missing are computed in the background.
+                let (runtime, off) = (self.function_runtime.clone(), adm.python_off.clone());
+                if let Err(e) = handle.with_engine(move |wb| wb.set_function_runtime(runtime, off)) {
+                    tracing::warn!(workbook, "could not set up Python functions: {e:#}");
+                }
+                handle.compute_functions_later();
                 Ok(lease)
             }
             Err(e) => {

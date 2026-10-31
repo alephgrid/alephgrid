@@ -46,6 +46,8 @@ pub struct Shared {
     scratch_seq: AtomicU64,
     pub(crate) lookups: Mutex<LookupCache>,
     pub(crate) results: crate::results::ResultsStore,
+    /// Results of worker (Python) functions (phase 8).
+    pub(crate) functions: Arc<crate::external::ResultCache>,
 }
 
 /// Grouped lookup relations built into scratch tables, keyed by their SQL. An entry is valid
@@ -157,8 +159,16 @@ impl Drop for Scratch {
 }
 
 impl Shared {
-    pub(crate) fn new(sheets: Sheets) -> Shared {
+    /// The sheet hook of this workbook's worker functions, for a sheet model loaded again.
+    pub(crate) fn external_hook(&self) -> ironcalc::base::external::ExternalHook {
+        Arc::new(crate::external::SheetHook(self.functions.clone()))
+    }
+
+    pub(crate) fn new(mut sheets: Sheets) -> Shared {
+        let functions = Arc::new(crate::external::ResultCache::default());
+        sheets.set_external(Some(Arc::new(crate::external::SheetHook(functions.clone()))));
         Shared {
+            functions,
             catalog: Mutex::new(Catalog { next_view: 1, ..Default::default() }),
             sheets: Mutex::new(sheets),
             graveyard: Arc::new(Mutex::new(Vec::new())),
