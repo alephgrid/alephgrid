@@ -19,7 +19,7 @@ use crate::http::{ImportRequest, JobStatus, ProfileChoice, RuntimeAction, Runtim
 use crate::runtime::budget::{AllocationUsage, HostBudget, ResourceUsage};
 use crate::runtime::controller::RuntimeStatus;
 use crate::runtime::{
-    AllocationState, Capability, ComputePolicy, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
+    AllocationState, Capability, ComputePolicy, ComputeState, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
     RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
 };
 use crate::auth::store::{AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
@@ -167,7 +167,7 @@ pub fn bindings() -> String {
         SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
         HistoryEntry, alephgrid_core::UndoState, alephgrid_core::UndoKind, alephgrid_core::UndoOutcome, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
-        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputeProfile, ComputePolicy, ProfileChoice, SpaceProfiles, AllocationState, FailureKind, RuntimeFailure,
+        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputeProfile, ComputePolicy, ProfileChoice, SpaceProfiles, AllocationState, ComputeState, FailureKind, RuntimeFailure,
         Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,
         HostBudget, AllocationUsage, ResourceUsage, BackupEntry, BackupManifest,
     );

@@ -19,6 +19,15 @@ alephgrid flights.parquet          # opens http://127.0.0.1:7878 with the file l
 alephgrid --demo-rows 100000000    # or try it on 100M generated rows
 ```
 
+<p align="center">
+  <img src="assets/screenshots/workbook-light.png" alt="A 200,000-row table open in Alephgrid, light theme: menu bar, toolbar, formula bar and grid" width="100%">
+</p>
+
+| | |
+|---|---|
+| <img src="assets/screenshots/sql-dark.png" alt="Dark theme with the workbook explorer and the SQL workspace docked under the grid"> | <img src="assets/screenshots/hub-light.png" alt="The hub: search, recently opened workbooks and the workbook list with each one's compute state"> |
+| Dark theme, explorer and docked SQL | The hub |
+
 Alephgrid is a self-hostable alternative to cloud big-data spreadsheets: your data
 and credentials stay on your machines, workbooks open without cold starts, and
 export, SSO and every other feature are free.
@@ -59,7 +68,7 @@ Reproduce with `alephgrid --demo-rows 20000000` and the script in `docs/bench.mj
 | | |
 |---|---|
 | Import | CSV/TSV (auto-detected), Parquet, JSON/JSONL, gzip as tables; **XLSX as editable sheets**. Drag and drop or CLI. Streamed, no size limit |
-| Grid | Virtual canvas grid, keyboard navigation, range selection, column resize and auto-fit, light and dark themes |
+| Grid | Virtual canvas grid, keyboard navigation, range selection, column resize and auto-fit; light, dark and system themes; menu bar, command search (⌘K), collapsible explorer |
 | Edit | Typed cell edits with validation, append by typing below the last row, insert and delete rows, paste TSV from Excel or Sheets, copy ranges |
 | Columns | Add, rename and delete columns; **formula columns** (`=[fare_usd] / [distance_mi]`, any DuckDB expression) |
 | Views | Multi-column sort, filters (equals, contains, greater than, empty, …) applied to the whole dataset |

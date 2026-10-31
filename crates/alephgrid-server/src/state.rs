@@ -95,6 +95,8 @@ pub struct WorkbookListing {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub role: Option<crate::auth::SpaceRole>,
+    /// Its compute right now (sleeping when closed; normal, not a failure).
+    pub compute: crate::runtime::ComputeState,
 }
 
 /// A workspace label of an older version, read once by the migration to spaces.
@@ -1229,7 +1231,8 @@ impl AppState {
             if let Some(h) = self.controller.handle(&meta.id) {
                 meta = h.meta.lock().unwrap().clone();
             }
-            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None });
+            let compute = self.controller.compute_state(&meta.id);
+            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None, compute });
         }
         out.sort_by_key(|w| std::cmp::Reverse(w.meta.opened_at.max(w.meta.created_at)));
         Ok(out)
@@ -1508,7 +1511,7 @@ impl AppState {
         for entry in entries {
             let dir = entry?.path();
             let Ok(meta) = read_meta(&dir) else { continue };
-            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None });
+            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None, compute: crate::runtime::ComputeState::Sleeping });
         }
         out.sort_by_key(|w| std::cmp::Reverse(w.meta.deleted_at));
         Ok(out)

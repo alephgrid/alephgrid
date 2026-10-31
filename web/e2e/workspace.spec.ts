@@ -148,3 +148,18 @@ test("at phone width every menu stays reachable and the page does not scroll sid
   await page.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "View", exact: true }).click();
   await expect(page.getByRole("menuitem", { name: /Dark theme/ })).toBeVisible();
 });
+
+test("the hub shows each workbook's compute, with sleeping as a normal state", async ({ page }) => {
+  const wb = await workbook("Compute state");
+  // After a restart nothing is open: the workbook sleeps.
+  await server.stop();
+  await server.start();
+  await page.goto(server.url);
+  const row = page.locator(".wb-row", { hasText: "Compute state" });
+  await expect(row.locator(".wb-compute")).toHaveText("Sleeping");
+  await expect(row.locator(".wb-compute")).toHaveAttribute("title", /Opening the workbook starts it/);
+  // Opening it starts its compute; back on the hub it is ready.
+  await open(page, wb);
+  await page.getByRole("button", { name: "Alephgrid — all workbooks" }).click();
+  await expect(page.locator(".wb-row", { hasText: "Compute state" }).locator(".wb-compute")).toHaveText("Ready");
+});

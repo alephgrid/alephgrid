@@ -863,6 +863,22 @@ impl Controller {
         }
     }
 
+    /// The list's view of a workbook's compute (no disk access).
+    pub fn compute_state(&self, workbook: &str) -> super::ComputeState {
+        use super::{AllocationState as A, ComputeState as C};
+        let slots = self.slots();
+        let Some(s) = slots.map.get(workbook) else { return C::Sleeping };
+        if s.queued.is_some() {
+            return C::Queued;
+        }
+        match s.record.state {
+            A::Requested | A::Starting | A::Running => C::Starting,
+            A::Ready => C::Ready,
+            A::Draining => C::Stopping,
+            A::Stopped | A::Failed => C::Sleeping,
+        }
+    }
+
     pub fn status(&self, workbook: &str) -> Result<RuntimeStatus> {
         let dir = self.data.join(workbook);
         let meta = read_meta(&dir)?;

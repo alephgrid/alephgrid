@@ -391,7 +391,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .sort:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .wb-table { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; background: var(--bg); box-shadow: var(--shadow-sm); }
-.wb-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 220px) 80px 110px 40px; align-items: center; gap: 8px; padding: 2px 8px; border-top: 1px solid var(--border); min-height: 50px; }
+.wb-row { display: grid; grid-template-columns: 40px minmax(0, 1fr) minmax(0, 200px) 80px 100px 150px 40px; align-items: center; gap: 8px; padding: 2px 8px; border-top: 1px solid var(--border); min-height: 50px; }
 .wb-row:first-child { border-top: 0; }
 .wb-row:not(.wb-head):hover { background: var(--panel); }
 .wb-head { min-height: 36px; font-size: 12px; font-weight: 600; color: var(--muted); background: var(--panel); }
@@ -645,3 +645,9 @@ dialog progress, .dialog progress { width: 100%; }
   *, *::before, *::after { transition: none !important; animation-duration: 0s !important; scroll-behavior: auto !important; }
   .wb-card:hover { transform: none; }
 }
+
+.wb-compute { display: inline-flex; align-items: center; gap: 7px; }
+.compute-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); }
+.wb-compute[data-compute="ready"] .compute-dot { background: var(--success); }
+.wb-compute[data-compute="starting"] .compute-dot, .wb-compute[data-compute="queued"] .compute-dot { background: var(--reference-0); }
+.wb-compute[data-compute="stopping"] .compute-dot { background: var(--muted); }

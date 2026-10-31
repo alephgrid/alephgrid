@@ -115,6 +115,41 @@ function compactCount(n: number): string {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
 }
 
+const COMPUTE_LABEL: Record<string, string> = {
+  sleeping: "Sleeping", queued: "Waiting for capacity", starting: "Starting", ready: "Ready", stopping: "Stopping",
+};
+const COMPUTE_TITLE: Record<string, string> = {
+  sleeping: "Not running. Opening the workbook starts it; its data is kept on disk.",
+  queued: "Waiting in line for server capacity; it opens by itself when there is room.",
+  starting: "Opening its compute.",
+  ready: "Running: open for editing.",
+  stopping: "Finishing its work, then sleeping.",
+};
+
+/** Compute state of a workbook in the list (U.03): sleeping is neutral, not an error. */
+function computeCell(w: WorkbookListing): HTMLElement {
+  const c = w.compute ?? "sleeping";
+  return el("span", { role: "cell", class: "muted hide-sm wb-compute", "data-compute": c, "data-id": w.id, title: COMPUTE_TITLE[c] },
+    el("span", { class: "compute-dot", "aria-hidden": "true" }), COMPUTE_LABEL[c] ?? c);
+}
+
+let computeTimer = 0;
+/** While the hub is shown, keep compute states current without re-rendering the page. */
+function watchCompute(): void {
+  clearInterval(computeTimer);
+  computeTimer = window.setInterval(async () => {
+    if (!document.querySelector(".home-layout")) { clearInterval(computeTimer); return; }
+    if (document.hidden) return;
+    try {
+      const list = await api.list();
+      for (const w of list) {
+        const cell = document.querySelector<HTMLElement>(`.wb-compute[data-id="${w.id}"]`);
+        if (cell && cell.dataset.compute !== (w.compute ?? "sleeping")) cell.replaceWith(computeCell(w));
+      }
+    } catch { /* the next tick tries again */ }
+  }, 20_000);
+}
+
 function describeContents(w: WorkbookListing): string {
   const s = w.summary;
   if (!s || (!s.tables && !s.sheets)) return "Empty";
@@ -277,7 +312,8 @@ function renderHome(): void {
       el("div", { class: "wb-row wb-head", role: "row" },
         el("span", { role: "columnheader" }), el("span", { role: "columnheader" }, "Name"),
         el("span", { role: "columnheader", class: "hide-sm" }, "Contents"), el("span", { role: "columnheader", class: "hide-sm num" }, "Size"),
-        el("span", { role: "columnheader", class: "hide-xs" }, "Opened"), el("span", { role: "columnheader" })),
+        el("span", { role: "columnheader", class: "hide-xs" }, "Opened"), el("span", { role: "columnheader", class: "hide-sm" }, "Compute"),
+        el("span", { role: "columnheader" })),
       ...items.map((w) => {
         const space = showSpace ? spaceName(w.space) : undefined;
         return el("div", { class: "wb-row", role: "row" },
@@ -293,6 +329,7 @@ function renderHome(): void {
           el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
           el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
           el("span", { role: "cell", class: "muted hide-xs", title: w.opened_at ? new Date(w.opened_at * 1000).toLocaleString() : "" }, relativeTime(w.opened_at)),
+          computeCell(w),
           el("span", { role: "cell", class: "cell-center" },
             el("button", { class: "icon-btn", title: "More", "aria-label": `${w.name} options`,
               onclick: (e: MouseEvent) => workbookMenu(w, e.clientX, e.clientY) }, icon("more"))),
@@ -382,6 +419,7 @@ function renderHome(): void {
     if (f) openFile(f);
   });
   app.replaceChildren(page);
+  watchCompute();
 }
 
 function setScope(scope: Scope): void {
