@@ -143,7 +143,7 @@ Evaluate DuckDB built-in cache before cache_httpfs. The community extension rema
 
 ## 9. Function execution
 
-Formula-defined/SQL functions use supported engine integration and immutable registry versions. Python is a later isolated adapter with no inherited credentials, bounded batch inputs/outputs and network disabled by default.
+Formula-defined/SQL functions use supported engine integration and immutable registry versions. Python runs through the `FunctionRuntime` adapter in sandboxed workers (phase 8, docs/PYTHON_FUNCTIONS.md) with no inherited credentials, bounded batch inputs/outputs and network disabled by default.
 
 Capture input and function revisions → execute outside workbook lock → validate typed output → recheck revisions/permissions → commit or report stale result. Pure-function caching includes exact inputs and function/runtime versions. Volatile or side-effecting code cannot participate in automatic pure recalculation. Tests and publication permissions are separate from ordinary execution.
 

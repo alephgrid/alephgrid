@@ -86,19 +86,16 @@ The settled pattern — used by Glide Data Grid, Perspective, and already by Ale
 - Glide Data Grid: scales to "millions of rows" with lazy, on-demand cell rendering; the maintainers originally virtualized both axes with react-virtualized and moved to canvas because "the problem was simply scrolling performance"; the grid takes only column defs, a row count, and a `getCellContent` callback, and recommends sorting/filtering be done by the data source (e.g., a database query) — [glide-data-grid README](https://github.com/glideapps/glide-data-grid)
 - Perspective browser client: `worker()` spawns the engine in a Web Worker; in client/server-replicated mode the browser holds a full local WASM copy of server tables synchronized via Apache Arrow over WebSockets, making interactive performance "identical to client-only" — [Perspective architecture](https://perspective.finos.org/guide/explanation/architecture.html); [client/server page](https://perspective.finos.org/guide/explanation/architecture/client_server.html)
 - DuckDB-WASM-based tools run the database in a Web Worker because "complex analytical queries" would otherwise block the main UI thread — [MotherDuck DuckDB-WASM post](https://motherduck.com/blog/duckdb-wasm-in-browser/)
-- Row Zero (closest commercial comparable — cloud spreadsheet on billions of rows): vendor claims a ceiling of 2,147,483,647 rows × 18,278 columns (i.e., i32::MAX rows), with computation kept server-side in contrast to Google Sheets' client-side formula execution; no first-party architecture internals published — [Row Zero community post](https://community.rowzero.com/t/what-is-the-biggest-spreadsheet-possible/78); [HPCwire on Row Zero](https://www.hpcwire.com/bigdatawire/2025/06/02/row-zero-provides-excel-like-experience-for-billion-row-data-sets/)
 - Mosaic clients speculatively publish queries before results are needed (prefetch), and the coordinator caches and consolidates them — the browser-side half of debounced-scroll + prefetch — [Why Mosaic](https://idl.uw.edu/mosaic/why-mosaic)
 
 ### Inferences
 - Alephgrid's grid.ts already implements the canvas + visible-window pattern; the documented next wins are (a) overscan prefetch: request ±1–2 pages beyond the viewport in scroll direction (Mosaic's speculative-publish pattern), (b) decode Arrow pages and hold the row cache in a Web Worker, posting only the visible slice (or a transferable/SharedArrayBuffer-backed typed-array view) to the render thread, and (c) debounce scroll-driven queries but render immediately from cache with a "loading" shimmer for missing rows — Glide's getCellContent model shows the renderer must tolerate async cells.
 - SharedArrayBuffer note: no retrieved source measured SAB vs postMessage for grids; Arrow IPC buffers are transferable (zero-copy postMessage), which captures most of the benefit without COOP/COEP header requirements. Treat SAB as optional.
 - Perspective-style full client replication is the wrong default at 100M+ rows (it assumes "medium-sized" datasets per its own docs); Alephgrid's server-windowed model is the correct architecture, with replication worth considering only for small result sets (pivots/aggregates).
-- Row Zero's i32 row ceiling suggests row indices should be i64/number-safe in the protocol now to avoid their constraint.
 
 ### Gaps
 - finos/regular-table specifics (its DOM-recycling approach, perf numbers) were not retrieved this pass.
 - No independent benchmark of canvas vs DOM grids, nor published numbers on prefetch window sizing or debounce intervals; these remain engineering heuristics.
-- Row Zero publishes no engine internals (no blog found describing their storage/compute design).
 
 ## Concurrency: readers, job queue, cancellation
 
@@ -141,4 +138,4 @@ DuckDB's own maintained benchmarks show large, sustained engine-level gains (ful
 
 ### Gaps
 - Official ClickBench leaderboard numbers for current DuckDB were not retrieved (search surfaced only DuckDB's H2O.ai posts and a vendor comparison).
-- No published end-to-end benchmark of a DuckDB-backed grid/spreadsheet product (Row Zero, Rill publish no reproducible numbers); any Alephgrid targets will need in-house measurement.
+- No published end-to-end benchmark of a DuckDB-backed grid/spreadsheet product (Rill publishes no reproducible numbers); any Alephgrid targets will need in-house measurement.

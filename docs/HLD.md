@@ -31,7 +31,7 @@ Light, dark and system themes share layouts. The grid is the main surface; explo
 | Hub | Open/create/import/find workbooks | Local product, then team permissions |
 | Workbook | Browse/filter/sort/edit local data | Existing core plus UI refinement |
 | SQL | Query → inspect → save → create table/sheet | SQL phase and remote-source restrictions |
-| Functions | Define → test → publish → pin version | Formula/SQL functions; isolated Python later |
+| Functions | Define → test → publish → pin version | Formula, SQL and Python functions (Python in sandboxed workers, phase 8) |
 | Connections | Register S3 dataset → preview → query/snapshot | S3 first |
 | Sharing/history | Grant access, inspect changes, recover | Identity/revisions/audit |
 | Compute settings | Choose authorized profile, controlled restart | Runtime policy/provider |
@@ -43,7 +43,7 @@ Light, dark and system themes share layouts. The grid is the main surface; explo
 |---|---|---|
 | Current foundation | Rust server, DuckDB tables, IronCalc sheets, SQL, bounded jobs and revisions documented in ARCHITECTURE | This document does not re-certify checked tasks |
 | S3-first connected release | Scoped read-only Parquet, bounded results, snapshot import, refresh, diagnostics | MCP, GCS, Azure, Postgres, remote write-back |
-| Complete team product | Identity, spaces, quotas, collaboration, functions, full UI, restore/upgrade | Python only after isolation gates |
+| Complete team product | Identity, spaces, quotas, collaboration, functions, full UI, restore/upgrade | Python behind its isolation gate (8.12) |
 | Kubernetes beta | Policy-managed placement and exclusive workbook ownership | Automatic lossless failover across every failure domain |
 | Later extensions | MCP, additional connectors, lakehouse catalogs, stronger recovery | Each requires its own acceptance decision |
 
