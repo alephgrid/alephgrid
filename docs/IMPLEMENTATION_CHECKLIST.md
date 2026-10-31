@@ -42,6 +42,7 @@ The chosen direction is **durable workbooks with automatic, policy-managed compu
 | Postgres connector slice | 10.02 tasks after the S3 gate | READ_ONLY ATTACH with structured fields, scan guardrails and materialized serving verified |
 | Agent gateway (read-only) | Phase M thin slice after the S3 gate and 7.12 | Frozen tool contract, ResultHandles over materialized artifacts and tiered receipts verified |
 | Coherent product UI | Phase U, alongside the corresponding feature phases | Light/dark workflows, accessible states and capability-aware navigation |
+| **Single-node launch v1** | Phase L sequence: SEC, U.15–U.20, phase S, phase M local slice, U.08–U.10, phase 9 | L.08 gate; S3 (phase 10) follows right after launch |
 | Kubernetes beta | Phase 11 launch tasks and 11.16 gate | Conservative single-owner placement and tested storage handoff |
 | Cluster recovery release | All phase 11 tasks and 11.10 gate | Published durability/recovery objectives demonstrated |
 | Extension ecosystem | Phase E below, after real adapters exercise contracts | External contributors can implement and verify compatible extensions |
@@ -482,7 +483,46 @@ Design direction: retain the approved spreadsheet-first concept, compact control
 - [ ] **U.T01** Test U.01–U.05/U.12: theme persistence/system changes, no flash, focus, screen-reader navigation, zoom, panel resizing, deep links, selection/formula agreement and performance regressions with large/wide tables.
 - [ ] **U.T02** Test U.06–U.11: complete import/query/function/share/restore/compute journeys, role restrictions, failed save, reconnect, stale edits, cancellation and recovery; include both themes and independent persisted-state assertions.
 - [ ] **U.T03** Review U.13 assets/provenance and README claims against the actual release; use visual regression baselines plus human interaction review, not screenshot similarity alone.
+- [ ] **U.15** Analyze as a non-modal side pane beside the grid: source, Rows / Values / Filters pickers with "Add field", aggregate per value, pivot column with value picker (no typed lists), totals; result and chart below the grid; save, save as, result table, drill-down. Measures and calculated measures through pickers and a formula field, not one-per-line text.
+- [ ] **U.16** Column header filter popup for tables: search, distinct values with counts (bounded, server-side), select all, sort A→Z / Z→A, clear, apply; keeps the condition filters (greater than, contains, empty…) as an advanced option. Filters stay server-side over the whole table.
+- [ ] **U.17** Find bar (⌘F) anchored top-right: match count, previous/next, match case, replace (⌘H) using the existing preview/undo-guarded table replacement; sheets use S.04.
+- [ ] **U.18** Charts: proper bar/column, line, area, scatter and pie with axes, labels, legend and theme colors, rendered from bounded aggregated results; used by Analyze, dashboards and S.09.
+- [ ] **U.19** Restyle the remaining dialogs on the design tokens: dashboards (pick analyses and slicers from lists), import as a side pane with typed column preview, Format table, Data tools, Names, History, Compute, sign-in and members.
+- [ ] **U.20** First-run experience: welcome with sample data, keyboard shortcut help, empty states that offer the next action; no feature is shown that the server has disabled.
+- [ ] **U.T04** Test U.15–U.20 in the three browsers: pane and popup keyboard paths, filter value counts against an independent count, find match counts against the server, chart values against the result table, axe in both themes.
 - [ ] **U.14 — Gate:** All screens enabled in a release have working navigation, accessible light/dark states and passing end-to-end journeys. Unreleased capabilities are omitted or explicitly unavailable; backend gates still apply.
+
+## S. Complete the sheet experience (launch v1)
+
+Added 1 November 2026: a spreadsheet user expects these in any sheet. Sheets stay on IronCalc; styles use its style model, are stored with the sheet and round-trip through XLSX import/export (state what does not). Every change is one undo step, collaborative, and bounded like other sheet edits.
+
+- [ ] **S.01** Cell formatting: bold, italic, underline, strikethrough, font size and color, fill color, borders, horizontal/vertical alignment, wrap text, clear formatting; toolbar row and Format menu; keyboard shortcuts (⌘B/⌘I/⌘U).
+- [ ] **S.02** Number formats: general, number with decimals, thousands separator, currency, percent, date, time, date-time, scientific, text and custom format codes; increase/decrease decimals; formats apply to display only, values stay exact.
+- [ ] **S.03** Cell context menu: cut, copy, paste, paste special (values, formulas, formats, transpose), insert/delete rows and columns, clear contents, clear formatting, add comment; same commands in menus and the command palette.
+- [ ] **S.04** Find and replace in sheets (⌘F / ⌘H): match case, whole cell, in values or formulas, this sheet or all sheets; replace one or all as one undo step; navigates to matches.
+- [ ] **S.05** Layout: freeze rows and columns, hide/unhide rows and columns, persisted column widths and row heights, auto-fit; merged cells only if IronCalc and XLSX round-trip support them faithfully (otherwise state the limit).
+- [ ] **S.06** Sort and filter a range in a sheet (by one or more columns, with or without header row), as one undo step; a filter hides rows without deleting them.
+- [ ] **S.07** Sheet tabs: duplicate, reorder by drag and keyboard, tab color, hide/unhide; references follow renames and moves.
+- [ ] **S.08** Zoom (50–200%) for sheets and tables, per workbook in this browser, with the canvas grid staying crisp and bounded.
+- [ ] **S.09** Charts from a selected sheet range or table view: insert, move, resize, edit type and series, update when cells change; stored with the workbook; XLSX export states that charts are not exported if they are not.
+- [ ] **S.10** Conditional formatting and data validation in sheets (rules shared with table presentation where possible): color scales, value rules, list dropdowns, invalid-input refusal.
+- [ ] **S.11** Comments: add, edit, resolve, delete and reply on a cell; indicator in the grid; author and time; visible to collaborators live; kept with the cell through insert/delete/move; included in history and XLSX notes where supported.
+- [ ] **S.T01** Test S.01–S.06: style and number-format display against hand-computed strings, XLSX round-trip of every supported style against openpyxl or the original file, undo/redo, collaborative edits, bounded large ranges, keyboard paths.
+- [ ] **S.T02** Test S.07–S.11: reference updates on tab moves, zoom hit-testing, chart values against the cells, rule evaluation against independent checks, comment persistence across reopen and row/column inserts, two-user comment journeys in three browsers.
+- [ ] **S.12 — Gate:** A spreadsheet user can format, find, sort, filter, freeze, chart and comment in sheets, save and reopen, and round-trip the supported parts through XLSX, in both themes.
+
+## L. Single-node launch v1
+
+Added 1 November 2026 by the project owner: a complete, clean single-node product to launch. Order of work; each step keeps its own task IDs and tests. In-app AI (a built-in assistant calling a model provider) is deliberately out of v1: agents use workbooks through MCP (phase M), and an in-app assistant is reserved as later differentiation. S3 (phase 10) comes right after launch.
+
+- [ ] **L.01** Security: SEC.01–SEC.14 and SEC.T01 (gate SEC.15 before any network-exposed launch).
+- [ ] **L.02** Clean existing features: U.15–U.20, U.T04.
+- [ ] **L.03** Sheet completeness: phase S through its gate S.12, comments included.
+- [ ] **L.04** MCP for local workbooks before S3 (owner decision, 1 November 2026): M.01–M.05, M.07, M.08, M.10 and M.T01–M.T02 over workbook tables, sheets, saved queries and analyses; read-only first; M.06 writes only through previewable, approvable operations. M.12 catalog search and the M.09 gate apply to local data; connectors join the same tool surface later.
+- [ ] **L.05** Team screens: U.08–U.10 (Share on a workbook, space settings, administration), with the rest of U.11 states and U.02 navigation identity.
+- [ ] **L.06** Package and release: phase 9 (9.01–9.15, 9.T01–9.T03), including 9.16 CI and 9.07 public repository.
+- [ ] **L.07** Launch review: README, screenshots and docs show only shipped behaviour; U.13 assets and provenance; known limits published.
+- [ ] **L.08 — Gate:** On a clean machine, a new user installs from published instructions, imports a large file, works in tables and fully formatted sheets, writes SQL and functions, analyzes and charts, collaborates, connects an MCP client with scoped read access, backs up, restores and upgrades; SEC.15, S.12, U.14 (for released screens), M.09 (local scope) and 9.12 pass.
 
 ## SEC. Security remediation from audit run-1 (31 October 2026)
 
@@ -543,6 +583,8 @@ Start with S3 baseline measurements; reuse completed phase 3 foundations and 9.0
 - [ ] **P.10 — Gate:** Adopt an optimization only when measured benefit, correctness, isolation and resource bounds pass its mapped tests; retain a disable/fallback path. A completed evaluation is not proof that a candidate dependency is shipped.
 
 ## M. MCP and agent access — committed thin slice after S3
+
+Reprioritized again 1 November 2026 by the project owner: the local-workbook slice ships before S3, in launch v1 (L.04). Tools, receipts and scopes are defined over workbook data first; S3 and later connectors join the same tool surface without changing it. The text below records the earlier ordering.
 
 Reprioritized 31 October 2026 by the debate verdict: a thin, read-only agent gateway is committed work landing after the S3 gate (10.07) and the phase 7 gate (7.12), not an open prioritization question. The empty open-source AI-native-spreadsheet niche (Quadratic closed-sourced March 2026) makes this the differentiator; the dependency order (receipts pin materialized artifacts, so materialization precedes the gateway) sets its position, not its importance. UI, CLI/SDK and MCP call the same shared application services with identical authorization, revisions, jobs and quotas; no private MCP path. If capacity halves, this phase is the first cut — nothing upstream depends on it.
 
@@ -659,3 +701,4 @@ Add one row when starting work, encountering a blocker or completing a task. Kee
 | 2026-10-31 | 8.01–8.13, 8.T01–8.T02, 8.12 | Complete | Python functions in sheet cells and table columns through a result cache (IronCalc patch 2, DuckDB lookup macros, storage format 9), computed in Seatbelt/bubblewrap-isolated workers in batches outside the workbook lock, pinned offline runtimes, volatile refresh, per-space Python setting, XLSX cached values (docs/PYTHON_FUNCTIONS.md). Benchmark: 1M rows, 100k distinct, 11.9 s. Gaps: the Linux sandbox was not run here; memory is watched, not limited, on macOS. |
 | 2026-10-31 | U.01, U.03, U.04, U.11–U.13 | In progress | Branch `ui-redesign`: brand tokens and Light/Dark/System themes, workbook top bar + menu bar + icon toolbar, restyled hub and dialogs ([DESIGN.md](DESIGN.md)). Accent changed from blue to the brand kit green per UI direction v2. Not complete: explorer, docked SQL (U.05), function editor (U.06), states (U.11), spacing tokens. Chrome, Firefox and WebKit suites pass.
 | 2026-11-01 | U.03–U.06, U.11–U.13 | In progress | Branch `ui-redesign`: honest save state (Saved only after acknowledgement), collapsible explorer, SQL docked under the grid, two-pane function editor with Draft/Tested/Published, menu bar keyboard model and phone width, hub compute column (server: `WorkbookListing.compute`), BRAND.md and README screenshots. Rust tests and clippy pass; browser suites: Chrome 95, WebKit 95, Firefox 94 + 1 skipped. Open: U.02, U.07 (needs phase 10), U.08–U.10, the full U.11 state set, spacing tokens, zoom.
+| 2026-11-01 | L, S, U.15–U.20, M | Planning enhanced | Owner decisions: complete single-node launch v1 (phase L order: SEC, UI cleanup U.15–U.20, new phase S for sheet completeness including comments, MCP for local workbooks before S3, team screens, phase 9); S3 right after launch; no in-app AI in v1. Planning only; no product implementation performed. |
