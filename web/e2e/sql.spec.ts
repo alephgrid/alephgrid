@@ -31,7 +31,7 @@ async function openSql(page: Page, wb: string): Promise<Locator> {
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
   await expect(page.getByRole("tab", { name: /sales/ })).toBeVisible();
   await page.getByRole("button", { name: "SQL", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "SQL" });
+  const dialog = page.getByRole("region", { name: "SQL" });
   await expect(dialog).toBeVisible();
   // The schema has loaded once the table is listed.
   await expect(dialog.getByRole("treeitem", { name: "sales 4 rows" })).toBeVisible();

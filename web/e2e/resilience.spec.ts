@@ -131,7 +131,7 @@ test("a long SQL query can be cancelled", async ({ page }) => {
   await expect(status).toContainText("Running");
   // Progress events from the server show as a percentage.
   await expect(status).toHaveText(/Running… \d+%/);
-  const cancel = page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true });
+  const cancel = page.getByRole("region", { name: "SQL" }).getByRole("button", { name: "Cancel", exact: true });
   await expect(cancel).toBeVisible();
   await cancel.click();
   await expect(status).toHaveText("Cancelled.");
@@ -165,7 +165,7 @@ test("a panel opened while the connection is still being made loads once it open
   });
   await page.goto(`${server.url}/w/${wb}`);
   await page.getByRole("button", { name: "SQL", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "SQL" });
+  const dialog = page.getByRole("region", { name: "SQL" });
   await expect(dialog.getByRole("treeitem", { name: /^sales/ })).toBeVisible();
   await expect(dialog).not.toContainText("not connected");
 });

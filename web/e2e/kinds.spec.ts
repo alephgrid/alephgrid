@@ -32,7 +32,7 @@ test("tables and sheets are labelled and copies report what was left out", async
 
   // Query → sheet over the limit says so up front, and asks before leaving rows out.
   await page.getByRole("button", { name: "SQL" }).click();
-  const sql = page.getByRole("dialog", { name: "SQL" });
+  const sql = page.getByRole("region", { name: "SQL" });
   await sql.locator("textarea").fill("SELECT i FROM range(1500) r(i)");
   await sql.getByRole("button", { name: "Open in sheet" }).click();
   const name = page.getByRole("dialog", { name: "Open result in a new sheet" });

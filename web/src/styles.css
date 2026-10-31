@@ -560,3 +560,49 @@ dialog progress, .dialog progress { width: 100%; }
 .facts dd { margin: 0; }
 .profile-list { display: grid; gap: 6px; margin: 8px 0; }
 .profile-option { display: flex; gap: 8px; align-items: baseline; }
+
+/* ---------- workbook explorer and docked panels (U.04, U.05) ---------- */
+.workbook-body { display: flex; flex: 1; min-height: 0; }
+.workbook-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.workbook-explorer { flex: none; width: 232px; overflow-y: auto; padding: 10px 8px 16px; border-right: 1px solid var(--border); background: var(--panel); }
+.explorer-section + .explorer-section { margin-top: 14px; }
+.explorer-section h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; padding: 4px 6px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.explorer-section h3 > span:first-child { flex: 1; }
+.explorer-count { font-variant-numeric: tabular-nums; letter-spacing: 0; font-weight: 600; }
+.explorer-section ul { list-style: none; margin: 0; padding: 0; }
+.explorer-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--text); cursor: pointer; text-align: left; font-size: 13px; }
+.explorer-item .icon { color: var(--muted); }
+.explorer-item:hover { background: var(--control); }
+.explorer-item.current { background: var(--accent-soft); color: var(--accent-strong); font-weight: 650; }
+.explorer-item.current .icon { color: var(--accent-strong); }
+.explorer-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.explorer-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.explorer-detail { flex: none; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.explorer-empty { margin: 2px 8px; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.tool[aria-pressed="true"] { background: var(--accent-soft); }
+.tool[aria-pressed="true"] .icon { color: var(--accent-strong); }
+.tab-icon { display: inline-flex; margin-right: 6px; }
+
+.dock { position: relative; flex: none; display: flex; flex-direction: column; min-height: 160px; border-top: 1px solid var(--border-strong); background: var(--bg); box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.06); }
+.dock-resize { position: absolute; top: -4px; left: 0; right: 0; height: 8px; cursor: row-resize; z-index: 6; }
+.dock-resize::after { content: ""; position: absolute; left: 50%; top: 3px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--border-strong); opacity: 0; transition: opacity .12s; }
+.dock-resize:hover::after, .dock-resize:focus-visible::after { opacity: 1; background: var(--accent); }
+.dock-resize:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.dock-controls { position: absolute; top: 8px; right: 10px; display: flex; gap: 2px; z-index: 5; }
+.workbook-main.dock-maximized .grid-wrap { flex: 0 0 0; min-height: 0; overflow: hidden; }
+.workbook-main.dock-maximized .dock { flex: 1 1 auto; }
+.sql-docked { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; overflow: hidden; padding: 10px 14px 12px; }
+.sql-docked .sql-head { flex-direction: row; align-items: baseline; gap: 12px; padding-right: 72px; }
+.sql-docked .sql-head h2 { margin: 0; font-size: 14px; font-weight: 700; }
+.sql-docked .sql-hint { font-size: 12px; color: var(--muted); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sql-docked .sql-body { flex: 1; min-height: 0; grid-template-columns: 210px minmax(0, 1fr); }
+.sql-docked .sql-side { max-height: none; overflow: auto; padding-right: 12px; border-right: 1px solid var(--border); }
+.sql-docked .sql-main { overflow: auto; min-height: 0; }
+.sql-docked .sql-editor { min-height: 72px; height: 104px; }
+.sql-docked .sql-results { max-height: none; }
+@media (max-width: 900px) {
+  .workbook-explorer { position: absolute; z-index: 20; top: 0; bottom: 0; left: 0; box-shadow: var(--shadow); }
+  .workbook-body { position: relative; }
+  .sql-docked .sql-body { grid-template-columns: 1fr; }
+  .sql-docked .sql-side { display: none; }
+}

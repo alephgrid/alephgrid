@@ -42,8 +42,12 @@ colors (blue, purple, orange, cyan) stay distinct from the accent. The type is M
 4. **Formula bar**: name box, `fx`, the cell's value or formula.
 5. **Grid**, then the **tab bar** with the selection's statistics and the row count.
 
-Advanced work (functions, SQL, analysis, import) opens in dialogs; the SQL workspace lives under
-Tools and in the toolbar, closed by default. Calling a function happens directly in the cell editor.
+The **explorer** (toolbar button or View → Explorer, collapsed by default) lists tables with row
+counts, sheets, saved queries and functions; each opens from there. The **SQL workspace** docks
+under the grid, closed by default (Tools → SQL workspace, or the toolbar): drag its top edge or
+use the arrow keys on it to resize, maximize it over the grid, close it with its button or Escape.
+
+Other advanced work (functions, analysis, import) opens in dialogs. Calling a function happens directly in the cell editor.
 
 The mark is the brand-kit-v1 favicon geometry without its tile, colored by `--brand-ink` and
 `--accent` so it reads on both themes.
