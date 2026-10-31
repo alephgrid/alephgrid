@@ -108,6 +108,74 @@ pub enum ProviderKind {
     Local,
 }
 
+/// The built-in profile every workbook may use.
+pub const STANDARD: &str = "standard";
+
+/// A named amount of compute an allocation reserves (7.13, docs/COMPUTE.md). Defined by the
+/// server's configuration only; clients name a profile, never amounts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ComputeProfile {
+    pub id: String,
+    /// Fixed memory reservation; `None` (standard) is an equal share of what fixed profiles
+    /// leave, at least the policy's minimum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub memory_bytes: Option<u64>,
+    /// Fixed worker threads (with `memory_bytes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub threads: Option<u64>,
+    /// Never closed to make room for another workbook; choosing it needs an organization admin.
+    pub dedicated: bool,
+}
+
+impl ComputeProfile {
+    pub fn standard() -> ComputeProfile {
+        ComputeProfile { id: STANDARD.into(), memory_bytes: None, threads: None, dedicated: false }
+    }
+
+    /// The exact reservation of a fixed profile (temporary disk is shared out separately).
+    pub fn fixed(&self) -> Option<Reservation> {
+        self.memory_bytes.map(|m| Reservation { memory_bytes: m, threads: self.threads.unwrap_or(1).max(1), temp_disk_bytes: 0 })
+    }
+
+    /// Memory counted against a space's compute budget: what the allocation is guaranteed.
+    pub fn guaranteed_memory(&self, min_memory: u64) -> u64 {
+        self.memory_bytes.unwrap_or(min_memory)
+    }
+
+    /// `ID=MEMORY:THREADS[:dedicated]`, e.g. `large=4GiB:4` (the `--profile` flag).
+    pub fn parse(text: &str) -> std::result::Result<ComputeProfile, String> {
+        let (id, rest) = text.split_once('=').ok_or_else(|| format!("expected ID=MEMORY:THREADS[:dedicated], got {text:?}"))?;
+        let id = id.trim();
+        if id.is_empty() || id.len() > 32 || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+            return Err(format!("profile id {id:?}: use 1–32 lowercase letters, digits, - or _"));
+        }
+        if id == STANDARD {
+            return Err("\"standard\" is built in; it is an equal share of the budget".into());
+        }
+        let parts: Vec<&str> = rest.split(':').collect();
+        let (memory, threads, dedicated) = match parts.as_slice() {
+            [m, t] => (*m, *t, false),
+            [m, t, "dedicated"] => (*m, *t, true),
+            _ => return Err(format!("expected ID=MEMORY:THREADS[:dedicated], got {text:?}")),
+        };
+        let memory_bytes = budget::parse_bytes(memory)?;
+        if memory_bytes < budget::MIN_DUCKDB_MEMORY {
+            return Err(format!("profile {id}: at least {} MiB of memory", budget::MIN_DUCKDB_MEMORY >> 20));
+        }
+        let threads: u64 = threads.trim().parse().map_err(|_| format!("profile {id}: invalid thread count {threads:?}"))?;
+        if threads == 0 {
+            return Err(format!("profile {id}: at least one thread"));
+        }
+        Ok(ComputeProfile { id: id.to_string(), memory_bytes: Some(memory_bytes), threads: Some(threads), dedicated })
+    }
+}
+
+fn standard_id() -> String {
+    STANDARD.to_string()
+}
+
 /// Resource and isolation constraints for allocations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ComputePolicy {
@@ -123,6 +191,16 @@ pub struct ComputePolicy {
     /// Close an allocation after this long without sessions or jobs.
     pub idle_timeout_ms: u64,
     pub providers: Vec<ProviderKind>,
+    /// Profiles allocations may use: `standard` first, then the configured ones.
+    pub profiles: Vec<ComputeProfile>,
+    /// How long a start waits for host capacity before failing with `capacity`.
+    pub queue_timeout_ms: u64,
+}
+
+impl ComputePolicy {
+    pub fn profile(&self, id: &str) -> Option<&ComputeProfile> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
 }
 
 /// Lifecycle of an allocation. `Requested → Starting → Running → Ready → Draining →
@@ -175,6 +253,8 @@ pub enum FailureKind {
     Incompatible,
     /// No resources left on this host.
     Capacity,
+    /// The workbook's space reached its open-workbooks or compute quota.
+    Quota,
     /// Another process holds the workbook.
     OwnedElsewhere,
     /// Opening or checking the workbook failed.
@@ -220,6 +300,9 @@ pub struct RuntimeAllocation {
     pub workbook: String,
     pub spec: String,
     pub policy: String,
+    /// The profile it runs with.
+    #[serde(default = "standard_id")]
+    pub profile: String,
     pub provider: ProviderKind,
     pub state: AllocationState,
     /// Ownership epoch; increases with every allocation of the workbook.
@@ -335,6 +418,9 @@ pub struct EnsureRequest<'a> {
     /// Called at each stage boundary ("starting", "running"); an error aborts the start
     /// (cancellation, or a test's injected failure).
     pub checkpoint: &'a (dyn Fn(AllocationState) -> std::result::Result<(), RuntimeFailure> + Sync),
+    /// The ownership lock of the allocation this one replaces (a controlled restart): taken
+    /// over instead of acquired, so nobody can take the workbook in between.
+    pub handoff: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 /// The narrow contract between the controller and whatever runs workbooks. All methods
@@ -433,7 +519,7 @@ mod tests {
     #[test]
     fn transitions_are_recorded_with_their_operation_and_bounded() {
         let mut a = RuntimeAllocation {
-            id: "al".into(), workbook: "w".into(), spec: "s".into(), policy: "p".into(), provider: ProviderKind::Local,
+            id: "al".into(), workbook: "w".into(), spec: "s".into(), policy: "p".into(), profile: STANDARD.into(), provider: ProviderKind::Local,
             state: Requested, epoch: 1, reservation: Reservation::default(), holder: "h".into(), requested_at_ms: 0,
             ready_at_ms: None, stopped_at_ms: None, failure: None, transitions: vec![],
         };
@@ -459,7 +545,7 @@ mod tests {
         };
         let policy = ComputePolicy {
             id: "p".into(), min_memory_bytes: 0, max_memory_bytes: None, isolation: IsolationClass::SharedProcess,
-            idle_timeout_ms: 0, providers: vec![ProviderKind::Local],
+            idle_timeout_ms: 0, providers: vec![ProviderKind::Local], profiles: vec![ComputeProfile::standard()], queue_timeout_ms: 0,
         };
         let spec = RuntimeSpec::current();
         assert_eq!(provider.incompatibility(&spec, &policy), None);
@@ -477,6 +563,20 @@ mod tests {
         assert!(provider.incompatibility(&python, &policy).unwrap().contains("python"));
         let container = ComputePolicy { isolation: IsolationClass::Container, ..policy.clone() };
         assert!(provider.incompatibility(&spec, &container).unwrap().contains("Container"));
+    }
+
+    #[test]
+    fn profiles_parse_from_flags_and_refuse_bad_ones() {
+        let large = ComputeProfile::parse("large=4GiB:4").unwrap();
+        assert_eq!(large, ComputeProfile { id: "large".into(), memory_bytes: Some(4 << 30), threads: Some(4), dedicated: false });
+        assert_eq!(large.fixed().unwrap(), Reservation { memory_bytes: 4 << 30, threads: 4, temp_disk_bytes: 0 });
+        assert_eq!(large.guaranteed_memory(256 << 20), 4 << 30);
+        assert!(ComputeProfile::parse("solo=1GB:2:dedicated").unwrap().dedicated);
+        assert_eq!(ComputeProfile::standard().guaranteed_memory(256 << 20), 256 << 20);
+        assert_eq!(ComputeProfile::standard().fixed(), None);
+        for bad in ["large", "large=4GiB", "standard=1GiB:1", "Big=1GiB:1", "x=1MiB:1", "x=1GiB:0", "x=1GiB:2:shared", "=1GiB:1"] {
+            assert!(ComputeProfile::parse(bad).is_err(), "{bad}");
+        }
     }
 }
 

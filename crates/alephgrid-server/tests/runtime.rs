@@ -354,6 +354,8 @@ async fn open_workbooks_share_the_budget_and_never_exceed_it() {
         c.memory_budget = Some(1 << 30);
         c.threads = Some(4);
         c.min_workbook_memory = 256 << 20;
+        // Refuse at once rather than wait in line (queueing: compute.rs).
+        c.start_queue_timeout = Duration::ZERO;
     })
     .await;
     let budget = 1u64 << 30;
@@ -435,10 +437,16 @@ async fn idle_workbooks_close_and_reopen_but_not_while_in_use() {
     let s = status(&server, &idle).await;
     assert_eq!(state_of(&s), "stopped");
     assert!(s["allocation"]["transitions"].as_array().unwrap().iter().any(|t| t["operation"].as_str().unwrap().starts_with("evict")));
-    // The workbook with a session stays open well past the timeout.
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(state_of(&status(&server, &busy).await), "ready");
-    assert_eq!(ws.ok("query", json!({ "sql": "SELECT x FROM t" })).await["rows"], json!([[7]]));
+    // A workbook in use (an operation every 50 ms) stays open well past the timeout. An
+    // open connection alone does not keep it open (compute.rs).
+    let epoch = status(&server, &busy).await["allocation"]["epoch"].clone();
+    for _ in 0..16 {
+        assert_eq!(ws.ok("query", json!({ "sql": "SELECT x FROM t" })).await["rows"], json!([[7]]));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let s = status(&server, &busy).await;
+    assert_eq!(state_of(&s), "ready");
+    assert_eq!(s["allocation"]["epoch"], epoch, "the same allocation throughout");
     ws.close().await;
     // Closed workbooks reopen on demand.
     let (code, _) = server.get(&format!("/api/workbooks/{idle}")).await;
@@ -483,11 +491,24 @@ async fn eviction_racing_new_work_never_serves_from_a_closed_workbook() {
                     assert_eq!(status, 200, "{body}");
                     assert_eq!(body["tables"][0]["row_count"], 100);
                 } else {
-                    let mut ws = Ws::connect(addr, &wb).await;
-                    let v = ws.ok("open_view", json!({ "spec": { "table": "t" } })).await;
-                    let block = ws.ok("fetch", json!({ "view_id": v["view_id"], "row_start": 98, "row_count": 5 })).await;
-                    assert_eq!(block["rows"], json!([[98], [99]]));
-                    ws.close().await;
+                    // An open session does not keep compute open (7.16): it may be closed
+                    // between two operations. Like any client, it reconnects and asks again;
+                    // what it is answered is always right.
+                    loop {
+                        let mut ws = Ws::connect(addr, &wb).await;
+                        let fetched = match ws.call("open_view", json!({ "spec": { "table": "t" } })).await {
+                            Ok(v) => ws.call("fetch", json!({ "view_id": v["view_id"], "row_start": 98, "row_count": 5 })).await,
+                            Err(e) => Err(e),
+                        };
+                        ws.close().await;
+                        match fetched {
+                            Ok(block) => {
+                                assert_eq!(block["rows"], json!([[98], [99]]));
+                                break;
+                            }
+                            Err(e) => assert!(e.contains("closed"), "only a closed workbook may refuse: {e}"),
+                        }
+                    }
                 }
                 ok += 1;
                 // Short pauses leave the workbook idle now and then.

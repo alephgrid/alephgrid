@@ -409,7 +409,7 @@ export type SpaceRole = "viewer" | "editor" | "owner";
 
 export type OrgRole = "member" | "admin";
 
-export type Cap = "view" | "query" | "export" | "edit" | "publish" | "create_workbook" | "delete_workbook" | "purge" | "manage_members" | "manage_space";
+export type Cap = "view" | "query" | "export" | "edit" | "publish" | "create_workbook" | "delete_workbook" | "purge" | "manage_members" | "manage_space" | "choose_compute";
 
 export type AuthMode = "local" | "accounts";
 
@@ -456,7 +456,7 @@ actor: string, action: string, org_id?: string, space_id?: string, workbook?: st
  */
 outcome: string, detail: Record<string, unknown>, };
 
-export type QuotaLimits = { storage_bytes?: number, workbooks?: number, jobs?: number, open_workbooks?: number, };
+export type QuotaLimits = { storage_bytes?: number, workbooks?: number, jobs?: number, open_workbooks?: number, compute_memory_bytes?: number, };
 
 export type QuotaKind = "storage" | "workbooks" | "jobs" | "open_workbooks";
 
@@ -464,7 +464,11 @@ export type SpaceUsage = { space: Space,
 /**
  * Bytes of its workbooks, the trash included.
  */
-storage_bytes: number, trash_bytes: number, workbooks: number, open_workbooks: number, jobs: number, 
+storage_bytes: number, trash_bytes: number, workbooks: number, open_workbooks: number, 
+/**
+ * Memory the space's open workbooks are guaranteed (their profiles).
+ */
+compute_memory_bytes: number, jobs: number, 
 /**
  * The limits that apply.
  */
@@ -472,7 +476,11 @@ limits: QuotaLimits,
 /**
  * The space's own overrides of the server defaults.
  */
-overrides: QuotaLimits, };
+overrides: QuotaLimits, 
+/**
+ * Compute profiles granted to it besides `standard`.
+ */
+profiles: Array<string>, };
 
 export type LibraryKind = "query" | "view" | "function";
 
@@ -536,7 +544,11 @@ deleted_at?: number,
 /**
  * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
  */
-runtime_spec?: string, };
+runtime_spec?: string, 
+/**
+ * The compute profile it runs with (7.15); `None` is `standard`.
+ */
+profile?: string, };
 
 export type WorkbookListing = { size_bytes: number, 
 /**
@@ -554,7 +566,11 @@ deleted_at?: number,
 /**
  * Id of the [`crate::runtime::RuntimeSpec`] the workbook was last opened with.
  */
-runtime_spec?: string, };
+runtime_spec?: string, 
+/**
+ * The compute profile it runs with (7.15); `None` is `standard`.
+ */
+profile?: string, };
 
 export type WorkbookPatch = { name?: string, 
 /**
@@ -634,6 +650,21 @@ export type IsolationClass = "shared_process" | "process" | "container" | "virtu
 
 export type ProviderKind = "local";
 
+export type ComputeProfile = { id: string, 
+/**
+ * Fixed memory reservation; `None` (standard) is an equal share of what fixed profiles
+ * leave, at least the policy's minimum.
+ */
+memory_bytes?: number, 
+/**
+ * Fixed worker threads (with `memory_bytes`).
+ */
+threads?: number, 
+/**
+ * Never closed to make room for another workbook; choosing it needs an organization admin.
+ */
+dedicated: boolean, };
+
 export type ComputePolicy = { id: string, 
 /**
  * Smallest memory share an allocation may run with; below it, opening another
@@ -647,11 +678,39 @@ max_memory_bytes?: number, isolation: IsolationClass,
 /**
  * Close an allocation after this long without sessions or jobs.
  */
-idle_timeout_ms: number, providers: Array<ProviderKind>, };
+idle_timeout_ms: number, providers: Array<ProviderKind>, 
+/**
+ * Profiles allocations may use: `standard` first, then the configured ones.
+ */
+profiles: Array<ComputeProfile>, 
+/**
+ * How long a start waits for host capacity before failing with `capacity`.
+ */
+queue_timeout_ms: number, };
+
+export type ProfileChoice = { profile: ComputeProfile, 
+/**
+ * Granted to the workbook's space (`standard` always is).
+ */
+granted: boolean, 
+/**
+ * The caller may switch the workbook to it.
+ */
+allowed: boolean, 
+/**
+ * Why not, if not.
+ */
+reason?: string, };
+
+export type SpaceProfiles = { 
+/**
+ * Profile ids granted to the space besides `standard`, which always is.
+ */
+profiles: Array<string>, };
 
 export type AllocationState = "requested" | "starting" | "running" | "ready" | "draining" | "stopped" | "failed";
 
-export type FailureKind = "incompatible" | "capacity" | "owned_elsewhere" | "startup_failed" | "cancelled" | "lost";
+export type FailureKind = "incompatible" | "capacity" | "quota" | "owned_elsewhere" | "startup_failed" | "cancelled" | "lost";
 
 export type RuntimeFailure = { kind: FailureKind, message: string, };
 
@@ -659,7 +718,11 @@ export type Reservation = { memory_bytes: number, threads: number, temp_disk_byt
 
 export type Transition = { at_ms: number, from: AllocationState, to: AllocationState, operation: string, };
 
-export type RuntimeAllocation = { id: string, workbook: string, spec: string, policy: string, provider: ProviderKind, state: AllocationState, 
+export type RuntimeAllocation = { id: string, workbook: string, spec: string, policy: string, 
+/**
+ * The profile it runs with.
+ */
+profile: string, provider: ProviderKind, state: AllocationState, 
 /**
  * Ownership epoch; increases with every allocation of the workbook.
  */
@@ -679,16 +742,45 @@ export type OwnershipAssignment = { workbook: string, allocation: string, epoch:
  */
 mechanism: string, };
 
-export type RuntimeStatus = { workbook: string, spec: RuntimeSpec, spec_id: string, policy: ComputePolicy, allocation?: RuntimeAllocation, ownership?: OwnershipAssignment, sessions: number, };
+export type RuntimeStatus = { workbook: string, spec: RuntimeSpec, spec_id: string, policy: ComputePolicy, allocation?: RuntimeAllocation, ownership?: OwnershipAssignment, sessions: number, 
+/**
+ * The profile the workbook asks for (`workbook.json`).
+ */
+profile: string, 
+/**
+ * Why the live allocation runs with another profile, if it does.
+ */
+note?: string, 
+/**
+ * Place in the capacity queue (1 is next) while waiting for the host to have room.
+ */
+queue_position?: number, 
+/**
+ * Last meaningful activity of the live allocation (ms since the epoch).
+ */
+last_activity_ms?: number, 
+/**
+ * Bytes of the workbook on disk: kept while its compute is stopped.
+ */
+storage_bytes: number, };
 
-export type RuntimeAction = "start" | "stop" | "cancel";
+export type RuntimeAction = "start" | "stop" | "cancel" | "restart";
 
 export type RuntimeRequest = { action: RuntimeAction, 
 /**
  * Repeating an operation id that already moved this workbook's allocation returns the
  * current status and does nothing.
  */
-operation_id?: string, };
+operation_id?: string, 
+/**
+ * `start`, `restart`: `false` replies once the start is under way (or over) instead of
+ * when it is ready; follow it with `GET`.
+ */
+wait?: boolean, 
+/**
+ * `restart`: run with this profile from now on (7.15).
+ */
+profile?: string, };
 
 export type HostBudget = { memory_bytes: number, threads: number, temp_disk_bytes: number, };
 

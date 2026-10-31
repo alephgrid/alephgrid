@@ -10,6 +10,9 @@
 //! * **workbooks**: workbooks of the space outside the trash.
 //! * **jobs**: bulk work (queries, exports, imports, copies) running at once for the space.
 //! * **open workbooks**: allocations live for the space's workbooks at once (compute).
+//! * **compute memory**: memory those allocations are guaranteed, summed (their profiles,
+//!   7.13). Both compute limits are checked and reserved by the runtime controller, under
+//!   the lock that records the allocation, so concurrent starts cannot pass them.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -26,6 +29,7 @@ pub struct QuotaLimits {
     pub workbooks: Option<u64>,
     pub jobs: Option<u64>,
     pub open_workbooks: Option<u64>,
+    pub compute_memory_bytes: Option<u64>,
 }
 
 impl QuotaLimits {
@@ -36,6 +40,7 @@ impl QuotaLimits {
             workbooks: self.workbooks.or(defaults.workbooks),
             jobs: self.jobs.or(defaults.jobs),
             open_workbooks: self.open_workbooks.or(defaults.open_workbooks),
+            compute_memory_bytes: self.compute_memory_bytes.or(defaults.compute_memory_bytes),
         }
     }
 }
@@ -70,18 +75,21 @@ pub struct SpaceUsage {
     pub trash_bytes: u64,
     pub workbooks: u64,
     pub open_workbooks: u64,
+    /// Memory the space's open workbooks are guaranteed (their profiles).
+    pub compute_memory_bytes: u64,
     pub jobs: u64,
     /// The limits that apply.
     pub limits: QuotaLimits,
     /// The space's own overrides of the server defaults.
     pub overrides: QuotaLimits,
+    /// Compute profiles granted to it besides `standard`.
+    pub profiles: Vec<String>,
 }
 
-/// Counts that change while the server runs: bulk jobs and allocation starts per space.
+/// Counts that change while the server runs: bulk jobs per space, measured storage.
 #[derive(Default)]
 pub struct Counters {
     jobs: Mutex<HashMap<String, u64>>,
-    opening: Mutex<HashMap<String, u64>>,
     storage: Mutex<HashMap<String, (Instant, u64)>>,
 }
 
@@ -97,21 +105,6 @@ pub struct JobSlot {
 impl Drop for JobSlot {
     fn drop(&mut self) {
         self.state.quota.release_job(&self.space);
-    }
-}
-
-/// A start counted against a space's open workbooks until dropped.
-pub struct Opening<'a> {
-    counters: &'a Counters,
-    space: String,
-}
-
-impl Drop for Opening<'_> {
-    fn drop(&mut self) {
-        let mut o = self.counters.opening.lock().unwrap();
-        if let Some(n) = o.get_mut(&self.space) {
-            *n = n.saturating_sub(1);
-        }
     }
 }
 
@@ -142,22 +135,6 @@ impl Counters {
         if let Some(n) = j.get_mut(space) {
             *n = n.saturating_sub(1);
         }
-    }
-
-    /// Count a start against `space`'s open workbooks, `live` being those open now.
-    pub fn opening(&self, space: &str, live: u64, limit: Option<u64>) -> anyhow::Result<Opening<'_>> {
-        let mut o = self.opening.lock().unwrap();
-        let n = o.entry(space.to_string()).or_insert(0);
-        if let Some(max) = limit {
-            if live + *n >= max {
-                return Err(exceeded(
-                    QuotaKind::OpenWorkbooks,
-                    format!("this space already has {} workbook(s) open, its limit; close one (it closes by itself when idle) or ask an admin to raise it", live + *n),
-                ));
-            }
-        }
-        *n += 1;
-        Ok(Opening { counters: self, space: space.to_string() })
     }
 
     /// A cached storage total of `space`, or `measure` it.
@@ -245,9 +222,9 @@ impl crate::state::AppState {
         Ok(JobSlot { state: self.clone(), space: space.to_string() })
     }
 
-    /// Workbooks of `space` with a live allocation now.
-    pub fn open_in(&self, space: &str) -> u64 {
-        self.controller.live().iter().filter(|id| self.workbook_space(id).ok().as_deref() == Some(space)).count() as u64
+    /// Workbooks of `space` with a live allocation now, and the memory they are guaranteed.
+    pub fn open_in(&self, space: &str) -> (u64, u64) {
+        self.controller.space_usage(space)
     }
 
     /// Usage and limits of every space of `org` (or of every space with `None`).
@@ -256,14 +233,17 @@ impl crate::state::AppState {
         for s in self.auth.store.spaces()?.into_iter().filter(|s| org.is_none_or(|o| s.org_id == o)) {
             let (storage, trash, workbooks) = self.measure(&s.id)?;
             let overrides = self.auth.store.space_quota(&s.id)?;
+            let (open, compute) = self.open_in(&s.id);
             out.push(SpaceUsage {
                 storage_bytes: storage,
                 trash_bytes: trash,
                 workbooks,
-                open_workbooks: self.open_in(&s.id),
+                open_workbooks: open,
+                compute_memory_bytes: compute,
                 jobs: self.quota.jobs_of(&s.id),
                 limits: overrides.over(self.config.quota),
                 overrides,
+                profiles: self.auth.store.space_profiles(&s.id)?,
                 space: s,
             });
         }

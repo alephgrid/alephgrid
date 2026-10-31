@@ -63,6 +63,9 @@ replaced.
   remembers the values it wrote until a fetch started after they committed replaces them. A
   quick second edit of the same cell is therefore based on the user's own value, not taken for
   someone else's change. Rows it just appended are edited by record (`first_appended`).
+* Work a session had queued or running when its workbook closed (idle, restart, shutdown) and
+  that did not commit answers `unavailable`, never `cancelled`, so the client sends it again.
+  `cancelled` is only ever the answer to the client's own `cancel`.
 * `hello.revision` tells a reconnecting client how far the workbook got. The client reopens its
   views, refetches what it shows, and resends changes that were not acknowledged, each with its
   original `mutation_id`. A change that had committed is not applied again: the reply repeats the

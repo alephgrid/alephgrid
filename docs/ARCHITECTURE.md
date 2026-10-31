@@ -215,9 +215,16 @@ and after a restart marks the previous process's allocations lost and removes th
 workbook held by another process is refused, never opened twice. See DURABILITY.md.
 
 A live allocation (`WorkbookHandle`) has a writer connection, two reader connections and a control
-connection. The **host budget** (memory, threads, temp disk) is split equally among live
-allocations and applied as DuckDB settings, shrinking others before a new one opens; idle
-workbooks are closed (`--idle-timeout`) or evicted to make room, otherwise opening fails with 503.
+connection. The **host budget** (memory, threads, temp disk) is shared by live allocations and
+applied as DuckDB settings, shrinking others before a new one opens: an allocation with a fixed
+**profile** (`--profile large=4GiB:4`) gets exactly its size, `standard` ones equal shares of the
+rest. A start is admitted under its space's compute quotas and reserved in the ledger under the
+controller's lock, with its record, so concurrent starts cannot pass a space's or the host's
+budget. Requests hold a **lease** on the handle while they use it; sessions only while they set up
+and during each operation. Workbooks without meaningful activity for `--idle-timeout` are closed,
+open connections or not; unused ones are closed to make room; otherwise a start waits in a
+first-come queue (`--start-queue-timeout`) and then fails with 503. A controlled restart (a new
+profile) hands the ownership lock to the replacement allocation. See COMPUTE.md.
 
 Deleting a workbook blocks new allocations, stops the live one (draining its work) and renames the
 directory into the trash. Shutdown stops admitting work, drains every allocation within

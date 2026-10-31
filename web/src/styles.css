@@ -85,6 +85,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .status-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .status-open { background: var(--success); }
 .status-closed { background: var(--danger); }
+.status-paused { background: var(--muted, #999); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 10px; border-radius: 999px; background: var(--bg); border: 1px solid var(--border); font-size: 13px; }
@@ -422,3 +423,14 @@ dialog progress, .dialog progress { width: 100%; }
 .token-secret input { width: 100%; }
 .role-tag { margin-left: 6px; font-size: 11px; opacity: 0.7; }
 .role-hint { display: block; font-size: 12px; }
+
+/* Compute (7.13–7.16): opening, waiting in line, paused, size. */
+.compute-status h2 { display: flex; align-items: center; gap: 10px; }
+.spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent, #2563eb); animation: spin 0.9s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 12px; }
+.facts dt { color: var(--muted, #666); }
+.facts dd { margin: 0; }
+.profile-list { display: grid; gap: 6px; margin: 8px 0; }
+.profile-option { display: flex; gap: 8px; align-items: baseline; }

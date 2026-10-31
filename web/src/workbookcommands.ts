@@ -9,7 +9,7 @@ export interface WorkbookActions {
   fill(direction: "down" | "right"): void;
   selectAll(): void; selectEntire(what: "rows" | "columns"): void;
   goTo(): void; names(): void | Promise<void>; formulaHelp(): void; sql(): void;
-  palette(): void; shortcuts(): void; history(): void;
+  palette(): void; shortcuts(): void; history(): void; compute(): void;
 }
 
 /** Every workbook command with its keys. Grid keys without `run` are handled by the grid;
@@ -38,6 +38,7 @@ export function workbookCommands(a: WorkbookActions): Command[] {
     { id: "names.manage", label: "Named ranges…", group: "Formulas", shortcuts: [], contexts: ["grid"], unavailable: sheetOnly("Named ranges"), run: () => a.names() },
     { id: "help.formulas", label: "Formula help", group: "Formulas", shortcuts: [{ key: "F3", shift: true }], contexts: ["grid"], run: () => a.formulaHelp() },
     { id: "app.history", label: "Change history…", group: "Workbook", shortcuts: [], contexts: ["grid"], run: () => a.history() },
+    { id: "app.compute", label: "Compute and size…", group: "Workbook", shortcuts: [], contexts: ["grid"], run: () => a.compute() },
     { id: "app.sql", label: "Open SQL workspace", group: "Workbook", shortcuts: [], contexts: ["grid"], unavailable: () => a.allowSql() ? null : "SQL is turned off on this server", run: () => a.sql() },
     { id: "app.commands", label: "Command palette", group: "Help", shortcuts: [{ key: "k", mod: true }], contexts: ["grid"], run: () => a.palette() },
     { id: "help.shortcuts", label: "Keyboard shortcuts", group: "Help", shortcuts: [{ key: "/", mod: true }], contexts: ["grid"], run: () => a.shortcuts() },

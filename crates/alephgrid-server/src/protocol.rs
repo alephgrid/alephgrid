@@ -15,15 +15,16 @@ use alephgrid_core::reports::{Calculated, ChartKind, Dashboard, DashboardResult,
 use ts_rs::{Config, TS};
 
 use crate::backup::{BackupEntry, BackupManifest};
-use crate::http::{ImportRequest, JobStatus, RuntimeAction, RuntimeRequest, UploadCreated};
+use crate::http::{ImportRequest, JobStatus, ProfileChoice, RuntimeAction, RuntimeRequest, UploadCreated};
 use crate::runtime::budget::{AllocationUsage, HostBudget, ResourceUsage};
 use crate::runtime::controller::RuntimeStatus;
 use crate::runtime::{
-    AllocationState, Capability, ComputePolicy, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
+    AllocationState, Capability, ComputePolicy, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
     RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
 };
 use crate::auth::store::{AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
 use crate::auth::{AuthMode, Cap, OrgRole, SpaceRole};
+use crate::auth::routes::SpaceProfiles;
 use crate::library::{LibraryEntry, LibraryKind, LibraryVersion};
 use crate::quota::{QuotaKind, QuotaLimits, SpaceUsage};
 use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch};
@@ -164,7 +165,7 @@ pub fn bindings() -> String {
         SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
         HistoryEntry, alephgrid_core::UndoState, alephgrid_core::UndoKind, alephgrid_core::UndoOutcome, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
-        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
+        Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputeProfile, ComputePolicy, ProfileChoice, SpaceProfiles, AllocationState, FailureKind, RuntimeFailure,
         Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,
         HostBudget, AllocationUsage, ResourceUsage, BackupEntry, BackupManifest,
     );

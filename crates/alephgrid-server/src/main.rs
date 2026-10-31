@@ -92,6 +92,11 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_SPACE_OPEN_WORKBOOKS")]
     space_open_workbooks: Option<u64>,
 
+    /// Default compute budget per space: memory its open workbooks are guaranteed, summed
+    /// (standard counts --min-workbook-memory, other profiles their memory), e.g. "8GiB".
+    #[arg(long, env = "ALEPHGRID_SPACE_COMPUTE_MEMORY", value_parser = parse_size)]
+    space_compute_memory: Option<u64>,
+
     /// Serve a network interface without sign-in. Anyone who can reach the port can read,
     /// change and delete every workbook.
     #[arg(long, env = "ALEPHGRID_UNSAFE_NO_AUTH")]
@@ -120,9 +125,19 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_MIN_WORKBOOK_MEMORY", value_parser = parse_size, default_value = "256MiB")]
     min_workbook_memory: u64,
 
-    /// Seconds without sessions or work before a workbook is closed (its data stays).
+    /// Seconds without meaningful activity (requests, running work) before a workbook's
+    /// compute is closed; open connections do not count. Its data stays.
     #[arg(long, env = "ALEPHGRID_IDLE_TIMEOUT", default_value_t = 600)]
     idle_timeout: u64,
+
+    /// A compute profile besides "standard", as ID=MEMORY:THREADS[:dedicated], e.g.
+    /// "large=4GiB:4". Repeatable. Organization admins grant profiles to spaces.
+    #[arg(long = "profile", value_parser = alephgrid_server::runtime::ComputeProfile::parse)]
+    profiles: Vec<alephgrid_server::runtime::ComputeProfile>,
+
+    /// Seconds a workbook start waits in line when the server is at capacity.
+    #[arg(long, env = "ALEPHGRID_START_QUEUE_TIMEOUT", default_value_t = 60)]
+    start_queue_timeout: u64,
 
     /// Seconds before an unused sorted or filtered view's materialization is dropped.
     #[arg(long, env = "ALEPHGRID_VIEW_TTL", default_value_t = 900)]
@@ -246,6 +261,7 @@ async fn main() -> Result<()> {
         workbooks: cli.space_workbooks,
         jobs: cli.space_jobs,
         open_workbooks: cli.space_open_workbooks,
+        compute_memory_bytes: cli.space_compute_memory,
     };
     config.auth = AuthConfig {
         mode: cli.auth,
@@ -261,6 +277,8 @@ async fn main() -> Result<()> {
     config.temp_budget = Some(cli.temp_budget);
     config.min_workbook_memory = cli.min_workbook_memory;
     config.idle_timeout = Duration::from_secs(cli.idle_timeout);
+    config.profiles = cli.profiles.clone();
+    config.start_queue_timeout = Duration::from_secs(cli.start_queue_timeout);
     config.view_ttl = Duration::from_secs(cli.view_ttl);
     config.shutdown_grace = Duration::from_secs(cli.shutdown_grace);
     config.max_upload_bytes = cli.max_upload;

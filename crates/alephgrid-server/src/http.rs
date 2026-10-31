@@ -140,13 +140,16 @@ fn runtime_status(kind: FailureKind) -> StatusCode {
     match kind {
         FailureKind::Incompatible => StatusCode::CONFLICT,
         FailureKind::Capacity | FailureKind::StartupFailed | FailureKind::Lost => StatusCode::SERVICE_UNAVAILABLE,
+        FailureKind::Quota => StatusCode::TOO_MANY_REQUESTS,
         FailureKind::OwnedElsewhere => StatusCode::LOCKED,
         FailureKind::Cancelled => StatusCode::CONFLICT,
     }
 }
 
-/// `POST /api/workbooks/{id}/runtime`.
+/// `POST /api/workbooks/{id}/runtime`. Unknown fields are refused: a request names a
+/// profile, never resource amounts (7.13).
 #[derive(Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeRequest {
     pub action: RuntimeAction,
     /// Repeating an operation id that already moved this workbook's allocation returns the
@@ -154,15 +157,40 @@ pub struct RuntimeRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<String>")]
     pub operation_id: Option<String>,
+    /// `start`, `restart`: `false` replies once the start is under way (or over) instead of
+    /// when it is ready; follow it with `GET`.
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub wait: Option<bool>,
+    /// `restart`: run with this profile from now on (7.15).
+    #[serde(default)]
+    #[ts(optional, as = "Option<String>")]
+    pub profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeAction {
     Start,
     Stop,
-    /// Cancel a start that has not reached `ready`.
+    /// Cancel a start that has not reached `ready` (or is waiting in line).
     Cancel,
+    /// Controlled restart, with `profile` to change size (7.15).
+    Restart,
+}
+
+/// A compute profile as one caller may use it for one workbook (`GET …/profiles`).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct ProfileChoice {
+    pub profile: crate::runtime::ComputeProfile,
+    /// Granted to the workbook's space (`standard` always is).
+    pub granted: bool,
+    /// The caller may switch the workbook to it.
+    pub allowed: bool,
+    /// Why not, if not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
 }
 
 pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
@@ -191,6 +219,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/orgs/{id}/audit", get(crate::auth::routes::org_audit))
         .route("/api/orgs/{id}/usage", get(crate::auth::routes::org_usage))
         .route("/api/spaces/{id}/quota", axum::routing::put(crate::auth::routes::set_space_quota))
+        .route("/api/spaces/{id}/profiles", axum::routing::put(crate::auth::routes::set_space_profiles))
+        .route("/api/workbooks/{id}/profiles", get(workbook_profiles))
         .route("/api/admin/usage", get(crate::auth::routes::instance_usage))
         .route("/api/spaces/{id}/library", get(crate::library::list).post(crate::library::publish_entry))
         .route("/api/spaces/{id}/library/{entry}", get(crate::library::entry).patch(crate::library::change_entry))
@@ -331,6 +361,7 @@ async fn config(State(state): State<Shared>) -> Json<serde_json::Value> {
         "max_message_bytes": state.config.max_message_bytes,
         "max_upload_bytes": state.config.max_upload_bytes,
         "max_edit_cells": alephgrid_core::limits::MAX_EDIT_CELLS,
+        "profiles": state.controller.policy.profiles,
     }))
 }
 
@@ -417,29 +448,122 @@ async fn runtime_status_handler(State(state): State<Shared>, Extension(p): Exten
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
     }
     allowed(&state, &p, &id, Cap::View).await?;
-    Ok(Json(blocking(move || state.controller.status(&id)).await?))
+    Ok(Json(blocking(move || Ok(redacted(state.controller.status(&id)?, &state.config.data_dir))).await?))
 }
 
-/// Start, stop or cancel a workbook's allocation. The workbook's data is unaffected.
+/// A status with the data directory taken out of its failure message, as HTTP errors are.
+fn redacted(mut s: crate::runtime::controller::RuntimeStatus, data_dir: &std::path::Path) -> crate::runtime::controller::RuntimeStatus {
+    if let Some(f) = s.allocation.as_mut().and_then(|a| a.failure.as_mut()) {
+        f.message = crate::ws::redact(&f.message, data_dir);
+    }
+    s
+}
+
+/// Why `p` (with `role` in `space`) may not run a workbook with `profile`, if not.
+fn profile_refusal(state: &Shared, p: &Principal, space: &crate::auth::Space, role: crate::auth::SpaceRole, profile: &crate::runtime::ComputeProfile) -> anyhow::Result<Option<anyhow::Error>> {
+    if profile.id != crate::runtime::STANDARD && !state.auth.store.space_profiles(&space.id)?.contains(&profile.id) {
+        return Ok(Some(crate::auth::refused(format!("the {} profile is not granted to this space; an organization admin can grant it", profile.id))));
+    }
+    if !space.allows(role, Cap::ChooseCompute) {
+        return Ok(Some(crate::auth::forbidden(Cap::ChooseCompute.describe())));
+    }
+    if profile.dedicated && state.auth.org_role(p, &space.org_id)? != Some(crate::auth::OrgRole::Admin) {
+        return Ok(Some(crate::auth::forbidden("request dedicated compute; ask an organization admin")));
+    }
+    Ok(None)
+}
+
+/// The profiles of this server, as the caller may use them for this workbook.
+async fn workbook_profiles(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (space, role) = allowed(&state, &p, &id, Cap::View).await?;
+    let choices = blocking(move || {
+        let granted = state.auth.store.space_profiles(&space.id)?;
+        state
+            .controller
+            .policy
+            .profiles
+            .iter()
+            .map(|profile| {
+                let refusal = profile_refusal(&state, &p, &space, role, profile)?;
+                Ok(ProfileChoice {
+                    granted: profile.id == crate::runtime::STANDARD || granted.contains(&profile.id),
+                    allowed: refusal.is_none(),
+                    reason: refusal.map(|e| e.to_string()),
+                    profile: profile.clone(),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await?;
+    Ok(Json(choices))
+}
+
+/// Start, stop, cancel or restart a workbook's allocation. The workbook's data is unaffected.
 async fn runtime_action(
     State(state): State<Shared>,
     Extension(p): Extension<Principal>,
     Path(id): Path<String>,
-    Json(req): Json<RuntimeRequest>,
+    body: axum::body::Bytes,
 ) -> ApiResult<impl IntoResponse> {
     if !crate::state::valid_id(&id) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
     }
-    // Opening is part of viewing; stopping or cancelling affects everyone using it.
-    let cap = if matches!(req.action, RuntimeAction::Start) { Cap::View } else { Cap::Edit };
-    allowed(&state, &p, &id, cap).await?;
+    let req: RuntimeRequest = serde_json::from_slice(&body).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid request: {e}")))?;
+    // Opening is part of viewing; stopping, cancelling or restarting affects everyone using it.
+    let cap = if req.action == RuntimeAction::Start { Cap::View } else { Cap::Edit };
+    let (space, role) = allowed(&state, &p, &id, cap).await?;
+    if req.profile.is_some() && req.action != RuntimeAction::Restart {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "a profile is chosen with the restart action"));
+    }
     let status = blocking(move || {
         let c = &state.controller;
+        if let Some(name) = &req.profile {
+            let profile = c.policy.profile(name).ok_or_else(|| crate::auth::Denied::BadRequest(format!("unknown compute profile {name:?}")))?;
+            let current = state.admission(&id, None)?.profile.id;
+            if profile.id != current {
+                if let Some(refusal) = profile_refusal(&state, &p, &space, role, profile)? {
+                    return Err(refusal);
+                }
+            }
+        }
         let op = req.operation_id.filter(|o| !o.is_empty()).unwrap_or_else(|| crate::runtime::controller::operation_id("api"));
         if !c.seen(&id, &op) {
+            let wait = req.wait.unwrap_or(true);
             match req.action {
-                RuntimeAction::Start => {
-                    state.get_with(&id, &op)?;
+                RuntimeAction::Start | RuntimeAction::Restart => {
+                    let (s, wb, o, profile, restart) = (state.clone(), id.clone(), op.clone(), req.profile.clone(), req.action == RuntimeAction::Restart);
+                    let run = move || -> anyhow::Result<()> {
+                        if restart {
+                            s.restart(&wb, &o, profile.as_deref())?;
+                        } else {
+                            s.get_with(&wb, &o)?;
+                        }
+                        Ok(())
+                    };
+                    if wait {
+                        run()?;
+                    } else {
+                        // Reply once the start is visible (its record is live) or over.
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(run());
+                        });
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                        loop {
+                            match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                                Ok(r) => {
+                                    r?;
+                                    break;
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            }
+                            let live = c.status(&id)?.allocation.is_some_and(|a| a.state.is_live() && a.state != crate::runtime::AllocationState::Draining);
+                            if live || std::time::Instant::now() >= until {
+                                break;
+                            }
+                        }
+                    }
                 }
                 RuntimeAction::Stop => c.stop(&id, &op, crate::runtime::controller::StopReason::Requested)?,
                 RuntimeAction::Cancel => {
@@ -447,7 +571,7 @@ async fn runtime_action(
                 }
             }
         }
-        c.status(&id)
+        Ok(redacted(c.status(&id)?, &state.config.data_dir))
     })
     .await?;
     Ok(Json(status))
@@ -1031,7 +1155,7 @@ pub fn attachment(name: &str) -> axum::http::HeaderValue {
 }
 
 /// Open (or find) a workbook off the async threads: starting an allocation can migrate files.
-async fn open(state: &Shared, id: &str) -> ApiResult<std::sync::Arc<crate::state::WorkbookHandle>> {
+async fn open(state: &Shared, id: &str) -> ApiResult<crate::state::Lease> {
     let (state, id) = (state.clone(), id.to_string());
     blocking(move || state.get(&id)).await
 }

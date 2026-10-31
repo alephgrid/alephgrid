@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS invites(
     space_id VARCHAR, space_role VARCHAR, created_by VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
     accepted_by VARCHAR, accepted_at BIGINT, revoked_at BIGINT);
 CREATE TABLE IF NOT EXISTS space_quotas(space_id VARCHAR PRIMARY KEY, storage_bytes BIGINT, workbooks BIGINT, jobs BIGINT, open_workbooks BIGINT);
+ALTER TABLE space_quotas ADD COLUMN IF NOT EXISTS compute_memory_bytes BIGINT;
+CREATE TABLE IF NOT EXISTS space_profiles(space_id VARCHAR NOT NULL, profile VARCHAR NOT NULL, PRIMARY KEY(space_id, profile));
 CREATE TABLE IF NOT EXISTS audit(
     seq BIGINT PRIMARY KEY, at_ms BIGINT NOT NULL, actor VARCHAR NOT NULL, action VARCHAR NOT NULL, org_id VARCHAR,
     space_id VARCHAR, workbook VARCHAR, outcome VARCHAR NOT NULL, detail VARCHAR NOT NULL);
@@ -688,6 +690,7 @@ impl Store {
         self.txn(|c| {
             c.execute("DELETE FROM space_members WHERE space_id = ?", params![id])?;
             c.execute("DELETE FROM space_quotas WHERE space_id = ?", params![id])?;
+            c.execute("DELETE FROM space_profiles WHERE space_id = ?", params![id])?;
             c.execute("DELETE FROM library_versions WHERE entry_id IN (SELECT id FROM library_entries WHERE space_id = ?)", params![id])?;
             c.execute("DELETE FROM library_entries WHERE space_id = ?", params![id])?;
             c.execute("UPDATE tokens SET revoked_at = ? WHERE space_id = ? AND revoked_at IS NULL", params![now_ms() as i64, id])?;
@@ -703,9 +706,9 @@ impl Store {
     pub fn space_quota(&self, space: &str) -> Result<crate::quota::QuotaLimits> {
         self.read(|c| {
             let q = c
-                .query_row("SELECT storage_bytes, workbooks, jobs, open_workbooks FROM space_quotas WHERE space_id = ?", params![space], |r| {
+                .query_row("SELECT storage_bytes, workbooks, jobs, open_workbooks, compute_memory_bytes FROM space_quotas WHERE space_id = ?", params![space], |r| {
                     let v = |i: usize| r.get::<_, Option<i64>>(i).map(|v| v.map(|v| v as u64));
-                    Ok(crate::quota::QuotaLimits { storage_bytes: v(0)?, workbooks: v(1)?, jobs: v(2)?, open_workbooks: v(3)? })
+                    Ok(crate::quota::QuotaLimits { storage_bytes: v(0)?, workbooks: v(1)?, jobs: v(2)?, open_workbooks: v(3)?, compute_memory_bytes: v(4)? })
                 })
                 .optional()?;
             Ok(q.unwrap_or_default())
@@ -716,9 +719,28 @@ impl Store {
         let v = |x: Option<u64>| x.map(|v| v.min(i64::MAX as u64) as i64);
         self.txn(|c| {
             c.execute(
-                "INSERT INTO space_quotas VALUES (?, ?, ?, ?, ?) ON CONFLICT (space_id) DO UPDATE SET storage_bytes = excluded.storage_bytes, workbooks = excluded.workbooks, jobs = excluded.jobs, open_workbooks = excluded.open_workbooks",
-                params![space, v(q.storage_bytes), v(q.workbooks), v(q.jobs), v(q.open_workbooks)],
+                "INSERT INTO space_quotas (space_id, storage_bytes, workbooks, jobs, open_workbooks, compute_memory_bytes) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (space_id) DO UPDATE SET storage_bytes = excluded.storage_bytes, workbooks = excluded.workbooks, jobs = excluded.jobs, open_workbooks = excluded.open_workbooks, compute_memory_bytes = excluded.compute_memory_bytes",
+                params![space, v(q.storage_bytes), v(q.workbooks), v(q.jobs), v(q.open_workbooks), v(q.compute_memory_bytes)],
             )?;
+            Ok(())
+        })
+    }
+
+    /// Compute profiles granted to a space besides `standard` (7.13).
+    pub fn space_profiles(&self, space: &str) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare("SELECT profile FROM space_profiles WHERE space_id = ? ORDER BY profile")?;
+            let rows = stmt.query_map(params![space], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn set_space_profiles(&self, space: &str, profiles: &[String]) -> Result<()> {
+        self.txn(|c| {
+            c.execute("DELETE FROM space_profiles WHERE space_id = ?", params![space])?;
+            for p in profiles {
+                c.execute("INSERT INTO space_profiles VALUES (?, ?)", params![space, p])?;
+            }
             Ok(())
         })
     }
