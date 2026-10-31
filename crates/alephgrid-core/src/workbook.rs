@@ -1897,6 +1897,14 @@ impl Reader {
     /// [`crate::sheets::Sheets::xlsx_compatibility`]), and tables, which are not part of the file.
     pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
         let mut notes = self.sheets().xlsx_compatibility()?;
+        let workers: Vec<String> = self.shared.functions.active.read().unwrap().keys().cloned().collect();
+        let calling = self.sheets().cells_calling(&workers);
+        if !calling.is_empty() {
+            notes.push(format!(
+                "{} cell(s) call Python functions, which Excel does not have: Excel shows #NAME? there. Export with cached values to keep their results",
+                calling.len()
+            ));
+        }
         for t in self.db().list_tables()? {
             notes.push(format!("table {} ({} rows) is not in the file: download it as CSV or Parquet; formulas over it are exported as values", t.name, t.row_count));
         }

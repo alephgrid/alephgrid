@@ -1088,6 +1088,7 @@ impl AppState {
             providers: vec![ProviderKind::Local],
             profiles: std::iter::once(crate::runtime::ComputeProfile::standard()).chain(config.profiles.iter().cloned()).collect(),
             queue_timeout_ms: config.start_queue_timeout.as_millis() as u64,
+            python: config.python_runtime.as_ref().map(|_| config.python_limits),
         };
         let (python, python_problem) = match &config.python_runtime {
             None => (None, None),
@@ -1109,7 +1110,8 @@ impl AppState {
                 }
             }
         };
-        let mut controller = Controller::new(&config.data_dir, budget, policy, config.stage_hook.clone())?;
+        let python_id = python.as_ref().map(|p| p.manifest.id());
+        let mut controller = Controller::with_spec(&config.data_dir, budget, policy, config.stage_hook.clone(), crate::runtime::RuntimeSpec::current().with_python(python_id.as_deref()))?;
         controller.function_runtime = python.clone().map(|p| p as Arc<dyn alephgrid_core::external::FunctionRuntime>);
         controller.drain_grace = config.shutdown_grace;
         let fixed = controller.reconcile()?;

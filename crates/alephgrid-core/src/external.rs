@@ -257,6 +257,13 @@ impl ResultCache {
         !self.pending.lock().unwrap().is_empty()
     }
 
+    /// Names of the worker functions pinned now.
+    pub fn worker_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.active.read().unwrap().keys().cloned().collect();
+        v.sort();
+        v
+    }
+
     /// Whether `function` is evaluated by workers (the hook claims it).
     pub fn is_worker_function(&self, function: &str) -> bool {
         self.active.read().unwrap().contains_key(&function.to_uppercase())

@@ -721,8 +721,61 @@ impl Sheets {
     /// compute, are written as their current values; each one is listed in the returned
     /// notes, so the replacement is never silent.
     pub fn export_xlsx(&self, path: &std::path::Path) -> Result<Vec<String>> {
-        let file = std::fs::File::create(path)?;
+        self.export_model(self.model()?, path)
+    }
+
+    /// Cells whose formula calls one of `functions` (worker functions): (sheet index, row,
+    /// column, formula).
+    pub fn cells_calling(&self, functions: &[String]) -> Vec<(u32, i32, i32, String)> {
+        let Ok(m) = self.model() else { return vec![] };
+        let mut out = Vec::new();
+        for (i, p) in m.get_worksheets_properties().iter().enumerate() {
+            if p.state != "visible" {
+                continue;
+            }
+            let Ok(sheet) = m.get_model().workbook.worksheet(i as u32) else { continue };
+            for (row, column, _) in sheet.sheet_data.cells() {
+                let content = m.get_cell_content(i as u32, row, column).unwrap_or_default();
+                if !content.starts_with('=') {
+                    continue;
+                }
+                let upper = content.to_uppercase();
+                if functions.iter().any(|f| upper.match_indices(&format!("{f}(")).any(|(k, _)| !upper[..k].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))) {
+                    out.push((i as u32, row, column, content));
+                }
+            }
+        }
+        out
+    }
+
+    /// Export with the cells that call `functions` (Python functions, which Excel does not
+    /// have) written as their current values (8.11).
+    pub fn export_xlsx_cached(&self, path: &std::path::Path, functions: &[String]) -> Result<Vec<String>> {
         let m = self.model()?;
+        let mut copy = UserModel::from_bytes(&m.to_bytes(), LANG).map_err(|e| anyhow!(e))?;
+        let mut notes = Vec::new();
+        for (i, row, column, formula) in self.cells_calling(functions) {
+            let shown = m.get_formatted_cell_value(i, row, column).unwrap_or_default();
+            let value = match (m.get_cell_type(i, row, column), m.get_model().get_cell_value_by_index(i, row, column)) {
+                (Ok(CellType::ErrorValue), _) => shown.clone(),
+                (_, Ok(CellValue::Number(n))) => format!("{n}"),
+                (_, Ok(CellValue::Boolean(b))) => if b { "TRUE".into() } else { "FALSE".into() },
+                (_, Ok(CellValue::String(t))) => format!("'{t}"),
+                _ => String::new(),
+            };
+            copy.set_user_input(i, row, column, &value).map_err(|e| anyhow!(e))?;
+            if notes.len() < 100 {
+                let name = m.get_worksheets_properties().get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
+                notes.push(format!("{name}!{}{}: {formula} is exported as its value {shown:?}", column_name(column as u32), row));
+            }
+        }
+        let mut notes2 = self.export_model(&copy, path)?;
+        notes.append(&mut notes2);
+        Ok(notes)
+    }
+
+    fn export_model(&self, m: &UserModel<'static>, path: &std::path::Path) -> Result<Vec<String>> {
+        let file = std::fs::File::create(path)?;
         let hidden = m.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET && p.state != "visible");
         let mut notes = Vec::new();
         match hidden {

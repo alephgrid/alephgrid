@@ -95,6 +95,12 @@ async fn a_python_function_runs_from_sheet_cells() {
         { "row": 0, "column": 1, "value": "=NORMALIZE_SKU(A1)" },
     ] })).await;
     assert_eq!(computed(&mut ws, 0, 1).await, "AB12");
+    // The runtime is part of the server's RuntimeSpec and policy (8.13).
+    let status = server.get(&format!("/api/workbooks/{wb}/runtime")).await.1;
+    let id = alephgrid_server::python::Manifest::load(runtime()).unwrap().id();
+    assert_eq!(status["spec"]["components"]["python"], id, "{status}");
+    assert_eq!(published["versions"][0]["runtime"]["id"], id);
+    assert_eq!(status["policy"]["python"]["workers"], 2);
     ws.close().await;
     server.stop().await;
 }
@@ -441,6 +447,48 @@ async fn runtimes_install_pinned_packages_offline() {
     ws.ok("sheet_create", json!({ "name": "Plan" })).await;
     set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=SKUCLEAN(\" ab \")" }])).await;
     assert_eq!(computed(&mut ws, 0, 0).await, "AB");
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------------ 8.11
+
+fn sheet_xml(bytes: &[u8]) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    zip.by_name("xl/worksheets/sheet1.xml").unwrap().read_to_string(&mut xml).unwrap();
+    xml
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn xlsx_keeps_formulas_or_exports_cached_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("xlsx").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "NORMALIZE_SKU", &["sku"], "text", "def normalize_sku(sku):\n    return sku.strip().upper()\n").await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": " ab " }, { "row": 0, "column": 1, "value": "=NORMALIZE_SKU(A1)" }])).await;
+    assert_eq!(computed(&mut ws, 0, 1).await, "AB");
+    let notes = ws.ok("xlsx_compatibility", json!({})).await;
+    assert!(notes.to_string().contains("1 cell(s) call Python functions"), "{notes}");
+    let (code, _, plain) = server.download(&format!("/api/workbooks/{wb}/export.xlsx")).await;
+    assert_eq!(code, 200);
+    let px = sheet_xml(&plain).to_lowercase();
+    assert!(px.contains("<f") && px.contains("normalize_sku(a1)"), "formulas kept by default: {px}");
+    let (code, _, cached) = server.download(&format!("/api/workbooks/{wb}/export.xlsx?values=python")).await;
+    assert_eq!(code, 200);
+    let xml = sheet_xml(&cached);
+    assert!(!xml.to_lowercase().contains("normalize_sku") && !xml.contains("<f"), "{xml}");
+    let strings = {
+        use std::io::Read;
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&cached[..])).unwrap();
+        let mut s = String::new();
+        zip.by_name("xl/sharedStrings.xml").unwrap().read_to_string(&mut s).unwrap();
+        s
+    };
+    assert!(strings.contains(">AB<"), "the value is written: {strings}");
     ws.close().await;
     server.stop().await;
 }

@@ -159,6 +159,11 @@ impl Drop for Scratch {
 }
 
 impl Shared {
+    /// Results of this workbook's worker (Python) functions.
+    pub fn function_results(&self) -> Arc<crate::external::ResultCache> {
+        self.functions.clone()
+    }
+
     /// The sheet hook of this workbook's worker functions, for a sheet model loaded again.
     pub(crate) fn external_hook(&self) -> ironcalc::base::external::ExternalHook {
         Arc::new(crate::external::SheetHook(self.functions.clone()))

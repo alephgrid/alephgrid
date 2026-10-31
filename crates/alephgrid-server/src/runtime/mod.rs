@@ -51,6 +51,15 @@ pub struct RuntimeSpec {
 }
 
 impl RuntimeSpec {
+    /// This build's spec with the Python runtime it runs functions in (8.13): a component,
+    /// not a required capability, so a workbook still opens on a server without it.
+    pub fn with_python(mut self, runtime_id: Option<&str>) -> RuntimeSpec {
+        if let Some(id) = runtime_id {
+            self.components.insert("python".to_string(), id.to_string());
+        }
+        self
+    }
+
     /// The spec of this build.
     pub fn current() -> RuntimeSpec {
         RuntimeSpec {
@@ -195,6 +204,10 @@ pub struct ComputePolicy {
     pub profiles: Vec<ComputeProfile>,
     /// How long a start waits for host capacity before failing with `capacity`.
     pub queue_timeout_ms: u64,
+    /// Limits of Python workers, when this server runs Python functions (phase 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub python: Option<crate::python::Limits>,
 }
 
 impl ComputePolicy {
@@ -545,7 +558,7 @@ mod tests {
         };
         let policy = ComputePolicy {
             id: "p".into(), min_memory_bytes: 0, max_memory_bytes: None, isolation: IsolationClass::SharedProcess,
-            idle_timeout_ms: 0, providers: vec![ProviderKind::Local], profiles: vec![ComputeProfile::standard()], queue_timeout_ms: 0,
+            idle_timeout_ms: 0, providers: vec![ProviderKind::Local], profiles: vec![ComputeProfile::standard()], queue_timeout_ms: 0, python: None,
         };
         let spec = RuntimeSpec::current();
         assert_eq!(provider.incompatibility(&spec, &policy), None);

@@ -1073,8 +1073,20 @@ async fn download(State(state): State<Shared>,
 }
 
 /// Download all sheets of a workbook as one .xlsx file.
+#[derive(Deserialize, Default)]
+struct XlsxQuery {
+    /// `python`: cells calling Python functions are written as their current values (8.11).
+    #[serde(default)]
+    values: Option<String>,
+}
+
 async fn export_xlsx(State(state): State<Shared>,
-    Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<Response> {
+    Extension(p): Extension<Principal>, Path(id): Path<String>, Query(q): Query<XlsxQuery>) -> ApiResult<Response> {
+    let cached = match q.values.as_deref() {
+        None | Some("") => false,
+        Some("python") => true,
+        Some(other) => return Err(ApiError::new(StatusCode::BAD_REQUEST, format!("values is \"python\" or absent, not {other:?}"))),
+    };
     let (space, _) = allowed(&state, &p, &id, Cap::Export).await?;
     // One of the space's bulk-job slots while this runs (7.07).
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
@@ -1084,7 +1096,14 @@ async fn export_xlsx(State(state): State<Shared>,
     let path = scratch.join("sheets.xlsx");
     let out = path.clone();
     let written = h
-        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| r.sheets().export_xlsx(&out).map(|_| ()))))
+        .run(http_job(Class::Bulk, &state), None, None, Work::Read(Box::new(move |r: &alephgrid_core::Reader| {
+            if cached {
+                let names = r.shared().function_results().worker_names();
+                r.sheets().export_xlsx_cached(&out, &names).map(|_| ())
+            } else {
+                r.sheets().export_xlsx(&out).map(|_| ())
+            }
+        })))
         .await
         .map_err(ApiError::from);
     let opened = match written {

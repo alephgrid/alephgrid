@@ -160,9 +160,12 @@ fn quota(message: String) -> RuntimeFailure {
 
 impl Controller {
     pub fn new(data: &Path, budget: HostBudget, policy: ComputePolicy, hook: Option<StageHook>) -> Result<Controller> {
+        Self::with_spec(data, budget, policy, hook, RuntimeSpec::current())
+    }
+
+    pub fn with_spec(data: &Path, budget: HostBudget, policy: ComputePolicy, hook: Option<StageHook>, spec: RuntimeSpec) -> Result<Controller> {
         let control = data.join(".control");
         std::fs::create_dir_all(control.join("allocations"))?;
-        let spec = RuntimeSpec::current();
         let spec_id = super::store_spec(&control, &spec)?;
         Ok(Controller {
             provider: LocalProvider { temp_root: data.join(".tmp") },
