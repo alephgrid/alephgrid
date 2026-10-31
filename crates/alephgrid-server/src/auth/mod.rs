@@ -126,6 +126,9 @@ pub enum Cap {
     ManageMembers,
     /// Rename or delete the space.
     ManageSpace,
+    /// Choose a workbook's compute profile (7.15); dedicated profiles also need an
+    /// organization admin.
+    ChooseCompute,
 }
 
 impl Cap {
@@ -133,7 +136,7 @@ impl Cap {
         match self {
             Cap::View | Cap::Query | Cap::Export => SpaceRole::Viewer,
             Cap::Edit | Cap::Publish | Cap::CreateWorkbook | Cap::DeleteWorkbook => SpaceRole::Editor,
-            Cap::Purge | Cap::ManageMembers | Cap::ManageSpace => SpaceRole::Owner,
+            Cap::Purge | Cap::ManageMembers | Cap::ManageSpace | Cap::ChooseCompute => SpaceRole::Owner,
         }
     }
 
@@ -149,6 +152,7 @@ impl Cap {
             Cap::Purge => "permanently remove workbooks of this space",
             Cap::ManageMembers => "manage this space's members",
             Cap::ManageSpace => "rename or delete this space",
+            Cap::ChooseCompute => "choose compute profiles in this space",
         }
     }
 }

@@ -23,7 +23,7 @@ use ts_rs::TS;
 
 use crate::auth::{Cap, Principal, SpaceRole};
 use crate::sched::{Class, JobError};
-use crate::state::{Job, Shared, Work, WorkbookHandle};
+use crate::state::{Job, Shared, Work};
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -827,6 +827,7 @@ pub fn error_code(e: &anyhow::Error) -> Option<&'static str> {
         if let Some(f) = c.downcast_ref::<crate::runtime::RuntimeFailure>() {
             return Some(match f.kind {
                 crate::runtime::FailureKind::Capacity => "capacity",
+                crate::runtime::FailureKind::Quota => "quota",
                 _ => "unavailable",
             });
         }
@@ -962,7 +963,10 @@ fn audit(state: &Shared, p: &Principal, space: &crate::auth::Space, workbook: &s
     }
 }
 
-pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>, principal: Principal, role: SpaceRole, space: crate::auth::Space) {
+/// Serve one connection. `lease` keeps the allocation from closing while the session sets
+/// up; after that, only its operations count as activity (7.16).
+pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state::Lease, principal: Principal, role: SpaceRole, space: crate::auth::Space) {
+    let handle = lease.handle();
     let session = state.next_session_id();
     // Subscribe before anything else, so an event during setup (a deletion) is not missed.
     let mut events = handle.events.subscribe();
@@ -984,6 +988,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     outbox.latest.fetch_max(revision, Ordering::SeqCst);
     let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone(), "revision": revision, "role": role });
     outbox.push(hello.to_string(), true);
+    drop(lease);
 
     // Writer: sends queued frames in order; closes the socket when told to.
     let (stop_tx, mut stop_rx) = watch::channel(false);
@@ -1107,6 +1112,10 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     };
     let views = Arc::new(Mutex::new(HashSet::new()));
     let cancels: Arc<Mutex<HashMap<u64, watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
+    // Set when the session ends (the workbook closed, or the client left): work withdrawn
+    // then was not cancelled by the client and must be sent again, so it answers
+    // `unavailable`, never `cancelled`.
+    let ending = Arc::new(AtomicBool::new(false));
     let mut jobs = tokio::task::JoinSet::new();
     loop {
         // Backpressure: do not read more requests while replies pile up unsent.
@@ -1143,6 +1152,8 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             }
         };
         let id = envelope.id;
+        // Each operation is meaningful activity and keeps the allocation open while it runs.
+        let op_lease = crate::state::Lease::new(handle.clone());
         // Authorization of this request: the role as last rechecked, and an expired
         // credential refuses everything (its revocation follows from the guard).
         let (expired, role, space_now) = {
@@ -1258,8 +1269,18 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         let audit_state = state.clone();
         let op = envelope.op;
         let mutation_id = envelope.mutation_id;
+        let ending = ending.clone();
+        let withdrawn = move |e: anyhow::Error| -> anyhow::Error {
+            let cancelled = e.chain().any(|c| matches!(c.downcast_ref::<JobError>(), Some(JobError::Cancelled)));
+            if cancelled && ending.load(Ordering::SeqCst) {
+                anyhow::anyhow!("this workbook was closed on the server before this ran; reconnect and send it again")
+            } else {
+                e
+            }
+        };
         jobs.spawn(async move {
             let _slot = slot;
+            let _lease = op_lease;
             let reply = if is_write {
                 let name = op_name(&op);
                 let audit_op = name.clone();
@@ -1324,7 +1345,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         }
                         r
                     }
-                    Err(e) => error_reply(id, &e, &data_dir),
+                    Err(e) => error_reply(id, &withdrawn(e), &data_dir),
                 }
             } else {
                 let downloads = ctx.downloads.clone();
@@ -1346,7 +1367,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         if let Some(d) = v.get("download").and_then(Value::as_str) {
                             downloads.discard(d);
                         }
-                        error_reply(id, &anyhow::Error::new(JobError::Cancelled), &data_dir)
+                        error_reply(id, &withdrawn(anyhow::Error::new(JobError::Cancelled)), &data_dir)
                     }
                     Ok(v) => {
                         if exporting {
@@ -1355,7 +1376,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         }
                         json!({ "id": id, "ok": true, "result": v })
                     }
-                    Err(e) => error_reply(id, &e, &data_dir),
+                    Err(e) => error_reply(id, &withdrawn(e), &data_dir),
                 }
             };
             cancels.lock().unwrap().remove(&id);
@@ -1366,6 +1387,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     // Queued work of this session is withdrawn and running work interrupted. A change
     // that already committed stays committed (a retry with its mutation id is not applied
     // twice).
+    ending.store(true, Ordering::SeqCst);
     for (_, c) in cancels.lock().unwrap().drain() {
         let _ = c.send(true);
     }

@@ -250,15 +250,17 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | GET | `/api/workbooks/{id}/downloads/{download}` | a finished `export_query` file, once; 404 once taken or expired |
 | GET/DELETE | `/api/workbooks/{id}/jobs/{job}` | progress `{running, percentage?, rows_processed, total_rows}` of a running import, or cancel it (only that job; 409 if it is not running) |
 
-| GET | `/api/workbooks/{id}/runtime` | `RuntimeStatus {workbook, spec, spec_id, policy, allocation?, ownership?, sessions}`; does not start anything |
-| POST | `/api/workbooks/{id}/runtime` | `{action: "start" \| "stop" \| "cancel", operation_id?}` → `RuntimeStatus`. Repeating an `operation_id` that already moved this workbook does nothing. The workbook's data is never affected |
+| GET | `/api/workbooks/{id}/runtime` | `RuntimeStatus {workbook, spec, spec_id, policy, allocation?, ownership?, sessions, profile, note?, queue_position?, last_activity_ms?, storage_bytes}`; does not start anything and is not activity |
+| POST | `/api/workbooks/{id}/runtime` | `RuntimeRequest {action: "start" \| "stop" \| "cancel" \| "restart", operation_id?, wait?, profile?}` → `RuntimeStatus`. `start` needs view, the others edit; `restart` with a different `profile` needs the space's owner role, the profile granted to the space, and an organization admin for a dedicated one (docs/COMPUTE.md). `wait: false` replies once the start is under way. Unknown fields are refused (400): requests name a profile, never resources. Repeating an `operation_id` that already moved this workbook does nothing. The workbook's data is never affected |
+| GET | `/api/workbooks/{id}/profiles` | `ProfileChoice[] {profile, granted, allowed, reason?}`: the server's profiles as the caller may use them for this workbook |
+| PUT | `/api/spaces/{id}/profiles` | `SpaceProfiles {profiles}` (organization admins): profiles granted to the space besides `standard`; unknown ids are 400 |
 | GET | `/api/admin/resources` | host budget, each open workbook's reservation and the DuckDB limits read back from it, jobs, upload bytes |
 | GET | `/api/admin/sessions` | open connections with unsent bytes |
 | POST | `/api/admin/backups` | back up every workbook into `<data-dir>/.backups/backup-<ms>/` → `{path, manifest}` (see DURABILITY.md) |
 
 A missing or trashed workbook answers **404**. Opening a workbook can fail with **409** (it needs a newer storage format or a capability this
-server lacks), **423** (another process holds it), or **503** (no capacity, or it could not be
-opened); the body is `{"error": message}`. Uploads larger than `--max-upload` fail with **413**
+server lacks), **423** (another process holds it), **429** (its space reached its open-workbooks or
+compute quota) or **503** (no capacity after waiting in line, or it could not be opened); the body is `{"error": message}`. Uploads larger than `--max-upload` fail with **413**
 (before the body is read when `Content-Length` says so); uploads that would exceed the
 temporary-disk budget, or hit a full disk, fail with **507**. Busy queues give **503**, deadlines
 **504**.

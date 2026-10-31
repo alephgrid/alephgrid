@@ -65,7 +65,11 @@ impl LocalProvider {
                 if wrong { format!("{e:#}; the workbook's files do not match its id") } else { format!("could not open the workbook: {e:#}") },
             )
         };
-        let lock = Self::lock(req.workbook_dir)?;
+        let handed = req.handoff.lock().unwrap().take();
+        let lock = match handed {
+            Some(lock) => lock,
+            None => Self::lock(req.workbook_dir)?,
+        };
         let temp = self.temp_dir(req.workbook);
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).map_err(|e| startup(e.into()))?;

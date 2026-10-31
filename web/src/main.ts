@@ -6,6 +6,7 @@ import { formatCount } from "./format";
 import type { WorkbookListing } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
+import { waitForCompute } from "./compute";
 
 const app = document.getElementById("app")!;
 let current: WorkbookScreen | null = null;
@@ -55,6 +56,10 @@ async function route(): Promise<void> {
 }
 
 async function showWorkbook(id: string): Promise<void> {
+  // Opening starts its compute; while that takes a moment the page says what it waits for.
+  const here = location.pathname;
+  const ready = await waitForCompute(id, app, () => navigate("/"), () => location.pathname === here);
+  if (!ready || location.pathname !== here) return;
   const { workbook } = await api.get(id);
   document.title = `${workbook.name} · Alephgrid`;
   const screen = new WorkbookScreen(workbook, () => navigate(homeUrl()));

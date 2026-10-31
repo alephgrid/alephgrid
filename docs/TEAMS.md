@@ -182,9 +182,10 @@ refused. Publishing, using, changing entries and the publish role are audited.
 
 ## Quotas (7.07)
 
-Each space has four limits (`quota.rs`). A limit is the space's own override, set by an
+Each space has five limits (`quota.rs`). A limit is the space's own override, set by an
 organization admin (`PUT /api/spaces/{id}/quota`; owners cannot raise their own), or else the server
-default (`--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks`); none
+default (`--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks`,
+`--space-compute-memory`); none
 means unlimited.
 
 | Limit | Counts | Refused when reached | Status / code |
@@ -192,7 +193,14 @@ means unlimited.
 | storage | bytes of the space's workbook directories, trash included | new, duplicated or moved-in workbooks; uploads (checked before and while they stream); staged imports; bulk changes (query tables, copies, transforms, refreshes) | 507 / `quota` |
 | workbooks | workbooks outside the trash | create, duplicate, move in, restore | 507 |
 | jobs | bulk requests (queries, exports, imports, copies) queued or running | the next bulk request of the space; other spaces are unaffected | 429 / `quota` |
-| open workbooks | live allocations of the space's workbooks, starts included | opening (or creating) another one | 429 |
+| open workbooks | live allocations of the space's workbooks, starts (and starts waiting in line) included | opening (or creating) another one | 429 / `quota` |
+| compute memory | memory those allocations are guaranteed, summed: `standard` counts `--min-workbook-memory`, other profiles their size | opening or resizing a workbook past it | 429 / `quota` |
+
+Both compute limits are checked and reserved by the runtime controller under the lock that records
+the allocation, so concurrent starts cannot pass them. Organization admins also grant **compute
+profiles** to a space (`PUT /api/spaces/{id}/profiles`); its owners choose among them per workbook,
+and dedicated profiles need an organization admin (docs/COMPUTE.md). Grants are audited
+(`space_profiles_changed`).
 
 Small interactive edits still work over the storage limit, so people can delete data to get under
 it. Storage totals are measured from the files, cached for 2 seconds and remeasured after imports
@@ -222,7 +230,7 @@ change nothing and are not `workbook_changed`. The log is not pruned yet.
 ## Limits and not yet done
 
 * One process serves every space (`shared_process`); roles are an authorization boundary, not a
-  resource-isolation boundary (see DURABILITY.md). Quotas bound what a space uses; memory and
-  threads are still shared by the host budget (compute policies are 7.13).
+  resource-isolation boundary (see DURABILITY.md). Quotas and profiles bound DuckDB's memory and
+  threads per workbook and per space, not the process's total memory.
 * No per-user stars, per-workbook grants, SCIM provisioning or identity-provider back-channel logout.
 * The audit log has no retention limit or export yet.

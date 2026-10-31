@@ -1,7 +1,10 @@
 //! Host-wide resource budget (3.03).
 //!
-//! The budget is split between live allocations: each gets an equal share of memory,
-//! threads and temporary disk, recomputed whenever one starts or stops. Shares are applied
+//! The budget is split between live allocations, recomputed whenever one starts or stops.
+//! An allocation with a fixed profile (7.13) gets exactly its memory and threads; the
+//! others (`standard`) get equal shares of what is left, never below the policy's minimum.
+//! Temporary disk is split equally between all of them. An allocation is in the ledger
+//! from the moment it is admitted, so concurrent starts plan against each other. Shares are applied
 //! as DuckDB settings (`memory_limit`, `threads`, `max_temp_directory_size`) of each
 //! workbook's database instance, shrinking existing ones before a new one opens, so the
 //! sum never exceeds the budget. Half of the temporary-disk budget is kept for staged
@@ -43,6 +46,8 @@ pub const MIN_DUCKDB_MEMORY: u64 = 64 << 20;
 #[derive(Debug, Default)]
 pub struct Ledger {
     allocations: HashMap<String, Reservation>,
+    /// Allocations with a fixed profile, and its reservation.
+    fixed: HashMap<String, Reservation>,
     /// Estimated sheet-model bytes per workbook, subtracted from DuckDB's share.
     sheets: HashMap<String, u64>,
     uploads: u64,
@@ -102,16 +107,53 @@ impl Ledger {
         Ok(Reservation { memory_bytes: memory, threads: budget.threads / n, temp_disk_bytes: budget.allocation_temp() / n })
     }
 
-    /// The reservations every live allocation (plus `adding`, if any) would have.
-    pub fn plan(&self, budget: &HostBudget, adding: Option<&str>, min_memory: u64) -> Result<HashMap<String, Reservation>, RuntimeFailure> {
-        let mut names: Vec<String> = self.allocations.keys().cloned().collect();
-        if let Some(a) = adding {
-            if !self.allocations.contains_key(a) {
-                names.push(a.to_string());
-            }
+    /// The reservations every allocation in the ledger would have with `change` applied:
+    /// `(workbook, fixed)` adds the workbook (or replaces its demand) with a fixed
+    /// reservation or, with `None`, an equal share.
+    pub fn plan(&self, budget: &HostBudget, change: Option<(&str, Option<Reservation>)>, min_memory: u64) -> Result<HashMap<String, Reservation>, RuntimeFailure> {
+        let mut demands: Vec<(String, Option<Reservation>)> =
+            self.allocations.keys().map(|k| (k.clone(), self.fixed.get(k).copied())).collect();
+        if let Some((wb, fixed)) = change {
+            demands.retain(|(k, _)| k != wb);
+            demands.push((wb.to_string(), fixed));
         }
-        let share = Self::shares(budget, names.len(), min_memory)?;
-        Ok(names.into_iter().map(|n| (n, share)).collect())
+        let fixed_memory: u64 = demands.iter().filter_map(|(_, f)| f.map(|r| r.memory_bytes)).sum();
+        let fixed_threads: u64 = demands.iter().filter_map(|(_, f)| f.map(|r| r.threads)).sum();
+        let elastic = demands.iter().filter(|(_, f)| f.is_none()).count();
+        if fixed_memory > budget.memory_bytes || fixed_threads > budget.threads {
+            return Err(RuntimeFailure::new(
+                FailureKind::Capacity,
+                format!(
+                    "the server is at capacity: workbooks with fixed profiles would reserve {} MiB and {fixed_threads} threads of {} MiB and {}; close a workbook or wait",
+                    fixed_memory >> 20,
+                    budget.memory_bytes >> 20,
+                    budget.threads
+                ),
+            ));
+        }
+        let rest = HostBudget { memory_bytes: budget.memory_bytes - fixed_memory, threads: budget.threads - fixed_threads, temp_disk_bytes: budget.temp_disk_bytes };
+        let share = if elastic > 0 { Some(Self::shares(&rest, elastic, min_memory)?) } else { None };
+        let temp = budget.allocation_temp() / demands.len().max(1) as u64;
+        Ok(demands
+            .into_iter()
+            .map(|(k, f)| {
+                let r = f.or(share).expect("an elastic share exists when there are elastic demands");
+                (k, Reservation { temp_disk_bytes: temp, ..r })
+            })
+            .collect())
+    }
+
+    /// The reservation recorded for `workbook`.
+    pub fn get(&self, workbook: &str) -> Option<Reservation> {
+        self.allocations.get(workbook).copied()
+    }
+
+    /// Record `workbook`'s demand (fixed reservation or equal share).
+    pub fn set_fixed(&mut self, workbook: &str, fixed: Option<Reservation>) {
+        match fixed {
+            Some(r) => self.fixed.insert(workbook.to_string(), r),
+            None => self.fixed.remove(workbook),
+        };
     }
 
     pub fn set(&mut self, workbook: &str, r: Reservation) {
@@ -120,6 +162,7 @@ impl Ledger {
 
     pub fn release(&mut self, workbook: &str) {
         self.allocations.remove(workbook);
+        self.fixed.remove(workbook);
         self.sheets.remove(workbook);
     }
 
@@ -257,16 +300,49 @@ mod tests {
         let b = budget();
         let mut l = Ledger::default();
         for i in 0..8 {
-            let plan = l.plan(&b, Some(&format!("w{i}")), 64 << 20).unwrap();
+            let plan = l.plan(&b, Some((&format!("w{i}"), None)), 64 << 20).unwrap();
             for (k, r) in &plan {
                 l.set(k, *r);
             }
             let t = l.total();
             assert!(t.memory_bytes <= b.memory_bytes && t.threads <= b.threads && t.temp_disk_bytes <= b.temp_disk_bytes - b.upload_bytes());
         }
-        assert!(l.plan(&b, Some("w8"), 64 << 20).is_err(), "the 9th exceeds 8 threads");
+        assert!(l.plan(&b, Some(("w8", None)), 64 << 20).is_err(), "the 9th exceeds 8 threads");
         l.release("w0");
-        assert!(l.plan(&b, Some("w8"), 64 << 20).is_ok());
+        assert!(l.plan(&b, Some(("w8", None)), 64 << 20).is_ok());
+    }
+
+    #[test]
+    fn fixed_profiles_get_exactly_theirs_and_standard_shares_the_rest() {
+        let b = budget(); // 4 GiB, 8 threads
+        let large = Reservation { memory_bytes: 2 << 30, threads: 4, temp_disk_bytes: 0 };
+        let mut l = Ledger::default();
+        let apply = |l: &mut Ledger, plan: &HashMap<String, Reservation>| {
+            for (k, r) in plan {
+                l.set(k, *r);
+            }
+        };
+        let plan = l.plan(&b, Some(("big", Some(large))), 256 << 20).unwrap();
+        assert_eq!(plan["big"].memory_bytes, 2 << 30);
+        l.set_fixed("big", Some(large));
+        apply(&mut l, &plan);
+        for w in ["a", "b"] {
+            let plan = l.plan(&b, Some((w, None)), 256 << 20).unwrap();
+            apply(&mut l, &plan);
+        }
+        let plan = l.plan(&b, None, 256 << 20).unwrap();
+        assert_eq!(plan["big"], Reservation { temp_disk_bytes: plan["big"].temp_disk_bytes, ..large }, "never shrunk by others");
+        assert_eq!(plan["a"].memory_bytes, 1 << 30, "the other 2 GiB split between the two");
+        assert_eq!(plan["a"].threads, 2);
+        let t: u64 = plan.values().map(|r| r.memory_bytes).sum();
+        assert_eq!(t, 4 << 30);
+        // A second fixed 2 GiB does not fit beside two standard minimums.
+        assert_eq!(l.plan(&b, Some(("big2", Some(large))), 256 << 20).unwrap_err().kind, FailureKind::Capacity);
+        // Resizing an existing one replaces its demand rather than adding to it.
+        let smaller = Reservation { memory_bytes: 1 << 30, threads: 2, temp_disk_bytes: 0 };
+        let plan = l.plan(&b, Some(("big", Some(smaller))), 256 << 20).unwrap();
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan["a"].memory_bytes, 3 << 29);
     }
 
     #[test]

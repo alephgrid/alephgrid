@@ -139,6 +139,8 @@ async fn every_http_route_follows_the_role_table() {
         (Method::GET, format!("/api/workbooks/{wa}"), None, None, Viewer),
         (Method::GET, format!("/api/workbooks/{wa}/runtime"), None, None, Viewer),
         (Method::POST, format!("/api/workbooks/{wa}/runtime"), Some(json!({ "action": "start" })), None, Viewer),
+        (Method::GET, format!("/api/workbooks/{wa}/profiles"), None, None, Viewer),
+        (Method::PUT, format!("/api/spaces/{alpha}/profiles"), Some(json!({ "profiles": [] })), None, SpaceOrgAdmin),
         (Method::GET, format!("/api/workbooks/{wa}/export?spec={spec}&format=csv"), None, None, Viewer),
         (Method::GET, format!("/api/workbooks/{wa}/export.xlsx"), None, None, Viewer),
         (Method::GET, format!("/api/workbooks/{wa}/jobs/nothing"), None, None, Viewer),

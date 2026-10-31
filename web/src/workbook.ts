@@ -12,6 +12,8 @@ import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc, RpcError } from "./api";
 import { importFile } from "./importer";
 import { historyDialog } from "./history";
+import { computeDialog, pausedText, profileLabel, waitForCompute } from "./compute";
+import type { RuntimeStatus } from "./protocol";
 
 import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
@@ -202,6 +204,8 @@ export class WorkbookScreen {
   private statsSeq = 0;
   private timers = new Set<number>();
   private disposed = false;
+  /** The server is restarting this workbook's compute (a new size): say so once it is back. */
+  private restarting = false;
   private closeFormulaHelp: (() => void) | null = null;
   private closeFunctions: (() => void) | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
@@ -262,11 +266,20 @@ export class WorkbookScreen {
     this.root = this.render();
     this.titleEl.textContent = meta.name;
     this.rpc.onStatus = (s) => {
-      this.setStatus(s);
+      this.setStatus(this.rpc.isPaused && s !== "open" ? "paused" : s);
       if (s === "open") this.failureEl.hidden = true;
     };
     this.rpc.onEvent = (e) => this.onEvent(e);
-    this.rpc.onReconnect = () => this.reopen();
+    this.rpc.onReconnect = async () => {
+      await this.reopen();
+      if (this.restarting) {
+        this.restarting = false;
+        try {
+          const s = await api.runtime(this.meta.id);
+          toast(`Back, running with the ${profileLabel(s.allocation?.profile ?? s.profile)} profile.`, "success");
+        } catch { /* the reconnect itself worked */ }
+      }
+    };
     this.rpc.onConnectFailed = () => this.checkFailure();
   }
 
@@ -274,9 +287,41 @@ export class WorkbookScreen {
     return this.active?.kind === "sheet";
   }
 
-  private setStatus(s: "connecting" | "open" | "closed"): void {
+  private setStatus(s: "connecting" | "open" | "closed" | "paused"): void {
     this.statusDot.className = `status-dot status-${s}`;
-    this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : "Disconnected — retrying";
+    this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused — resumes when you continue" : "Disconnected — retrying";
+  }
+
+  /**
+   * The server closed this workbook's compute after a time without activity (7.16): stop
+   * reconnecting, say what is kept, and resume when the person continues.
+   */
+  private async pause(): Promise<void> {
+    this.rpc.pause();
+    this.setStatus("paused");
+    let status: RuntimeStatus | null = null;
+    try { status = await api.runtime(this.meta.id); } catch { /* say it without the numbers */ }
+    if (this.disposed || !this.rpc.isPaused) return;
+    const resume = (e?: Event) => {
+      if (e instanceof KeyboardEvent && ["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+      this.root.removeEventListener("keydown", resume, true);
+      this.root.removeEventListener("pointerdown", resume, true);
+      void this.resume();
+    };
+    this.failureEl.replaceChildren(
+      el("h2", {}, "This workbook is paused"),
+      el("p", {}, pausedText(status)),
+      el("div", { class: "empty-actions" }, el("button", { class: "btn btn-primary", onclick: () => resume() }, "Resume")),
+    );
+    this.failureEl.hidden = false;
+    this.root.addEventListener("keydown", resume, true);
+    this.root.addEventListener("pointerdown", resume, true);
+  }
+
+  private async resume(): Promise<void> {
+    const ready = await waitForCompute(this.meta.id, this.failureEl, () => this.goHome(), () => !this.disposed);
+    if (!ready || this.disposed) return;
+    this.rpc.reconnectNow();
   }
 
   private leaveDeleted(): void {
@@ -456,6 +501,7 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
         el("button", { class: "btn", title: "Search all commands (⌘K)", onclick: () => { commandPalette(this.commands); } }, "Commands"),
         el("button", { class: "btn", title: "Everyone's recent changes; undo table changes", onclick: () => historyDialog(this.rpc, () => void this.resync()) }, "History"),
+        el("button", { class: "btn", title: "This workbook's compute: state, size, idle shutdown", onclick: () => computeDialog(this.meta.id) }, "Compute"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),
@@ -1584,6 +1630,7 @@ export class WorkbookScreen {
       palette: () => { commandPalette(this.commands); },
       shortcuts: () => { shortcutHelp(this.commands); },
       history: () => historyDialog(this.rpc, () => void this.resync()),
+      compute: () => computeDialog(this.meta.id),
     }));
   }
 
@@ -2123,9 +2170,14 @@ export class WorkbookScreen {
         break;
       case "workbook_closed":
         // The server ends the connection next; the reconnect reopens views and refetches,
-        // and changes not yet acknowledged are resent.
+        // and changes not yet acknowledged are resent. An idle workbook waits for the person.
+        if (e.reason === "idle") { void this.pause(); break; }
         this.setStatus("connecting");
         if (e.reason === "shutdown") toast("The server is restarting…");
+        if (e.reason === "restarting") {
+          this.restarting = true;
+          toast("This workbook is restarting with a new size; it reconnects by itself.");
+        }
         break;
       case "resync":
         if (a?.kind === "table") await this.reloadPresentation(a.name);

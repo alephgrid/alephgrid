@@ -1,5 +1,5 @@
 import { RevisionTracker } from "./revisions";
-import type { ErrorCode } from "./protocol";
+import type { ComputeProfile, ErrorCode, ProfileChoice, RuntimeRequest, RuntimeStatus } from "./protocol";
 import type {
   AuditEvent, AuthMode, ImportProblem, ImportRequest, Imported, Invite, JobStatus, MemberKind, Org, OrgMember, OrgRole, OpName, Params,
   PublicUser, Results, ServerEvent, SheetInfo, Space, SpaceMember, SpaceRole, TableInfo, Token, UploadCreated, UploadPreview,
@@ -57,7 +57,7 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 export const api = {
   config: () => http<{
     version: string; auth: AuthMode; setup_required: boolean; sso: { label: string } | null; allow_sql: boolean; sheet_copy_rows?: number;
-    max_message_bytes?: number; max_upload_bytes?: number; max_edit_cells?: number;
+    max_message_bytes?: number; max_upload_bytes?: number; max_edit_cells?: number; profiles?: ComputeProfile[];
   }>("GET", "/api/config"),
   me: () => http<Me>("GET", "/api/me"),
   login: (email: string, password: string) => http<Me>("POST", "/api/auth/login", { email, password }),
@@ -110,6 +110,11 @@ export const api = {
   setPublishRole: (space: string, role: SpaceRole) => http<Space>("PATCH", `/api/spaces/${space}`, { publish_role: role }),
   usage: (org: string) => http<SpaceUsage[]>("GET", `/api/orgs/${org}/usage`),
   setQuota: (space: string, limits: QuotaLimits) => http<SpaceUsage | null>("PUT", `/api/spaces/${space}/quota`, limits),
+  setSpaceProfiles: (space: string, profiles: string[]) => http<SpaceUsage | null>("PUT", `/api/spaces/${space}/profiles`, { profiles }),
+  /** The workbook's compute; starts nothing. */
+  runtime: (id: string) => http<RuntimeStatus>("GET", `/api/workbooks/${id}/runtime`),
+  runtimeAction: (id: string, req: RuntimeRequest) => http<RuntimeStatus>("POST", `/api/workbooks/${id}/runtime`, req),
+  profiles: (id: string) => http<ProfileChoice[]>("GET", `/api/workbooks/${id}/profiles`),
   setUserDisabled: (user: string, disabled: boolean) => http<PublicUser | null>("PATCH", `/api/users/${user}`, { disabled }),
   previewUpload: (id: string, upload: string, req: ImportRequest) =>
     http<UploadPreview>("POST", `/api/workbooks/${id}/uploads/${upload}/preview`, req),
@@ -221,6 +226,8 @@ export class Rpc {
   private opened = false;
   private retry = 0;
   private retryTimer = 0;
+  /** Not reconnecting until `reconnectNow` (the workbook was paused while idle). */
+  private paused = false;
   session = 0;
   /** Revisions announced so far; a skip makes the client refresh (see `RevisionTracker`). */
   readonly revisions = new RevisionTracker();
@@ -265,7 +272,7 @@ export class Rpc {
           if (!this.opened && this.retry === 0) reject(new Error("could not connect to workbook"));
           this.onConnectFailed();
         }
-        if (!this.closed) {
+        if (!this.closed && !this.paused) {
           const delay = Math.min(10_000, 500 * 2 ** this.retry++);
           this.retryTimer = window.setTimeout(() => !this.closed && this.connect().catch(() => {}), delay);
         }
@@ -274,11 +281,22 @@ export class Rpc {
     });
   }
 
-  /** Try to reconnect now instead of waiting for the next retry. */
+  /** Try to reconnect now instead of waiting for the next retry (ends a pause). */
   reconnectNow(): void {
+    this.paused = false;
     if (this.closed || this.ws) return;
     clearTimeout(this.retryTimer);
     this.connect().catch(() => {});
+  }
+
+  /** Stop reconnecting by itself until `reconnectNow`: the server closed an idle workbook. */
+  pause(): void {
+    this.paused = true;
+    clearTimeout(this.retryTimer);
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   /**

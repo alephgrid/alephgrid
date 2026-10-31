@@ -35,7 +35,8 @@ use ts_rs::TS;
 use crate::runtime::budget::HostBudget;
 use crate::sched::{Class, JobError, Key, Lane, Scheduler};
 use crate::runtime::controller::{operation_id, Controller, StageHook, StopReason};
-use crate::runtime::{ComputePolicy, IsolationClass, OwnershipAssignment, ProviderKind, Reservation};
+use crate::runtime::controller::Admission;
+use crate::runtime::{ComputePolicy, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation, RuntimeFailure, STANDARD};
 use crate::ws::Event;
 
 /// DuckDB handle types, re-exported by the engine's dependency.
@@ -78,6 +79,10 @@ pub struct WorkbookMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_spec: Option<String>,
+    /// The compute profile it runs with (7.15); `None` is `standard`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile: Option<String>,
 }
 
 /// What the workbook list shows: metadata plus size on disk.
@@ -141,6 +146,10 @@ pub struct WorkbookHandle {
     /// Operations running now (writer or readers).
     active: AtomicUsize,
     sessions: AtomicU64,
+    /// Leases held now (requests, operations, sessions setting up).
+    uses: AtomicUsize,
+    /// Whether any session has connected to this allocation.
+    had_session: AtomicBool,
     last_activity_ms: AtomicU64,
     pub events: broadcast::Sender<Event>,
     pub dir: PathBuf,
@@ -148,6 +157,38 @@ pub struct WorkbookHandle {
     lock: Mutex<Option<File>>,
     pub temp_dir: PathBuf,
     pub ownership: OwnershipAssignment,
+}
+
+/// A use of a live allocation: while any lease is held the workbook is not closed as idle
+/// or to make room. Requests hold one from the moment the controller hands out the handle;
+/// sessions hold one while they set up and while each operation runs, so an open
+/// connection alone does not keep compute running (7.16). Dropping it counts as activity.
+pub struct Lease(Arc<WorkbookHandle>);
+
+impl Lease {
+    pub fn new(handle: Arc<WorkbookHandle>) -> Lease {
+        handle.uses.fetch_add(1, Ordering::SeqCst);
+        Lease(handle)
+    }
+
+    /// The handle, for keeping after the lease ends (a session).
+    pub fn handle(&self) -> Arc<WorkbookHandle> {
+        self.0.clone()
+    }
+}
+
+impl std::ops::Deref for Lease {
+    type Target = Arc<WorkbookHandle>;
+    fn deref(&self) -> &Arc<WorkbookHandle> {
+        &self.0
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.0.uses.fetch_sub(1, Ordering::SeqCst);
+        self.0.touch_activity();
+    }
 }
 
 /// Counts an operation as active for as long as it lives.
@@ -190,6 +231,8 @@ impl WorkbookHandle {
             closed: Mutex::new(None),
             active: AtomicUsize::new(0),
             sessions: AtomicU64::new(0),
+            uses: AtomicUsize::new(0),
+            had_session: AtomicBool::new(false),
             last_activity_ms: AtomicU64::new(alephgrid_core::storage::now_ms()),
             events,
             dir,
@@ -442,7 +485,22 @@ impl WorkbookHandle {
         self.last_activity_ms.load(Ordering::Relaxed)
     }
 
+    pub fn uses(&self) -> usize {
+        self.uses.load(Ordering::SeqCst)
+    }
+
+    /// Take the ownership lock out, still held, before closing (a controlled restart hands
+    /// it to the replacement allocation).
+    pub fn take_lock(&self) -> Option<File> {
+        self.lock.lock().unwrap().take()
+    }
+
+    pub fn had_session(&self) -> bool {
+        self.had_session.load(Ordering::SeqCst)
+    }
+
     pub fn session_started(&self) {
+        self.had_session.store(true, Ordering::SeqCst);
         self.sessions.fetch_add(1, Ordering::SeqCst);
         self.touch_activity();
     }
@@ -595,8 +653,13 @@ pub struct Config {
     pub temp_budget: Option<u64>,
     /// Smallest memory share a workbook may run with.
     pub min_workbook_memory: u64,
-    /// Close workbooks without sessions or work after this long.
+    /// Close workbooks without meaningful activity (requests, running work) after this long;
+    /// open connections do not count.
     pub idle_timeout: Duration,
+    /// Compute profiles besides `standard` (7.13).
+    pub profiles: Vec<crate::runtime::ComputeProfile>,
+    /// How long a start waits in line for host capacity.
+    pub start_queue_timeout: Duration,
     /// Drop sorted/filtered view materializations unused for this long.
     pub view_ttl: Duration,
     /// Time running work gets to finish when a workbook is drained (shutdown, stop).
@@ -630,6 +693,8 @@ impl Config {
             temp_budget: None,
             min_workbook_memory: 256 << 20,
             idle_timeout: Duration::from_secs(600),
+            profiles: Vec::new(),
+            start_queue_timeout: Duration::from_secs(60),
             view_ttl: Duration::from_secs(900),
             shutdown_grace: Duration::from_secs(30),
             stage_hook: None,
@@ -769,7 +834,7 @@ pub fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn dir_size(dir: &Path) -> u64 {
+pub fn dir_size(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -853,6 +918,8 @@ impl AppState {
             isolation: IsolationClass::SharedProcess,
             idle_timeout_ms: config.idle_timeout.as_millis() as u64,
             providers: vec![ProviderKind::Local],
+            profiles: std::iter::once(crate::runtime::ComputeProfile::standard()).chain(config.profiles.iter().cloned()).collect(),
+            queue_timeout_ms: config.start_queue_timeout.as_millis() as u64,
         };
         let mut controller = Controller::new(&config.data_dir, budget, policy, config.stage_hook.clone())?;
         controller.drain_grace = config.shutdown_grace;
@@ -959,15 +1026,20 @@ impl AppState {
     }
 
     /// Create a workbook in `space` (the caller checked the principal may).
-    pub fn create(&self, name: &str, space: &str) -> Result<Arc<WorkbookHandle>> {
+    pub fn create(&self, name: &str, space: &str) -> Result<Lease> {
         if self.auth.store.space(space)?.is_none() {
             bail!(crate::auth::not_found("space not found"));
         }
         self.check_new_workbook(space, 0)?;
-        if let Some(limit) = self.limits(space)?.open_workbooks {
-            // A new workbook opens at once: refuse before making it rather than leave it closed.
-            drop(self.quota.opening(space, self.open_in(space), Some(limit))?);
-        }
+        // A new workbook opens at once: refuse before making it rather than leave it closed.
+        let limits = self.limits(space)?;
+        self.controller.check_admission(&Admission {
+            space: space.to_string(),
+            open_workbooks: limits.open_workbooks,
+            compute_memory_bytes: limits.compute_memory_bytes,
+            profile: crate::runtime::ComputeProfile::standard(),
+            note: None,
+        })?;
         let id = new_id();
         let dir = self.workbook_dir(&id);
         std::fs::create_dir_all(&dir)?;
@@ -984,18 +1056,25 @@ impl AppState {
             summary: Summary::default(),
             deleted_at: None,
             runtime_spec: None,
+            profile: None,
         };
         write_meta(&dir, &meta)?;
         self.get(&id)
     }
 
     /// The live handle of a workbook, starting an allocation for it if needed.
-    pub fn get(&self, id: &str) -> Result<Arc<WorkbookHandle>> {
+    pub fn get(&self, id: &str) -> Result<Lease> {
         self.get_with(id, &operation_id("open"))
     }
 
     /// [`AppState::get`] under a caller-chosen operation id.
-    pub fn get_with(&self, id: &str, operation: &str) -> Result<Arc<WorkbookHandle>> {
+    pub fn get_with(&self, id: &str, operation: &str) -> Result<Lease> {
+        self.check_workbook(id)?;
+        let admit = || self.admission(id, None).map_err(|e| RuntimeFailure::new(FailureKind::StartupFailed, format!("{e:#}")));
+        Ok(self.controller.ensure(id, operation, &admit)?)
+    }
+
+    fn check_workbook(&self, id: &str) -> Result<()> {
         if !valid_id(id) {
             bail!("invalid workbook id");
         }
@@ -1005,15 +1084,44 @@ impl AppState {
         if !self.workbook_dir(id).join("workbook.json").exists() {
             bail!("workbook {id} not found");
         }
-        if self.controller.handle(id).is_none() {
-            // A start: counted against the space's open workbooks until it is live.
-            let space = self.workbook_space(id)?;
-            if let Some(limit) = self.limits(&space)?.open_workbooks {
-                let _opening = self.quota.opening(&space, self.open_in(&space), Some(limit))?;
-                return Ok(self.controller.ensure(id, operation)?);
-            }
+        Ok(())
+    }
+
+    /// What a start of `id` is admitted under (7.13): its space's compute quotas and its
+    /// profile (`profile`, or the one it keeps), if the server still defines it and the
+    /// space is still granted it; otherwise `standard`, with a note saying why.
+    pub fn admission(&self, id: &str, profile: Option<&str>) -> Result<Admission> {
+        let meta = read_meta(&self.workbook_dir(id))?;
+        let limits = self.limits(&meta.space)?;
+        let wanted = profile.map(str::to_string).or(meta.profile).unwrap_or_else(|| STANDARD.to_string());
+        let (profile, note) = self.entitled_profile(&meta.space, &wanted)?;
+        Ok(Admission { space: meta.space, open_workbooks: limits.open_workbooks, compute_memory_bytes: limits.compute_memory_bytes, profile, note })
+    }
+
+    fn entitled_profile(&self, space: &str, wanted: &str) -> Result<(ComputeProfile, Option<String>)> {
+        if wanted == STANDARD {
+            return Ok((ComputeProfile::standard(), None));
         }
-        Ok(self.controller.ensure(id, operation)?)
+        Ok(match self.controller.policy.profile(wanted) {
+            None => (ComputeProfile::standard(), Some(format!("the {wanted} profile is no longer offered by this server; it runs with standard"))),
+            Some(_) if !self.auth.store.space_profiles(space)?.iter().any(|p| p == wanted) => {
+                (ComputeProfile::standard(), Some(format!("the {wanted} profile is no longer granted to this space; it runs with standard")))
+            }
+            Some(p) => (p.clone(), None),
+        })
+    }
+
+    /// Run `id` with `profile` from now on (7.15): a controlled restart if it is open, else
+    /// recorded and opened. The caller checked the principal may choose it.
+    pub fn restart(&self, id: &str, operation: &str, profile: Option<&str>) -> Result<Lease> {
+        self.check_workbook(id)?;
+        let previous = self.admission(id, None)?;
+        let wanted = profile.map(str::to_string).unwrap_or_else(|| previous.profile.id.clone());
+        let adm = self.admission(id, Some(&wanted))?;
+        if adm.profile.id != wanted {
+            return Err(crate::auth::refused(adm.note.clone().unwrap_or_else(|| format!("the {wanted} profile is not available"))));
+        }
+        Ok(self.controller.restart(id, operation, adm, previous)?)
     }
 
     /// Change metadata without opening the workbook's database.
@@ -1063,7 +1171,11 @@ impl AppState {
             Ok(())
         });
         if moved {
-            // Connections to it now answer to the roles of its new space.
+            // Connections to it now answer to the roles of its new space, and its compute
+            // counts against that space's quotas.
+            if let Ok(meta) = &out {
+                self.controller.moved(id, &meta.space);
+            }
             self.auth.bump();
         }
         out

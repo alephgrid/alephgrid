@@ -233,6 +233,12 @@ impl Ws {
         self.replies.len()
     }
 
+    /// A WebSocket ping (what keepalives send). The server answers it; it is not activity.
+    /// False once the connection is closed.
+    pub async fn ping(&mut self) -> bool {
+        self.stream.send(Message::Ping(Vec::new().into())).await.is_ok()
+    }
+
     /// Send a frame without waiting for its reply.
     pub async fn send_raw(&mut self, frame: Value) {
         self.stream.send(Message::Text(frame.to_string().into())).await.unwrap();

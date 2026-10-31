@@ -870,6 +870,44 @@ pub async fn instance_usage(State(state): State<Shared>, Extension(p): Extension
     ))
 }
 
+/// `PUT /api/spaces/{id}/profiles`.
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct SpaceProfiles {
+    /// Profile ids granted to the space besides `standard`, which always is.
+    pub profiles: Vec<String>,
+}
+
+/// Grant compute profiles to a space (organization admins, 7.13). Unknown profiles are
+/// refused; workbooks of the space that use a profile no longer granted run with
+/// `standard` from their next start.
+pub async fn set_space_profiles(
+    State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(req): Json<SpaceProfiles>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        blocking(move || {
+            let space = state.auth.store.space(&id)?.ok_or_else(|| not_found("space not found"))?;
+            if state.auth.space_role(&p, &space)?.is_none() {
+                return Err(not_found("space not found"));
+            }
+            state.auth.require_org_admin(&p, &space.org_id)?;
+            let mut profiles: Vec<String> = req.profiles.into_iter().filter(|p| p != crate::runtime::STANDARD).collect();
+            profiles.sort();
+            profiles.dedup();
+            if let Some(unknown) = profiles.iter().find(|p| state.controller.policy.profile(p).is_none()) {
+                return Err(anyhow::Error::new(crate::auth::Denied::BadRequest(format!("unknown compute profile {unknown:?}"))));
+            }
+            state.auth.store.set_space_profiles(&id, &profiles)?;
+            state.auth.audit(&p, "space_profiles_changed", Some(&space.org_id), Some(&id), None, json!({ "profiles": profiles }));
+            Ok(state.usage(Some(&space.org_id))?.into_iter().find(|u| u.space.id == id))
+        })
+        .await?,
+    ))
+}
+
 /// Set a space's own limits (organization admins; owners cannot raise their own). A missing
 /// or null field uses the server default.
 pub async fn set_space_quota(

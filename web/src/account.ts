@@ -376,14 +376,16 @@ function bytes(n: number): string {
 /** Usage of each space against its limits; admins change a space's limits (7.07). */
 export function usageDialog(org: string): void {
   panel("Usage and limits", async function render(body) {
-    const spaces = await api.usage(org);
+    const [spaces, config] = await Promise.all([api.usage(org), api.config()]);
+    const offered = (config.profiles ?? []).filter((p) => p.id !== "standard").map((p) => p.id);
     const of = (used: string, limit: number | null | undefined, fmt: (n: number) => string = String) =>
       limit === undefined || limit === null ? `${used} (no limit)` : `${used} of ${fmt(limit)}`;
     const rows = spaces.map((u) => el("div", { class: "member-row", role: "row" },
       el("span", { role: "cell" }, el("strong", {}, u.space.name)),
       el("span", { role: "cell", class: "muted" },
         `Storage ${of(bytes(u.storage_bytes), u.limits.storage_bytes, bytes)} · workbooks ${of(String(u.workbooks), u.limits.workbooks)} · `
-        + `open ${of(String(u.open_workbooks), u.limits.open_workbooks)} · jobs ${of(String(u.jobs), u.limits.jobs)}`),
+        + `open ${of(String(u.open_workbooks), u.limits.open_workbooks)} · compute ${of(bytes(u.compute_memory_bytes), u.limits.compute_memory_bytes, bytes)} · jobs ${of(String(u.jobs), u.limits.jobs)}`
+        + (u.profiles.length ? ` · profiles: standard, ${u.profiles.join(", ")}` : "")),
       el("span", { role: "cell" }, el("button", { class: "btn small", "aria-label": `Limits of ${u.space.name}`, onclick: async () => {
         const o = u.overrides;
         const gb = (n?: number | null) => (n === undefined || n === null ? "" : String(n / 2 ** 30));
@@ -393,11 +395,14 @@ export function usageDialog(org: string): void {
           { name: "workbooks", label: "Workbooks", value: num(o.workbooks) },
           { name: "jobs", label: "Bulk jobs at once", value: num(o.jobs) },
           { name: "open", label: "Workbooks open at once", value: num(o.open_workbooks) },
-        ], "Save", (vals) => Object.values(vals).every((x) => x.trim() === "" || Number(x) >= 0) ? null : "Use numbers, or leave empty.");
+          { name: "compute", label: "Compute memory (GB)", value: gb(o.compute_memory_bytes), hint: "Memory the space's open workbooks are guaranteed, summed: standard counts its minimum share, other profiles their size." },
+          ...(offered.length ? [{ name: "profiles", label: "Profiles granted besides standard", value: u.profiles.join(", "), hint: `Offered by this server: ${offered.join(", ")}. Space owners choose among them for a workbook.` }] : []),
+        ], "Save", (vals) => Object.entries(vals).every(([k, x]) => k === "profiles" || x.trim() === "" || Number(x) >= 0) ? null : "Use numbers, or leave empty.");
         if (!v) return;
         const opt = (x: string, scale = 1) => (x.trim() === "" ? undefined : Math.round(Number(x) * scale));
         try {
-          await api.setQuota(u.space.id, { storage_bytes: opt(v.storage, 2 ** 30), workbooks: opt(v.workbooks), jobs: opt(v.jobs), open_workbooks: opt(v.open) });
+          await api.setQuota(u.space.id, { storage_bytes: opt(v.storage, 2 ** 30), workbooks: opt(v.workbooks), jobs: opt(v.jobs), open_workbooks: opt(v.open), compute_memory_bytes: opt(v.compute, 2 ** 30) });
+          if (offered.length) await api.setSpaceProfiles(u.space.id, (v.profiles ?? "").split(",").map((x) => x.trim()).filter(Boolean));
           await render(body);
         } catch (e) { toast((e as Error).message, "error"); }
       } }, "Limits…"))));

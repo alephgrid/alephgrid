@@ -49,8 +49,13 @@ A **profile** is a named amount of compute an allocation reserves out of the hos
 
 * **Queue.** When the host budget cannot fit another allocation and no workbook can be closed to
   make room, a start waits in a first-come queue for up to `--start-queue-timeout` (60 s), then fails
-  with `capacity`. Space quotas are not queued: they are refused at once, since waiting would not
+  with `capacity`; only the first in line takes capacity that frees up, and a new start does not
+  overtake the line. Space quotas are not queued: they are refused at once, since waiting would not
   free them.
+* **Making room.** A workbook may be closed to make room when nothing runs on it and nobody has it
+  open, or when it has been idle for the idle timeout anyway. One started for someone who has not
+  connected yet (the page follows the start, then connects) is spared for 10 s. Dedicated
+  allocations are never closed to make room.
 * **One owner, every collaborator routed to it.** All opens of a workbook go through one
   single-flight start: the second collaborator waits for the first one's allocation and joins it,
   never starting another. The allocation's holder (`ownership.holder`, `host:pid` here) is the only
@@ -86,6 +91,10 @@ A workbook's compute closes after `--idle-timeout` (10 minutes) without **meanin
   the workbook open however long it runs; the idle time starts when it ends.
 * **Does not count:** an open connection, WebSocket ping/pong, reading the runtime status. Open
   tabs alone do not keep compute running.
+* **How:** a request holds a lease on the allocation while it uses it, and a connection only while
+  it sets up and during each of its operations; dropping a lease counts as activity. The idle check
+  and the move to `draining` happen under one lock, so a request arriving at that moment either
+  keeps it open or waits for the next allocation.
 
 Closing drains and checkpoints first, so every committed change is in the workbook file; then the
 lock and the reservation are released. Storage is kept as it is: the status and the paused screen
