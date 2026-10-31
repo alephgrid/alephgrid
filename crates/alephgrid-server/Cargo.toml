@@ -44,5 +44,6 @@ base64 = "0.22"
 libc = "0.2"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 tempfile = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tokio-tungstenite = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

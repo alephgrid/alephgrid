@@ -72,7 +72,8 @@ async fn computed(ws: &mut Ws, row: u32, column: u32) -> String {
         // `#CALC!` is also a final answer (a limit reached); pending cells say "Calculating".
         let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": row, "column": column })).await;
         if !detail.to_string().contains("Calculating") {
-            return v;
+            // Read again: the result may have arrived between the two reads.
+            return cell(ws, row, column).await;
         }
         assert!(Instant::now() < deadline, "cell ({row}, {column}) still calculating");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -270,6 +271,176 @@ async fn limits_stop_runaway_functions_without_hanging_other_workbooks() {
         let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": row, "column": 0 })).await;
         assert!(detail.to_string().contains(why), "row {row}: {detail}");
     }
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------- 8.07, 8.08
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workers_run_outside_the_lock_and_stale_versions_are_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("lock").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "SLOW", &["x"], "number", "import time\ndef slow(x):\n    time.sleep(1.5)\n    return x * 2\n").await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=SLOW(10)" }])).await;
+    // While the worker sleeps, the workbook takes changes and reads at once.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let t = Instant::now();
+    set(&mut ws, json!([{ "row": 5, "column": 5, "value": "edited meanwhile" }])).await;
+    assert_eq!(cell(&mut ws, 5, 5).await, "edited meanwhile");
+    assert!(t.elapsed() < Duration::from_millis(700), "a change waited for the worker: {:?}", t.elapsed());
+    // A new version pinned while version 1 computes: version 1's result is not stored.
+    let v2 = ws.ok("publish_function", function("SLOW", &["x"], "number", "import time\ndef slow(x):\n    time.sleep(0.2)\n    return x * 3\n", json!([]))).await;
+    assert_eq!(v2["versions"].as_array().unwrap().len(), 2);
+    ws.ok("pin_functions", json!({ "pins": { "SLOW": 2 } })).await;
+    assert_eq!(computed(&mut ws, 0, 0).await, "30", "only the pinned version's result shows");
+    // Version 1's late result was discarded, not kept for it either.
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let r = ws.ok("query", json!({ "sql": "SELECT 1" })).await;
+    assert_eq!(r["rows"], json!([[1]]));
+    ws.ok("pin_functions", json!({ "pins": { "SLOW": 1 } })).await;
+    assert_eq!(computed(&mut ws, 0, 0).await, "20", "version 1 computed afresh when pinned again");
+    ws.close().await;
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn volatile_functions_change_only_on_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("volatile").await;
+    let mut ws = server.ws(&wb).await;
+    let mut f = function("STAMP", &["x"], "number", "import time\ndef stamp(x):\n    return time.time_ns() % 1000000007\n", json!([]));
+    f["definition"]["volatile"] = json!(true);
+    ws.ok("publish_function", f).await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=STAMP(1)" }])).await;
+    let first = computed(&mut ws, 0, 0).await;
+    // Other changes recalculate the sheet; the stamp stays.
+    set(&mut ws, json!([{ "row": 3, "column": 3, "value": "7" }])).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(cell(&mut ws, 0, 0).await, first);
+    // Refresh computes it again.
+    ws.ok("refresh_functions", json!({})).await;
+    let second = computed(&mut ws, 0, 0).await;
+    assert_ne!(second, first);
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------------ 8.10
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revocation_duplicates_and_a_missing_runtime_are_handled() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("policy").await;
+    let space = server.get(&format!("/api/workbooks/{wb}")).await.1["workbook"]["space"].as_str().unwrap().to_string();
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "SLOW", &["x"], "number", "import time\ndef slow(x):\n    time.sleep(1)\n    return x + 1\n").await;
+    publish(&mut ws, "PLUS", &["x"], "number", "def plus(x):\n    return x + 100\n").await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=PLUS(1)" }])).await;
+    assert_eq!(computed(&mut ws, 0, 0).await, "101");
+    // Turned off for the space while a call computes: its result is not stored, and cells
+    // say why.
+    set(&mut ws, json!([{ "row": 1, "column": 0, "value": "=SLOW(1)" }])).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (code, body) = server.send(reqwest::Method::PATCH, &format!("/api/spaces/{space}"), Some(json!({ "python": false }))).await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(body["python"], false);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(cell(&mut ws, 1, 0).await, "#NAME?");
+    let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": 1, "column": 0 })).await;
+    assert!(detail.to_string().contains("turned off for this space"), "{detail}");
+    assert_eq!(cell(&mut ws, 0, 0).await, "101", "results computed before stay");
+    let h = server.state.controller.handle(&wb).unwrap();
+    assert!(h.functions.get("SLOW", 1, &alephgrid_core::external::sheet_key(&[alephgrid_core::external::WorkerValue::Number(1.0)])).is_none(), "the late result was not stored");
+    // Back on: it computes.
+    server.send(reqwest::Method::PATCH, &format!("/api/spaces/{space}"), Some(json!({ "python": true }))).await;
+    assert_eq!(computed(&mut ws, 1, 0).await, "2");
+    // The same results delivered twice are stored once; the first stands.
+    let key = alephgrid_core::external::sheet_key(&[alephgrid_core::external::WorkerValue::Number(5.0)]);
+    let first = h.with_engine({ let k = key.clone(); move |wb| wb.store_function_results("PLUS", 1, &[(k, alephgrid_core::external::CallResult::Number(105.0))]) }).unwrap();
+    let again = h.with_engine({ let k = key.clone(); move |wb| wb.store_function_results("PLUS", 1, &[(k, alephgrid_core::external::CallResult::Number(-1.0))]) }).unwrap();
+    assert_eq!((first.stored, again.stored), (1, 0));
+    assert_eq!(h.functions.get("PLUS", 1, &key), Some(alephgrid_core::external::CallResult::Number(105.0)));
+    drop(h);
+    ws.close().await;
+    server.stop().await;
+
+    // The server without a Python runtime: cached results show, new calls say why.
+    let server = TestServer::start(dir.path()).await;
+    let mut ws = server.ws(&wb).await;
+    assert_eq!(cell(&mut ws, 0, 0).await, "101");
+    set(&mut ws, json!([{ "row": 2, "column": 0, "value": "=PLUS(2)" }])).await;
+    assert_eq!(cell(&mut ws, 2, 0).await, "#NAME?");
+    let detail = ws.ok("sheet_cell_detail", json!({ "sheet": 0, "row": 2, "column": 0 })).await;
+    assert!(detail.to_string().contains("no Python runtime"), "{detail}");
+    ws.close().await;
+    server.stop().await;
+}
+
+// ------------------------------------------------------------------ 8.05
+
+/// A wheel of one pure-Python module, made by hand (no build tools, no network).
+fn wheel(dir: &Path) -> (PathBuf, String) {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let files = [
+        ("skutools/__init__.py", "def clean(s):\n    return s.strip().upper()\n".to_string()),
+        ("skutools-1.0.dist-info/METADATA", "Metadata-Version: 2.1\nName: skutools\nVersion: 1.0\n".to_string()),
+        ("skutools-1.0.dist-info/WHEEL", "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n".to_string()),
+    ];
+    let path = dir.join("skutools-1.0-py3-none-any.whl");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let mut record = String::new();
+    for (name, body) in &files {
+        zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+        let h = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(body.as_bytes()));
+        record.push_str(&format!("{name},sha256={h},{}\n", body.len()));
+    }
+    record.push_str("skutools-1.0.dist-info/RECORD,,\n");
+    zip.start_file("skutools-1.0.dist-info/RECORD", zip::write::SimpleFileOptions::default()).unwrap();
+    zip.write_all(record.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    let sha = alephgrid_server::runtime::hex(&Sha256::digest(std::fs::read(&path).unwrap()));
+    (path, sha)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtimes_install_pinned_packages_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let wheels = dir.path().join("wheels");
+    std::fs::create_dir_all(&wheels).unwrap();
+    let (_, sha) = wheel(&wheels);
+    let req = dir.path().join("requirements.txt");
+    std::fs::write(&req, format!("skutools==1.0 --hash=sha256:{sha}\n")).unwrap();
+    let rt = dir.path().join("rt");
+    let m = alephgrid_server::python::create::create(&alephgrid_server::python::create::Options { python: python(), wheels: Some(wheels.clone()), requirements: Some(req.clone()), dir: rt.clone() }).unwrap();
+    assert_eq!(m.packages.len(), 1);
+    assert_eq!((m.packages[0].name.as_str(), m.packages[0].version.as_str(), m.packages[0].sha256.as_str()), ("skutools", "1.0", sha.as_str()));
+    let plain = alephgrid_server::python::Manifest::load(runtime()).unwrap();
+    assert_ne!(m.id(), plain.id(), "packages are part of the runtime's identity");
+    // A wrong hash is refused, and nothing is fetched from anywhere.
+    std::fs::write(&req, "skutools==1.0 --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000\n").unwrap();
+    let e = alephgrid_server::python::create::create(&alephgrid_server::python::create::Options { python: python(), wheels: Some(wheels), requirements: Some(req), dir: dir.path().join("rt2") });
+    assert!(e.is_err());
+    // The package is importable from functions run in this runtime.
+    let data = dir.path().join("data");
+    let server = TestServer::start_with(&data, |c| c.python_runtime = Some(rt.clone())).await;
+    let wb = server.create_workbook("pkg").await;
+    let mut ws = server.ws(&wb).await;
+    let f = publish(&mut ws, "SKUCLEAN", &["s"], "text", "import skutools\ndef skuclean(s):\n    return skutools.clean(s)\n").await;
+    assert_eq!(f["versions"][0]["runtime"]["packages"], json!(["skutools==1.0"]));
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=SKUCLEAN(\" ab \")" }])).await;
+    assert_eq!(computed(&mut ws, 0, 0).await, "AB");
     ws.close().await;
     server.stop().await;
 }
