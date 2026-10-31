@@ -102,3 +102,38 @@ test("SQL-disabled server permits formula publication and pins but refuses SQL f
     ws.close();
   } finally { await restricted.dispose(); }
 });
+
+// U.06: the editor tells a draft, a tested draft and a published version apart.
+test("the function editor shows Draft, Tested and Published states", async ({ page }) => {
+  const wb = await server.createWorkbook("Function states");
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await page.getByRole("button", { name: "Functions", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Function library" });
+  const state = dialog.locator(".fn-state");
+  await dialog.getByRole("textbox", { name: "Function name" }).fill("HALF");
+  await dialog.getByRole("textbox", { name: "Arguments" }).fill("x");
+  await dialog.getByRole("textbox", { name: "Function source" }).fill("x/2");
+  await dialog.getByRole("textbox", { name: "Function tests" }).fill(JSON.stringify([{ arguments: ["10"], expected: "6" }]));
+  await expect(dialog.locator(".fn-signature")).toHaveText("HALF(x)");
+  await expect(state).toHaveText("Draft");
+
+  // A failing test: still a draft, and it says so.
+  await dialog.getByRole("button", { name: "Run tests", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("FAILED · actual 5 · expected 6");
+  await expect(state).toHaveText("Draft · tests failing");
+
+  // Fixed and passing: tested, for exactly this definition.
+  await dialog.getByRole("textbox", { name: "Function tests" }).fill(JSON.stringify([{ arguments: ["10"], expected: "5" }]));
+  await expect(state).toHaveText("Draft");
+  await dialog.getByRole("button", { name: "Run tests", exact: true }).click();
+  await expect(state).toHaveText("Tested · ready to publish");
+
+  await dialog.getByRole("button", { name: "Publish version", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "HALF · v1", exact: true })).toBeVisible();
+  await expect(state).toHaveText("Published · v1 · active");
+
+  // Editing the published definition makes it a draft again.
+  await dialog.getByRole("textbox", { name: "Function documentation" }).fill("Half of x.");
+  await expect(state).toHaveText("Draft");
+});
