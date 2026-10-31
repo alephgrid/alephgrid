@@ -181,6 +181,10 @@ pub trait FunctionRuntime: Send + Sync {
     fn identity(&self) -> RuntimeIdentity;
     /// One result per call, in order, or why there are none.
     fn run(&self, job: &WorkerJob, cancel: &AtomicBool) -> std::result::Result<Vec<CallResult>, WorkerFailure>;
+    /// Batches it can run at once.
+    fn parallelism(&self) -> usize {
+        1
+    }
 }
 
 // ------------------------------------------------------------------ cache
@@ -400,17 +404,35 @@ fn row_result(kind: &str, num: Option<f64>, txt: Option<String>, b: Option<bool>
 pub(crate) fn store(conn: &Connection, function: &str, version: u32, results: &[(String, CallResult)]) -> Result<usize> {
     let now = crate::storage::now_ms() as i64;
     let mut written = 0;
-    let mut replace = conn.prepare(
-        "INSERT INTO _rf_fn_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (name, version, key) DO UPDATE SET kind = excluded.kind, num = excluded.num, txt = excluded.txt, bool = excluded.bool,
-             transient = excluded.transient, computed_at = excluded.computed_at
-         WHERE _rf_fn_results.transient AND NOT excluded.transient",
-    )?;
-    let mut keep = conn.prepare("INSERT INTO _rf_fn_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")?;
-    for (key, r) in results {
-        let (kind, num, txt, b, transient) = result_row(r);
-        let params = duckdb::params![function, version, key, kind, num, txt, b, transient, now];
-        written += if transient { keep.execute(params)? } else { replace.execute(params)? };
+    // One statement per few hundred rows: a statement per row costs more than the work.
+    let mut seen = std::collections::HashSet::new();
+    let rows: Vec<String> = results
+        .iter()
+        .filter(|(key, _)| seen.insert(key.clone()))
+        .map(|(key, r)| {
+            let (kind, num, txt, b, transient) = result_row(r);
+            format!(
+                "({}, {version}, {}, {}, {}, {}, {}, {transient}, {now})",
+                lit(function),
+                lit(key),
+                lit(kind),
+                num.map(|n| format!("CAST({n:?} AS DOUBLE)")).unwrap_or_else(|| "NULL".into()),
+                txt.map(|t| lit(&t)).unwrap_or_else(|| "NULL".into()),
+                b.map(|b| b.to_string()).unwrap_or_else(|| "NULL".into()),
+            )
+        })
+        .collect();
+    for chunk in rows.chunks(500) {
+        written += conn.execute(
+            &format!(
+                "INSERT INTO _rf_fn_results VALUES {}
+                 ON CONFLICT (name, version, key) DO UPDATE SET kind = excluded.kind, num = excluded.num, txt = excluded.txt, bool = excluded.bool,
+                     transient = excluded.transient, computed_at = excluded.computed_at
+                 WHERE _rf_fn_results.transient AND NOT excluded.transient",
+                chunk.join(", ")
+            ),
+            [],
+        )?;
     }
     Ok(written)
 }

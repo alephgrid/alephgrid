@@ -383,6 +383,10 @@ impl FunctionRuntime for PythonRuntime {
         }
     }
 
+    fn parallelism(&self) -> usize {
+        self.limits.workers.max(1) as usize
+    }
+
     fn run(&self, job: &WorkerJob, cancel: &AtomicBool) -> std::result::Result<Vec<CallResult>, WorkerFailure> {
         if job.calls.is_empty() {
             return Ok(vec![]);

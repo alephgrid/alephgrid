@@ -197,6 +197,11 @@ impl Drop for Lease {
     }
 }
 
+/// How many workers a runtime runs at once (1 for one that does not say).
+fn runtime_workers(runtime: &Arc<dyn alephgrid_core::external::FunctionRuntime>) -> usize {
+    runtime.parallelism()
+}
+
 /// The background computation of worker functions of one allocation.
 #[derive(Default)]
 struct FnJob {
@@ -348,7 +353,8 @@ impl WorkbookHandle {
             if !sheet.is_empty() {
                 work.push((CallContext::Sheet, sheet));
             }
-            for (_, calls) in self.with_reader(|r| r.missing_table_calls(BATCH_CALLS))? {
+            // One scan finds many batches' worth (bounded), not one batch per scan.
+            for (_, calls) in self.with_reader(|r| r.missing_table_calls(BATCH_CALLS * 50))? {
                 work.push((CallContext::Table, calls));
             }
             if work.is_empty() {
@@ -370,8 +376,6 @@ impl WorkbookHandle {
                     let Some(v) = registry.iter().find(|f| f.name == name).and_then(|f| f.versions.iter().find(|v| v.version == version)) else { continue };
                     let d = &v.definition;
                     let returns = d.returns.unwrap_or(alephgrid_core::external::ResultType::Text);
-                    let mut batch: Vec<PendingCall> = Vec::new();
-                    let mut bytes = 0;
                     let flush = |batch: &mut Vec<PendingCall>| -> Result<bool> {
                         if batch.is_empty() {
                             return Ok(true);
@@ -407,19 +411,32 @@ impl WorkbookHandle {
                         }
                         Ok(true)
                     };
+                    // Cut into batches by count and size.
+                    let mut batches: Vec<Vec<PendingCall>> = vec![Vec::new()];
+                    let mut bytes = 0;
                     for c in calls {
                         let size = serde_json::to_vec(&c.args).map(|v| v.len()).unwrap_or(0);
-                        if batch.len() >= BATCH_CALLS || (bytes + size > BATCH_BYTES && !batch.is_empty()) {
-                            if !flush(&mut batch)? {
-                                return Ok(());
-                            }
+                        let last = batches.last().unwrap();
+                        if last.len() >= BATCH_CALLS || (bytes + size > BATCH_BYTES && !last.is_empty()) {
+                            batches.push(Vec::new());
                             bytes = 0;
                         }
                         bytes += size;
-                        batch.push(c);
+                        batches.last_mut().unwrap().push(c);
                     }
-                    if !flush(&mut batch)? {
-                        return Ok(());
+                    // As many at once as the runtime has workers; each stored as it ends.
+                    let parallel = (runtime_workers(&runtime)).max(1);
+                    for chunk in batches.chunks_mut(parallel) {
+                        let outcomes: Vec<Result<bool>> = std::thread::scope(|scope| {
+                            let flush = &flush;
+                            let handles: Vec<_> = chunk.iter_mut().map(|b| scope.spawn(move || flush(b))).collect();
+                            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(anyhow!("a worker thread panicked")))).collect()
+                        });
+                        for o in outcomes {
+                            if !o? {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }

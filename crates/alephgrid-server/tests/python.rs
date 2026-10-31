@@ -492,3 +492,42 @@ async fn xlsx_keeps_formulas_or_exports_cached_values() {
     ws.close().await;
     server.stop().await;
 }
+
+// ------------------------------------------------------------------ 8.06
+
+/// Benchmark (run with `--ignored`): a table column over 1,000,000 rows with 100,000 distinct
+/// values. Prints the time to fill the column and how many workers ran.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn bench_a_million_rows_with_100k_distinct_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |c| {
+        c.python_limits.timeout_ms = 60_000;
+        c.python_limits.cpu_ms = 60_000;
+        c.memory_budget = Some(2 << 30);
+    })
+    .await;
+    let wb = server.create_workbook("bench").await;
+    let mut ws = server.ws(&wb).await;
+    publish(&mut ws, "NORMALIZE_SKU", &["sku"], "text", "def normalize_sku(sku):\n    return sku.strip().upper().replace('-', '')\n").await;
+    ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT i AS n, ' ab-' || (i % 100000) || ' ' AS sku FROM range(1000000) r(i)" })).await;
+    let before = started(&server);
+    let t0 = Instant::now();
+    ws.ok("add_formula_column", json!({ "table": "t", "name": "clean", "formula": "NORMALIZE_SKU([sku])" })).await;
+    loop {
+        let r = ws.ok("query", json!({ "sql": "SELECT count(*) FILTER (WHERE clean IS NULL) FROM t" })).await["rows"].clone();
+        if r[0][0] == json!(0) {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(600), "{r}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let filled = t0.elapsed();
+    let t1 = Instant::now();
+    let r = ws.ok("query", json!({ "sql": "SELECT count(DISTINCT clean), min(clean) FROM t" })).await["rows"].clone();
+    let read = t1.elapsed();
+    assert_eq!(r[0][0], json!(100000));
+    eprintln!("bench: 1,000,000 rows, 100,000 distinct: filled in {filled:?} with {} worker batches; reading the column again took {read:?}", started(&server) - before);
+    ws.close().await;
+    server.stop().await;
+}
