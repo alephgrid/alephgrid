@@ -61,8 +61,8 @@ async function stored(wb: string, id: number): Promise<string> {
 
 test("a stale edit of the same cell is refused and can be overwritten; other cells merge", async ({ browser }) => {
   const wb = await workbookWithTable("Together");
-  const a = await (await browser.newContext()).newPage();
-  const b = await (await browser.newContext()).newPage();
+  const contexts = [await browser.newContext(), await browser.newContext()];
+  const [a, b] = [await contexts[0].newPage(), await contexts[1].newPage()];
   await open(a, wb);
   await open(b, wb);
 
@@ -92,6 +92,8 @@ test("a stale edit of the same cell is refused and can be overwritten; other cel
     await expect.poll(() => valueAt(page, 1, 1)).toBe("A two");
     await expect.poll(() => valueAt(page, 2, 1)).toBe("B three");
   }
+  // Closed, so their pages stop reconnecting once this file's server is gone.
+  for (const c of contexts) await c.close();
 });
 
 test("dropped, repeated and late events still leave the page showing the workbook as it is", async ({ page }) => {

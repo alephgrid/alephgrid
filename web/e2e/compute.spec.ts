@@ -71,7 +71,7 @@ test.describe("a full server", () => {
 });
 
 test.describe("idle shutdown", () => {
-  const server = new Server(["--idle-timeout", "2"]);
+  const server = new Server(["--idle-timeout", "4"]);
   test.beforeAll(async () => server.start());
   test.afterAll(async () => server.dispose());
 
@@ -118,8 +118,8 @@ test.describe("profiles", () => {
     const wb = await server.createWorkbook("Resize");
     await server.api(`/api/workbooks/${wb}/import?filename=t.csv`, { method: "POST", body: "id,name\n1,a\n2,b\n" });
     await server.api(`/api/spaces/${await spaceOf(server, wb)}/profiles`, put({ profiles: ["large"] }));
-    const a = await (await browser.newContext()).newPage();
-    const b = await (await browser.newContext()).newPage();
+    const contexts = [await browser.newContext(), await browser.newContext()];
+    const [a, b] = [await contexts[0].newPage(), await contexts[1].newPage()];
     await open(a, wb);
     await open(b, wb);
     const before = await runtime(server, wb);
@@ -155,5 +155,7 @@ test.describe("profiles", () => {
       await b.keyboard.press("ArrowRight");
       return b.locator(".formula-input").inputValue();
     }).toBe("after resize");
+    // Closed, so their pages stop reconnecting once this file's server is gone.
+    for (const c of contexts) await c.close();
   });
 });

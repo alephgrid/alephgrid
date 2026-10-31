@@ -88,7 +88,12 @@ export function waitForCompute(workbook: string, host: HTMLElement, leave: () =>
       show(host, {
         title: FAILURE_TITLE[kind] ?? FAILURE_TITLE.startup_failed,
         text: `${FAILURE_HINT[kind] ?? ""} ${message}`.trim(),
-        actions: [el("button", { class: "btn btn-primary", onclick: () => { attempts = 0; void step(true); } }, "Try again"), back()],
+        actions: [el("button", { class: "btn btn-primary", onclick: () => {
+          // The old reason goes at once: what shows next is this attempt's outcome.
+          attempts = 0;
+          show(host, { title: "Trying again…", busy: true, text: "Opening the workbook.", actions: [] });
+          void step(true);
+        } }, "Try again"), back()],
       });
     };
     let attempts = 0;
