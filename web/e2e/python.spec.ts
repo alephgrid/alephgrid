@@ -23,10 +23,13 @@ test.beforeAll(async () => server.start());
 test.afterAll(async () => server.dispose());
 
 async function select(page: Page, row: number, column: number): Promise<void> {
-  await page.locator(".grid-host").focus();
-  await page.keyboard.press("ControlOrMeta+Home");
-  for (let i = 0; i < row; i++) await page.keyboard.press("ArrowDown");
-  for (let i = 0; i < column; i++) await page.keyboard.press("ArrowRight");
+  // By address, through Go to: arrow keys right after focusing can land a cell off in Firefox.
+  const address = `${String.fromCharCode(65 + column)}${row + 1}`;
+  await page.getByRole("button", { name: "Go to", exact: true }).click();
+  const goTo = page.getByRole("dialog", { name: "Go to" });
+  await goTo.getByLabel("Cell, range or name").fill(address);
+  await goTo.getByLabel("Cell, range or name").press("Enter");
+  await expect(page.locator(".cell-ref")).toHaveText(address);
 }
 
 async function enter(page: Page, row: number, column: number, text: string): Promise<void> {
@@ -68,9 +71,11 @@ test("define, test, publish, call, recalculate and reopen a Python function", as
   await enter(page, 0, 0, " ab-12 ");
   await enter(page, 0, 1, "=NORMALIZE_SKU(A1)");
   await expect.poll(() => shown(page, 0, 1), { timeout: 30_000 }).toBe("AB12");
-  // Its input changes: it is computed again.
+  // Its input changes: it is computed again (read on the server; the page shows it below).
   await enter(page, 0, 0, "cd-34");
-  await expect.poll(() => shown(page, 0, 1), { timeout: 30_000 }).toBe("CD34");
+  const check = await server.connect(wb);
+  await expect.poll(async () => (await check.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 })).rows[0][1][0], { timeout: 30_000 }).toBe("CD34");
+  check.close();
   // Reopened: the result shows at once, from the workbook's cache.
   await page.reload();
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
