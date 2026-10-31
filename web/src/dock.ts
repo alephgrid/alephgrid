@@ -66,6 +66,16 @@ export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, 
   dock.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !e.defaultPrevented) { e.preventDefault(); onClose(); }
   });
+  // Safari does not focus a clicked button, so focus can fall to the page body after a click in
+  // the panel: bring it back to the panel so Escape and Tab keep working there.
+  dock.tabIndex = -1;
+  dock.addEventListener("mousedown", () => setTimeout(() => {
+    if (dock.isConnected && (document.activeElement === document.body || !document.activeElement)) dock.focus({ preventScroll: true });
+  }));
+  // Firefox puts scrollable boxes in the Tab order; inside the panel only controls belong there.
+  for (const box of panel.querySelectorAll<HTMLElement>(".sql-side, .sql-main, .sql-results")) {
+    if (!box.hasAttribute("tabindex")) box.tabIndex = -1;
+  }
   render();
   host.append(dock);
   return {
