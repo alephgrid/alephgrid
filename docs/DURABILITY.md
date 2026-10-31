@@ -23,7 +23,10 @@ was cancelled or timed out) either committed completely or not at all. Clients t
 send the same `mutation_id`: a mutation id found in the history is not applied again (the last
 10,000 revisions are kept for this), and the reply says `replayed: true`.
 
-Revisions start at 0 and increase by exactly one per committed change, with no gaps.
+Revisions start at 0 and increase by exactly one per committed change, with no gaps. Every
+revision is announced to open connections in order, and table changes keep what undo needs in the
+same transaction as the change (storage format 8: `_rf_undo` and its row copies). Overlapping
+edits follow [COLLABORATION.md](COLLABORATION.md).
 
 ## What survives which failure
 

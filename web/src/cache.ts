@@ -16,10 +16,52 @@ export interface FetchRpc {
   call(op: "fetch", params: Params<"fetch">): Promise<RowBlock>;
 }
 
+/**
+ * Values this client wrote, by cell, shown (and used as the base of the next edit) until a
+ * fetch that started after the write committed replaces them. A fetch already in flight when
+ * the write was sent may still carry the old value; without this the next edit of the same
+ * cell would be checked against it and refused as if someone else had changed the cell.
+ */
+class OwnWrites<V> {
+  private map = new Map<string, { value: V; until: number }>();
+  write(key: string, value: V): void {
+    this.map.set(key, { value, until: Infinity });
+  }
+  /** The writes committed: blocks whose load started at `generation` or later show them. */
+  committed(keys: string[], generation: number): void {
+    for (const k of keys) {
+      const e = this.map.get(k);
+      if (e) e.until = Math.min(e.until, generation);
+    }
+  }
+  drop(keys: string[]): void {
+    for (const k of keys) this.map.delete(k);
+  }
+  clear(): void {
+    this.map.clear();
+  }
+  /** The value written, unless the block (loaded at `loadedAt`) already has it. */
+  get(key: string, loadedAt: number | undefined): V | undefined {
+    const e = this.map.get(key);
+    if (!e) return undefined;
+    if (loadedAt !== undefined && loadedAt >= e.until) {
+      this.map.delete(key);
+      return undefined;
+    }
+    return e.value;
+  }
+}
+
+export const cellKey = (r: number, c: number) => `${r},${c}`;
+
 type Block = {
   rows: CellValue[][];
   /** Stable record id of each row. */
   ids: number[];
+  /** The table generation its positions were read at (NaN when its parts disagree). */
+  gen: number;
+  /** The cache generation its load started at. */
+  loadedAt: number;
   bytes: number;
   /** When the grid last wanted it (for least-recently-used eviction). */
   used: number;
@@ -60,6 +102,12 @@ export class RowCache {
   viewId = 0;
   /** Columns of the view (column blocks beyond it are never requested). */
   columns = 0;
+  /** The view's current table generation (see `ViewInfo.generation`). */
+  viewGeneration = 0;
+  /** Record ids learned without a fetch (rows this client just appended), valid for one
+   *  generation: positions name other rows once it changes. */
+  private known = { generation: NaN, ids: new Map<number, number>() };
+  private own = new OwnWrites<CellValue>();
   readonly maxBytes: number;
 
   constructor(
@@ -75,12 +123,30 @@ export class RowCache {
   value(r: number, c: number): CellValue | undefined {
     const k = key(Math.floor(r / ROW_BLOCK), Math.floor(c / COL_BLOCK));
     const block = this.blocks.get(k) ?? this.stale.get(k);
+    const own = this.own.get(cellKey(r, c), block?.loadedAt);
+    if (own !== undefined) return own;
     const row = block?.rows[r % ROW_BLOCK];
     return row ? row[c % COL_BLOCK] : undefined;
   }
 
+  /** Edits of these cells were saved (refresh first) or refused (`ok` false). */
+  settled(cells: string[], ok: boolean): void {
+    if (ok) this.own.committed(cells, this.generation);
+    else this.own.drop(cells);
+  }
+
+  /** Rows `start…` of generation `generation` have these record ids (consecutive from `first`). */
+  learn(start: number, first: number, count: number, generation: number): void {
+    if (this.known.generation !== generation) this.known = { generation, ids: new Map() };
+    for (let k = 0; k < count && k < 10_000; k++) this.known.ids.set(start + k, first + k);
+  }
+
   /** Record id of a row from any loaded block of it (for edits by record). */
   record(r: number): number | undefined {
+    if (this.known.generation === this.viewGeneration) {
+      const id = this.known.ids.get(r);
+      if (id !== undefined) return id;
+    }
     const rb = Math.floor(r / ROW_BLOCK);
     const colBlocks = Math.max(1, Math.ceil(this.columns / COL_BLOCK));
     for (const map of [this.blocks, this.stale]) {
@@ -90,6 +156,20 @@ export class RowCache {
       }
     }
     return undefined;
+  }
+
+  /** Table generations of the rows [r0, r1] on screen (fresh or stale blocks). One value
+   *  means the positions shown all belong to it; none, that nothing there is loaded. */
+  generations(r0: number, r1: number): Set<number> {
+    const out = new Set<number>();
+    const colBlocks = Math.max(1, Math.ceil(this.columns / COL_BLOCK));
+    for (let rb = Math.floor(r0 / ROW_BLOCK); rb <= Math.floor(r1 / ROW_BLOCK); rb++) {
+      for (let cb = 0; cb < colBlocks; cb++) {
+        const b = this.blocks.get(key(rb, cb)) ?? this.stale.get(key(rb, cb));
+        if (b) out.add(b.gen);
+      }
+    }
+    return out;
   }
 
   /** Estimated size of everything cached, fresh and stale. */
@@ -132,6 +212,8 @@ export class RowCache {
   reset(viewId: number, columns = 0): void {
     this.viewId = viewId;
     this.columns = columns;
+    this.known = { generation: NaN, ids: new Map() };
+    this.own.clear();
     this.generation++;
     this.blocks.clear();
     this.stale.clear();
@@ -153,6 +235,7 @@ export class RowCache {
 
   /** Optimistically show an edit before the server confirms it. */
   patch(r: number, c: number, value: CellValue): void {
+    this.own.write(cellKey(r, c), value);
     const k = key(Math.floor(r / ROW_BLOCK), Math.floor(c / COL_BLOCK));
     const block = this.blocks.get(k) ?? this.stale.get(k);
     const row = block?.rows[r % ROW_BLOCK];
@@ -227,7 +310,7 @@ export class RowCache {
     const gen = this.generation;
     const rb = rowBlockOf(k), cb = colBlockOf(k);
     this.inFlight.add(k);
-    const block: Block = { rows: [], ids: [], bytes: 0, used: this.tick };
+    const block: Block = { rows: [], ids: [], gen: NaN, loadedAt: gen, bytes: 0, used: this.tick };
     try {
       // A reply may stop short of the rows asked for (`truncated`): keep what came and
       // ask for the rest.
@@ -240,6 +323,7 @@ export class RowCache {
         if (gen !== this.generation) return;
         // Error values of spreadsheet-formula columns arrive beside the rows; show their codes.
         for (const e of res.errors ?? []) res.rows[e.row][e.column] = e.code;
+        block.gen = block.rows.length === 0 || block.gen === res.generation ? res.generation : NaN;
         block.rows.push(...res.rows);
         block.ids.push(...res.ids);
         block.bytes = estimateBytes(block.rows);
@@ -276,6 +360,11 @@ const SHEET_BLOCK = 100;
 export class SheetCache {
   private blocks = new Map<number, (SheetCell | null)[][]>();
   private stale = new Map<number, (SheetCell | null)[][]>();
+  /** The sheet layout each block (fresh or stale) was read at. */
+  private layouts = new Map<number, number>();
+  /** The cache generation each block's load started at. */
+  private loadedAt = new Map<number, number>();
+  private own = new OwnWrites<string>();
   private inFlight = new Set<number>();
   private generation = 0;
   sheet = 0;
@@ -286,8 +375,26 @@ export class SheetCache {
   cell(r: number, c: number): SheetCell | null | undefined {
     const b = Math.floor(r / SHEET_BLOCK);
     const block = this.blocks.get(b) ?? this.stale.get(b);
+    const own = this.own.get(cellKey(r, c), block ? this.loadedAt.get(b) : undefined);
+    if (own !== undefined) return own === "" ? null : [own, /^-?\d+(\.\d+)?$/.test(own) ? "right" : "left"];
     if (!block) return undefined;
     return block[r - b * SHEET_BLOCK]?.[c] ?? null;
+  }
+
+  /** Edits of these cells were saved (refresh first) or refused (`ok` false). */
+  settled(cells: string[], ok: boolean): void {
+    if (ok) this.own.committed(cells, this.generation);
+    else this.own.drop(cells);
+  }
+
+  /** Layouts of the rows [r0, r1] on screen; see `RowCache.generations`. */
+  layoutsIn(r0: number, r1: number): Set<number> {
+    const out = new Set<number>();
+    for (let b = Math.floor(r0 / SHEET_BLOCK); b <= Math.floor(r1 / SHEET_BLOCK); b++) {
+      const l = this.layouts.get(b);
+      if (l !== undefined) out.add(l);
+    }
+    return out;
   }
 
   ensure(first: number, last: number): void {
@@ -302,6 +409,9 @@ export class SheetCache {
     this.generation++;
     this.blocks.clear();
     this.stale.clear();
+    this.layouts.clear();
+    this.loadedAt.clear();
+    this.own.clear();
     this.inFlight.clear();
   }
 
@@ -313,6 +423,7 @@ export class SheetCache {
   }
 
   patch(r: number, c: number, value: string): void {
+    this.own.write(cellKey(r, c), value);
     const b = Math.floor(r / SHEET_BLOCK);
     const block = this.blocks.get(b);
     if (!block) return;
@@ -329,6 +440,8 @@ export class SheetCache {
       });
       if (gen !== this.generation) return;
       this.blocks.set(b, res.rows);
+      this.layouts.set(b, res.layout);
+      this.loadedAt.set(b, gen);
       this.stale.delete(b);
       this.onLoaded();
     } catch (e) {

@@ -45,12 +45,13 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\"
   | \"not_allowed\" | \"sql_change\" | \"bad_parameter\" | \"schema_changed\"
-  | \"unauthenticated\" | \"forbidden\" | \"not_found\" | \"bad_request\" | \"quota\";
+  | \"unauthenticated\" | \"forbidden\" | \"not_found\" | \"bad_request\" | \"quota\" | \"conflict\";
 
-/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
+/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied).
+ *  A `conflict` with `moved` addressed rows, columns or cells that moved or are gone: refresh, nothing to overwrite. */
 export type Reply =
   | { id: number; ok: true; result: unknown; revision?: number; replayed?: boolean }
-  | { id: number | null; ok: false; error: string; code?: ErrorCode };
+  | { id: number | null; ok: false; error: string; code?: ErrorCode; moved?: boolean };
 
 /** Pushed after connecting. */
 export type Hello = { event: \"hello\"; session: number; workbook: WorkbookMeta; revision: number; role: SpaceRole };
@@ -87,6 +88,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("edit", "EditOutcome"),
     ("insert_rows", "null"),
     ("delete_rows", "null"),
+    ("undo", "UndoOutcome | null"),
     ("stats", "Stats"),
     ("add_column", "null"),
     ("add_formula_column", "null"),
@@ -160,7 +162,7 @@ pub fn bindings() -> String {
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
         SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
-        HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
+        HistoryEntry, alephgrid_core::UndoState, alephgrid_core::UndoKind, alephgrid_core::UndoOutcome, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
         Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,

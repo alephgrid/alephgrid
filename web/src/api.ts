@@ -1,3 +1,4 @@
+import { RevisionTracker } from "./revisions";
 import type { ErrorCode } from "./protocol";
 import type {
   AuditEvent, AuthMode, ImportProblem, ImportRequest, Imported, Invite, JobStatus, MemberKind, Org, OrgMember, OrgRole, OpName, Params,
@@ -169,6 +170,8 @@ const MUTATION_KEEP_MAX = 100;
 
 /** A failed request; `code` says why when the server knows (see `ErrorCode`). */
 export class RpcError extends Error {
+  /** For a `conflict`: what the change addressed moved or is gone (refresh; nothing to overwrite). */
+  moved = false;
   constructor(message: string, public code?: ErrorCode) {
     super(message);
   }
@@ -219,6 +222,9 @@ export class Rpc {
   private retry = 0;
   private retryTimer = 0;
   session = 0;
+  /** Revisions announced so far; a skip makes the client refresh (see `RevisionTracker`). */
+  readonly revisions = new RevisionTracker();
+  private greeted = false;
   onEvent: (e: ServerEvent) => void = () => {};
   onStatus: (s: "connecting" | "open" | "closed") => void = () => {};
   /** Called after a reconnect so views can be reopened; kept changes are resent once it settles. */
@@ -389,7 +395,15 @@ export class Rpc {
   private receive(data: string): void {
     const msg = JSON.parse(data);
     if (msg.event) {
-      if (msg.event === "hello") this.session = msg.session;
+      if (msg.event === "hello") {
+        this.session = msg.session;
+        // A reconnect refreshes everything anyway (`onReconnect`); the first hello starts the count.
+        this.revisions.hello(msg.revision);
+        this.greeted = true;
+      }
+      let gap = false;
+      if (msg.event === "resync") this.revisions.caughtUp(msg.revision ?? this.revisions.last);
+      else if (typeof msg.revision === "number" && msg.event !== "hello" && this.greeted) gap = this.revisions.see(msg.revision);
       // The server closes the connection next; reconnecting would be refused.
       if (msg.event === "access_revoked") {
         this.closed = true;
@@ -399,6 +413,8 @@ export class Rpc {
         for (const [id, p] of this.pending) if (id === msg.request) p.opts.onProgress?.(msg.percentage);
       }
       this.onEvent(msg as ServerEvent);
+      // A revision was never announced: refresh what is shown, as after dropped events.
+      if (gap) this.onEvent({ event: "resync", revision: msg.revision } as ServerEvent);
       return;
     }
     const p = this.pending.get(msg.id);
@@ -424,6 +440,8 @@ export class Rpc {
       this.keep(p);
       return;
     }
-    p.reject(new RpcError(msg.error, msg.code));
+    const err = new RpcError(msg.error, msg.code);
+    err.moved = !!msg.moved;
+    p.reject(err);
   }
 }

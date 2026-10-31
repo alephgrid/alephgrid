@@ -49,6 +49,9 @@ pub struct Workbook {
     report: OpenReport,
     /// Who changes made without an explicit [`Mutation`] (imports, refreshes) are recorded as.
     actor: Option<String>,
+    /// The change in progress: who makes it and the revision it will commit as.
+    pub(crate) txn_actor: Option<String>,
+    pub(crate) txn_revision: u64,
 }
 
 /// In-memory updates that may only happen once the transaction has committed.
@@ -142,7 +145,9 @@ impl Workbook {
         crate::functions::check_runtime(&conn, &crate::functions::list(&conn)?)?;
         let mut sheets = Sheets::from_bytes(bytes)?;
         sheets.set_table_cells(storage::table_cells(&conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
-        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report, actor: None })
+        let layouts = storage::meta_get(&conn, SHEET_LAYOUTS)?.and_then(|v| serde_json::from_str(&v).ok());
+        sheets.set_layouts(layouts, storage::revision(&conn)?);
+        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report, actor: None, txn_actor: None, txn_revision: 0 })
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -306,6 +311,15 @@ impl Workbook {
         self.settled.clear();
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         self.txn_depth = 1;
+        self.txn_actor = m.actor.map(str::to_string);
+        self.txn_revision = match storage::revision(&self.conn) {
+            Ok(r) => r + 1,
+            Err(e) => {
+                self.txn_depth = 0;
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                return Err(e);
+            }
+        };
         // SQL changes may not add validation violations (F.12); edits are checked per value.
         let before = if m.op == "sql_change" { crate::tools::all_violations(&self.conn).ok() } else { None };
         // Table cells follow whatever the change did to the tables they read.
@@ -1101,11 +1115,13 @@ impl Workbook {
         let m = self.db().materialize(&entry)?;
         let table = m.spec.table.clone();
         if edits.is_empty() {
-            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0 });
+            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0, first_appended: None });
         }
         let by_name: HashMap<String, Column> = m.columns.iter().map(|c| (c.name.clone(), c.clone())).collect();
         for e in edits {
-            let col = by_name.get(&e.column).ok_or_else(|| anyhow!("unknown column {:?}", e.column))?;
+            let col = by_name.get(&e.column).ok_or_else(|| {
+                anyhow!(Conflict::moved(format!("unknown column {:?} (it may have been renamed, removed or hidden since you read it); nothing was changed", e.column)))
+            })?;
             if col.is_computed() {
                 bail!("{:?} is a formula column; edit its formula instead", col.name);
             }
@@ -1120,8 +1136,10 @@ impl Workbook {
             Some(r) => Target::Record(r),
             None => Target::Position(e.row),
         };
-        // Last write wins for repeated cells; keep first-seen order otherwise.
+        // Last write wins for repeated cells; keep first-seen order otherwise. A repeated
+        // cell is checked against the base of its first edit (what the user first saw).
         let mut cells: Vec<(Target, &str, Option<&str>)> = Vec::new();
+        let mut bases: Vec<(Target, &str, &Value)> = Vec::new();
         let mut seen: HashMap<(Target, &str), usize> = HashMap::new();
         for e in edits {
             let value = e.value.as_deref().filter(|s| !s.is_empty());
@@ -1131,6 +1149,9 @@ impl Workbook {
                 None => {
                     seen.insert((t, e.column.as_str()), cells.len());
                     cells.push((t, e.column.as_str(), value));
+                    if let Some(b) = &e.base {
+                        bases.push((t, e.column.as_str(), b));
+                    }
                 }
             }
         }
@@ -1214,8 +1235,43 @@ impl Workbook {
             let found: i64 =
                 self.conn.query_row(&format!("SELECT count(*) FROM main.{} WHERE {ID} IN ({list})", ident(&table)), [], |r| r.get(0))?;
             if found as usize != records.len() {
-                bail!("a row being edited was deleted by someone else; nothing was changed");
+                bail!(Conflict::moved("a row being edited was deleted by someone else; nothing was changed"));
             }
+        }
+        // Cells someone else changed since the user saw them: refuse rather than overwrite.
+        // One query per column, comparing in the column's own type.
+        let mut checks: HashMap<&str, Vec<String>> = HashMap::new();
+        for (t, column, base) in &bases {
+            let rid = match *t {
+                Target::Record(r) => r,
+                Target::Position(p) if p < m.row_count => pos_to_id[&p],
+                // A new row has nothing to compare with.
+                Target::Position(_) => continue,
+            };
+            checks.entry(column).or_default().push(format!("({rid}, {})", base_literal(base)));
+        }
+        let mut conflicts: Vec<String> = Vec::new();
+        for (column, rows) in &checks {
+            let col = &by_name[*column];
+            let changed: Vec<i64> = self
+                .conn
+                .prepare(&format!(
+                    "SELECT v.id FROM (VALUES {}) v(id, base) JOIN main.{t} ON {t}.{ID} = v.id
+                     WHERE {t}.{c} IS DISTINCT FROM TRY_CAST(v.base AS {ty}) ORDER BY v.id LIMIT 5",
+                    rows.join(","),
+                    t = ident(&table),
+                    c = ident(&col.name),
+                    ty = col.sql_type,
+                ))?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            if !changed.is_empty() {
+                conflicts.push(format!("{:?} of record{} {}", col.name, if changed.len() == 1 { "" } else { "s" }, changed.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ")));
+            }
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort();
+            bail!(Conflict::values(format!("someone else changed {} since you started editing; nothing was changed", conflicts.join("; "))));
         }
         // Appended rows get new ids and order keys after the last row.
         let meta = storage::table_meta(&self.conn, &table)?;
@@ -1258,6 +1314,29 @@ impl Workbook {
             ));
         }
         let cells_changed = cells.len();
+        // Undo (7.09): the existing rows it sets cells of, before and after; new rows count
+        // as inserted.
+        let mut undo_cells: crate::undo::Cells = Default::default();
+        let mut touched: BTreeSet<i64> = BTreeSet::new();
+        for (column, values) in &by_column {
+            let mut ids = Vec::new();
+            for (t, _) in values {
+                let existing = match *t {
+                    Target::Record(_) => true,
+                    Target::Position(p) => p < m.row_count,
+                };
+                if existing {
+                    let rid = rid_of(*t)?;
+                    ids.push(rid);
+                    touched.insert(rid);
+                }
+            }
+            ids.sort_unstable();
+            ids.dedup();
+            undo_cells.insert(column.to_string(), Some(ids));
+        }
+        let id_list = |ids: &BTreeSet<i64>| if ids.is_empty() { "false".to_string() } else { format!("{ID} IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")) };
+        let capture = self.undo_begin(&table, &id_list(&touched))?;
         storage::touch_table(&self.conn, &table)?;
         if appended > 0 {
             self.conn.execute_batch(&format!(
@@ -1273,7 +1352,24 @@ impl Workbook {
             faults::check("edit")?;
             self.conn.execute_batch(sql)?;
         }
-        Ok(EditOutcome { table, cells_changed, rows_appended: appended })
+        let after = match appended {
+            0 => id_list(&touched),
+            n => format!("({}) OR ({ID} >= {} AND {ID} < {})", id_list(&touched), meta.next_id, meta.next_id + n as i64),
+        };
+        self.undo_finish(capture, &after, undo_cells)?;
+        Ok(EditOutcome { table, cells_changed, rows_appended: appended, first_appended: (appended > 0).then_some(meta.next_id) })
+    }
+
+    /// Refuse with [`Conflict`] unless view `id`'s table still has structure generation
+    /// `generation` (see [`ViewInfo::generation`]): positions the caller read at another
+    /// generation may now name other rows.
+    pub fn expect_generation(&self, id: u64, generation: i64) -> Result<()> {
+        let table = self.shared.view(id)?.spec().table;
+        let now = storage::table_meta(&self.conn, &table)?.gen;
+        if now != generation {
+            bail!(Conflict::moved(format!("rows of {table:?} were inserted, deleted or reordered since you read them; refresh and try again")));
+        }
+        Ok(())
     }
 
     /// Insert `count` empty rows before view position `at` (clamped to the end). Only on
@@ -1286,6 +1382,15 @@ impl Workbook {
     }
 
     fn insert_in_txn(&mut self, id: u64, at: u64, count: u64) -> Result<String> {
+        let table = self.shared.view(id)?.spec().table;
+        let next_id = storage::table_meta(&self.conn, &table)?.next_id;
+        let capture = if count > 0 { self.undo_begin(&table, "false")? } else { None };
+        let out = self.insert_rows_raw(id, at, count)?;
+        self.undo_finish(capture, &format!("{ID} >= {next_id} AND {ID} < {}", next_id + count as i64), Default::default())?;
+        Ok(out)
+    }
+
+    fn insert_rows_raw(&mut self, id: u64, at: u64, count: u64) -> Result<String> {
         let entry = self.shared.view(id)?;
         let m = self.db().materialize(&entry)?;
         if m.perm.is_some() {
@@ -1387,7 +1492,9 @@ impl Workbook {
             // would already reflect the delete.
             let index = if m.perm.is_none() { Some(wb.db().index(&table)?) } else { None };
             let cond = wb.db().range_condition(&m, start, end)?;
+            let capture = wb.undo_begin(&table, &cond)?;
             let n = wb.conn.execute(&format!("DELETE FROM main.{} WHERE {cond}", ident(&table)), [])?;
+            wb.undo_finish(capture, "false", Default::default())?;
             if n as u64 != end - start {
                 bail!("expected to delete {} rows, found {n}; nothing was changed", end - start);
             }
@@ -1433,7 +1540,9 @@ impl Workbook {
             let (result, changed) = {
                 let mut sheets = wb.shared.sheets.lock().unwrap_or_else(|e| e.into_inner());
                 let before = sheets.changes();
+                sheets.begin(wb.txn_revision, wb.txn_actor.clone());
                 let result = f(&mut sheets);
+                sheets.finish();
                 (result, sheets.changes() != before)
             };
             if changed {
@@ -1466,12 +1575,18 @@ impl Workbook {
         let bytes: Option<Vec<u8>> = self.conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         let mut sheets = Sheets::from_bytes(bytes)?;
         sheets.set_table_cells(storage::table_cells(&self.conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
+        let layouts = storage::meta_get(&self.conn, SHEET_LAYOUTS)?.and_then(|v| serde_json::from_str(&v).ok());
+        sheets.set_layouts(layouts, storage::revision(&self.conn)?);
         Ok(sheets)
     }
 
     /// Write the model (inside the caller's transaction).
     pub(crate) fn save_sheets(&self) -> Result<()> {
-        let bytes = self.sheets().to_bytes();
+        let (bytes, layouts) = {
+            let s = self.sheets();
+            (s.to_bytes(), serde_json::to_string(s.layouts())?)
+        };
+        storage::meta_set(&self.conn, SHEET_LAYOUTS, &layouts)?;
         self.conn.execute_batch("DELETE FROM _rf_sheets;")?;
         if let Some(bytes) = bytes {
             faults::check("save_sheets")?;
@@ -1539,7 +1654,7 @@ impl Workbook {
             .columns
             .iter()
             .enumerate()
-            .map(|(c, col)| (SheetInput { row: 0, column: c as u32, value: col.name.clone() }, true))
+            .map(|(c, col)| (SheetInput { row: 0, column: c as u32, value: col.name.clone(), base: None }, true))
             .collect();
         for (r, row) in preview.rows.iter().enumerate() {
             for (c, v) in row.iter().enumerate() {
@@ -1551,7 +1666,7 @@ impl Workbook {
                     Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }.to_string(), false),
                     other => (other.to_string(), false),
                 };
-                inputs.push((SheetInput { row: r as u32 + 1, column: c as u32, value }, text));
+                inputs.push((SheetInput { row: r as u32 + 1, column: c as u32, value, base: None }, text));
             }
         }
         let rows_copied = preview.rows.len() as u64;
@@ -1926,4 +2041,19 @@ fn fits_double(text: &str) -> bool {
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// `_rf_meta` key of the sheets' layouts (see [`SheetInfo::layout`]).
+const SHEET_LAYOUTS: &str = "sheet_layouts";
+
+/// SQL text literal of an edit's base value as fetched (see [`wire`](crate::wire)), cast
+/// to the column's type when compared.
+fn base_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL::VARCHAR".into(),
+        Value::String(s) => lit(s),
+        Value::Bool(b) => lit(if *b { "true" } else { "false" }),
+        Value::Number(n) => lit(&n.to_string()),
+        other => lit(&other.to_string()),
+    }
 }

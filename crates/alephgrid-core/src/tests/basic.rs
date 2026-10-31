@@ -49,8 +49,8 @@ fn edit_append_and_type_errors() {
         .edit(
             v.view_id,
             &[
-                CellEdit { row: 3, column: "carrier".into(), value: Some("ZZ".into()), record: None },
-                CellEdit { row: 101, column: "distance_mi".into(), value: Some("42".into()), record: None },
+                CellEdit { row: 3, column: "carrier".into(), value: Some("ZZ".into()), record: None, base: None },
+                CellEdit { row: 101, column: "distance_mi".into(), value: Some("42".into()), record: None, base: None },
             ],
         )
         .unwrap();
@@ -61,7 +61,7 @@ fn edit_append_and_type_errors() {
     assert_eq!(wb.fetch(v.view_id, 3, 1).unwrap().rows[0][carrier], json!("ZZ"));
 
     let err = wb
-        .edit(v.view_id, &[CellEdit { row: 0, column: "distance_mi".into(), value: Some("far".into()), record: None }])
+        .edit(v.view_id, &[CellEdit { row: 0, column: "distance_mi".into(), value: Some("far".into()), record: None, base: None }])
         .unwrap_err();
     assert!(err.to_string().contains("not a valid"), "{err}");
 }
@@ -82,7 +82,7 @@ fn formula_columns_are_lazy_and_sortable() {
     let values: Vec<f64> = block.rows.iter().map(|r| r[last].as_f64().unwrap()).collect();
     assert!(values.windows(2).all(|w| w[0] <= w[1]));
 
-    let err = wb.edit(v.view_id, &[CellEdit { row: 0, column: "fare_x2".into(), value: Some("1".into()), record: None }]);
+    let err = wb.edit(v.view_id, &[CellEdit { row: 0, column: "fare_x2".into(), value: Some("1".into()), record: None, base: None }]);
     assert!(err.is_err());
 }
 
@@ -131,7 +131,7 @@ fn import_and_export_roundtrip() {
 }
 
 fn input(row: u32, column: u32, value: &str) -> SheetInput {
-    SheetInput { row, column, value: value.into() }
+    SheetInput { row, column, value: value.into(), base: None }
 }
 
 #[test]

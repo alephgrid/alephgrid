@@ -414,7 +414,7 @@ impl Sheets {
                     Some(i) => self.translate(i, (span.row + sr, span.column + sc), (index, row, column))?,
                     None => String::new(),
                 };
-                inputs.push((SheetInput { row, column, value }, s.is_text));
+                inputs.push((SheetInput { row, column, value, base: None }, s.is_text));
             }
         }
         self.write(index, inputs, Some((area, styles)))
@@ -454,7 +454,7 @@ impl Sheets {
                         None => (String::new(), false),
                     },
                 };
-                inputs.push((SheetInput { row, column, value }, text));
+                inputs.push((SheetInput { row, column, value, base: None }, text));
             }
         }
         let styles = source_styles.map(|_| (target, styles));
@@ -486,6 +486,8 @@ impl Sheets {
         m.set_selected_cell(target.row as i32 + 1, target.column as i32 + 1).map_err(|e| anyhow!(e))?;
         m.paste_from_clipboard(index, (r0, c0, r1, c1), &data, true).map_err(|e| anyhow!(e))?;
         self.record(1);
+        // Cells moved: addresses read before now name other content.
+        self.moved(index);
         Ok(target)
     }
 }
@@ -502,7 +504,7 @@ mod tests {
     }
 
     fn input(row: u32, column: u32, value: &str) -> SheetInput {
-        SheetInput { row, column, value: value.to_string() }
+        SheetInput { row, column, value: value.to_string(), base: None }
     }
 
     fn content(s: &Sheets, sheet: u32, row: u32, column: u32) -> String {

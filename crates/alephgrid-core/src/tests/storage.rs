@@ -197,7 +197,7 @@ fn an_edit_by_record_lands_on_that_record_after_rows_move() {
     let c_id = fetched.ids[2];
     // Someone else inserts two rows at the top; "c" is now at position 4.
     t.wb.insert_rows(v, 0, 2).unwrap();
-    let edit = CellEdit { row: 2, column: "name".into(), value: Some("C!".into()), record: Some(c_id) };
+    let edit = CellEdit { row: 2, column: "name".into(), value: Some("C!".into()), record: Some(c_id), base: None };
     t.wb.edit(v, &[edit]).unwrap();
     let rows = t.wb.fetch(v, 0, 5).unwrap().rows;
     assert_eq!(rows, vec![vec![json!(null)], vec![json!(null)], vec![json!("a")], vec![json!("b")], vec![json!("C!")]]);
@@ -205,8 +205,8 @@ fn an_edit_by_record_lands_on_that_record_after_rows_move() {
     t.wb.delete_rows(v, 4, 1).unwrap();
     let rev = t.wb.revision().unwrap();
     let edits = [
-        CellEdit { row: 0, column: "name".into(), value: Some("x".into()), record: None },
-        CellEdit { row: 0, column: "name".into(), value: Some("y".into()), record: Some(c_id) },
+        CellEdit { row: 0, column: "name".into(), value: Some("x".into()), record: None, base: None },
+        CellEdit { row: 0, column: "name".into(), value: Some("y".into()), record: Some(c_id), base: None },
     ];
     let err = t.wb.edit(v, &edits).unwrap_err();
     assert!(format!("{err:#}").contains("deleted by someone else"), "{err:#}");

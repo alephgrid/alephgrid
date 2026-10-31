@@ -114,7 +114,11 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
   file, so memory never runs ahead of what is durable.
 * Undo/redo use IronCalc's history, grouped so that one user operation (a paste, an
   import) is one step. The history is in memory, shared by everyone in the workbook,
-  and lost on restart or after a reload.
+  and lost on restart or after a reload. Each step remembers who made it; only they
+  can undo or redo it.
+* Each sheet has a `layout`: the revision that last moved its rows, columns or cells or
+  shifted its index, kept in `_rf_meta`. Changes that address cells by position carry it
+  and are refused once it moved (see [COLLABORATION.md](COLLABORATION.md)).
 * `sheet_fetch` walks only the cells that exist in each row (`cells_in_row`) and
   returns `[display, align, input?]`, so the client never re-implements number
   formatting or formula evaluation.

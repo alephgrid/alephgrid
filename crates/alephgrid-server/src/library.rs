@@ -326,6 +326,7 @@ pub async fn use_entry(State(state): State<Shared>, Extension(p): Extension<Prin
     };
     let (kind, payload, name, actor) = (entry.kind, version.payload.clone(), b.name.clone(), p.actor());
     let summary = format!("use library entry {:?} v{}", entry.name, version.version);
+    let events = h.events.clone();
     let (result, revision) = h
         .run(
             crate::http::http_job(crate::sched::Class::Interactive, &state),
@@ -354,16 +355,20 @@ pub async fn use_entry(State(state): State<Shared>, Extension(p): Extension<Prin
                         }
                     })
                 })?;
+                // On the writer, so events go out in revision order.
+                let revision = c.revision;
+                let event = match kind {
+                    LibraryKind::Query => crate::ws::Event::QueriesChanged { origin: 0, revision },
+                    LibraryKind::View => crate::ws::Event::ViewsChanged { table: c.result["spec"]["table"].as_str().unwrap_or("").to_string(), origin: 0, revision },
+                    LibraryKind::Function => crate::ws::Event::Resync { revision: Some(revision) },
+                };
+                if !c.replayed {
+                    let _ = events.send(event);
+                }
                 Ok((c.result, c.revision))
             })),
         )
         .await?;
-    let event = match kind {
-        LibraryKind::Query => crate::ws::Event::QueriesChanged { origin: 0, revision },
-        LibraryKind::View => crate::ws::Event::ViewsChanged { table: result["spec"]["table"].as_str().unwrap_or("").to_string(), origin: 0, revision },
-        LibraryKind::Function => crate::ws::Event::Resync {},
-    };
-    let _ = h.events.send(event);
     state.auth.record(&p, "library_used", &space, &id, json!({ "entry": entry.id, "kind": kind, "version": version.version, "revision": revision }));
     if kind == LibraryKind::Function {
         state.auth.record(&p, "function_published", &space, &id, json!({ "function": result["name"], "from_library": entry.id, "revision": revision }));

@@ -22,14 +22,19 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 let toastHost: HTMLElement | null = null;
 
-export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000): void {
+export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000,
+  action?: { label: string; run: () => void }): void {
   if (!toastHost) {
     toastHost = el("div", { class: "toasts", role: "status", "aria-live": "polite" });
     document.body.append(toastHost);
   }
   const t = el("div", { class: `toast toast-${kind}` }, message);
+  if (action) {
+    t.append(" ", el("button", { class: "btn btn-small toast-action", onclick: () => { t.remove(); action.run(); } }, action.label));
+  }
   toastHost.append(t);
-  setTimeout(() => t.remove(), kind === "error" ? ms * 2 : ms);
+  // A toast with an action stays long enough to use it.
+  setTimeout(() => t.remove(), (kind === "error" ? ms * 2 : ms) * (action ? 2 : 1));
 }
 
 export type MenuItem =

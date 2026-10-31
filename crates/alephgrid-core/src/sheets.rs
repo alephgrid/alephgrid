@@ -36,6 +36,11 @@ pub struct SheetInfo {
     /// Used range, 0-based exclusive bounds.
     pub rows: u32,
     pub columns: u32,
+    /// The revision that last inserted, deleted or moved this sheet's rows, columns or
+    /// cells, or shifted its index. Send it with changes that address cells by position
+    /// (`layout`): they are refused, not misapplied, once it moved on.
+    #[serde(default)]
+    pub layout: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -57,6 +62,9 @@ pub struct SheetBlock {
     /// `rows[i][j]` is `null` for empty cells.
     #[ts(type = "(SheetCell | null)[][]")]
     pub rows: Vec<Vec<Option<SheetCell>>>,
+    /// As [`SheetInfo::layout`]: the layout these addresses were read at.
+    #[serde(default)]
+    pub layout: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -65,6 +73,13 @@ pub struct SheetInput {
     pub column: u32,
     /// Text exactly as typed: `42`, `hello`, `=SUM(A1:A9)`. Empty clears the cell.
     pub value: String,
+    /// What the cell showed in its editor when the user started editing (its input, or
+    /// its display when it has no input; empty for an empty cell). When given and the
+    /// cell holds something else now, someone else changed it: the whole request is
+    /// refused with [`Conflict`](crate::Conflict) and nothing is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub base: Option<String>,
 }
 
 pub struct Sheets {
@@ -79,6 +94,14 @@ pub struct Sheets {
     /// Formulas of the table cells (F.09), by result slot: shown in place of the
     /// `=_rf_links!$B$n` reference the sheet engine holds for them.
     table_cells: std::collections::HashMap<u32, String>,
+    /// Who made each undo and redo step, parallel to the groups (see [`Sheets::begin`]).
+    undo_actors: Vec<Option<String>>,
+    redo_actors: Vec<Option<String>>,
+    /// The actor and revision of the change in progress.
+    actor: Option<String>,
+    stamp: u64,
+    /// [`SheetInfo::layout`] of every worksheet, by index (the hidden link sheet included).
+    layouts: Vec<u64>,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -94,7 +117,110 @@ impl Sheets {
             Some(b) => Some(UserModel::from_bytes(&b, LANG).map_err(|e| anyhow!("corrupt sheet data: {e}"))?),
             None => None,
         };
-        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0, table_cells: Default::default() })
+        Ok(Sheets {
+            model,
+            undo_groups: vec![],
+            redo_groups: vec![],
+            changes: 0,
+            table_cells: Default::default(),
+            undo_actors: vec![],
+            redo_actors: vec![],
+            actor: None,
+            stamp: 0,
+            layouts: vec![],
+        })
+    }
+
+    /// Start a change made by `actor` that will commit as revision `stamp`.
+    pub fn begin(&mut self, stamp: u64, actor: Option<String>) {
+        self.sync_history();
+        self.actor = actor;
+        self.stamp = stamp;
+    }
+
+    /// After a change: attribute new undo steps and give new worksheets a layout.
+    pub fn finish(&mut self) {
+        self.sync_history();
+        self.settle_layouts();
+    }
+
+    fn sync_history(&mut self) {
+        self.undo_actors.truncate(self.undo_groups.len());
+        while self.undo_actors.len() < self.undo_groups.len() {
+            self.undo_actors.push(self.actor.clone());
+        }
+        self.redo_actors.truncate(self.redo_groups.len());
+        while self.redo_actors.len() < self.redo_groups.len() {
+            self.redo_actors.push(self.actor.clone());
+        }
+    }
+
+    fn worksheet_count(&self) -> usize {
+        self.model.as_ref().map(|m| m.get_worksheets_properties().len()).unwrap_or(0)
+    }
+
+    /// New worksheets (created, imported, the link sheet) get the current stamp; a list
+    /// that does not match (another model) is stamped as a whole.
+    fn settle_layouts(&mut self) {
+        let n = self.worksheet_count();
+        if self.layouts.len() > n {
+            self.layouts = vec![self.stamp; n];
+        }
+        self.layouts.resize(n, self.stamp);
+    }
+
+    /// Layouts as stored (`stored`), or every sheet at `revision` when they do not fit the
+    /// model (a workbook from before layouts were kept).
+    pub fn set_layouts(&mut self, stored: Option<Vec<u64>>, revision: u64) {
+        let n = self.worksheet_count();
+        self.layouts = match stored {
+            Some(l) if l.len() == n => l,
+            _ => vec![revision; n],
+        };
+    }
+
+    pub fn layouts(&self) -> &[u64] {
+        &self.layouts
+    }
+
+    fn layout_of(&self, index: u32) -> u64 {
+        self.layouts.get(index as usize).copied().unwrap_or(0)
+    }
+
+    fn moved(&mut self, index: u32) {
+        self.settle_layouts();
+        if let Some(l) = self.layouts.get_mut(index as usize) {
+            *l = self.stamp;
+        }
+    }
+
+    fn moved_all(&mut self) {
+        let n = self.worksheet_count();
+        self.layouts = vec![self.stamp; n];
+    }
+
+    /// Refuse with [`Conflict`](crate::Conflict) unless sheet `index` still has layout
+    /// `expected`.
+    pub fn expect_layout(&self, index: u32, expected: u64) -> Result<()> {
+        self.check_index(index)?;
+        if self.layout_of(index) != expected {
+            let name = self.info(index).map(|i| i.name).unwrap_or_default();
+            bail!(crate::Conflict::moved(format!(
+                "rows, columns or cells of sheet {name:?} were inserted, deleted or moved since you read them (or the sheet's position changed); refresh and try again"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Undo and redo take back only the caller's own step: refuse when the step is someone
+    /// else's.
+    fn check_owner(&self, owner: Option<&Option<String>>, what: &str) -> Result<()> {
+        if let (Some(Some(owner)), Some(me)) = (owner, &self.actor) {
+            if owner != me {
+                bail!(crate::Conflict::values(format!("the last sheet change was made by someone else; you can only {what} your own changes")));
+            }
+        }
+        Ok(())
     }
 
     /// Record that the last user operation added `entries` IronCalc history entries.
@@ -134,10 +260,10 @@ impl Sheets {
         // Scratch model only. Values cannot inject formulas; ranges are entered in real sheets.
         let mut inputs = Vec::new();
         for (i, value) in args.iter().enumerate() {
-            inputs.push(SheetInput { row: 0, column: i as u32, value: if value.starts_with('=') { format!("'{value}") } else { value.clone() } });
+            inputs.push(SheetInput { row: 0, column: i as u32, value: if value.starts_with('=') { format!("'{value}") } else { value.clone() }, base: None });
         }
         let refs = (0..args.len()).map(|i| format!("{}1", column_name(i as u32))).collect::<Vec<_>>().join(",");
-        inputs.push(SheetInput { row: 1, column: 0, value: format!("={}({refs})", d.name) });
+        inputs.push(SheetInput { row: 1, column: 0, value: format!("={}({refs})", d.name), base: None });
         self.set(0, &inputs)?;
         self.model()?.get_formatted_cell_value(0, 2, 1).map_err(|e| anyhow!(e))
     }
@@ -177,7 +303,7 @@ impl Sheets {
             .filter(|(_, p)| p.state == "visible")
             .map(|(i, p)| {
                 let (rows, columns) = used_size(m, i as u32);
-                SheetInfo { index: i as u32, name: p.name, rows, columns }
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32) }
             })
             .collect()
     }
@@ -195,6 +321,7 @@ impl Sheets {
                 self.model = Some(UserModel::new_empty("workbook", "en", "UTC", LANG).map_err(|e| anyhow!(e))?);
                 self.undo_groups.clear();
                 self.redo_groups.clear();
+                self.moved_all();
                 0
             }
             Some(m) => {
@@ -262,10 +389,19 @@ impl Sheets {
             self.model = None;
             self.undo_groups.clear();
             self.redo_groups.clear();
+            self.layouts.clear();
             return Ok(());
         }
         self.model_mut()?.delete_sheet(index).map_err(|e| anyhow!(e))?;
         self.record(1);
+        // Every later sheet moved down one index.
+        if (index as usize) < self.layouts.len() {
+            self.layouts.remove(index as usize);
+            for l in &mut self.layouts[index as usize..] {
+                *l = self.stamp;
+            }
+        }
+        self.settle_layouts();
         Ok(())
     }
 
@@ -308,7 +444,7 @@ impl Sheets {
             }
             rows.push(if any { out } else { vec![] });
         }
-        Ok(SheetBlock { row_start, rows })
+        Ok(SheetBlock { row_start, rows, layout: self.layout_of(index) })
     }
 
     /// Write cell inputs as one undoable step. Every coordinate is validated before the
@@ -331,6 +467,7 @@ impl Sheets {
                 bail!("{}{}: {LINK_SHEET} is reserved for Alephgrid's own use", column_name(i.column), i.row + 1);
             }
         }
+        self.check_bases(index, inputs)?;
         let m = self.model_mut()?;
         m.pause_evaluation();
         let mut entries = 0;
@@ -360,7 +497,7 @@ impl Sheets {
             .filter(|(i, text)| {
                 *text && !matches!(m.get_cell_type(index, i.row as i32 + 1, i.column as i32 + 1), Ok(CellType::Text))
             })
-            .map(|(i, _)| SheetInput { value: format!("'{}", i.value), ..i.clone() })
+            .map(|(i, _)| SheetInput { value: format!("'{}", i.value), base: None, ..i.clone() })
             .collect();
         if !fix.is_empty() {
             self.set(index, &fix)?;
@@ -373,29 +510,66 @@ impl Sheets {
         Ok(())
     }
 
+    /// Refuse a write over cells whose content is no longer the `base` the user saw.
+    fn check_bases(&self, index: u32, inputs: &[SheetInput]) -> Result<()> {
+        let Some(m) = self.model.as_ref() else { return Ok(()) };
+        let mut changed = Vec::new();
+        for i in inputs {
+            let Some(base) = &i.base else { continue };
+            let (row, col) = (i.row as i32 + 1, i.column as i32 + 1);
+            let input = self.shown_input(index, m.get_cell_content(index, row, col).unwrap_or_default());
+            let now = if input.is_empty() { m.get_formatted_cell_value(index, row, col).unwrap_or_default() } else { input };
+            if !same_text(base, &now) {
+                changed.push(format!("{}{}", column_name(i.column), i.row + 1));
+            }
+        }
+        if !changed.is_empty() {
+            let more = if changed.len() > 5 { format!(" and {} more", changed.len() - 5) } else { String::new() };
+            changed.truncate(5);
+            bail!(crate::Conflict::values(format!("someone else changed {}{more} since you started editing; nothing was changed", changed.join(", "))));
+        }
+        Ok(())
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo_groups.is_empty()
     }
 
+    /// Take back the last step, if it was the caller's (see [`Sheets::begin`]). Steps are
+    /// shared by everyone editing the workbook; someone else's last step blocks undo
+    /// until they take it back themselves.
     pub fn undo(&mut self) -> Result<bool> {
-        let Some(n) = self.undo_groups.pop() else { return Ok(false) };
+        self.sync_history();
+        let Some(&n) = self.undo_groups.last() else { return Ok(false) };
+        self.check_owner(self.undo_actors.last(), "undo")?;
+        self.undo_groups.pop();
+        let owner = self.undo_actors.pop().flatten();
         let m = self.model_mut()?;
         for _ in 0..n {
             m.undo().map_err(|e| anyhow!(e))?;
         }
         m.evaluate();
         self.redo_groups.push(n);
+        self.redo_actors.push(owner);
+        // Undo may restore rows, columns or whole sheets anywhere.
+        self.moved_all();
         Ok(true)
     }
 
     pub fn redo(&mut self) -> Result<bool> {
-        let Some(n) = self.redo_groups.pop() else { return Ok(false) };
+        self.sync_history();
+        let Some(&n) = self.redo_groups.last() else { return Ok(false) };
+        self.check_owner(self.redo_actors.last(), "redo")?;
+        self.redo_groups.pop();
+        let owner = self.redo_actors.pop().flatten();
         let m = self.model_mut()?;
         for _ in 0..n {
             m.redo().map_err(|e| anyhow!(e))?;
         }
         m.evaluate();
         self.undo_groups.push(n);
+        self.undo_actors.push(owner);
+        self.moved_all();
         Ok(true)
     }
 
@@ -411,6 +585,7 @@ impl Sheets {
         self.check_span(at, count, MAX_ROWS, "row")?;
         self.model_mut()?.insert_rows(index, at as i32 + 1, count as i32).map_err(|e| anyhow!(e))?;
         self.record(1);
+        self.moved(index);
         Ok(())
     }
 
@@ -419,6 +594,7 @@ impl Sheets {
         self.check_span(at, count, MAX_ROWS, "row")?;
         self.model_mut()?.delete_rows(index, at as i32 + 1, count as i32).map_err(|e| anyhow!(e))?;
         self.record(1);
+        self.moved(index);
         Ok(())
     }
 
@@ -427,6 +603,7 @@ impl Sheets {
         self.check_span(at, count, MAX_COLUMNS, "column")?;
         self.model_mut()?.insert_columns(index, at as i32 + 1, count as i32).map_err(|e| anyhow!(e))?;
         self.record(1);
+        self.moved(index);
         Ok(())
     }
 
@@ -435,6 +612,7 @@ impl Sheets {
         self.check_span(at, count, MAX_COLUMNS, "column")?;
         self.model_mut()?.delete_columns(index, at as i32 + 1, count as i32).map_err(|e| anyhow!(e))?;
         self.record(1);
+        self.moved(index);
         Ok(())
     }
 
@@ -456,6 +634,7 @@ impl Sheets {
             self.model = Some(imported);
             self.undo_groups.clear();
             self.redo_groups.clear();
+            self.moved_all();
             return Ok((self.list(), warnings));
         }
         let groups_before = self.undo_groups.len();
@@ -487,7 +666,7 @@ impl Sheets {
             for (row, col, _) in ws.sheet_data.cells() {
                 if let Ok(content) = imported.get_cell_content(i as u32, row, col) {
                     if !content.is_empty() {
-                        inputs.push(SheetInput { row: row as u32 - 1, column: col as u32 - 1, value: content });
+                        inputs.push(SheetInput { row: row as u32 - 1, column: col as u32 - 1, value: content, base: None });
                     }
                 }
             }
@@ -858,4 +1037,10 @@ pub fn column_name(index: u32) -> String {
         n = (n - 1) / 26;
     }
     s.iter().rev().collect()
+}
+
+/// Cell texts that mean the same: equal, or the same number written differently (the
+/// sheet engine may store `1.50` as `1.5`).
+fn same_text(a: &str, b: &str) -> bool {
+    a == b || matches!((a.trim().parse::<f64>(), b.trim().parse::<f64>()), (Ok(x), Ok(y)) if x == y)
 }

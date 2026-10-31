@@ -162,6 +162,12 @@ pub struct ViewInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stale: Option<String>,
+    /// The table's structure generation the view's positions belong to. Positions are
+    /// stable while it stays the same; send it with changes that address rows by position
+    /// (`insert_rows`, `delete_rows`, appending edits) so they are refused, not misapplied,
+    /// after someone else inserted, deleted or reordered rows.
+    #[serde(default)]
+    pub generation: i64,
 }
 
 /// A block of rows, row-major, in view order.
@@ -187,6 +193,9 @@ pub struct RowBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stale: Option<String>,
+    /// As [`ViewInfo::generation`]: the generation these positions were read at.
+    #[serde(default)]
+    pub generation: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -202,6 +211,43 @@ pub struct CellEdit {
     #[serde(default)]
     #[ts(optional, as = "Option<i64>")]
     pub record: Option<i64>,
+    /// The value the cell had when the user started editing it, as fetched (`null` for
+    /// empty). When given and the cell holds something else now, someone else changed it:
+    /// the whole edit is refused with [`Conflict`] and nothing is written. Leave it out to
+    /// overwrite whatever is there.
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "CellValue")]
+    pub base: Option<Value>,
+}
+
+/// A field that is present (even as `null`) deserializes to `Some`; a missing one to `None`
+/// (through `#[serde(default)]`).
+pub(crate) fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
+}
+
+/// A change was refused because what it was based on changed meanwhile. Nothing was
+/// changed; refresh and try again.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct Conflict {
+    pub message: String,
+    /// The rows, columns or cells it addressed moved or are gone (its positions are
+    /// out of date), as opposed to cells holding other values than the user saw (which
+    /// the user may choose to overwrite).
+    pub moved: bool,
+}
+
+impl Conflict {
+    /// Cells hold other values than the edit's bases.
+    pub fn values(message: impl Into<String>) -> Conflict {
+        Conflict { message: message.into(), moved: false }
+    }
+
+    /// What the change addressed moved or is gone.
+    pub fn moved(message: impl Into<String>) -> Conflict {
+        Conflict { message: message.into(), moved: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -209,6 +255,11 @@ pub struct EditOutcome {
     pub table: String,
     pub cells_changed: usize,
     pub rows_appended: u64,
+    /// Record id of the first appended row; the others follow it in order, at the view
+    /// positions after the old last row. Later edits of those rows can then go by record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_appended: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

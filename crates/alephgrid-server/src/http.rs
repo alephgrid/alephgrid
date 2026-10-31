@@ -84,6 +84,9 @@ impl From<anyhow::Error> for ApiError {
         if e.chain().any(|c| c.downcast_ref::<alephgrid_core::limits::TooLarge>().is_some()) {
             return ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, format!("{e:#}"));
         }
+        if e.chain().any(|c| c.downcast_ref::<alephgrid_core::Conflict>().is_some()) {
+            return ApiError::new(StatusCode::CONFLICT, format!("{e:#}"));
+        }
         let text = format!("{e:#}");
         if text.starts_with("workbook ") && text.contains(" not found") || text.contains("is not in the trash") {
             return ApiError::new(StatusCode::NOT_FOUND, text);
@@ -615,6 +618,7 @@ async fn import_file(
     let (scratch, path, size) = receive(&state, &id, &file_name, &headers, body).await?;
     let import_path = path.clone();
     let actor = p.actor();
+    let events = h.events.clone();
     let result = h
         .run(
             http_job(Class::Bulk, &state),
@@ -622,7 +626,10 @@ async fn import_file(
             None,
             Work::Write(Box::new(move |wb| {
                 let imported = wb.acting_as(&actor, |wb| wb.import_any(&import_path, q.table.as_deref()))?;
-                Ok((imported, wb.revision()?))
+                let revision = wb.revision()?;
+                // On the writer, so events go out in revision order.
+                let _ = events.send(ws::Event::TablesChanged { origin: 0, revision });
+                Ok((imported, revision))
             })),
         )
         .await;
@@ -633,7 +640,6 @@ async fn import_file(
     state.quota.forget(&space.id);
     let h2 = h.clone();
     let _ = blocking(move || h2.refresh_summary()).await;
-    let _ = h.events.send(ws::Event::TablesChanged { origin: 0, revision });
     Ok(Json(imported))
 }
 
@@ -813,6 +819,10 @@ async fn import_upload(
         *h2.job.lock().unwrap() = job;
         let out = wb.acting_as(&actor, |wb| wb.import_any_with(&u.path, req.table.as_deref(), &req.types)).and_then(|i| Ok((i, wb.revision()?)));
         *h2.job.lock().unwrap() = None;
+        // On the writer, so events go out in revision order.
+        if let Ok((_, revision)) = &out {
+            let _ = h2.events.send(ws::Event::TablesChanged { origin: 0, revision: *revision });
+        }
         out
     }));
     let (imported, revision) = h.run(http_job(Class::Bulk, &state), None, None, work).await?;
@@ -821,7 +831,6 @@ async fn import_upload(
     state.remove_upload(&upload);
     let h3 = h.clone();
     let _ = blocking(move || h3.refresh_summary()).await;
-    let _ = h.events.send(ws::Event::TablesChanged { origin: 0, revision });
     Ok(Json(imported))
 }
 

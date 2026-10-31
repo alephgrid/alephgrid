@@ -23,6 +23,7 @@ mod reads;
 pub mod results;
 pub mod reports;
 pub mod tools;
+pub mod undo;
 pub mod sheets;
 pub mod sql;
 mod sqlchange;
@@ -40,6 +41,7 @@ pub use queries::SchemaChanged;
 pub use results::{ResultsActivity, RESULTS_MIN_ROWS};
 pub use sqlpolicy::{BadParameter, IsChange, NotAllowed, ParamType, QueryParam};
 pub use storage::{HistoryEntry, OpenReport, TooNew, WrongWorkbook};
+pub use undo::{UndoKind, UndoOutcome, UndoState};
 pub use workbook::{Committed, Imported, Mutation, Reader, SheetCopy, UploadPreview, Workbook};
 
 /// DuckDB handles the server uses for progress and cancellation.

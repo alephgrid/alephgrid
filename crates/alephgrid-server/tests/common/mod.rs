@@ -261,6 +261,19 @@ impl Ws {
         }
     }
 
+    /// The next event, whatever its name (those kept while waiting for replies first).
+    pub async fn event_any(&mut self) -> Option<Value> {
+        if !self.events.is_empty() {
+            return Some(self.events.remove(0));
+        }
+        loop {
+            let msg = self.next_message().await?;
+            if msg.get("event").is_some() {
+                return Some(msg);
+            }
+        }
+    }
+
     /// True once the server has closed the connection.
     pub async fn closed(&mut self) -> bool {
         loop {
@@ -364,6 +377,9 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("edit", json!({ "view_id": 1, "edits": [{ "row": 0, "column": "s", "value": "z" }] })),
         ("insert_rows", json!({ "view_id": 1, "at": 1, "count": 1 })),
         ("delete_rows", json!({ "view_id": 1, "start": 1, "count": 1 })),
+        // Take the delete back and redo it: the state that follows is unchanged.
+        ("undo", json!({})),
+        ("undo", json!({ "redo": true })),
         ("stats", json!({ "view_id": 1, "column": "n", "start": 0, "end": 3 })),
         ("add_column", json!({ "table": "t", "name": "extra", "sql_type": "INTEGER" })),
         ("add_formula_column", json!({ "table": "t", "name": "twice", "formula": "[n] * 2" })),

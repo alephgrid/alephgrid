@@ -22,7 +22,7 @@ fn validation_rules_hold_on_every_write_path() {
     let v = t.wb.open_view(spec("people")).unwrap();
     assert!(t.wb.edit(v.view_id, &[edit(0, "tier", "platinum")]).unwrap_err().to_string().contains("one of \"gold\", \"silver\""));
     assert!(t.wb.edit(v.view_id, &[edit(0, "id", "500")]).unwrap_err().to_string().contains("≤ 100"));
-    assert!(t.wb.edit(v.view_id, &[CellEdit { row: 0, column: "name".into(), value: None, record: None }]).unwrap_err().to_string().contains("not blank"));
+    assert!(t.wb.edit(v.view_id, &[CellEdit { row: 0, column: "name".into(), value: None, record: None, base: None }]).unwrap_err().to_string().contains("not blank"));
     // Appending a row by typing below the last one is an edit too.
     assert!(t.wb.edit(v.view_id, &[edit(4, "id", "0")]).is_err());
     t.wb.edit(v.view_id, &[edit(0, "tier", "silver")]).unwrap();

@@ -19,8 +19,8 @@ fn xlsx_bytes() -> Vec<u8> {
     wb.with_sheets(|s| {
         let sheet = s.create("Budget")?;
         s.set(sheet.index, &[
-            alephgrid_core::SheetInput { row: 0, column: 0, value: "2".into() },
-            alephgrid_core::SheetInput { row: 1, column: 0, value: "=A1*21".into() },
+            alephgrid_core::SheetInput { row: 0, column: 0, value: "2".into(), base: None },
+            alephgrid_core::SheetInput { row: 1, column: 0, value: "=A1*21".into(), base: None },
         ])
     })
     .unwrap();
@@ -339,6 +339,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SavedView" => conforms::<alephgrid_core::SavedView>(op, v),
         "SavedView[]" => conforms::<Vec<alephgrid_core::SavedView>>(op, v),
         "HistoryEntry[]" => conforms::<Vec<alephgrid_core::HistoryEntry>>(op, v),
+        "UndoOutcome | null" => conforms::<Option<alephgrid_core::UndoOutcome>>(op, v),
         "QueryResult" => conforms::<alephgrid_core::QueryResult>(op, v),
         "TableSchema[]" => conforms::<Vec<alephgrid_core::TableSchema>>(op, v),
         "QueryExport" => conforms::<alephgrid_server::ws::QueryExport>(op, v),

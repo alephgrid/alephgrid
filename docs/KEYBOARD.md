@@ -15,7 +15,7 @@ Ctrl+C still copies when the key types `с`.
 
 | Command | Keys | Notes |
 |---|---|---|
-| Undo / Redo | Mod+Z / Mod+Shift+Z, Mod+Y | Sheets only; tables explain that undo is unavailable |
+| Undo / Redo | Mod+Z / Mod+Shift+Z, Mod+Y | Sheets: the caller's own last step. Tables: the caller's own last table change, and redo of their last undo; refused when someone changed it since ([COLLABORATION.md](COLLABORATION.md)) |
 | Copy | Mod+C | Tables and sheets. Copies displayed values as text to the system clipboard |
 | Cut | Mod+X | Sheets |
 | Paste | Mod+V | System paste event. Text copied from this workbook pastes the cells (formulas translated, formats kept); other text pastes as values |

@@ -821,6 +821,7 @@ impl Db<'_> {
                 columns: m.columns.clone(),
                 can_append: m.perm.is_none(),
                 stale: self.view_staleness(m)?,
+                generation: m.gen,
             })
         })
     }
@@ -863,7 +864,7 @@ impl Db<'_> {
             let rows_allowed = limits::fetch_rows(row_count, cols.len());
             let end = row_start.saturating_add(rows_allowed).min(m.row_count);
             let stale = self.view_staleness(m)?;
-            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false, errors: vec![], stale: stale.clone() };
+            let empty = RowBlock { row_start, rows: vec![], ids: vec![], column_start: c0, truncated: false, errors: vec![], stale: stale.clone(), generation: m.gen };
             if row_start >= end {
                 return Ok(empty);
             }
@@ -928,7 +929,7 @@ impl Db<'_> {
                 out_ids.push(*rid);
             }
             let truncated = out.len() < ids.len();
-            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated, errors, stale })
+            Ok(RowBlock { row_start, rows: out, ids: out_ids, column_start: c0, truncated, errors, stale, generation: m.gen })
         })
     }
 
