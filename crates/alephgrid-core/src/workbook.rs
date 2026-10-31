@@ -1140,6 +1140,16 @@ impl Workbook {
         self.db().stats(id, column, start, end)
     }
 
+    /// Find text in a view (see [`Db::find_in_view`]).
+    pub fn find_in_view(&self, id: u64, text: &str, match_case: bool, from: u64, backwards: bool, count: bool) -> Result<FindResult> {
+        self.db().find_in_view(id, text, match_case, from, backwards, count)
+    }
+
+    /// Distinct values of a column with their counts (see [`Db::column_values`]).
+    pub fn column_values(&self, spec: &ViewSpec, column: &str, search: &str, limit: usize) -> Result<ColumnValues> {
+        self.db().column_values(spec, column, search, limit)
+    }
+
     /// Check the cached position index of `table` against its data (tests).
     pub fn verify_index(&self, table: &str) -> Result<bool> {
         let index = self.db().index(table)?;
@@ -1974,6 +1984,14 @@ impl Reader {
 
     pub fn stats(&self, id: u64, column: &str, start: u64, end: u64) -> Result<Stats> {
         self.db().stats(id, column, start, end)
+    }
+
+    pub fn column_values(&self, spec: &ViewSpec, column: &str, search: &str, limit: usize) -> Result<ColumnValues> {
+        self.db().column_values(spec, column, search, limit)
+    }
+
+    pub fn find_in_view(&self, id: u64, text: &str, match_case: bool, from: u64, backwards: bool, count: bool) -> Result<FindResult> {
+        self.db().find_in_view(id, text, match_case, from, backwards, count)
     }
 
     pub fn preview_query(&self, sql: &str, limit: usize) -> Result<QueryPreview> {

@@ -46,6 +46,10 @@ pub fn json_size(v: &Value) -> usize {
     }
 }
 
+/// Values a header filter lists at most (U.16), and values a list filter may hold.
+pub const MAX_COLUMN_VALUES: usize = 1_000;
+pub const MAX_FILTER_VALUES: usize = 10_000;
+
 /// Cells one sheet evaluation may read before it stops (SEC.07). Formulas over whole
 /// columns read only the used area; this bounds a formula over a huge declared range,
 /// or a sheet whose used area was stretched by a value in a far corner.

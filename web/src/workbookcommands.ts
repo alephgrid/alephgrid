@@ -10,6 +10,7 @@ export interface WorkbookActions {
   selectAll(): void; selectEntire(what: "rows" | "columns"): void;
   goTo(): void; names(): void | Promise<void>; formulaHelp(): void; sql(): void;
   palette(): void; shortcuts(): void; history(): void; compute(): void;
+  find(replace: boolean): void;
 }
 
 /** Every workbook command with its keys. Grid keys without `run` are handled by the grid;
@@ -34,6 +35,10 @@ export function workbookCommands(a: WorkbookActions): Command[] {
     { id: "select.rows", label: "Select whole rows", group: "Select", shortcuts: [{ key: " ", shift: true }], contexts: ["grid"], run: () => a.selectEntire("rows") },
     { id: "select.columns", label: "Select whole columns", group: "Select", shortcuts: [{ key: " ", ctrl: true }], contexts: ["grid"], run: () => a.selectEntire("columns"),
       note: isMac() ? "macOS switches input sources with Ctrl+Space by default; use the command palette if the key does nothing" : undefined },
+    { id: "edit.find", label: "Find…", group: "Edit", shortcuts: [{ key: "f", mod: true }], contexts: ["grid"], run: () => a.find(false),
+      note: "Searches every row of a table on the server, not only what is on screen" },
+    { id: "edit.replace", label: "Find and replace…", group: "Edit", shortcuts: [{ key: "h", mod: true }, { key: "h", mod: true, shift: true }], contexts: ["grid"], run: () => a.find(true),
+      note: isMac() ? "macOS keeps ⌘H for hiding the browser; use ⌘⇧H" : undefined },
     { id: "nav.goTo", label: "Go to…", group: "Navigate", shortcuts: [{ key: "g", mod: true }], contexts: ["grid"], unavailable: sheetOnly("Go to"), run: () => a.goTo() },
     { id: "names.manage", label: "Named ranges…", group: "Formulas", shortcuts: [], contexts: ["grid"], unavailable: sheetOnly("Named ranges"), run: () => a.names() },
     { id: "help.formulas", label: "Formula help", group: "Formulas", shortcuts: [{ key: "F3", shift: true }], contexts: ["grid"], run: () => a.formulaHelp() },

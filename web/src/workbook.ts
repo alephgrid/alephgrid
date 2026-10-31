@@ -5,7 +5,9 @@ import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
 import type { PasteMode } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
-import { AnalysisWorkspace, dashboardsDialog, replaceDialog } from "./analysis";
+import { dashboardsDialog } from "./analysis";
+import { AnalyzePane } from "./analyzepane";
+import { FindBar, type FindProvider } from "./findbar";
 import { dataToolsDialog } from "./tools";
 import type { Validation } from "./protocol";
 import { functionCompletion, functionLibrary } from "./functions";
@@ -27,6 +29,8 @@ import { SqlWorkspace } from "./sqlworkspace";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
+import { filterPopup } from "./filterpopup";
+import type { ColumnValues } from "./protocol";
 
 /** "1.2M rows" for the explorer. */
 function compactRows(n: number): string {
@@ -77,6 +81,11 @@ function defaultWidth(c: Column): number {
 }
 
 function describeFilter(f: Filter): string {
+  if (f.op === "in") {
+    const vals = Array.isArray(f.value) ? (f.value as (string | null)[]) : [];
+    const shown = vals.slice(0, 3).map((v) => (v === null ? "(Empty)" : `“${v}”`)).join(", ");
+    return vals.length <= 3 ? `${f.column} is ${shown || "none"}` : `${f.column} is one of ${vals.length} values`;
+  }
   const op = FILTER_OPS.find((o) => o.value === f.op);
   return `${f.column} ${op?.label ?? f.op}${op?.needsValue ? ` “${f.value ?? ""}”` : ""}`;
 }
@@ -137,6 +146,8 @@ export class WorkbookScreen {
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
   private allowSql = true;
+  /** Controls shown only when the server allows SQL (U.20). */
+  private sqlOnly: HTMLElement[] = [];
   /** Rows copied into a sheet at most (from /api/config). */
   private sheetCopyRows = 100_000;
   /** Largest request frame and edit the server accepts (from /api/config). */
@@ -218,10 +229,12 @@ export class WorkbookScreen {
   private sheetButtons: HTMLElement[] = [];
   /** The open SQL workspace, if any (it receives server events). */
   private sql: SqlWorkspace | null = null;
-  private analysis: AnalysisWorkspace | null = null;
+  private analysis: AnalyzePane | null = null;
   private presentation = emptyPresentation();
   private closePresentation: (() => void) | null = null;
   private closeReplace: (() => void) | null = null;
+  private findBar = new FindBar(() => this.grid.focus());
+  private replaceRevision = 0;
   /** Tables made from a query, and the saved queries they may name. */
   private materialized: MaterializedTable[] = [];
   private savedQueries: SavedQuery[] = [];
@@ -278,6 +291,7 @@ export class WorkbookScreen {
         referencePick: (range, phase) => self.pickReference(range, phase),
         commitEdits: (edits) => self.commitEdits(edits),
         headerMenu: (c, x, y) => self.headerMenu(c, x, y),
+        headerFilter: (c, x, y) => self.headerFilter(c, x, y),
         rowMenu: (r, x, y) => self.rowMenu(r, x, y),
         copy: (range) => self.copy(range),
         paste: (at, text) => self.paste(at, text),
@@ -288,7 +302,7 @@ export class WorkbookScreen {
       },
     );
     this.registerCommands();
-    this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl);
+    this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl, this.findBar.el);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
     this.rpc.onSaveState = () => this.renderStatus();
@@ -428,6 +442,8 @@ export class WorkbookScreen {
     try {
       const config = await api.config();
       this.allowSql = config.allow_sql;
+      // U.20: what the server has turned off is not shown at all.
+      for (const e of this.sqlOnly) e.hidden = !this.allowSql;
       this.sheetCopyRows = config.sheet_copy_rows ?? this.sheetCopyRows;
       this.maxMessageBytes = config.max_message_bytes ?? this.maxMessageBytes;
       this.maxEditCells = config.max_edit_cells ?? this.maxEditCells;
@@ -529,14 +545,14 @@ export class WorkbookScreen {
     // Every command once; the menus, the toolbar and the top bar share them.
     const act = {
       formatTable: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } },
-      findReplace: async () => { if (this.active?.kind !== "table") return; this.closeReplace?.(); try { this.closeReplace = await replaceDialog(this.rpc, this.active.name, this.meta.id); } catch (e) { toast(String(e), "error"); } },
+      findReplace: () => this.openFind(true),
+      find: () => this.openFind(false),
       addColumn: () => this.addColumnDialog(),
       filter: () => this.filterDialog(this.grid.active.c),
       names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } },
       goTo: () => void this.goTo(),
       importFile: () => this.fileInput.click(),
-      analyze: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
-        async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); },
+      analyze: () => this.openAnalyze(),
       dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
       dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
       sql: () => this.sqlPanel(),
@@ -560,7 +576,7 @@ export class WorkbookScreen {
       tool("filter", "Filter", act.filter, { text: "Filter", title: "Filter rows of the whole table" }),
       tool("columnPlus", "Add column", act.addColumn, { text: "Add column", title: "Add a column or formula column" }),
       tool("brush", "Format table", act.formatTable, { title: "Format table: number formats, hidden and frozen columns, rules" }),
-      tool("search", "Find / replace", act.findReplace, { title: "Find / replace across the table" }),
+      tool("search", "Find / replace", act.find, { title: "Find in the whole table (⌘F)" }),
     ];
     this.sheetButtons = [
       tool("undo", "Undo", () => this.undo(false), { title: "Undo (⌘Z)" }),
@@ -588,7 +604,8 @@ export class WorkbookScreen {
         "sep",
         { label: "Paste special…", hint: "⇧⌘V", disabled: sheetOnly(), action: () => this.pasteSpecialDialog() },
         { label: "Go to…", hint: "⌘G", disabled: sheetOnly(), action: act.goTo },
-        { label: "Find / replace…", disabled: tableOnly(), action: act.findReplace },
+        { label: "Find…", hint: "⌘F", disabled: tableOnly(), action: act.find },
+        { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
       ]],
       ["View", () => [
         { label: `${this.explorerOpen ? "✓ " : ""}Explorer`, action: () => this.toggleExplorer() },
@@ -678,7 +695,7 @@ export class WorkbookScreen {
         tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
         sep(),
         tool("chart", "Analyze", act.analyze, { text: "Analyze", title: "Summaries, pivots, charts and joins without SQL" }),
-        tool("database", "SQL", act.sql, { text: "SQL", title: "SQL workspace" }),
+        this.needsSql(tool("database", "SQL", act.sql, { text: "SQL", title: "SQL workspace" })),
         tool("fx", "Functions", act.functions, { text: "Functions", title: "Define, test and publish reusable functions" }),
         el("div", { class: "spacer" }),
         this.exportBtn = tool("download", "Export", (e) => this.exportMenu(anchor(e)), { text: "Export", menu: true, title: "Download this table or the sheets" }),
@@ -686,6 +703,7 @@ export class WorkbookScreen {
       ),
       this.chips,
       this.snapshotEl,
+      this.welcome(),
       el("div", { class: "workbook-body" },
         this.explorerEl,
         this.withChildren(this.mainEl,
@@ -924,6 +942,34 @@ export class WorkbookScreen {
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
 
+  private needsSql<T extends HTMLElement>(e: T): T {
+    this.sqlOnly.push(e);
+    e.hidden = !this.allowSql;
+    return e;
+  }
+
+  /** U.20: a short, dismissible first-run guide on a workbook, once per browser. */
+  private welcome(): HTMLElement | null {
+    try { if (localStorage.getItem("alephgrid-welcome-done")) return null; } catch { return null; }
+    const done = () => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* private mode */ } strip.remove(); };
+    const kbd = (k: string) => el("kbd", {}, k);
+    const tips = [
+      el("li", {}, "Filter a column by its values: its header's ", el("strong", {}, "▾"), " or ", kbd("Alt"), "+", kbd("↓")),
+      el("li", {}, "Find anywhere in a table: ", kbd("⌘F")),
+      el("li", {}, "Summarize with no code: ", el("strong", {}, "Analyze"), " in the toolbar"),
+      el("li", {}, "Every command: ", kbd("⌘K"), "; all shortcuts: ", kbd("⌘/")),
+    ];
+    // Shown only when the server allows SQL; added once the configuration is known.
+    const sqlTip = el("li", { hidden: true }, "Query with SQL: ", el("strong", {}, "SQL"), " opens under the grid");
+    tips.push(this.needsSql(sqlTip));
+    const strip: HTMLElement = el("section", { class: "welcome-strip", "aria-label": "Getting started" },
+      el("div", {}, el("strong", {}, "Welcome to Alephgrid. "), el("span", {}, "A few things to try:"), el("ul", {}, ...tips)),
+      el("div", { class: "welcome-actions" },
+        el("button", { class: "btn btn-ghost", onclick: () => shortcutHelp(this.commands) }, "Keyboard shortcuts"),
+        el("button", { class: "btn", onclick: done }, "Got it")));
+    return strip;
+  }
+
   private renderEmpty(): void {
     this.active = null;
     this.view = null;
@@ -940,8 +986,10 @@ export class WorkbookScreen {
       el("div", { class: "empty-actions" },
         el("button", { class: "btn btn-primary", onclick: () => this.fileInput.click() }, "Import a file"),
         el("button", { class: "btn", onclick: () => this.createSheet() }, "New blank sheet"),
-        el("button", { class: "btn", onclick: () => this.createDemo(1_000_000) }, "Generate 1M demo rows"),
+        el("button", { class: "btn", onclick: () => this.createDemo(1_000_000) }, "Try sample data (1M flights)"),
+        this.allowSql ? el("button", { class: "btn btn-ghost", onclick: () => this.sqlPanel() }, "Start with SQL") : null,
       ),
+      el("p", { class: "empty-hint" }, "Press ", el("kbd", {}, "⌘K"), " to search every command, or ", el("kbd", {}, "⌘/"), " for keyboard shortcuts."),
     );
     this.gridWrap.querySelector(".empty")?.remove();
     this.gridWrap.append(card);
@@ -1870,7 +1918,77 @@ export class WorkbookScreen {
       shortcuts: () => { shortcutHelp(this.commands); },
       history: () => historyDialog(this.rpc, () => void this.resync()),
       compute: () => computeDialog(this.meta.id),
+      find: (replace) => this.openFind(replace),
     }));
+  }
+
+  /** U.15: Analyze beside the grid; its result docks under the grid. */
+  private openAnalyze(): void {
+    if (this.analysis) { this.analysis.close(); this.analysis = null; return; }
+    const body = this.mainEl.parentElement!;
+    this.analysis = new AnalyzePane(this.rpc, {
+      pane: (panel, onClose) => {
+        body.append(panel);
+        return { close: () => { panel.remove(); if (this.analysis) { this.analysis = null; onClose(); } this.grid.focus(); } };
+      },
+      results: (panel, onClose) => dockPanel(this.mainEl, panel, "Analysis", onClose),
+      table: () => (this.active?.kind === "table" ? this.active.name : null),
+      openTable: async (name) => { await this.loadItems(); await this.openTable(name); },
+      openView: async (spec) => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); },
+    });
+  }
+
+  /** U.17: the find bar over the current table (server-side, every row) or sheet. */
+  private openFind(replace: boolean): void {
+    const provider = this.findProvider();
+    if (!provider) { toast("Open a table or sheet to find in it"); return; }
+    this.findBar.open(provider, replace);
+  }
+
+  private findProvider(): FindProvider | null {
+    if (this.active?.kind === "table" && this.view) {
+      const table = this.active.name;
+      const key = `alephgrid-replace-${this.meta.id}`;
+      let pending: { table: string; column: string; find: string; replacement: string; revision: number } | null = null;
+      return {
+        label: table,
+        find: async (text, matchCase, from, backwards, count) => {
+          if (!this.view) return { hits: [] };
+          return this.rpc.call("find_in_view", { view_id: this.view.view_id, text, match_case: matchCase, from: Math.max(0, Math.min(from, Number.MAX_SAFE_INTEGER)), backwards, count });
+        },
+        active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
+        go: (row, c) => this.grid.select({ r: row, c }),
+        columnName: (c) => this.view?.columns[c]?.name ?? "",
+        replace: {
+          columns: () => (this.view?.columns ?? []).filter((c) => c.kind === "text" && !c.formula).map((c) => c.name),
+          preview: async (column, find, replacement) => {
+            const spec = { table, column, find, replacement };
+            const p = await this.rpc.call("replace_preview", { spec });
+            pending = { ...spec, revision: p.sample.revision };
+            return p.matches;
+          },
+          apply: async () => {
+            if (!pending) throw new Error("Preview the replacement first");
+            const { revision, ...rest } = pending;
+            const r = await this.rpc.call("replace_apply", { spec: { ...rest, table }, revision });
+            this.replaceRevision = r.undo_revision;
+            try { localStorage.setItem(key, String(r.undo_revision)); } catch { /* private mode */ }
+            pending = null;
+            return `Replaced ${formatCount(r.rows)} cells. Undo is available until the next change to the workbook.`;
+          },
+          undo: async () => {
+            let revision = this.replaceRevision;
+            if (!revision) { try { revision = Number(localStorage.getItem(key)) || 0; } catch { revision = 0; } }
+            if (!revision) throw new Error("No replacement to undo in this browser");
+            await this.rpc.call("replace_undo", { revision });
+            this.replaceRevision = 0;
+            try { localStorage.removeItem(key); } catch { /* private mode */ }
+            return "Replacement undone";
+          },
+        },
+      };
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------ menus
@@ -1892,6 +2010,21 @@ export class WorkbookScreen {
       this.reportConflict(e);
       if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
+  }
+
+  /** U.16: the value filter popup of a table column. */
+  private headerFilter(c: number, x: number, y: number): void {
+    const col = this.view?.columns[c];
+    if (!col || this.isSheet()) return;
+    if (x < 0) {
+      const r = this.gridWrap.getBoundingClientRect();
+      x = r.left + 60; y = r.top + 40;
+    }
+    filterPopup(col, this.spec, x, y + 4, {
+      values: (spec, column, search) => this.rpc.call("column_values", { spec, column, search, limit: 500 }) as Promise<ColumnValues>,
+      apply: (spec) => this.setSpec(spec),
+      condition: () => this.filterDialog(c),
+    }, { focus: () => this.grid.focus() });
   }
 
   private headerMenu(c: number, x: number, y: number): void {
@@ -1920,7 +2053,8 @@ export class WorkbookScreen {
       { label: "Then sort by this", disabled: !this.spec.sort.length || this.spec.sort.some((s) => s.column === col.name),
         action: () => this.setSpec({ ...this.spec, sort: [...this.spec.sort, { column: col.name, desc: false }] }) },
       "sep",
-      { label: "Filter…", action: () => this.filterDialog(c) },
+      { label: "Filter by values…", hint: "Alt+↓", action: () => this.headerFilter(c, x, y) },
+      { label: "Filter by condition…", action: () => this.filterDialog(c) },
       { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1,
         action: () => this.setSpec({ ...this.spec, hidden: [...this.spec.hidden, this.view!.columns[c].name] }) },
     ];
