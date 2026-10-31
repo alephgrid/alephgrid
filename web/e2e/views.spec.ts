@@ -47,7 +47,7 @@ test("save a view, reload, re-apply it, and snapshot it", async ({ page }) => {
   await expect(page.locator(".chips")).toContainText("1 hidden column");
 
   // Save it.
-  await page.getByRole("button", { name: "Views ▾" }).click();
+  await page.getByRole("toolbar", { name: "Workbook tools" }).getByRole("button", { name: "Views", exact: true }).click();
   await page.getByRole("menuitem", { name: "Save view as…" }).click();
   await page.getByRole("dialog", { name: "Save view" }).getByLabel("View name").fill("Positive");
   await page.getByRole("dialog", { name: "Save view" }).getByRole("button", { name: "Save view" }).click();
@@ -57,7 +57,7 @@ test("save a view, reload, re-apply it, and snapshot it", async ({ page }) => {
   await page.reload();
   await expect(page.locator(".grid-host")).toBeVisible();
   await expect(page.locator(".chip-view")).toHaveCount(0);
-  await page.getByRole("button", { name: "Views ▾" }).click();
+  await page.getByRole("toolbar", { name: "Workbook tools" }).getByRole("button", { name: "Views", exact: true }).click();
   await page.getByRole("menuitem", { name: "Positive" }).click();
   await expect(page.locator(".chip-view")).toHaveText("View: Positive");
   await expect(page.locator(".chips")).toContainText("amount");
@@ -69,7 +69,7 @@ test("save a view, reload, re-apply it, and snapshot it", async ({ page }) => {
   await expect(page.locator(".row-count")).toHaveText("2 rows");
 
   // Snapshot.
-  await page.getByRole("button", { name: "Views ▾" }).click();
+  await page.getByRole("toolbar", { name: "Workbook tools" }).getByRole("button", { name: "Views", exact: true }).click();
   await page.getByRole("menuitem", { name: "Save rows as a new table (snapshot)…" }).click();
   const snap = page.getByRole("dialog", { name: "Save rows as a new table" });
   await expect(snap).toContainText("snapshot");

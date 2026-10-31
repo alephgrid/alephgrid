@@ -679,3 +679,34 @@ async fn a_long_job_keeps_compute_open_and_idle_time_starts_when_it_ends() {
     ws.close().await;
     server.stop().await;
 }
+
+/// U.03: the workbook list says whether each workbook's compute is running or sleeping, from
+/// the controller's memory (no workbook is opened to answer).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workbook_list_shows_compute_ready_then_sleeping() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start_with(dir.path(), |c| c.idle_timeout = Duration::from_millis(400)).await;
+    let wb = server.create_workbook("listed").await;
+    let compute = |list: &serde_json::Value| list.as_array().unwrap().iter().find(|w| w["id"] == wb.as_str()).unwrap()["compute"].clone();
+
+    let mut ws = server.ws(&wb).await;
+    ws.ok("sheets", json!({})).await;
+    let (_, list) = server.get("/api/workbooks").await;
+    assert_eq!(compute(&list), "ready", "open and serving: {list}");
+
+    ws.close().await;
+    let mut asleep = false;
+    for _ in 0..100 {
+        let (_, list) = server.get("/api/workbooks").await;
+        if compute(&list) == "sleeping" {
+            asleep = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(asleep, "an idle workbook goes to sleep and the list says so");
+    // Listing did not wake it.
+    let (_, list) = server.get("/api/workbooks").await;
+    assert_eq!(compute(&list), "sleeping");
+    server.stop().await;
+}

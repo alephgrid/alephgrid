@@ -21,10 +21,18 @@ import { Grid, type Cell, type GridEdit, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
-import type { MaterializedTable, SavedQuery } from "./protocol";
+import type { MaterializedTable, SavedQuery, WorkbookFunction } from "./protocol";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
+import { brandMark, icon, type IconName } from "./icons";
+import { dockPanel } from "./dock";
+
+/** "1.2M rows" for the explorer. */
+function compactRows(n: number): string {
+  return `${new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)} rows`;
+}
+import { setTheme, THEME_CHOICES, themeButton, themePreference } from "./theme";
 
 const FILTER_OPS: { value: FilterOp; label: string; needsValue: boolean }[] = [
   { value: "eq", label: "is equal to", needsValue: true },
@@ -136,7 +144,25 @@ export class WorkbookScreen {
   private maxEditCells = 1_000_000;
 
   private titleEl = el("button", { class: "wb-title", title: "Rename workbook" });
+  /** The menu bar button whose menu is open, for submenus that reopen beside it. */
+  private menuAnchor: HTMLElement = document.body;
+  private themeBtn: HTMLButtonElement | null = null;
+  /** Separates the table or sheet tools from the rest; hidden when neither is shown. */
+  private groupSep: HTMLElement = document.createElement("span");
+  private exportBtn: HTMLButtonElement | null = null;
+  /** The workbook explorer (U.04): tables, sheets, saved queries and functions; collapsible. */
+  private explorerEl = el("nav", { class: "workbook-explorer", "aria-label": "Workbook explorer" });
+  private explorerBtn: HTMLButtonElement | null = null;
+  private explorerOpen = (() => {
+    try { const v = localStorage.getItem("alephgrid-explorer"); if (v) return v === "open"; } catch { /* default */ }
+    return false; // collapsed until the person opens it (UI direction v2)
+  })();
+  private functionsList: WorkbookFunction[] = [];
+  private functionsTimer = 0;
+  /** The column that holds the formula bar, grid and docked panels. */
+  private mainEl = el("div", { class: "workbook-main" });
   private statusDot = el("span", { class: "status-dot", title: "Connecting…" });
+  private statusText = el("span", { class: "status-text" }, "Connecting…");
   private chips = el("div", { class: "chips" });
   private cellRef = el("div", { class: "cell-ref" });
   private formulaInput = el("input", { class: "formula-input", spellcheck: false, "aria-label": "Cell value or formula" });
@@ -265,6 +291,7 @@ export class WorkbookScreen {
     this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
+    this.rpc.onSaveState = () => this.renderStatus();
     this.rpc.onStatus = (s) => {
       this.setStatus(this.rpc.isPaused && s !== "open" ? "paused" : s);
       if (s === "open") this.failureEl.hidden = true;
@@ -287,9 +314,38 @@ export class WorkbookScreen {
     return this.active?.kind === "sheet";
   }
 
+  /** The top bar's theme button shows the current choice after the View menu changes it. */
+  private syncThemeButton(): void {
+    const next = themeButton();
+    this.themeBtn?.replaceWith(next);
+    this.themeBtn = next;
+  }
+
+  private connection: "connecting" | "open" | "closed" | "paused" = "connecting";
+
   private setStatus(s: "connecting" | "open" | "closed" | "paused"): void {
+    this.connection = s;
     this.statusDot.className = `status-dot status-${s}`;
     this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused — resumes when you continue" : "Disconnected — retrying";
+    this.renderStatus();
+  }
+
+  /** Connection and save state in words (U.11): "Saved" only once the server acknowledged every
+   *  change this page sent, which it does after commit. */
+  private renderStatus(): void {
+    const s = this.connection;
+    const save = this.rpc.saveState;
+    const [text, tone, title] =
+      save === "failed" ? ["Not saved", "failed", "A change was lost while the connection was down. Check the last edits and make them again."]
+      : save === "unsaved" ? ["Unsaved changes", "unsaved", "Changes are kept and sent again when the connection is back."]
+      : s === "paused" ? ["Paused", "paused", this.statusDot.title]
+      : s === "connecting" ? ["Connecting…", "connecting", this.statusDot.title]
+      : s === "closed" ? ["Reconnecting…", "closed", this.statusDot.title]
+      : save === "saving" ? ["Saving…", "saving", "Sending changes to the server."]
+      : ["Saved", "saved", "Every change is saved on the server."];
+    this.statusText.textContent = text;
+    this.statusText.title = title;
+    this.statusText.dataset.state = tone;
   }
 
   /**
@@ -470,51 +526,177 @@ export class WorkbookScreen {
         if (files) this.importFiles([...files]);
         (e.target as HTMLInputElement).value = "";
       } });
+    // Every command once; the menus, the toolbar and the top bar share them.
+    const act = {
+      formatTable: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } },
+      findReplace: async () => { if (this.active?.kind !== "table") return; this.closeReplace?.(); try { this.closeReplace = await replaceDialog(this.rpc, this.active.name, this.meta.id); } catch (e) { toast(String(e), "error"); } },
+      addColumn: () => this.addColumnDialog(),
+      filter: () => this.filterDialog(this.grid.active.c),
+      names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } },
+      goTo: () => void this.goTo(),
+      importFile: () => this.fileInput.click(),
+      analyze: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
+        async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); },
+      dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
+      dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
+      sql: () => this.sqlPanel(),
+      functions: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
+      formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
+      commands: () => { commandPalette(this.commands); },
+      shortcuts: () => { shortcutHelp(this.commands); },
+      history: () => historyDialog(this.rpc, () => void this.resync()),
+      compute: () => computeDialog(this.meta.id),
+    };
+    const tool = (name: IconName, label: string, run: (e: MouseEvent) => void, o: { text?: string; title?: string; menu?: boolean } = {}) =>
+      el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label,
+        "aria-haspopup": o.menu ? "menu" : false, onclick: run },
+        icon(name), o.text ? el("span", {}, o.text) : null, o.menu ? icon("chevron", 12) : null);
+    const sep = () => el("span", { class: "tool-sep", "aria-hidden": "true" });
+    const anchor = (e: MouseEvent) => e.currentTarget as HTMLElement;
+    this.groupSep = sep();
+
     this.tableButtons = [
-      el("button", { class: "btn", onclick: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } } }, "Format table"),
-      el("button", { class: "btn", onclick: async () => { if (this.active?.kind !== "table") return; this.closeReplace?.(); try { this.closeReplace = await replaceDialog(this.rpc, this.active.name, this.meta.id); } catch (e) { toast(String(e), "error"); } } }, "Find / replace"),
-      el("button", { class: "btn", onclick: (e: MouseEvent) => this.viewsMenu(e) }, "Views ▾"),
-      el("button", { class: "btn", onclick: () => this.addColumnDialog() }, "Add column"),
-      el("button", { class: "btn", onclick: () => this.filterDialog(this.grid.active.c) }, "Filter"),
+      tool("layers", "Views", (e) => this.viewsMenu(anchor(e)), { text: "Views", title: "Saved views of this table", menu: true }),
+      tool("filter", "Filter", act.filter, { text: "Filter", title: "Filter rows of the whole table" }),
+      tool("columnPlus", "Add column", act.addColumn, { text: "Add column", title: "Add a column or formula column" }),
+      tool("brush", "Format table", act.formatTable, { title: "Format table: number formats, hidden and frozen columns, rules" }),
+      tool("search", "Find / replace", act.findReplace, { title: "Find / replace across the table" }),
     ];
     this.sheetButtons = [
-      el("button", { class: "btn", title: "Undo (⌘Z)", "aria-label": "Undo", onclick: () => this.undo(false) }, "↶"),
-      el("button", { class: "btn", title: "Redo (⇧⌘Z)", "aria-label": "Redo", onclick: () => this.undo(true) }, "↷"),
-      el("button", { class: "btn", title: "Named ranges", onclick: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } } }, "Names"),
-      el("button", { class: "btn", title: "Go to a cell, range or name (⌘G)", onclick: () => void this.goTo() }, "Go to"),
+      tool("undo", "Undo", () => this.undo(false), { title: "Undo (⌘Z)" }),
+      tool("redo", "Redo", () => this.undo(true), { title: "Redo (⇧⌘Z)" }),
+      sep(),
+      tool("tag", "Names", act.names, { title: "Named ranges" }),
+      tool("target", "Go to", act.goTo, { title: "Go to a cell, range or name (⌘G)" }),
     ];
+
+    const sheetOnly = () => !this.isSheet();
+    const tableOnly = () => this.active?.kind !== "table";
+    const menus: [string, () => MenuItem[]][] = [
+      ["File", () => [
+        { label: "New sheet", action: () => this.createSheet() },
+        { label: "Import file…", hint: "CSV · Parquet · JSON · XLSX", action: act.importFile },
+        "sep",
+        ...this.exportItems().map((i): MenuItem => i === "sep" ? i : { ...i, label: `Export ${i.label}` }),
+        ...(this.exportItems().length ? ["sep" as const] : []),
+        { label: "Rename workbook…", action: () => this.renameWorkbook() },
+        { label: "All workbooks", action: () => this.goHome() },
+      ]],
+      ["Edit", () => [
+        { label: "Undo", hint: "⌘Z", disabled: sheetOnly(), action: () => this.undo(false) },
+        { label: "Redo", hint: "⇧⌘Z", disabled: sheetOnly(), action: () => this.undo(true) },
+        "sep",
+        { label: "Paste special…", hint: "⇧⌘V", disabled: sheetOnly(), action: () => this.pasteSpecialDialog() },
+        { label: "Go to…", hint: "⌘G", disabled: sheetOnly(), action: act.goTo },
+        { label: "Find / replace…", disabled: tableOnly(), action: act.findReplace },
+      ]],
+      ["View", () => [
+        { label: `${this.explorerOpen ? "✓ " : ""}Explorer`, action: () => this.toggleExplorer() },
+        { label: "Saved views…", disabled: tableOnly(), action: () => this.viewsMenu(this.menuAnchor) },
+        "sep",
+        ...THEME_CHOICES.map((t): MenuItem => ({ label: `${themePreference() === t.value ? "✓ " : ""}${t.label}`, action: () => { setTheme(t.value); this.syncThemeButton(); } })),
+      ]],
+      ["Insert", () => [
+        { label: "Sheet", hint: "Excel formulas", action: () => this.createSheet() },
+        { label: "Column…", disabled: tableOnly(), action: act.addColumn },
+        { label: "Named range…", disabled: sheetOnly(), action: act.names },
+        { label: "Table from SQL query…", disabled: !this.allowSql, action: act.sql },
+        "sep",
+        { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
+      ]],
+      ["Format", () => [
+        { label: "Format table…", hint: tableOnly() ? "Tables" : undefined, disabled: tableOnly(), action: act.formatTable },
+      ]],
+      ["Data", () => [
+        { label: "Filter…", disabled: tableOnly(), action: act.filter },
+        { label: "Analyze…", hint: "Pivot · chart · join", action: act.analyze },
+        { label: "Dashboards…", action: act.dashboards },
+        { label: "Data tools…", disabled: tableOnly(), action: act.dataTools },
+      ]],
+      ["Tools", () => [
+        { label: "SQL workspace", disabled: !this.allowSql, action: act.sql },
+        { label: "Functions…", action: act.functions },
+        { label: "Change history…", action: act.history },
+        { label: "Compute and size…", action: act.compute },
+        "sep",
+        { label: "Command palette", hint: "⌘K", action: act.commands },
+      ]],
+      ["Help", () => [
+        { label: "Formula help", hint: "⇧F3", action: act.formulaHelp },
+        { label: "Keyboard shortcuts", hint: "⌘/", action: act.shortcuts },
+      ]],
+    ];
+    // A menu bar of menu buttons: click or ArrowDown opens a menu; ArrowLeft/Right move between
+    // the buttons, or between open menus (U.12).
+    const menuButtons: HTMLButtonElement[] = [];
+    const openMenuAt = (i: number) => {
+      const b = menuButtons[(i + menuButtons.length) % menuButtons.length];
+      const [label, items] = menus[menuButtons.indexOf(b)];
+      this.menuAnchor = b;
+      b.focus({ preventScroll: true });
+      const r = b.getBoundingClientRect();
+      b.setAttribute("aria-expanded", "true");
+      showMenu(items(), r.left, r.bottom + 2, { label,
+        onArrow: (d) => openMenuAt(menuButtons.indexOf(b) + d),
+        onClose: () => b.setAttribute("aria-expanded", "false") });
+    };
+    const menubar = el("nav", { class: "menubar", "aria-label": "Workbook menus" },
+      ...menus.map(([label], i) => {
+        const b = el("button", { class: "menubar-item", "aria-haspopup": "menu", "aria-expanded": "false" }, label);
+        b.addEventListener("click", () => openMenuAt(i));
+        b.addEventListener("keydown", (e) => {
+          if (e.key === "ArrowDown") { e.preventDefault(); openMenuAt(i); }
+          else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+            e.preventDefault();
+            menuButtons[(i + (e.key === "ArrowRight" ? 1 : -1) + menuButtons.length) % menuButtons.length].focus();
+          }
+        });
+        menuButtons.push(b);
+        return b;
+      }));
+    this.themeBtn = themeButton();
+
     const root = el("div", { class: "workbook" },
-      el("header", { class: "toolbar" },
-        el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks" }, el("span", { class: "logo" }), "Alephgrid"),
-        this.titleEl,
-        this.statusDot,
+      el("header", { class: "appbar" },
+        el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks", "aria-label": "Alephgrid — all workbooks" }, brandMark(24)),
+        el("div", { class: "appbar-title" },
+          el("div", { class: "appbar-name" }, this.titleEl, el("span", { class: "status" }, this.statusDot, this.statusText)),
+          menubar),
         el("div", { class: "spacer" }),
+        el("button", { class: "command-search", title: "Search all commands (⌘K)", "aria-keyshortcuts": "Meta+K Control+K", onclick: act.commands },
+          icon("search", 14), el("span", { class: "command-search-label" }, "Search commands"), el("kbd", { "aria-hidden": "true" }, "⌘K")),
+        tool("clock", "History", act.history, { title: "Everyone's recent changes; undo table changes" }),
+        tool("cpu", "Compute", act.compute, { title: "This workbook's compute: state, size, idle shutdown" }),
+        this.themeBtn,
+      ),
+      el("div", { class: "toolbar", role: "toolbar", "aria-label": "Workbook tools" },
+        this.explorerBtn = tool("sidebar", "Explorer", () => this.toggleExplorer(), { title: "Show or hide the workbook explorer" }),
+        sep(),
         ...this.sheetButtons,
-        el("button", { class: "btn", onclick: () => this.fileInput.click() }, "Import"),
         ...this.tableButtons,
-        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
-          async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); } }, "Analyze"),
-        el("button", { class: "btn", onclick: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); } }, "Dashboards"),
-        el("button", { class: "btn", onclick: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); } }, "Data tools"),
-        el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
-        el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
-        el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
-        el("button", { class: "btn", title: "Search all commands (⌘K)", onclick: () => { commandPalette(this.commands); } }, "Commands"),
-        el("button", { class: "btn", title: "Everyone's recent changes; undo table changes", onclick: () => historyDialog(this.rpc, () => void this.resync()) }, "History"),
-        el("button", { class: "btn", title: "This workbook's compute: state, size, idle shutdown", onclick: () => computeDialog(this.meta.id) }, "Compute"),
-        el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
+        this.groupSep,
+        tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
+        sep(),
+        tool("chart", "Analyze", act.analyze, { text: "Analyze", title: "Summaries, pivots, charts and joins without SQL" }),
+        tool("database", "SQL", act.sql, { text: "SQL", title: "SQL workspace" }),
+        tool("fx", "Functions", act.functions, { text: "Functions", title: "Define, test and publish reusable functions" }),
+        el("div", { class: "spacer" }),
+        this.exportBtn = tool("download", "Export", (e) => this.exportMenu(anchor(e)), { text: "Export", menu: true, title: "Download this table or the sheets" }),
         this.fileInput,
       ),
       this.chips,
       this.snapshotEl,
-      el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput, this.referenceLegend),
-      this.formulaProblem,
-      this.cellNote,
-      this.staleNote,
-      this.gridWrap,
+      el("div", { class: "workbook-body" },
+        this.explorerEl,
+        this.withChildren(this.mainEl,
+          el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx", "aria-hidden": "true" }, icon("fx", 15)), this.formulaInput, this.referenceLegend),
+          this.formulaProblem,
+          this.cellNote,
+          this.staleNote,
+          this.gridWrap)),
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
-          onclick: (e: MouseEvent) => this.newItemMenu(e) }, "+"),
+          onclick: (e: MouseEvent) => this.newItemMenu(e) }, icon("plus", 15)),
         this.tabsEl,
         el("div", { class: "spacer" }),
         this.statsEl,
@@ -531,7 +713,60 @@ export class WorkbookScreen {
       if (files?.length) this.importFiles([...files]);
     });
     this.updateToolbar();
+    this.applyExplorer();
     return root;
+  }
+
+  private withChildren<T extends HTMLElement>(parent: T, ...children: HTMLElement[]): T {
+    parent.append(...children);
+    return parent;
+  }
+
+  private toggleExplorer(): void {
+    this.explorerOpen = !this.explorerOpen;
+    try { localStorage.setItem("alephgrid-explorer", this.explorerOpen ? "open" : "closed"); } catch { /* this page only */ }
+    this.applyExplorer();
+  }
+
+  private applyExplorer(): void {
+    this.explorerEl.hidden = !this.explorerOpen;
+    this.explorerBtn?.setAttribute("aria-pressed", this.explorerOpen ? "true" : "false");
+    this.explorerBtn?.setAttribute("aria-expanded", this.explorerOpen ? "true" : "false");
+    if (this.explorerOpen) this.renderExplorer();
+  }
+
+  /** Refresh the explorer's function list a moment after changes (no event names functions). */
+  private refreshFunctionsSoon(): void {
+    clearTimeout(this.functionsTimer);
+    this.functionsTimer = window.setTimeout(async () => {
+      try { this.functionsList = await this.rpc.call("functions", {}); } catch { return; }
+      if (!this.disposed) this.renderExplorer();
+    }, 400);
+  }
+
+  private renderExplorer(): void {
+    if (!this.explorerOpen) return;
+    const a = this.active;
+    const item = (glyph: IconName, name: string, detail: string, current: boolean, open: () => void, title?: string) =>
+      el("li", {}, el("button", { class: `explorer-item${current ? " current" : ""}`, "aria-current": current ? "true" : false, title: title ?? name, onclick: open },
+        icon(glyph, 15), el("span", { class: "explorer-name" }, name), el("span", { class: "explorer-detail" }, detail)));
+    const section = (title: string, items: HTMLElement[], empty: string, action?: [string, () => void]) => {
+      const id = `explorer-${title.toLowerCase().replace(/\W+/g, "-")}`;
+      return el("section", { class: "explorer-section", "aria-labelledby": id },
+        el("h3", { id }, el("span", {}, title), el("span", { class: "explorer-count" }, String(items.length)),
+          action ? el("button", { class: "icon-btn small", "aria-label": action[0], title: action[0], onclick: action[1] }, icon("plus", 13)) : null),
+        items.length ? el("ul", {}, ...items) : el("p", { class: "explorer-empty" }, empty));
+    };
+    this.explorerEl.replaceChildren(...[
+      section("Tables", this.tables.map((t) => item("table", t.name, compactRows(t.row_count), a?.kind === "table" && a.name === t.name, () => void this.openTable(t.name),
+        `${t.name} · ${formatCount(t.row_count)} rows · ${t.column_count} columns`)), "Import a file to add a table.", ["Add a table from a file", () => this.fileInput.click()]),
+      section("Sheets", this.sheets.map((sh) => item("sheet", sh.name, "", a?.kind === "sheet" && a.index === sh.index,
+        () => this.pickingFormula() ? this.showSheetForPicking(sh.index) : void this.openSheet(sh.index))), "No sheets yet.", ["Add a sheet", () => void this.createSheet()]),
+      this.allowSql ? section("Queries", this.savedQueries.map((q) => item("query", q.name, `v${q.version}`, false, () => this.sqlPanel(q.id),
+        `${q.name} · ${q.kind} query, version ${q.version}`)), "Saved SQL queries appear here.", ["Write a query", () => this.sqlPanel()]) : null,
+      section("Functions", this.functionsList.map((f) => item("fx", f.name, `v${f.pinned}`, false, () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
+        `${f.name} · version ${f.pinned} in use`)), "Reusable functions appear here.", ["Define a function", () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); }]),
+    ].filter((x): x is HTMLElement => !!x));
   }
 
   private setKind(kind: "table" | "sheet"): void {
@@ -588,9 +823,9 @@ export class WorkbookScreen {
     await this.setSpec(v.spec);
   }
 
-  private async viewsMenu(e: MouseEvent): Promise<void> {
+  private async viewsMenu(anchor: HTMLElement): Promise<void> {
     if (this.active?.kind !== "table") return;
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const r = anchor.getBoundingClientRect();
     await this.savedViewsLoading;
     const current = this.currentSaved;
     const items: MenuItem[] = [
@@ -684,6 +919,8 @@ export class WorkbookScreen {
       b.disabled = !this.view;
     }
     for (const b of this.sheetButtons) b.hidden = !sheet;
+    this.groupSep.hidden = !this.active;
+    if (this.exportBtn) this.exportBtn.disabled = !this.active;
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
 
@@ -724,6 +961,7 @@ export class WorkbookScreen {
     ]);
     this.renderTabs();
     if (this.allowSql) this.loadMaterialized();
+    this.refreshFunctionsSoon();
   }
 
   private renderTabs(): void {
@@ -735,7 +973,7 @@ export class WorkbookScreen {
         title: `Table · ${formatCount(t.row_count)} rows · ${t.column_count} columns${this.snapshotNote(t.name)}`,
         onclick: () => this.openTable(t.name),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.tableTabMenu(t, e.clientX, e.clientY); },
-      }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "▦"), t.name,
+      }, el("span", { class: "tab-icon" }, icon("table", 13)), t.name,
       this.materialized.some((m) => m.table === t.name && m.stale) ? el("span", { class: "tab-stale", "aria-hidden": "true" }, " •") : null);
     });
     const sheetTabs = this.sheets.map((s) => {
@@ -748,7 +986,7 @@ export class WorkbookScreen {
         onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
         onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
-      }, el("span", { class: "tab-icon", "aria-hidden": "true" }, "ƒ"), s.name);
+      }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name);
     });
     const tabsHadFocus = this.tabsEl.contains(document.activeElement);
     this.tabsEl.replaceChildren(...tableTabs, ...sheetTabs);
@@ -756,6 +994,7 @@ export class WorkbookScreen {
     const all = [...tableTabs, ...sheetTabs];
     all.forEach((t) => (t.tabIndex = t.classList.contains("active") || (!all.some((x) => x.classList.contains("active")) && t === all[0]) ? 0 : -1));
     if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
+    this.renderExplorer();
   }
 
   private snapshotNote(table: string): string {
@@ -1813,13 +2052,9 @@ export class WorkbookScreen {
     ], r.left, r.top - 260);
   }
 
-  private exportMenu(e: MouseEvent): void {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    if (this.isSheet()) {
-      showMenu([{ label: "Excel workbook (.xlsx), all sheets", action: () => this.downloadXlsx() }], r.left, r.bottom + 4);
-      return;
-    }
-    if (!this.view) return;
+  private exportItems(): MenuItem[] {
+    if (this.isSheet()) return [{ label: "Excel workbook (.xlsx), all sheets", action: () => this.downloadXlsx() }];
+    if (!this.view) return [];
     const filtered = this.spec.sort.length || this.spec.filters.length ? " (current view)" : "";
     const items: MenuItem[] = [
       { label: `CSV${filtered}`, action: () => this.download(this.spec, "csv") },
@@ -1827,7 +2062,14 @@ export class WorkbookScreen {
       { label: `JSON lines${filtered}`, action: () => this.download(this.spec, "json") },
     ];
     if (this.sheets.length) items.push("sep", { label: "Sheets as .xlsx", action: () => this.downloadXlsx() });
-    showMenu(items, r.left, r.bottom + 4);
+    return items;
+  }
+
+  private exportMenu(anchor: HTMLElement): void {
+    const items = this.exportItems();
+    if (!items.length) return;
+    const r = anchor.getBoundingClientRect();
+    showMenu(items, Math.min(r.left, innerWidth - 260), r.bottom + 4);
   }
 
   private download(spec: ViewSpec, format: string): void {
@@ -1977,9 +2219,12 @@ export class WorkbookScreen {
     }
   }
 
-  private sqlPanel(): void {
+  private sqlPanel(queryId?: string): void {
     if (!this.allowSql) { toast("SQL is disabled on this server", "error"); return; }
-    if (this.sql) return;
+    if (this.sql) {
+      if (queryId) void this.sql.openQuery(queryId);
+      return;
+    }
     const tableName = this.active?.kind === "table" ? this.active.name : this.tables[0]?.name;
     const t = tableName ? quoteIdent(tableName) : "my_table";
     const firstCol = this.active?.kind === "table" ? this.view?.columns.find((c) => c.kind === "text")?.name : undefined;
@@ -2007,9 +2252,11 @@ export class WorkbookScreen {
         a.remove();
       },
       closed: () => { if (this.sql === ws) this.sql = null; },
+      dock: (panel, onClose) => dockPanel(this.mainEl, panel, "SQL", onClose),
     });
     this.sql = ws;
     ws.open();
+    if (queryId) void ws.openQuery(queryId);
   }
 
   // ------------------------------------------------------ materialized tables
@@ -2149,7 +2396,8 @@ export class WorkbookScreen {
         if (this.materialized.length) this.reloadMaterializedSoon();
         break;
       case "queries_changed":
-        if (this.materialized.length) this.loadMaterialized();
+        // Snapshots and the explorer's saved queries.
+        if (this.allowSql) this.loadMaterialized();
         break;
       case "table_changed":
         if (a?.kind === "table" && e.table === a.name && this.view) {

@@ -115,7 +115,7 @@ test("a view sorted by a lookup column shows stale stored results while they are
   await ws.call("save_view", { name: "by customer", spec: { table: "orders", sort: [{ column: "who", desc: false }], filters: [], hidden: [] }, widths: {} });
   await page.goto(`${server.url}/w/${wb}`);
   await page.getByRole("tab", { name: /orders/ }).click();
-  await page.getByRole("button", { name: "Views ▾" }).click();
+  await page.getByRole("button", { name: "Views", exact: true }).click();
   await page.getByRole("menuitem", { name: /by customer/ }).click();
   await expect.poll(() => shown(page, 0, 2), { timeout: 60_000 }).toContain("c000000");
   const note = page.locator(".stale-note");

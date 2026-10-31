@@ -235,6 +235,19 @@ pub enum AllocationState {
     Failed,
 }
 
+/// A workbook's compute as the workbook list shows it (U.03): read from the controller's
+/// memory, never by opening the workbook. Sleeping is the normal state of a closed workbook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeState {
+    Sleeping,
+    /// Waiting in line for host capacity.
+    Queued,
+    Starting,
+    Ready,
+    Stopping,
+}
+
 impl AllocationState {
     pub fn is_live(self) -> bool {
         !matches!(self, AllocationState::Stopped | AllocationState::Failed)

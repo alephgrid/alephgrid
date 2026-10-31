@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 import { displayValue, cellColor } from "../src/presentation";
 import type { Column, DisplayFormat } from "../src/protocol";
 const server = new Server();
@@ -153,7 +153,7 @@ test("F.11: a report with totals, a line chart, drill-down and a sliced dashboar
   await expect(d).toBeHidden();
   await expect(page.locator(".footer")).toContainText("2 rows");
   // A dashboard sliced to East.
-  await page.getByRole("button", { name: "Dashboards", exact: true }).click();
+  await menuCommand(page, "Data", "Dashboards…");
   const b = page.getByRole("dialog", { name: "Dashboards" });
   await b.getByRole("listbox", { name: "Analyses on the dashboard" }).selectOption({ label: "Revenue by region" });
   await b.getByRole("textbox", { name: "Slicer table" }).fill("orders");

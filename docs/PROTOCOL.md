@@ -232,7 +232,7 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/config` | `{version, auth_required, allow_sql, sheet_copy_rows, max_message_bytes, max_upload_bytes, max_edit_cells}` (no auth) |
-| GET/POST | `/api/workbooks` | list (with `size_bytes`, `summary`, `starred`, `workspace`, `opened_at`), or create `{name, workspace?}` |
+| GET/POST | `/api/workbooks` | list (with `size_bytes`, `summary`, `starred`, `workspace`, `opened_at`, and `compute`: `sleeping`, `queued`, `starting`, `ready` or `stopping`, read from memory without opening the workbook), or create `{name, workspace?}` |
 | GET/PATCH/DELETE | `/api/workbooks/{id}` | info with tables and sheets; patch `{name?, workspace?, starred?}` (`workspace: ""` = unfiled); delete moves it to the trash |
 | GET/DELETE | `/api/trash` | list trashed workbooks (with `deleted_at`), or empty the trash permanently |
 | DELETE | `/api/trash/{id}` | delete one trashed workbook permanently |

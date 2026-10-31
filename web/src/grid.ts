@@ -159,10 +159,10 @@ export class Grid {
     this.observer = new ResizeObserver(() => this.resize());
     this.observer.observe(this.host);
     const signal = this.abort.signal;
-    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-      this.colors = palette();
-      this.invalidate();
-    }, { signal });
+    // The theme can change by the system or by the user's choice (theme.ts).
+    const repaint = () => { this.colors = palette(); this.invalidate(); };
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", repaint, { signal });
+    window.addEventListener("alephgrid-theme", repaint, { signal });
     this.scroller.addEventListener("scroll", () => this.onScroll(), { signal });
     this.scroller.addEventListener("wheel", (e) => this.onWheel(e), { passive: false, signal });
     this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e), { signal });

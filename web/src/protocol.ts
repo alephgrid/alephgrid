@@ -598,7 +598,11 @@ export type WorkbookListing = { size_bytes: number,
 /**
  * The asking principal's role in the workbook's space (workbook lists).
  */
-role?: SpaceRole, id: string, name: string, created_at: number, 
+role?: SpaceRole, 
+/**
+ * Its compute right now (sleeping when closed; normal, not a failure).
+ */
+compute: ComputeState, id: string, name: string, created_at: number, 
 /**
  * The space that owns the workbook; its roles decide who may use it.
  */
@@ -757,6 +761,8 @@ export type SpaceProfiles = {
 profiles: Array<string>, };
 
 export type AllocationState = "requested" | "starting" | "running" | "ready" | "draining" | "stopped" | "failed";
+
+export type ComputeState = "sleeping" | "queued" | "starting" | "ready" | "stopping";
 
 export type FailureKind = "incompatible" | "capacity" | "quota" | "owned_elsewhere" | "startup_failed" | "cancelled" | "lost";
 

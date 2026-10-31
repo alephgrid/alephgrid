@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 
 const server = new Server();
 test.beforeAll(async () => server.start());
@@ -11,7 +11,7 @@ test("F.12: a list rule becomes a dropdown and refuses other values; dedupe make
   await ws.call("add_formula_column", { table: "people", name: "badge", formula: "=UPPER([@tier])", language: "sheet" });
   await page.goto(`${server.url}/w/${wb}`);
   await expect(page.getByRole("grid", { name: "Table people" })).toBeVisible();
-  await page.getByRole("button", { name: "Data tools", exact: true }).click();
+  await menuCommand(page, "Data", "Data tools…");
   const d = page.getByRole("dialog", { name: /Data tools/ });
   await d.getByRole("combobox", { name: "Column", exact: true }).selectOption("tier");
   await d.getByRole("textbox", { name: "Rule values" }).fill("gold\nsilver");
@@ -54,7 +54,7 @@ test("F.13: an XLSX download first says what it leaves out", async ({ page }) =>
   await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "=SUM(orders[amount])" }] });
   await page.goto(`${server.url}/w/${wb}`);
   await page.getByRole("tab", { name: /Report/ }).click();
-  await page.getByRole("button", { name: "Export ▾" }).click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
   await page.getByRole("menuitem", { name: /xlsx/i }).first().click();
   const d = page.locator(".dialog", { hasText: "XLSX compatibility" });
   await expect(d).toContainText("Report!A1: the table formula =SUM(orders[amount]) is exported as its value \"100\"");

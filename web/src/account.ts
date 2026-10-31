@@ -5,6 +5,7 @@
 import { api, HttpError, type InviteInfo, type Me, type SpaceListing } from "./api";
 import type { AuditEvent, Invite, LibraryKind, OrgMember, OrgRole, SpaceMember, SpaceRole, Token } from "./types";
 import { confirmDialog, el, formDialog, openModal, showMenu, toast } from "./ui";
+import { brandMark } from "./icons";
 
 type Navigate = (path: string) => void;
 type Config = Awaited<ReturnType<typeof api.config>>;
@@ -30,7 +31,7 @@ export function loginUrl(): string {
 function card(title: string, ...body: (Node | null)[]): HTMLElement {
   return el("main", { class: "auth-page" },
     el("div", { class: "auth-card" },
-      el("div", { class: "brand big" }, el("span", { class: "logo" }), "Alephgrid"),
+      el("div", { class: "brand big" }, brandMark(26), el("span", { class: "wordmark" }, "alephgrid")),
       el("h1", {}, title),
       ...body));
 }

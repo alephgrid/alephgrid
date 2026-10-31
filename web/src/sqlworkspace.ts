@@ -45,6 +45,9 @@ export interface SqlHost {
   download(href: string): void;
   /** The workspace was closed. */
   closed(): void;
+  /** Show the workspace docked beside the grid instead of as a modal dialog (U.05). The host
+   *  calls `onClose` when the person closes the dock; `close` removes it. */
+  dock?(panel: HTMLElement, onClose: () => void): { close: () => void };
 }
 
 type ParamState = { type: ParamType; value: string; isNull: boolean };
@@ -157,7 +160,8 @@ export class SqlWorkspace {
     this.editor.addEventListener("click", () => this.hideSuggestions());
     this.tree.addEventListener("keydown", (e) => this.treeKey(e));
     this.results.replaceChildren(el("p", { class: "muted" }, "Run a query to preview its first rows. Export writes every row to a file."));
-    const dialog = el("div", { class: "dialog dialog-wide sql-workspace" },
+    const docked = !!this.host.dock;
+    const dialog = el("div", { class: docked ? "sql-workspace sql-docked" : "dialog dialog-wide sql-workspace" },
       el("div", { class: "sql-head" },
         el("h2", {}, "SQL"),
         el("p", { class: "sql-hint" },
@@ -190,7 +194,7 @@ export class SqlWorkspace {
             el("button", { class: "btn", onclick: () => this.exportResult() }, "Export…"),
             el("button", { class: "btn", onclick: () => this.toSheet(), title: `Up to ${formatCount(this.host.sheetCopyRows)} rows` }, "Open in sheet"),
             el("button", { class: "btn", onclick: () => this.toTable() }, "Save as table"),
-            el("button", { class: "btn", onclick: () => this.close() }, "Close"),
+            docked ? null : el("button", { class: "btn", onclick: () => this.close() }, "Close"),
           ),
           this.liveEl,
           this.noticeEl,
@@ -198,7 +202,7 @@ export class SqlWorkspace {
         ),
       ),
     );
-    this.modal = openModal(dialog, () => this.close());
+    this.modal = this.host.dock ? this.host.dock(dialog, () => this.close()) : openModal(dialog, () => this.close());
     this.syncParams();
     this.updateLoaded();
     this.editor.focus();
@@ -630,6 +634,13 @@ export class SqlWorkspace {
   }
 
   // ---------------------------------------------------------- saved queries
+
+  /** Open saved query `id` (from the workbook explorer), once the list has loaded. */
+  async openQuery(id: string): Promise<void> {
+    if (!this.saved.some((q) => q.id === id)) await this.loadSaved();
+    const q = this.saved.find((x) => x.id === id);
+    if (q) this.openSaved(q);
+  }
 
   private async loadSaved(): Promise<void> {
     try {

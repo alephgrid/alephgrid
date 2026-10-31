@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 
 const server = new Server();
 test.beforeAll(async () => server.start());
@@ -59,7 +59,7 @@ test("F.15: the analyst workflow runs end to end without SQL", async ({ page }) 
   await expect(d.getByRole("status")).toContainText("Analysis saved");
   await d.getByRole("button", { name: "Close", exact: true }).click();
   // Filtered: a dashboard sliced to East.
-  await page.getByRole("button", { name: "Dashboards", exact: true }).click();
+  await menuCommand(page, "Data", "Dashboards…");
   const b = page.getByRole("dialog", { name: "Dashboards" });
   await b.getByRole("listbox", { name: "Analyses on the dashboard" }).selectOption({ label: "Revenue by region" });
   await b.getByRole("textbox", { name: "Slicer table" }).fill("orders");
@@ -89,7 +89,7 @@ test("F.15: the analyst workflow runs end to end without SQL", async ({ page }) 
   await page.getByRole("tab", { name: /Sheet/ }).click();
   await expect.poll(() => shown(page, 0, 0)).toContain("125");
   // Export: the download first says what XLSX cannot keep.
-  await page.getByRole("button", { name: "Export ▾" }).click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
   await page.getByRole("menuitem", { name: /xlsx/i }).first().click();
   const notes = page.locator(".dialog", { hasText: "XLSX compatibility" });
   await expect(notes).toContainText('the table formula =SUMIFS(orders[amount],orders[region],"West") is exported as its value "125"');

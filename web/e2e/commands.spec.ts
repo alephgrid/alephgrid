@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { CommandRegistry, matches } from "../src/commands";
 import { workbookCommands, type WorkbookActions } from "../src/workbookcommands";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 
 const server = new Server();
 test.beforeAll(async () => server.start());
@@ -230,7 +230,7 @@ test("command palette, shortcut help, table context and other keyboard layouts",
 test("a dialog keeps Escape and Tab when focus has left it, as after a click in Safari", async ({ page }) => {
   const wb = await server.createWorkbook("Dialog focus");
   await page.goto(`${server.url}/w/${wb}`);
-  await page.getByRole("button", { name: "Formula help", exact: true }).click();
+  await menuCommand(page, "Help", "Formula help");
   const dialog = page.getByRole("dialog", { name: "Formula help" });
   await expect(dialog).toBeVisible();
   // Safari leaves focus on the page body after a click on a button.
