@@ -103,7 +103,7 @@ fn lookups_give_one_result_per_row_and_follow_source_edits() {
     assert_eq!(rendered(&table_block(&mut t.wb, "orders")), expect("Ann"), "duplicates give the first or last match, one row per order");
     // Editing the source changes the lookups that read it, and nothing else.
     let v = t.wb.open_view(spec("customers")).unwrap();
-    t.wb.edit(v.view_id, &[CellEdit { row: 0, column: "name".into(), value: Some("Anna".into()), record: None }]).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 0, column: "name".into(), value: Some("Anna".into()), record: None, base: None }]).unwrap();
     assert_eq!(rendered(&table_block(&mut t.wb, "orders")), expect("Anna"));
     t.reopen();
     assert_eq!(rendered(&table_block(&mut t.wb, "orders")), expect("Anna"));
@@ -204,7 +204,7 @@ fn lookup_read_timings() {
     time("first page of the filtered view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
     let cv = t.wb.open_view(spec("customers")).unwrap().view_id;
     time("edit one customer name", &mut || {
-        t.wb.edit(cv, &[CellEdit { row: 0, column: "name".into(), value: Some("renamed".into()), record: None }]).unwrap();
+        t.wb.edit(cv, &[CellEdit { row: 0, column: "name".into(), value: Some("renamed".into()), record: None, base: None }]).unwrap();
     });
     t.wb.shared().results_queued("orders");
     time("sort while results are stale (last results)", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
@@ -253,13 +253,13 @@ fn cached_lookups_are_rebuilt_only_when_their_source_changes() {
     assert_eq!(cached(&t.wb), first);
     // Editing the table that holds the formulas does not touch the looked-up table's results.
     let v = t.wb.open_view(spec("orders")).unwrap();
-    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "want".into(), value: Some("silver".into()), record: None }]).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "want".into(), value: Some("silver".into()), record: None, base: None }]).unwrap();
     let after = rendered(&table_block(&mut t.wb, "orders"));
     assert_eq!(after[1], "11|2|\"silver\"|\"Bo\"|\"Bo\"|\"silver\"|\"Bo\"", "the multi-key lookup sees the new key");
     assert_eq!(cached(&t.wb), first);
     // Editing the looked-up table rebuilds them, with the new data.
     let v = t.wb.open_view(spec("customers")).unwrap();
-    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "name".into(), value: Some("Bea".into()), record: None }]).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "name".into(), value: Some("Bea".into()), record: None, base: None }]).unwrap();
     let after = rendered(&table_block(&mut t.wb, "orders"));
     assert_eq!(after[1], "11|2|\"silver\"|\"Bea\"|\"Bea\"|\"silver\"|\"Bea\"");
     let rebuilt = cached(&t.wb);
@@ -315,7 +315,7 @@ fn conditional_aggregates_across_tables_follow_edits_and_renames() {
     assert_eq!(shares, ["0.6666666666666666", "0.3333333333333333", "1.0"]);
     // An edit to orders moves the totals.
     let v = t.wb.open_view(spec("orders")).unwrap();
-    t.wb.edit(v.view_id, &[CellEdit { row: 2, column: "cid".into(), value: Some("3".into()), record: None }]).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 2, column: "cid".into(), value: Some("3".into()), record: None, base: None }]).unwrap();
     assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0", "30.0|1.0|30.0|30.0|3.0"]);
     // Renames follow; a delete that a formula needs is refused.
     t.wb.rename_column("orders", "amount", "net").unwrap();
@@ -356,7 +356,7 @@ fn nearest_sorted_and_positional_lookups_in_a_workbook() {
     ].map(String::from));
     // Unsorted keys: the sorted lookups say #N/A; the nearest match does not need sorting.
     let v = t.wb.open_view(spec("tiers")).unwrap();
-    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "min".into(), value: Some("2000".into()), record: None }]).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "min".into(), value: Some("2000".into()), record: None, base: None }]).unwrap();
     assert_eq!(rendered(&mut t.wb)[2], "3|750|0.1|#N/A|#N/A|#N/A|1000.0");
     // Deleting a column the lookups read is refused, INDEX's column number included.
     let e = t.wb.drop_column("tiers", "rate").unwrap_err().to_string();

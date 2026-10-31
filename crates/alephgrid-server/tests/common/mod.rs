@@ -261,6 +261,19 @@ impl Ws {
         }
     }
 
+    /// The next event, whatever its name (those kept while waiting for replies first).
+    pub async fn event_any(&mut self) -> Option<Value> {
+        if !self.events.is_empty() {
+            return Some(self.events.remove(0));
+        }
+        loop {
+            let msg = self.next_message().await?;
+            if msg.get("event").is_some() {
+                return Some(msg);
+            }
+        }
+    }
+
     /// True once the server has closed the connection.
     pub async fn closed(&mut self) -> bool {
         loop {
@@ -348,4 +361,305 @@ pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
         rows.push(row);
     }
     rows
+}
+
+/// One sample request of every operation, in an order that runs on a workbook holding table
+/// `t` (`n,s` with 3 rows). Ids written as `PLACEHOLDER`, `QUERY`, `ANALYSIS`, `DASHBOARD`,
+/// `PREVIEW_REV` and `UNDO_REV` are filled in by the caller from earlier replies.
+pub fn operation_script() -> Vec<(&'static str, Value)> {
+    vec![
+        ("tables", json!({})),
+        ("open_view", json!({ "spec": { "table": "t", "sort": [], "filters": [] } })),
+        ("update_view", json!({ "view_id": 1, "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [] } })),
+        ("view_info", json!({ "view_id": 1 })),
+        ("fetch", json!({ "view_id": 1, "row_start": 0, "row_count": 10 })),
+        ("update_view", json!({ "view_id": 1, "spec": { "table": "t" } })),
+        ("edit", json!({ "view_id": 1, "edits": [{ "row": 0, "column": "s", "value": "z" }] })),
+        ("insert_rows", json!({ "view_id": 1, "at": 1, "count": 1 })),
+        ("delete_rows", json!({ "view_id": 1, "start": 1, "count": 1 })),
+        // Take the delete back and redo it: the state that follows is unchanged.
+        ("undo", json!({})),
+        ("undo", json!({ "redo": true })),
+        ("stats", json!({ "view_id": 1, "column": "n", "start": 0, "end": 3 })),
+        ("add_column", json!({ "table": "t", "name": "extra", "sql_type": "INTEGER" })),
+        ("add_formula_column", json!({ "table": "t", "name": "twice", "formula": "[n] * 2" })),
+        ("update_formula", json!({ "table": "t", "name": "twice", "formula": "[n] * 3" })),
+        ("rename_column", json!({ "table": "t", "name": "extra", "new_name": "more" })),
+        ("drop_column", json!({ "table": "t", "name": "more" })),
+        ("query", json!({ "sql": "SELECT n, twice FROM t" })),
+        ("create_table_from_query", json!({ "name": "copy", "sql": "SELECT * FROM t" })),
+        ("create_demo_table", json!({ "rows": 10 })),
+        ("rename_table", json!({ "table": "copy", "new_name": "copy2" })),
+        ("drop_table", json!({ "table": "copy2" })),
+        ("sheet_create", json!({ "name": "S" })),
+        ("sheets", json!({})),
+        ("sheet_rename", json!({ "sheet": 0, "name": "Sheet A" })),
+        ("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": "1" }, { "row": 1, "column": 0, "value": "=A1+1" }] })),
+        ("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 5, "column_count": 3 })),
+        ("sheet_undo", json!({})),
+        ("sheet_redo", json!({})),
+        ("sheet_insert_rows", json!({ "sheet": 0, "at": 0, "count": 1 })),
+        ("sheet_delete_rows", json!({ "sheet": 0, "at": 0, "count": 1 })),
+        ("sheet_insert_columns", json!({ "sheet": 0, "at": 0, "count": 1 })),
+        ("sheet_delete_columns", json!({ "sheet": 0, "at": 0, "count": 1 })),
+        ("sheet_define_name", json!({ "name": "FirstCells", "refers_to": "='Sheet A'!$A$1:$A$2" })),
+        ("sheet_update_name", json!({ "name": "FirstCells", "new_name": "Anchor", "new_scope": 0, "refers_to": "='Sheet A'!$A$1" })),
+        ("sheet_names", json!({})),
+        ("sheet_delete_name", json!({ "name": "Anchor", "scope": 0 })),
+        ("sheet_cell_detail", json!({ "sheet": 0, "row": 1, "column": 0 })),
+        ("sheet_check_formula", json!({ "sheet": 0, "row": 0, "column": 1, "formula": "=SUM(1,,"})),
+        ("sheet_fill", json!({ "sheet": 0, "area": { "row": 1, "column": 0, "rows": 3, "columns": 1 }, "direction": "down" })),
+        ("sheet_paste", json!({ "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "sheet": 0, "row": 0, "column": 2, "mode": "values", "transpose": true })),
+        ("sheet_move", json!({ "sheet": 0, "source": { "row": 0, "column": 2, "rows": 1, "columns": 2 }, "row": 5, "column": 2 })),
+        ("create_sheet_from_query", json!({ "name": "Q", "sql": "SELECT * FROM t" })),
+        ("open_view", json!({ "spec": { "table": "t" } })),
+        ("table_to_sheet", json!({ "view_id": 2, "name": "Copy" })),
+        ("sheet_delete", json!({ "sheet": 2 })),
+        ("save_view", json!({ "name": "Top", "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [], "hidden": ["s"] }, "widths": { "n": 120.0 } })),
+        ("saved_views", json!({ "table": "t" })),
+        ("table_from_view", json!({ "view_id": 2, "name": "snap" })),
+        ("sheet_set", json!({ "sheet": 1, "inputs": [{ "row": 0, "column": 0, "value": "h" }, { "row": 1, "column": 0, "value": "1" }] })),
+        ("sheet_to_table", json!({ "sheet": 1, "name": "from_sheet" })),
+        ("sheet_delete", json!({ "sheet": 1 })),
+        ("rename_saved_view", json!({ "saved": "PLACEHOLDER", "name": "Top two" })),
+        ("delete_saved_view", json!({ "saved": "PLACEHOLDER" })),
+        ("close_view", json!({ "view_id": 1 })),
+        ("history", json!({ "after": 0, "limit": 5 })),
+        ("schema", json!({})),
+        ("save_query", json!({ "name": "Big", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }] })),
+        ("query_versions", json!({ "saved": "QUERY" })),
+        ("saved_queries", json!({})),
+        ("rename_query", json!({ "saved": "QUERY", "name": "Bigger" })),
+        ("query", json!({ "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "limit": 1 })),
+        ("export_query", json!({ "sql": "SELECT * FROM t", "format": "csv" })),
+        ("create_table_from_query", json!({ "name": "mat", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "saved": "QUERY", "version": 1 })),
+        ("materialized", json!({})),
+        ("sql_change", json!({ "sql": "UPDATE t SET s = 'q' WHERE n = 1" })),
+        ("refresh_materialized", json!({ "table": "mat" })),
+        ("delete_query", json!({ "saved": "QUERY" })),
+        ("analyze", json!({"spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        ("analyses", json!({})),
+        ("save_analysis", json!({"saved":null,"name":"Profile","spec":{"kind":"profile","table":"t","columns":["s"]},"chart":false})),
+        ("materialize_analysis", json!({"name":"analysis_copy","spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        ("save_dashboard", json!({"saved":null,"name":"Board","tiles":[{"analysis":"ANALYSIS","x":0,"y":0,"w":6,"h":6}],"slicers":[]})),
+        ("dashboards", json!({})),
+        ("dashboard", json!({"dashboard":"DASHBOARD"})),
+        ("set_validations", json!({"table":"t","rules":[{"column":"s","rule":{"kind":"required"}}]})),
+        ("validations", json!({"table":"t"})),
+        ("preview_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"}})),
+        ("apply_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"},"name":"t_trimmed"})),
+        ("set_validations", json!({"table":"t","rules":[]})),
+        ("inspect_formula", json!({"table":"t","column":"twice"})),
+        ("xlsx_compatibility", json!({})),
+        ("drill", json!({"spec":{"kind":"summary","table":"t","groups":["s"],"aggregate":"count","value":null,"pivot":null},"row":["x",1]})),
+        ("delete_dashboard", json!({"dashboard":"DASHBOARD"})),
+        ("delete_analysis", json!({"analysis":"ANALYSIS"})),
+        ("presentation", json!({"table":"t"})),
+        ("save_presentation", json!({"table":"t","presentation":{"hidden":[],"frozen":1,"formats":{},"rules":[]}})),
+        ("replace_preview", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"}})),
+        ("replace_apply", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"},"revision":"PREVIEW_REV"})),
+        ("replace_undo", json!({"revision":"UNDO_REV"})),
+        ("functions", json!({})),
+        ("test_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [{"arguments":["2"],"expected":"3"}] } })),
+        ("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
+        ("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
+        ("cancel", json!({ "request": 1 })),
+        ("recalculate", json!({ "table": "t" })),
+        ("cancel_recalculation", json!({ "table": "t" })),
+    ]
+}
+
+// ------------------------------------------------------------- accounts mode
+
+pub const ADMIN_EMAIL: &str = "admin@example.com";
+pub const ADMIN_PASSWORD: &str = "correct horse battery";
+
+impl TestServer {
+    /// `--auth accounts` with the instance admin created at start.
+    pub async fn start_accounts(data_dir: &Path, configure: impl FnOnce(&mut Config)) -> TestServer {
+        Self::start_with(data_dir, |c| {
+            c.auth.mode = alephgrid_server::auth::AuthMode::Accounts;
+            c.auth.bootstrap = Some((ADMIN_EMAIL.into(), ADMIN_PASSWORD.into()));
+            configure(c);
+        })
+        .await
+    }
+
+    pub fn origin(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Sign in with a password.
+    pub async fn login(&self, email: &str, password: &str) -> Result<Session, (u16, Value)> {
+        let res = self
+            .http
+            .post(self.url("/api/auth/login"))
+            .header("Origin", self.origin())
+            .json(&json!({ "email": email, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let cookie = session_cookie(res.headers());
+        let body: Value = res.json().await.unwrap_or(Value::Null);
+        match cookie {
+            Some(c) if status == 200 => Ok(Session { addr: self.addr, http: self.http.clone(), cookie: Some(c), bearer: None, me: body }),
+            _ => Err((status, body)),
+        }
+    }
+
+    pub async fn admin(&self) -> Session {
+        self.login(ADMIN_EMAIL, ADMIN_PASSWORD).await.expect("admin signs in")
+    }
+
+    /// A client with no credentials at all.
+    pub fn anonymous(&self) -> Session {
+        Session { addr: self.addr, http: self.http.clone(), cookie: None, bearer: None, me: Value::Null }
+    }
+
+    /// A client sending `Authorization: Bearer <token>`.
+    pub fn bearer(&self, token: &str) -> Session {
+        Session { addr: self.addr, http: self.http.clone(), cookie: None, bearer: Some(token.into()), me: Value::Null }
+    }
+
+    /// Accept an invitation by creating a password user; returns the signed-in session.
+    pub async fn accept(&self, code: &str, name: &str, password: &str) -> Session {
+        let res = self
+            .http
+            .post(self.url("/api/invites/accept"))
+            .header("Origin", self.origin())
+            .json(&json!({ "code": code, "name": name, "password": password }))
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let cookie = session_cookie(res.headers());
+        let body: Value = res.json().await.unwrap_or(Value::Null);
+        assert_eq!(status, 200, "accepting the invitation: {body}");
+        Session { addr: self.addr, http: self.http.clone(), cookie, bearer: None, me: body }
+    }
+}
+
+/// The session cookie's value from a response's `Set-Cookie`.
+pub fn session_cookie(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find_map(|v| {
+        let first = v.split(';').next()?;
+        let (k, val) = first.split_once('=')?;
+        (k == "alephgrid_session" && !val.is_empty()).then(|| val.to_string())
+    })
+}
+
+/// A client of one principal: its cookie or bearer token on every request, and this
+/// server's `Origin` (as a browser page of the server would send).
+#[derive(Clone)]
+pub struct Session {
+    pub addr: SocketAddr,
+    pub http: reqwest::Client,
+    pub cookie: Option<String>,
+    pub bearer: Option<String>,
+    /// What signing in returned (`/api/me`).
+    pub me: Value,
+}
+
+impl Session {
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+
+    pub fn user_id(&self) -> String {
+        self.me["user"]["id"].as_str().unwrap_or_default().to_string()
+    }
+
+    fn credentials(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(c) = &self.cookie {
+            req = req.header("Cookie", format!("alephgrid_session={c}"));
+        }
+        if let Some(b) = &self.bearer {
+            req = req.header("Authorization", format!("Bearer {b}"));
+        }
+        req.header("Origin", format!("http://{}", self.addr))
+    }
+
+    pub async fn send(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> (u16, Value) {
+        let mut req = self.credentials(self.http.request(method, self.url(path)));
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let res = req.send().await.unwrap();
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    pub async fn send_bytes(&self, method: reqwest::Method, path: &str, bytes: Vec<u8>) -> (u16, Value) {
+        let res = self.credentials(self.http.request(method, self.url(path))).body(bytes).send().await.unwrap();
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap();
+        (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    pub async fn get(&self, path: &str) -> (u16, Value) {
+        self.send(reqwest::Method::GET, path, None).await
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> (u16, Value) {
+        self.send(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    /// `body` of a 2xx reply, or a panic naming the request.
+    pub async fn ok(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Value {
+        let (status, v) = self.send(method.clone(), path, body).await;
+        assert!((200..300).contains(&status), "{method} {path}: {status} {v}");
+        v
+    }
+
+    pub async fn ws(&self, workbook: &str) -> Result<Ws, String> {
+        let mut headers = vec![("Origin".to_string(), format!("http://{}", self.addr))];
+        if let Some(c) = &self.cookie {
+            headers.push(("Cookie".into(), format!("alephgrid_session={c}")));
+        }
+        if let Some(b) = &self.bearer {
+            headers.push(("Authorization".into(), format!("Bearer {b}")));
+        }
+        Ws::try_connect_with(self.addr, workbook, &headers).await
+    }
+
+    /// Invite `email` to `org`, optionally with a role in `space`; returns the code.
+    pub async fn invite(&self, org: &str, email: &str, space: Option<&str>, role: Option<&str>) -> String {
+        let v = self
+            .ok(reqwest::Method::POST, &format!("/api/orgs/{org}/invites"), Some(json!({ "email": email, "space": space, "space_role": role })))
+            .await;
+        v["code"].as_str().unwrap().to_string()
+    }
+}
+
+impl Ws {
+    /// Connect with extra request headers (credentials, `Origin`).
+    pub async fn try_connect_with(addr: SocketAddr, workbook: &str, headers: &[(String, String)]) -> Result<Ws, String> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut req = format!("ws://{addr}/ws/{workbook}").into_client_request().map_err(|e| e.to_string())?;
+        for (k, v) in headers {
+            req.headers_mut().insert(
+                tokio_tungstenite::tungstenite::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        let (stream, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+            tokio_tungstenite::tungstenite::Error::Http(r) => format!("HTTP {}", r.status().as_u16()),
+            other => other.to_string(),
+        })?;
+        let mut ws = Ws { stream, next_id: 1, session: 0, events: vec![], replies: Default::default(), hello: Value::Null };
+        let hello = ws.next_message().await.ok_or("closed before hello")?;
+        assert_eq!(hello["event"], "hello");
+        ws.session = hello["session"].as_u64().unwrap();
+        ws.hello = hello;
+        Ok(ws)
+    }
+
+    /// The error code of a request's reply (`None` if it succeeded or the connection closed).
+    pub async fn code(&mut self, op: &str, params: Value) -> Option<String> {
+        let id = self.send(op, params).await;
+        let r = self.reply(id).await?;
+        (r["ok"] != true).then(|| r["code"].as_str().unwrap_or("").to_string())
+    }
 }

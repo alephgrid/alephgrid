@@ -1,4 +1,4 @@
-# docker compose up -d   →   http://localhost:7878/?token=change-me
+# docker compose up -d; the log shows the one-time setup code for http://localhost:7878/setup
 services:
   alephgrid:
     build: .
@@ -7,7 +7,11 @@ services:
     ports:
       - "7878:7878"
     environment:
-      ALEPHGRID_TOKEN: change-me          # shared access token; set something long and random
+      ALEPHGRID_AUTH: accounts            # people sign in; the first start logs a one-time setup code
+      # ALEPHGRID_PUBLIC_URL: https://grid.example.com   # how people reach it (needed for SSO)
+      # ALEPHGRID_OIDC_ISSUER: https://login.example.com  # single sign-on (see docs/TEAMS.md)
+      # ALEPHGRID_OIDC_CLIENT_ID: alephgrid
+      # ALEPHGRID_OIDC_CLIENT_SECRET: ...
       ALEPHGRID_MEMORY_LIMIT: 4GB         # DuckDB memory budget; spills to disk beyond it
       # ALEPHGRID_DISABLE_SQL: "true"     # turn off the SQL console for untrusted users
     volumes:

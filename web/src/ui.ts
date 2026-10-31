@@ -22,14 +22,19 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 let toastHost: HTMLElement | null = null;
 
-export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000): void {
+export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000,
+  action?: { label: string; run: () => void }): void {
   if (!toastHost) {
     toastHost = el("div", { class: "toasts", role: "status", "aria-live": "polite" });
     document.body.append(toastHost);
   }
   const t = el("div", { class: `toast toast-${kind}` }, message);
+  if (action) {
+    t.append(" ", el("button", { class: "btn btn-small toast-action", onclick: () => { t.remove(); action.run(); } }, action.label));
+  }
   toastHost.append(t);
-  setTimeout(() => t.remove(), kind === "error" ? ms * 2 : ms);
+  // A toast with an action stays long enough to use it.
+  setTimeout(() => t.remove(), (kind === "error" ? ms * 2 : ms) * (action ? 2 : 1));
 }
 
 export type MenuItem =
@@ -117,7 +122,7 @@ export interface Field {
   label: string;
   value?: string;
   placeholder?: string;
-  type?: "text" | "textarea" | "select" | "number";
+  type?: "text" | "textarea" | "select" | "number" | "password";
   options?: { value: string; label: string }[];
   hint?: string;
   mono?: boolean;
@@ -173,11 +178,16 @@ export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dial
   });
   document.addEventListener("keydown", outside);
   dialog.addEventListener("mousedown", refocus);
+  // A dialog opened over another: the one beneath is inert (and out of the accessibility
+  // tree) until this one closes, so only the topmost modal is reachable.
+  const beneath = [...document.querySelectorAll<HTMLElement>(".backdrop")].filter((b) => !b.inert);
+  for (const b of beneath) b.inert = true;
   document.body.append(backdrop);
   return {
     close: () => {
       document.removeEventListener("keydown", outside);
       backdrop.remove();
+      for (const b of beneath) b.inert = false;
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     },
   };

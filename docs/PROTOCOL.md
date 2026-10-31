@@ -1,7 +1,15 @@
 # WebSocket protocol (v0.6)
 
-Connect to `ws(s)://<host>/ws/<workbook-id>` (add `?token=…` when the server uses a
-token). Every frame is a JSON text message.
+Connect to `ws(s)://<host>/ws/<workbook-id>`. With `--auth accounts` the upgrade request
+carries the session cookie (browsers) or `Authorization: Bearer agt_…` (service tokens); a
+principal that cannot see the workbook gets 404, and an `Origin` other than the server's own
+gets 403. Every frame is a JSON text message.
+
+Each operation needs a capability in the workbook's space (`ws::required_caps`, the table in
+[TEAMS.md](TEAMS.md)): reads need `view`, `query` and `export_query` need `query` (and
+`export`), changes need `edit`, `publish_function` and `pin_functions` need `publish`. A refused
+request gets `code: "forbidden"` and changes nothing; an expired credential gets
+`"unauthenticated"`.
 
 The TypeScript types in [`web/src/protocol.ts`](../web/src/protocol.ts) are generated from
 the Rust types and are the precise definition of every request, event and result
@@ -20,7 +28,7 @@ the Rust types and are the precise definition of every request, event and result
 { "id": 8, "ok": true,  "result": {…}, "revision": 12, "replayed": true }  // a retry of an applied change
 { "id": 9, "ok": false, "error": "this workbook is busy …", "code": "overloaded" }
 // server push (no id)
-{ "event": "hello", "session": 3, "workbook": {…}, "revision": 11 }
+{ "event": "hello", "session": 3, "workbook": {…}, "revision": 11, "role": "editor" }
 { "event": "cells_changed",  "table": "flights", "origin": 3, "revision": 12 }
 { "event": "table_changed",  "table": "flights", "origin": 3, "revision": 13 }  // rows inserted/deleted, columns changed
 { "event": "tables_changed", "origin": 3, "revision": 14 }   // tables or sheets added/removed/renamed
@@ -29,8 +37,11 @@ the Rust types and are the precise definition of every request, event and result
 { "event": "queries_changed", "origin": 3, "revision": 17 }  // saved queries were added, changed or removed
 { "event": "workbook_deleted", "origin": 0 }  // moved to the trash; the server then closes the socket
 { "event": "workbook_closed", "reason": "idle" | "stopped" | "shutdown" }  // reconnect to reopen
-{ "event": "resync" }        // events were dropped for this slow client: refresh what is shown
+{ "event": "committed", "origin": 3, "revision": 18 }  // a change with nothing to refresh
+{ "event": "resync", "revision": 19 }  // refresh what is shown: a broad change, or events dropped for this slow client
 { "event": "progress", "request": 9, "percentage": 41.5 }  // a long request of this connection
+{ "event": "role_changed", "role": "viewer" }  // this connection's role changed; applies to the next request
+{ "event": "access_revoked", "reason": "signed_out" | "no_access" }  // the server then closes the socket; do not reconnect
 ```
 
 Undo/redo sends `tables_changed` instead of `sheet_changed` when it adds, removes or renames a sheet.
@@ -80,6 +91,13 @@ Replies to changes carry `revision`; change events carry the same number. `mutat
 string, unique per change) makes retries safe: a change whose id is in the history (the last 10,000
 revisions) is not applied again and the reply repeats the recorded result with `replayed: true`.
 
+Every revision is announced to every connection by at least one event, in revision order, so a
+skipped number means events were missed: refresh what is shown. Changes say what they are based
+on, and are refused with `code: "conflict"` rather than applied over someone else's change: cell
+edits carry `base` (the value the user saw), position-addressed changes `generation` (tables) or
+`layout` (sheets). A refusal with `"moved": true` addressed rows or cells that moved or are gone.
+The full contract, with undo, is [COLLABORATION.md](COLLABORATION.md).
+
 ### Error codes
 
 | code | meaning |
@@ -94,6 +112,7 @@ revisions) is not applied again and the reply repeats the recorded result with `
 | `sql_change` | `query` got an INSERT/UPDATE/DELETE: confirm, then send it with `sql_change` |
 | `bad_parameter` | a `$name` has no value, is not used, or its value does not parse as its type |
 | `schema_changed` | a materialized table's query now produces different columns; nothing changed |
+| `conflict` | the change was based on what someone else changed since (cells, rows, layout); nothing changed. `moved: true`: what it addressed moved or is gone ([COLLABORATION.md](COLLABORATION.md)) |
 
 Error messages never contain the server's data-directory path (it is shown as `<data>`). DuckDB's
 `LINE n:` positions refer to the user's own SQL text.
@@ -115,10 +134,11 @@ not read until they drain; beyond 64 MiB it is closed.
 | `update_view` | `view_id, spec` | `ViewInfo` |
 | `view_info` | `view_id` | `ViewInfo` |
 | `close_view` | `view_id` | `null` |
-| `fetch` | `view_id, row_start, row_count, column_start?, column_count?` | `{row_start, rows, ids, column_start, truncated}`; `ids` are stable record ids |
-| `edit` | `view_id, edits: [{row, column, value, record?}]` (`null` value clears the cell; `record` targets a record id from a fetch, so the edit lands on that row even if rows moved, and fails if it was deleted) | `{table, cells_changed, rows_appended}`. All-or-nothing: every value is validated first; typing below the last row appends rows in the same transaction; a repeated cell takes its last value; an empty list changes nothing |
-| `insert_rows` | `view_id, at, count` | `null` |
-| `delete_rows` | `view_id, start, count` | `null` |
+| `fetch` | `view_id, row_start, row_count, column_start?, column_count?` | `{row_start, rows, ids, column_start, truncated, generation}`; `ids` are stable record ids, `generation` the arrangement the positions belong to (also on `ViewInfo`) |
+| `edit` | `view_id, edits: [{row, column, value, record?, base?}], generation?` (`null` value clears the cell; `record` targets a record id from a fetch, so the edit lands on that row even if rows moved, and fails if it was deleted; `base` is the value the user saw, `null` for empty; `generation` checks rows addressed by position, such as appends) | `{table, cells_changed, rows_appended, first_appended?}` (`first_appended`: record id of the first new row; the others follow in order). All-or-nothing: every value is validated first; typing below the last row appends rows in the same transaction; a repeated cell takes its last value; an empty list changes nothing. `conflict` when a cell no longer holds its `base` or the generation moved |
+| `insert_rows` | `view_id, at, count, generation?` | `null` |
+| `delete_rows` | `view_id, start, count, generation?` | `null` |
+| `undo` | `revision?, redo?` | `UndoOutcome {table, undone, kind, rows}` or `null` when there is nothing to take back. Without `revision`: the caller's own latest table change (`redo`: their latest undo). `conflict` when anything it would take back changed since |
 | `stats` | `view_id, column, start, end` | `{rows, count, sum?, avg?, min?, max?}`; `sum`, `min`, `max` follow the exact-value rules below |
 | `add_column` | `table, name, sql_type` | `null` |
 | `add_formula_column` | `table, name, formula` | `null` |
@@ -130,12 +150,12 @@ not read until they drain; beyond 64 MiB it is closed.
 | `create_demo_table` | `rows?` | `TableInfo` |
 | `drop_table` | `table` | `null` |
 | `rename_table` | `table, new_name` | new name |
-| `sheets` | – | `SheetInfo[]` (`{index, name, rows, columns}`; rows/columns = used range) |
+| `sheets` | – | `SheetInfo[]` (`{index, name, rows, columns, layout}`; rows/columns = used range; `layout` is the revision that last moved its cells or index) |
 | `sheet_create` | `name?` | `SheetInfo` |
 | `sheet_rename` / `sheet_delete` | `sheet[, name]` | `null` |
 | `sheet_fetch` | `sheet, row_start, row_count, column_count` (0-based) | `{row_start, rows}`; each cell `null` or `[display, align, input?]` |
-| `sheet_set` | `sheet, inputs: [{row, column, value}]` (`""` clears; `=` starts a formula) | `SheetInfo`. All-or-nothing; one batch is one undo step |
-| `sheet_undo` / `sheet_redo` | – | `bool` (whether anything changed). History is shared by everyone in the workbook and kept in memory only |
+| `sheet_set` | `sheet, inputs: [{row, column, value, base?}], layout?` (`""` clears; `=` starts a formula; `base` is the input the user saw). Changes that address sheet cells by position take `layout` (see `sheets`) | `SheetInfo`. All-or-nothing; one batch is one undo step |
+| `sheet_undo` / `sheet_redo` | – | `bool` (whether anything changed). History is shared by everyone in the workbook and kept in memory only; a step can be undone or redone only by whoever made it (`conflict` otherwise) |
 | `sheet_insert_rows` / `sheet_delete_rows` / `sheet_insert_columns` / `sheet_delete_columns` | `sheet, at, count` | `null` |
 | `create_sheet_from_query` | `name, sql, params?, allow_truncation?` | `SheetCopy {sheet, rows_copied, total_rows?, truncated, row_limit}`. At most `--sheet-copy-rows` (default 100,000) rows, fewer for wide results; a larger result fails with `too_large` and creates nothing unless `allow_truncation` |
 | `table_to_sheet` | `view_id, name` | `SheetCopy`; copies the view's first rows in its sort and filter |
@@ -144,7 +164,7 @@ not read until they drain; beyond 64 MiB it is closed.
 | `save_view` | `saved?, name, spec, widths?` | `SavedView`; creates, or updates the view with id `saved`. Names are unique per table |
 | `rename_saved_view` / `delete_saved_view` | `saved[, name]` | `SavedView` / `null` |
 | `sheet_to_table` | `sheet, name` | `TableInfo`. Reads every used row; column types come from the cells |
-| `history` | `after?, limit?` (≤ 1000) | `HistoryEntry[]` (`{revision, mutation_id?, op, actor?, at_ms, summary}`), oldest first |
+| `history` | `after?, limit?` (≤ 1000) | `HistoryEntry[]` (`{revision, mutation_id?, op, actor?, at_ms, summary, undo?}`), oldest first; `undo` (`{table, kind, undoes?, undone_by?}`) is present for table changes that can still be taken back |
 | `schema` | – | `TableSchema[]` (`{name, row_count, columns}`), user tables only |
 | `export_query` | `sql, params?, format?` (`csv` default, `parquet`, `json`) | `QueryExport {download, file_name, rows, bytes, revision}`: the complete result, from one snapshot, written server-side; fetch it once from `GET /api/workbooks/{id}/downloads/{download}` within an hour |
 | `sql_change` | `sql, params?` | `SqlChangeOutcome {table, kind, rows}`: `INSERT INTO t [(cols)] <query or VALUES>`, `UPDATE t SET col = expr, … [WHERE …]` or `DELETE FROM t [WHERE …]` as one change (record ids, revision, history); anything else is `not_allowed` |

@@ -23,6 +23,9 @@
 //!   one's anchor in the hidden link sheet and its value as of the last sheet change;
 //!   `_rf_table_cells`, the table formulas of sheet cells that read tables.
 //!
+//! * **8** (7.09): `_rf_undo`, how to take back recent table changes, with copies of the
+//!   rows each one touched in hidden `_rf_undo_<revision>_b` / `_a` tables (see `undo.rs`).
+//!
 //! Opening an older file keeps a copy of it (`<file>.v<N>.bak`) and migrates it in one
 //! transaction. There is no downgrade: the copy is the only way back. Opening a file
 //! written by a newer format is refused.
@@ -36,7 +39,7 @@ use crate::faults;
 use crate::sql::{ident, lit};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 8;
 /// Spacing of `_rf_ord` values for rows written in order, leaving room for inserts.
 pub const ORD_GAP: i64 = 1 << 20;
 /// History entries kept; a mutation id older than this many revisions can be applied again.
@@ -155,6 +158,16 @@ const V7_SCHEMA: &str = "
         slot INTEGER NOT NULL, formula VARCHAR NOT NULL, kind VARCHAR, num DOUBLE, text VARCHAR
     );";
 
+/// Added in format 8: one row per undoable table change (see `undo.rs`). `before_rows` and
+/// `after_rows` name the tables holding the rows it touched as they were before and after
+/// it; `cells` is a JSON object of the columns whose values it set, each with the records
+/// (`null`: every row in both copies).
+pub(crate) const V8_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS _rf_undo (
+        revision BIGINT NOT NULL, table_name VARCHAR NOT NULL, actor VARCHAR, kind VARCHAR NOT NULL,
+        undoes BIGINT, undone_by BIGINT, before_rows VARCHAR NOT NULL, after_rows VARCHAR NOT NULL, cells VARCHAR NOT NULL
+    );";
+
 /// Bring a database at `path` to [`FORMAT`], copying it first when it is migrated.
 /// Returns the open connection.
 pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {
@@ -216,7 +229,7 @@ pub fn sync_dir(dir: &Path) {
 
 fn create_fresh(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
-        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA} {V7_SCHEMA}
+        "BEGIN TRANSACTION; {BASE_SCHEMA} {V2_SCHEMA} {V3_SCHEMA} {V7_SCHEMA} {V8_SCHEMA}
          ALTER TABLE _rf_tables ADD COLUMN data_rev BIGINT NOT NULL DEFAULT 0;
          INSERT INTO _rf_meta VALUES ('format', '{FORMAT}'), ('revision', '0');
          COMMIT;"
@@ -251,6 +264,10 @@ fn migrate(conn: &Connection, from: u32) -> Result<()> {
         if from < 7 {
             conn.execute_batch(V7_SCHEMA)?;
             meta_set(conn, "format", "7")?;
+        }
+        if from < 8 {
+            conn.execute_batch(V8_SCHEMA)?;
+            meta_set(conn, "format", "8")?;
         }
         faults::check("migrate")?;
         Ok(())
@@ -484,12 +501,15 @@ pub fn rename_table(conn: &Connection, from: &str, to: &str) -> Result<()> {
     // A rename does not change the rows; materializations that read the old name see it gone.
     conn.execute("UPDATE _rf_tables SET table_name = ?, gen = gen + 1 WHERE table_name = ?", duckdb::params![to, from])?;
     conn.execute("UPDATE _rf_materialized SET table_name = ? WHERE table_name = ?", duckdb::params![to, from])?;
+    conn.execute("UPDATE _rf_undo SET table_name = ? WHERE table_name = ?", duckdb::params![to, from])?;
     Ok(())
 }
 
 pub fn forget_table(conn: &Connection, table: &str) -> Result<()> {
     conn.execute("DELETE FROM _rf_tables WHERE table_name = ?", [table])?;
     conn.execute("DELETE FROM _rf_materialized WHERE table_name = ?", [table])?;
+    conn.execute("DELETE FROM _rf_undo WHERE table_name = ?", [table])?;
+    crate::undo::drop_unused(conn)?;
     Ok(())
 }
 
@@ -509,6 +529,10 @@ pub struct HistoryEntry {
     pub at_ms: u64,
     /// Short description of the change, at most [`SUMMARY_BYTES`] bytes.
     pub summary: String,
+    /// Present for table changes that can be taken back (see `undo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub undo: Option<crate::undo::UndoState>,
 }
 
 pub const SUMMARY_BYTES: usize = 512;
@@ -551,9 +575,20 @@ pub fn record(conn: &Connection, mutation_id: Option<&str>, op: &str, actor: Opt
 
 pub fn history(conn: &Connection, after: u64, limit: usize) -> Result<Vec<HistoryEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT revision, mutation_id, op, actor, at_ms, summary FROM _rf_history WHERE revision > ? ORDER BY revision LIMIT ?",
+        "SELECT h.revision, h.mutation_id, h.op, h.actor, h.at_ms, h.summary, u.table_name, u.kind, u.undoes, u.undone_by
+         FROM _rf_history h LEFT JOIN _rf_undo u ON u.revision = h.revision
+         WHERE h.revision > ? ORDER BY h.revision LIMIT ?",
     )?;
     let rows = stmt.query_map(duckdb::params![after as i64, limit as i64], |r| {
+        let undo = match (r.get::<_, Option<String>>(6)?, r.get::<_, Option<String>>(7)?) {
+            (Some(table), Some(kind)) => Some(crate::undo::UndoState {
+                table,
+                kind: crate::undo::UndoKind::parse(&kind),
+                undoes: r.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                undone_by: r.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            }),
+            _ => None,
+        };
         Ok(HistoryEntry {
             revision: r.get::<_, i64>(0)? as u64,
             mutation_id: r.get(1)?,
@@ -561,6 +596,7 @@ pub fn history(conn: &Connection, after: u64, limit: usize) -> Result<Vec<Histor
             actor: r.get(3)?,
             at_ms: r.get::<_, i64>(4)? as u64,
             summary: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            undo,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

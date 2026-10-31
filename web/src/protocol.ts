@@ -12,15 +12,17 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = "overloaded" | "deadline_exceeded" | "cancelled" | "too_large" | "capacity" | "unavailable"
-  | "not_allowed" | "sql_change" | "bad_parameter" | "schema_changed";
+  | "not_allowed" | "sql_change" | "bad_parameter" | "schema_changed"
+  | "unauthenticated" | "forbidden" | "not_found" | "bad_request" | "quota" | "conflict";
 
-/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
+/** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied).
+ *  A `conflict` with `moved` addressed rows, columns or cells that moved or are gone: refresh, nothing to overwrite. */
 export type Reply =
   | { id: number; ok: true; result: unknown; revision?: number; replayed?: boolean }
-  | { id: number | null; ok: false; error: string; code?: ErrorCode };
+  | { id: number | null; ok: false; error: string; code?: ErrorCode; moved?: boolean };
 
 /** Pushed after connecting. */
-export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number };
+export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number; role: SpaceRole };
 
 export type Rule = { "kind": "one_of", values: Array<string>, } | { "kind": "between", min?: number, max?: number, } | { "kind": "required" };
 
@@ -176,7 +178,14 @@ can_append: boolean,
  * Why the view's formula values are not current, when it is ordered or filtered by
  * formula columns whose stored results are being recalculated or failed to be (F.09).
  */
-stale?: string, };
+stale?: string, 
+/**
+ * The table's structure generation the view's positions belong to. Positions are
+ * stable while it stays the same; send it with changes that address rows by position
+ * (`insert_rows`, `delete_rows`, appending edits) so they are refused, not misapplied,
+ * after someone else inserted, deleted or reordered rows.
+ */
+generation: number, };
 
 export type RowBlock = { row_start: number, 
 /**
@@ -199,7 +208,11 @@ errors?: Array<CellErrorMark>,
 /**
  * As [`ViewInfo::stale`]: the formula values are the last committed results.
  */
-stale?: string, };
+stale?: string, 
+/**
+ * As [`ViewInfo::generation`]: the generation these positions were read at.
+ */
+generation: number, };
 
 export type CellEdit = { 
 /**
@@ -215,9 +228,21 @@ value: string | null,
  * Record id from a fetch. The edit then lands on that record even if rows were
  * inserted, deleted or re-sorted since the fetch; it fails if the record is gone.
  */
-record?: number, };
+record?: number, 
+/**
+ * The value the cell had when the user started editing it, as fetched (`null` for
+ * empty). When given and the cell holds something else now, someone else changed it:
+ * the whole edit is refused with [`Conflict`] and nothing is written. Leave it out to
+ * overwrite whatever is there.
+ */
+base?: CellValue, };
 
-export type EditOutcome = { table: string, cells_changed: number, rows_appended: number, };
+export type EditOutcome = { table: string, cells_changed: number, rows_appended: number, 
+/**
+ * Record id of the first appended row; the others follow it in order, at the view
+ * positions after the old last row. Later edits of those rows can then go by record.
+ */
+first_appended?: number, };
 
 export type Stats = { rows: number, count: number, 
 /**
@@ -311,19 +336,36 @@ export type SheetInfo = { index: number, name: string,
 /**
  * Used range, 0-based exclusive bounds.
  */
-rows: number, columns: number, };
+rows: number, columns: number, 
+/**
+ * The revision that last inserted, deleted or moved this sheet's rows, columns or
+ * cells, or shifted its index. Send it with changes that address cells by position
+ * (`layout`): they are refused, not misapplied, once it moved on.
+ */
+layout: number, };
 
 export type SheetBlock = { row_start: number, 
 /**
  * `rows[i][j]` is `null` for empty cells.
  */
-rows: (SheetCell | null)[][], };
+rows: (SheetCell | null)[][], 
+/**
+ * As [`SheetInfo::layout`]: the layout these addresses were read at.
+ */
+layout: number, };
 
 export type SheetInput = { row: number, column: number, 
 /**
  * Text exactly as typed: `42`, `hello`, `=SUM(A1:A9)`. Empty clears the cell.
  */
-value: string, };
+value: string, 
+/**
+ * What the cell showed in its editor when the user started editing (its input, or
+ * its display when it has no input; empty for an empty cell). When given and the
+ * cell holds something else now, someone else changed it: the whole request is
+ * refused with [`Conflict`](crate::Conflict) and nothing is written.
+ */
+base?: string, };
 
 export type SheetCopy = { sheet: SheetInfo, rows_copied: number, 
 /**
@@ -363,15 +405,130 @@ export type PasteMode = "all" | "formulas" | "values" | "formats";
 
 export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
 
+export type SpaceRole = "viewer" | "editor" | "owner";
+
+export type OrgRole = "member" | "admin";
+
+export type Cap = "view" | "query" | "export" | "edit" | "publish" | "create_workbook" | "delete_workbook" | "purge" | "manage_members" | "manage_space";
+
+export type AuthMode = "local" | "accounts";
+
+export type Org = { id: string, name: string, created_at: number, };
+
+export type Space = { id: string, org_id: string, name: string, created_at: number, 
+/**
+ * The least role that may publish: function versions and pins in the space's
+ * workbooks, and entries of its library (7.11). `editor` or `owner`.
+ */
+publish_role: SpaceRole, };
+
+export type PublicUser = { id: string, email: string, name: string, instance_admin: boolean, disabled: boolean, 
+/**
+ * `password`, `sso` or both.
+ */
+sign_in: Array<string>, groups: Array<string>, last_login?: number, };
+
+export type OrgMember = { user: PublicUser, role: OrgRole, };
+
+export type MemberKind = "user" | "group";
+
+export type SpaceMember = { kind: MemberKind, 
+/**
+ * User id or group name.
+ */
+principal: string, role: SpaceRole, 
+/**
+ * For a user: their email and name.
+ */
+user?: PublicUser, };
+
+export type Token = { id: string, name: string, space_id: string, role: SpaceRole, created_by: string, created_at: number, expires_at: number, revoked_at?: number, last_used?: number, };
+
+export type Invite = { id: string, org_id: string, email: string, org_role: OrgRole, space_id?: string, space_role?: SpaceRole, created_by: string, created_at: number, expires_at: number, accepted_at?: number, revoked_at?: number, };
+
+export type AuditEvent = { seq: number, at: number, 
+/**
+ * `user:<id>`, `token:<id>`, `local` or `system`.
+ */
+actor: string, action: string, org_id?: string, space_id?: string, workbook?: string, 
+/**
+ * `ok` or `denied`.
+ */
+outcome: string, detail: Record<string, unknown>, };
+
+export type QuotaLimits = { storage_bytes?: number, workbooks?: number, jobs?: number, open_workbooks?: number, };
+
+export type QuotaKind = "storage" | "workbooks" | "jobs" | "open_workbooks";
+
+export type SpaceUsage = { space: Space, 
+/**
+ * Bytes of its workbooks, the trash included.
+ */
+storage_bytes: number, trash_bytes: number, workbooks: number, open_workbooks: number, jobs: number, 
+/**
+ * The limits that apply.
+ */
+limits: QuotaLimits, 
+/**
+ * The space's own overrides of the server defaults.
+ */
+overrides: QuotaLimits, };
+
+export type LibraryKind = "query" | "view" | "function";
+
+export type LibraryVersion = { version: number, 
+/**
+ * The saved query (`name`, `kind`, `sql`, `params`), view (`name`, `spec`, `widths`) or
+ * function definition as published.
+ */
+payload: Record<string, unknown>, source_workbook: string, published_by: string, published_at: number, };
+
+export type LibraryEntry = { id: string, space_id: string, kind: LibraryKind, name: string, created_by: string, created_at: number, retired_at?: number, latest: LibraryVersion, };
+
 export type HistoryEntry = { revision: number, mutation_id?: string, op: string, actor?: string, at_ms: number, 
 /**
  * Short description of the change, at most [`SUMMARY_BYTES`] bytes.
  */
-summary: string, };
+summary: string, 
+/**
+ * Present for table changes that can be taken back (see `undo`).
+ */
+undo?: UndoState, };
+
+export type UndoState = { table: string, kind: UndoKind, 
+/**
+ * The revision this entry took back (undo and redo entries).
+ */
+undoes?: number, 
+/**
+ * The revision that took this entry back, if one did; it cannot be undone again (undo
+ * that one instead).
+ */
+undone_by?: number, };
+
+export type UndoKind = "change" | "undo" | "redo";
+
+export type UndoOutcome = { table: string, 
+/**
+ * The revision taken back.
+ */
+undone: number, 
+/**
+ * `undo` or `redo`.
+ */
+kind: UndoKind, 
+/**
+ * Rows deleted, restored or changed.
+ */
+rows: number, };
 
 export type Summary = { tables: number, sheets: number, rows: number, };
 
-export type WorkbookMeta = { id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
+export type WorkbookMeta = { id: string, name: string, created_at: number, 
+/**
+ * The space that owns the workbook; its roles decide who may use it.
+ */
+space: string, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
@@ -381,7 +538,15 @@ deleted_at?: number,
  */
 runtime_spec?: string, };
 
-export type WorkbookListing = { size_bytes: number, id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
+export type WorkbookListing = { size_bytes: number, 
+/**
+ * The asking principal's role in the workbook's space (workbook lists).
+ */
+role?: SpaceRole, id: string, name: string, created_at: number, 
+/**
+ * The space that owns the workbook; its roles decide who may use it.
+ */
+space: string, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
@@ -393,15 +558,17 @@ runtime_spec?: string, };
 
 export type WorkbookPatch = { name?: string, 
 /**
- * Workspace id; an empty string moves the workbook out of any workspace.
+ * Move the workbook into this space.
  */
-workspace?: string, starred?: boolean, };
+space?: string, starred?: boolean, };
 
-export type Workspace = { id: string, name: string, created_at: number, };
+export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", revision?: number, } | { "event": "committed", origin: number, revision: number, } | { "event": "access_revoked", reason: string, } | { "event": "role_changed", role: SpaceRole, } | { "event": "progress", request: number, percentage: number, };
 
-export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "progress", request: number, percentage: number, };
-
-export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
+export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, generation?: number, } | { "op": "insert_rows", view_id: number, at: number, count: number, generation?: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, generation?: number, } | { "op": "undo", revision?: number, redo?: boolean, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, layout?: number, } | { "op": "sheet_delete", sheet: number, layout?: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, layout?: number, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, layout?: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, layout?: number, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, 
+/**
+ * Layouts (see `SheetInfo::layout`) of the target sheet and of `from_sheet`.
+ */
+layout?: number, source_layout?: number, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, layout?: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, layout?: number, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
 
 export type ColumnType = { name: string, sql_type: string, };
 
@@ -543,7 +710,11 @@ export type BackupEntry = { id: string, name: string,
  */
 revision: number, storage_format: number, bytes: number, sha256: string, };
 
-export type BackupManifest = { format: number, created_at_ms: number, server_version: string, workbooks: Array<BackupEntry>, };
+export type BackupManifest = { format: number, created_at_ms: number, server_version: string, 
+/**
+ * SHA-256 of `control.duckdb` (format 2).
+ */
+control_sha256?: string, workbooks: Array<BackupEntry>, };
 
 /** Result type of each operation. */
 export interface Results {
@@ -581,6 +752,7 @@ export interface Results {
   edit: EditOutcome;
   insert_rows: null;
   delete_rows: null;
+  undo: UndoOutcome | null;
   stats: Stats;
   add_column: null;
   add_formula_column: null;

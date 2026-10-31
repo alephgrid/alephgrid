@@ -146,8 +146,7 @@ fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
                         row: *r,
                         column: if *c == 0 { "n" } else { "s" }.into(),
                         value: v.as_ref().map(to_text),
-                        record: None,
-                    })
+                        record: None, base: None })
                     .collect();
                 t.wb.edit(view, &edits).map(|_| ())
             }
@@ -157,7 +156,7 @@ fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
                 } else {
                     let (id, _) = model.rows[*i % model.rows.len()];
                     // A deliberately wrong position: the record id must win.
-                    let edit = CellEdit { row: 0, column: if *c == 0 { "n" } else { "s" }.into(), value: v.as_ref().map(to_text), record: Some(id) };
+                    let edit = CellEdit { row: 0, column: if *c == 0 { "n" } else { "s" }.into(), value: v.as_ref().map(to_text), record: Some(id), base: None };
                     t.wb.edit(view, &[edit]).map(|_| ())
                 }
             }

@@ -23,8 +23,11 @@ export class Server {
   port = 0;
   private proc: ChildProcess | null = null;
 
-  /** `extraArgs` are added to the command line of every start. */
-  constructor(private extraArgs: string[] = []) {}
+  /** What the server printed on its console (the setup code, for instance). */
+  output = "";
+
+  /** `extraArgs` are added to the command line of every start; `env` to its environment. */
+  constructor(private extraArgs: string[] = [], private env: Record<string, string> = {}) {}
 
   get url(): string {
     return `http://127.0.0.1:${this.port}`;
@@ -32,7 +35,9 @@ export class Server {
 
   async start(): Promise<void> {
     if (!this.port) this.port = await freePort();
-    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000", ...this.extraArgs], { stdio: "ignore" });
+    this.proc = spawn(BIN, ["--data-dir", this.dataDir, "--port", String(this.port), "--threads", "2", "--sheet-copy-rows", "1000", ...this.extraArgs],
+      { stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ...this.env } });
+    this.proc.stdout?.on("data", (d: Buffer) => { this.output = (this.output + d.toString()).slice(-16_384); });
     const deadline = Date.now() + 30_000;
     for (;;) {
       try {

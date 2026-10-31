@@ -706,7 +706,7 @@ fn p_values() -> Cells {
     s.create("Data").unwrap();
     s.create("P").unwrap();
     let inputs: Vec<crate::SheetInput> = P_CELLS.iter().enumerate().filter(|(_, v)| !v.is_empty())
-        .map(|(r, v)| crate::SheetInput { row: r as u32, column: 0, value: v.to_string() }).collect();
+        .map(|(r, v)| crate::SheetInput { row: r as u32, column: 0, value: v.to_string(), base: None }).collect();
     s.set(1, &inputs).unwrap();
     Cells((1..=P_CELLS.len() as u32).map(|row| {
         let c = CellRef { sheet: "P".into(), row, column: 1 };

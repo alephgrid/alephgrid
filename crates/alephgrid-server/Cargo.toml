@@ -15,6 +15,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+argon2 = "0.5"
+base64 = "0.22"
+getrandom = "0.3"
+jsonwebtoken = { version = "9", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
 alephgrid-core = { path = "../alephgrid-core" }
@@ -34,6 +39,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 
 [dev-dependencies]
+base64 = "0.22"
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 tempfile = "3"
 tokio-tungstenite = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

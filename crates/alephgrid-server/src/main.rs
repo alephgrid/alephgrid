@@ -9,6 +9,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use alephgrid_server::http;
+use alephgrid_server::auth::oidc::OidcConfig;
+use alephgrid_server::auth::{AuthConfig, AuthMode};
 use alephgrid_server::state::{AppState, Config};
 
 #[derive(Parser, Debug)]
@@ -21,16 +23,79 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_DATA_DIR", default_value = "./alephgrid-data")]
     data_dir: PathBuf,
 
-    /// Interface to bind. Use 0.0.0.0 to serve your team (set --token too).
+    /// Interface to bind. Use 0.0.0.0 to serve your team (with --auth accounts).
     #[arg(long, env = "ALEPHGRID_HOST", default_value = "127.0.0.1")]
     host: String,
 
     #[arg(long, env = "ALEPHGRID_PORT", default_value_t = 7878)]
     port: u16,
 
-    /// Shared access token required by the API and WebSocket.
-    #[arg(long, env = "ALEPHGRID_TOKEN")]
-    token: Option<String>,
+    /// `local`: no sign-in, for your own machine (loopback only). `accounts`: users sign in
+    /// with a password or single sign-on and roles apply. On first start with accounts and
+    /// no users, a one-time setup code is printed (or set ALEPHGRID_BOOTSTRAP_EMAIL and
+    /// ALEPHGRID_BOOTSTRAP_PASSWORD to create the admin).
+    #[arg(long, env = "ALEPHGRID_AUTH", value_enum, default_value = "local")]
+    auth: alephgrid_server::auth::AuthMode,
+
+    /// Address people use to reach this server, e.g. https://grid.example.com. Required
+    /// for single sign-on; with https, session cookies are marked Secure. Requests for
+    /// other host names are refused.
+    #[arg(long, env = "ALEPHGRID_PUBLIC_URL")]
+    public_url: Option<String>,
+
+    /// Hours a sign-in lasts.
+    #[arg(long, env = "ALEPHGRID_SESSION_HOURS", default_value_t = 12)]
+    session_hours: u64,
+
+    /// OpenID Connect issuer URL for single sign-on (https).
+    #[arg(long, env = "ALEPHGRID_OIDC_ISSUER", requires = "oidc_client_id")]
+    oidc_issuer: Option<String>,
+
+    #[arg(long, env = "ALEPHGRID_OIDC_CLIENT_ID")]
+    oidc_client_id: Option<String>,
+
+    /// Client secret (prefer the environment variable; omit for a public client).
+    #[arg(long, env = "ALEPHGRID_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    oidc_client_secret: Option<String>,
+
+    #[arg(long, env = "ALEPHGRID_OIDC_SCOPES", default_value = "openid email profile")]
+    oidc_scopes: String,
+
+    /// ID-token claim with the user's groups, for granting space roles to groups.
+    #[arg(long, env = "ALEPHGRID_OIDC_GROUPS_CLAIM", default_value = "groups")]
+    oidc_groups_claim: String,
+
+    /// Text of the single sign-on button.
+    #[arg(long, env = "ALEPHGRID_OIDC_LABEL", default_value = "Sign in with SSO")]
+    oidc_label: String,
+
+    /// Who may join through single sign-on: `invite` (people with an invitation) or `any`
+    /// (anyone the identity provider signs in joins the default organization, with no
+    /// space roles until granted).
+    #[arg(long, env = "ALEPHGRID_OIDC_JOIN", value_enum, default_value = "invite")]
+    oidc_join: alephgrid_server::auth::oidc::OidcJoin,
+
+    /// Default storage limit of each space (its workbooks and trash), e.g. "500GB".
+    /// Organization admins can set other limits per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_STORAGE", value_parser = parse_size)]
+    space_storage: Option<u64>,
+
+    /// Default most workbooks per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_WORKBOOKS")]
+    space_workbooks: Option<u64>,
+
+    /// Default most bulk jobs (queries, imports, exports, copies) running at once per space.
+    #[arg(long, env = "ALEPHGRID_SPACE_JOBS")]
+    space_jobs: Option<u64>,
+
+    /// Default most workbooks open at once per space (compute).
+    #[arg(long, env = "ALEPHGRID_SPACE_OPEN_WORKBOOKS")]
+    space_open_workbooks: Option<u64>,
+
+    /// Serve a network interface without sign-in. Anyone who can reach the port can read,
+    /// change and delete every workbook.
+    #[arg(long, env = "ALEPHGRID_UNSAFE_NO_AUTH")]
+    unsafe_no_auth: bool,
 
     /// Create a demo workbook with this many synthetic flight rows.
     #[arg(long)]
@@ -123,13 +188,73 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.host != "127.0.0.1" && cli.host != "localhost" && cli.token.is_none() {
-        tracing::warn!("serving on {} without --token: anyone who can reach this port can read and edit your data", cli.host);
+    let loopback = matches!(cli.host.as_str(), "127.0.0.1" | "localhost" | "::1");
+    if !loopback && cli.auth == AuthMode::Local {
+        if !cli.unsafe_no_auth {
+            anyhow::bail!(
+                "serving {} without sign-in would let anyone who can reach it read and change every workbook; use --auth accounts (or --unsafe-no-auth if you really mean it)",
+                cli.host
+            );
+        }
+        tracing::warn!("serving on {} without sign-in: anyone who can reach this port can read, change and delete your data", cli.host);
     }
+    let public_url = cli.public_url.as_deref().map(|u| u.trim_end_matches('/').to_string());
+    if let Some(u) = &public_url {
+        if !(u.starts_with("https://") || u.starts_with("http://")) || u.matches('/').count() > 2 {
+            anyhow::bail!("--public-url must be a scheme and host, like https://grid.example.com (got {u})");
+        }
+    }
+    let oidc = match (&cli.oidc_issuer, &cli.oidc_client_id) {
+        (Some(issuer), Some(client_id)) => {
+            let Some(public) = &public_url else { anyhow::bail!("single sign-on needs --public-url, to tell the identity provider where to send people back") };
+            if cli.auth != AuthMode::Accounts {
+                anyhow::bail!("single sign-on needs --auth accounts");
+            }
+            Some(OidcConfig {
+                issuer: issuer.clone(),
+                client_id: client_id.clone(),
+                client_secret: cli.oidc_client_secret.clone().filter(|s| !s.is_empty()),
+                scopes: cli.oidc_scopes.clone(),
+                groups_claim: cli.oidc_groups_claim.clone(),
+                label: cli.oidc_label.clone(),
+                join: cli.oidc_join,
+                redirect_uri: format!("{public}/api/auth/oidc/callback"),
+            })
+        }
+        _ => None,
+    };
+    let bootstrap = match (std::env::var("ALEPHGRID_BOOTSTRAP_EMAIL"), std::env::var("ALEPHGRID_BOOTSTRAP_PASSWORD")) {
+        (Ok(e), Ok(p)) if !e.is_empty() && !p.is_empty() => Some((e, p)),
+        _ => None,
+    };
+    let allowed_hosts = match &public_url {
+        Some(u) => {
+            let host = u.split_once("://").map(|(_, h)| h).unwrap_or(u);
+            let name = host.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h).unwrap_or(host);
+            let mut hosts = alephgrid_server::auth::loopback_hosts();
+            hosts.push(name.to_ascii_lowercase());
+            Some(hosts)
+        }
+        None if loopback => Some(alephgrid_server::auth::loopback_hosts()),
+        None => None,
+    };
 
     let mut config = Config::new(cli.data_dir.clone());
     config.sheet_copy_rows = cli.sheet_copy_rows.max(1);
-    config.token = cli.token.clone();
+    config.quota = alephgrid_server::quota::QuotaLimits {
+        storage_bytes: cli.space_storage,
+        workbooks: cli.space_workbooks,
+        jobs: cli.space_jobs,
+        open_workbooks: cli.space_open_workbooks,
+    };
+    config.auth = AuthConfig {
+        mode: cli.auth,
+        public_url: public_url.clone(),
+        session_ttl: Duration::from_secs(cli.session_hours.clamp(1, 24 * 30) * 3600),
+        oidc,
+        bootstrap,
+        allowed_hosts,
+    };
     config.allow_sql = !cli.disable_sql;
     config.memory_budget = cli.memory_budget;
     config.threads = cli.threads;
@@ -144,11 +269,12 @@ async fn main() -> Result<()> {
     config.job_timeout = Duration::from_secs(cli.job_timeout.max(1));
     let state = AppState::new(config)?;
     let janitor = alephgrid_server::state::start_janitor(&state);
+    let default_space = state.auth.store.setting("default_space")?.context("the default space is missing")?;
 
     let mut open_path = String::new();
     if !cli.files.is_empty() {
         let first = cli.files[0].file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let h = state.create(&first, None)?;
+        let h = state.create(&first, &default_space)?;
         for file in &cli.files {
             let path = file.canonicalize().with_context(|| format!("cannot open {}", file.display()))?;
             let started = std::time::Instant::now();
@@ -159,7 +285,7 @@ async fn main() -> Result<()> {
         open_path = format!("w/{}", h.meta.lock().unwrap().id);
     }
     if let Some(rows) = cli.demo_rows {
-        let h = state.create("Demo: US flights", None)?;
+        let h = state.create("Demo: US flights", &default_space)?;
         let started = std::time::Instant::now();
         let info = h.with_engine(|wb| wb.create_demo_table(rows))?;
         tracing::info!("generated {} demo rows in {:.1?}", info.row_count, started.elapsed());
@@ -172,8 +298,12 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     let bound_port = listener.local_addr()?.port();
     let shown_host = if cli.host == "0.0.0.0" { "localhost" } else { cli.host.as_str() };
-    let token = cli.token.as_ref().map(|t| format!("?token={t}")).unwrap_or_default();
-    println!("\n  Alephgrid is running → http://{shown_host}:{bound_port}/{open_path}{token}\n  Data: {}\n", cli.data_dir.display());
+    let base = public_url.clone().unwrap_or_else(|| format!("http://{shown_host}:{bound_port}"));
+    println!("\n  Alephgrid is running → {base}/{open_path}\n  Data: {}\n", cli.data_dir.display());
+    if let Some(code) = state.auth.setup_code() {
+        // Shown only on the console of whoever started the server; it creates the admin once.
+        println!("  First start: open {base}/setup and enter the setup code {code}\n");
+    }
 
     let stopping = state.clone();
     let (begun_tx, begun_rx) = tokio::sync::oneshot::channel::<()>();

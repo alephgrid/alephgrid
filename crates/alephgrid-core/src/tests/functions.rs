@@ -21,9 +21,9 @@ fn lambda_recalculates_versions_and_reopens() {
         s.set(
             0,
             &[
-                SheetInput { row: 0, column: 0, value: "100".into() },
-                SheetInput { row: 0, column: 1, value: "60".into() },
-                SheetInput { row: 0, column: 2, value: "=MARGIN(A1,B1)".into() },
+                SheetInput { row: 0, column: 0, value: "100".into(), base: None },
+                SheetInput { row: 0, column: 1, value: "60".into(), base: None },
+                SheetInput { row: 0, column: 2, value: "=MARGIN(A1,B1)".into(), base: None },
             ],
         )
     })

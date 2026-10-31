@@ -29,12 +29,18 @@ export interface GridModel {
   cell?(r: number, c: number): { text: string; align: Align } | null | undefined;
   /** Text shown in the editor (formula source for sheets). */
   editText?(r: number, c: number): string;
+  /** What an edit of the cell is checked against on the server (the value shown when
+   *  editing starts), or undefined while it is loading. */
+  base?(r: number, c: number): CellValue | undefined;
 }
+
+/** One cell edit; `base` is the cell's value when the user started editing it. */
+export type GridEdit = { r: number; c: number; value: string | null; base?: CellValue };
 
 export interface GridHandlers {
   referencePick?(range: Range, phase: "start" | "move" | "end"): boolean;
   selectionChanged(range: Range, active: Cell): void;
-  commitEdits(edits: { r: number; c: number; value: string | null }[]): Promise<boolean>;
+  commitEdits(edits: GridEdit[]): Promise<boolean>;
   headerMenu(col: number, clientX: number, clientY: number): void;
   rowMenu(row: number, clientX: number, clientY: number): void;
   copy(range: Range): void;
@@ -94,6 +100,8 @@ export class Grid {
   private dragging: "cells" | "cols" | "rows" | null = null;
   private resizing: { col: number; startX: number; startW: number } | null = null;
   private editing: Cell | null = null;
+  /** The edited cell's value when editing started (see `GridModel.base`). */
+  private editingBase: CellValue | undefined;
   private referenceAnchor: Cell | null = null;
   private referencePicked = false;
   private references: Range[] = [];
@@ -321,6 +329,7 @@ export class Grid {
     }
     if (this.active.r >= this.model.rowCount() && !this.model.canAppend()) return;
     this.editing = { ...this.active };
+    this.editingBase = this.model.base?.(this.active.r, this.active.c);
     // A column with a list rule (F.12) offers its values as a dropdown.
     const choices = this.model.choices?.(col.name) ?? [];
     this.choiceList.replaceChildren(...choices.map(v => { const o = document.createElement("option"); o.value = v; return o; }));
@@ -736,7 +745,7 @@ export class Grid {
       this.select(next, next);
     }
     if (value !== before) {
-      await this.handlers.commitEdits([{ r: cell.r, c: cell.c, value: value === "" ? null : value }]);
+      await this.handlers.commitEdits([{ r: cell.r, c: cell.c, value: value === "" ? null : value, base: this.editingBase }]);
     }
   }
 

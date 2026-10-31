@@ -237,7 +237,10 @@ impl Workbook {
                     }
                     let pairs: Vec<(&Column, String)> = cols.iter().zip(staged.iter().map(|c| ident(&c.name))).collect();
                     wb.check_conversions(&pairs, &staged)?;
+                    let next_id = storage::table_meta(&wb.conn, &table)?.next_id;
+                    let capture = wb.undo_begin(&table, "false")?;
                     let n = wb.append_staged(&table, &pairs)?;
+                    wb.undo_finish(capture, &format!("{ID} >= {next_id} AND {ID} < {}", next_id + n as i64), Default::default())?;
                     Ok(SqlChangeOutcome { table: table.clone(), kind: "insert".into(), rows: n })
                 })
             }
@@ -263,6 +266,8 @@ impl Workbook {
                     wb.check_conversions(&pairs, &staged)?;
                     let assignments: Vec<String> =
                         pairs.iter().map(|(c, v)| format!("{} = CAST(s.{v} AS {})", ident(&c.name), c.sql_type)).collect();
+                    let targets = format!("{ID} IN (SELECT _rf_target FROM temp.{STAGE})");
+                    let capture = wb.undo_begin(&table, &targets)?;
                     let n = wb.conn.execute(
                         &format!(
                             "UPDATE main.{t} SET {} FROM temp.{STAGE} s WHERE main.{t}.{ID} = s._rf_target",
@@ -273,6 +278,7 @@ impl Workbook {
                     )?;
                     crate::faults::check("sql_change")?;
                     storage::update_table(&wb.conn, &table, None, None)?;
+                    wb.undo_finish(capture, &targets, cols.iter().map(|c| (c.name.clone(), None)).collect())?;
                     wb.conn.execute_batch(&format!("DROP TABLE temp.{STAGE};"))?;
                     Ok(SqlChangeOutcome { table: table.clone(), kind: "update".into(), rows: n as u64 })
                 })
@@ -289,10 +295,12 @@ impl Workbook {
                 self.mutating("sql_change", None, |wb| {
                     let q = wb.db().expand_query(&checked)?;
                     wb.stage(&q.sql, q.lines_before, params)?;
+                    let capture = wb.undo_begin(&table, &format!("{ID} IN (SELECT _rf_target FROM temp.{STAGE})"))?;
                     let n = wb.conn.execute(
                         &format!("DELETE FROM main.{} WHERE {ID} IN (SELECT _rf_target FROM temp.{STAGE})", ident(&table)),
                         [],
                     )?;
+                    wb.undo_finish(capture, "false", Default::default())?;
                     crate::faults::check("sql_change")?;
                     storage::update_table(&wb.conn, &table, None, Some(false))?;
                     wb.conn.execute_batch(&format!("DROP TABLE temp.{STAGE};"))?;

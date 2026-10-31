@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
 use ts_rs::TS;
 
+use crate::auth::{Cap, Principal, SpaceRole};
 use crate::sched::{Class, JobError};
 use crate::state::{Job, Shared, Work, WorkbookHandle};
 
@@ -44,14 +45,44 @@ pub enum Event {
     /// The server closed the workbook (`reason`: "idle", "stopped" or "shutdown") and ends
     /// the connection; reconnecting reopens it. Unacknowledged requests may not have run.
     WorkbookClosed { reason: String },
-    /// Events were dropped because this client was not reading fast enough: refresh
-    /// everything shown (sent to that session only).
-    Resync {},
+    /// Refresh everything shown: a change whose effects are broad (analyses, functions),
+    /// with its `revision`; or, without one when nothing is known, after events were
+    /// dropped because this client was not reading fast enough (sent to that session only,
+    /// with the latest revision announced so far).
+    Resync {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        revision: Option<u64>,
+    },
+    /// A committed change with nothing to refresh (an undo with nothing to undo). Every
+    /// revision is announced by at least one event, in revision order, so a client that
+    /// sees a revision skip knows it missed something.
+    Committed { origin: u64, revision: u64 },
+    /// This connection lost its access (signed out, session expired, role removed, token
+    /// revoked or the workbook moved to a space it cannot see); the server closes it.
+    AccessRevoked { reason: String },
+    /// This connection's role in the workbook's space changed.
+    RoleChanged { role: SpaceRole },
     /// A long request's progress (sent to the session that made it).
     Progress { request: u64, percentage: f64 },
 }
 
 impl Event {
+    /// The revision a change event announces.
+    pub fn revision(&self) -> Option<u64> {
+        match self {
+            Event::CellsChanged { revision, .. }
+            | Event::TableChanged { revision, .. }
+            | Event::TablesChanged { revision, .. }
+            | Event::SheetChanged { revision, .. }
+            | Event::ViewsChanged { revision, .. }
+            | Event::QueriesChanged { revision, .. }
+            | Event::Committed { revision, .. } => Some(*revision),
+            Event::Resync { revision } => *revision,
+            _ => None,
+        }
+    }
+
     /// Events after which the home-screen summary (counts, rows) may be stale.
     pub fn changes_structure(&self) -> bool {
         matches!(self, Event::TableChanged { .. } | Event::TablesChanged { .. })
@@ -127,9 +158,18 @@ pub enum Op {
         #[serde(default)] #[ts(optional, as = "Option<u32>")] column_start: u32,
         #[serde(default)] #[ts(optional, as = "Option<u32>")] column_count: Option<u32>,
     },
-    Edit { view_id: u64, edits: Vec<CellEdit> },
-    InsertRows { view_id: u64, at: u64, count: u64 },
-    DeleteRows { view_id: u64, start: u64, count: u64 },
+    /// `generation` (see `ViewInfo::generation`) guards edits that address rows by position
+    /// (appends); edits by record are guarded by their `base` values.
+    Edit { view_id: u64, edits: Vec<CellEdit>, #[serde(default)] #[ts(optional, as = "Option<i64>")] generation: Option<i64> },
+    InsertRows { view_id: u64, at: u64, count: u64, #[serde(default)] #[ts(optional, as = "Option<i64>")] generation: Option<i64> },
+    DeleteRows { view_id: u64, start: u64, count: u64, #[serde(default)] #[ts(optional, as = "Option<i64>")] generation: Option<i64> },
+    /// Take back a table change: `revision`, or the caller's own latest change (`redo`:
+    /// their latest undo). `null` when there is nothing to take back; a `conflict` when
+    /// what it would take back changed since (see the engine's `undo.rs`).
+    Undo {
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] revision: Option<u64>,
+        #[serde(default)] #[ts(optional, as = "Option<bool>")] redo: bool,
+    },
     Stats { view_id: u64, column: String, start: u64, end: u64 },
     AddColumn { table: String, name: String, sql_type: String },
     /// `language` is `sql` (a DuckDB expression, the default) or `sheet` (spreadsheet syntax).
@@ -154,19 +194,20 @@ pub enum Op {
     CreateDemoTable { #[serde(default = "default_demo_rows")] #[ts(optional, as = "Option<u64>")] rows: u64 },
     DropTable { table: String },
     RenameTable { table: String, new_name: String },
-    // Sheets (IronCalc). Rows/columns are 0-based.
+    // Sheets (IronCalc). Rows/columns are 0-based. `layout` (see `SheetInfo::layout`) guards
+    // changes that address cells by position; `SheetInput::base` guards each cell's value.
     Sheets,
     SheetCreate { #[serde(default)] #[ts(optional, as = "Option<String>")] name: String },
-    SheetRename { sheet: u32, name: String },
-    SheetDelete { sheet: u32 },
+    SheetRename { sheet: u32, name: String, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    SheetDelete { sheet: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     SheetFetch { sheet: u32, row_start: u32, row_count: u32, column_count: u32 },
-    SheetSet { sheet: u32, inputs: Vec<SheetInput> },
+    SheetSet { sheet: u32, inputs: Vec<SheetInput>, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     SheetUndo,
     SheetRedo,
-    SheetInsertRows { sheet: u32, at: u32, count: u32 },
-    SheetDeleteRows { sheet: u32, at: u32, count: u32 },
-    SheetInsertColumns { sheet: u32, at: u32, count: u32 },
-    SheetDeleteColumns { sheet: u32, at: u32, count: u32 },
+    SheetInsertRows { sheet: u32, at: u32, count: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    SheetDeleteRows { sheet: u32, at: u32, count: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    SheetInsertColumns { sheet: u32, at: u32, count: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    SheetDeleteColumns { sheet: u32, at: u32, count: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Named cells and ranges (workbook functions are listed by `functions`).
     SheetNames,
     /// `scope` is a sheet index for a sheet-level name; omitted for the whole workbook.
@@ -185,7 +226,7 @@ pub enum Op {
     /// Where a formula typed into a cell fails to parse; `null` when it parses.
     SheetCheckFormula { sheet: u32, row: u32, column: u32, formula: String },
     /// Copy the first row (down) or column (right) of `area` over the rest of it.
-    SheetFill { sheet: u32, area: alephgrid_core::CellArea, direction: alephgrid_core::FillDirection },
+    SheetFill { sheet: u32, area: alephgrid_core::CellArea, direction: alephgrid_core::FillDirection, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
     SheetPaste {
         from_sheet: u32,
@@ -195,9 +236,12 @@ pub enum Op {
         column: u32,
         #[serde(default = "default_paste_mode")] #[ts(optional, as = "Option<alephgrid_core::PasteMode>")] mode: alephgrid_core::PasteMode,
         #[serde(default)] #[ts(optional, as = "Option<bool>")] transpose: bool,
+        /// Layouts (see `SheetInfo::layout`) of the target sheet and of `from_sheet`.
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] source_layout: Option<u64>,
     },
     /// Cut and paste within one sheet; references to the moved cells follow them.
-    SheetMove { sheet: u32, source: alephgrid_core::CellArea, row: u32, column: u32 },
+    SheetMove { sheet: u32, source: alephgrid_core::CellArea, row: u32, column: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Copy a query's first rows into a new sheet. Fails with `too_large` when the result has
     /// more rows than a sheet copy holds, unless `allow_truncation`.
     CreateSheetFromQuery {
@@ -222,7 +266,7 @@ pub enum Op {
     DeleteSavedView { saved: String },
     /// Copy a view's current rows into a new table (a snapshot).
     TableFromView { view_id: u64, name: String },
-    SheetToTable { sheet: u32, name: String },
+    SheetToTable { sheet: u32, name: String, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Committed changes after revision `after`, oldest first.
     History { #[serde(default)] #[ts(optional, as = "Option<u64>")] after: u64, #[serde(default = "default_history")] #[ts(optional, as = "Option<usize>")] limit: usize },
     /// Every table with its columns (schema browser, autocomplete).
@@ -294,6 +338,39 @@ fn default_query_kind() -> QueryKind {
     QueryKind::Query
 }
 
+/// What the connection's principal must be allowed to do in the workbook's space for `op`
+/// (7.04). Every operation is listed, so a new one cannot be added without deciding.
+pub fn required_caps(op: &Op) -> &'static [Cap] {
+    use Op::*;
+    const VIEW: &[Cap] = &[Cap::View];
+    const EDIT: &[Cap] = &[Cap::Edit];
+    const QUERY: &[Cap] = &[Cap::Query];
+    const EDIT_QUERY: &[Cap] = &[Cap::Edit, Cap::Query];
+    match op {
+        Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
+        | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
+        | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
+        TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
+        TestFunction { .. } => VIEW,
+        Query { .. } => QUERY,
+        ExportQuery { .. } => &[Cap::Query, Cap::Export],
+        PublishFunction { .. } | PinFunctions { .. } => &[Cap::Publish],
+        CreateTableFromQuery { .. } | CreateSheetFromQuery { .. } | SqlChange { .. } | RefreshMaterialized { .. } => EDIT_QUERY,
+        SaveAnalysis { .. } | DeleteAnalysis { .. } | SaveDashboard { .. } | DeleteDashboard { .. } | SetValidations { .. }
+        | ApplyTransform { .. } | MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | SavePresentation { .. }
+        | Edit { .. } | InsertRows { .. } | DeleteRows { .. } | Undo { .. } | AddColumn { .. } | AddFormulaColumn { .. } | UpdateFormula { .. }
+        | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
+        | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
+        | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetPaste { .. } | SheetMove { .. }
+        | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
+        | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
+        | CancelRecalculation { .. } => EDIT,
+    }
+}
+
 /// Where a request runs (see `sched.rs`): `(is_write, class)`; `None` is answered at once.
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
@@ -335,7 +412,9 @@ fn op_name(op: &Op) -> String {
 fn summary(op: &Op) -> String {
     match op {
         Op::Edit { edits, .. } => format!("{} cell(s)", edits.len()),
-        Op::SheetSet { sheet, inputs } => format!("sheet {sheet}: {} cell(s)", inputs.len()),
+        Op::Undo { revision: Some(r), redo } => format!("{} revision {r}", if *redo { "redo" } else { "undo" }),
+        Op::Undo { revision: None, redo } => (if *redo { "redo" } else { "undo" }).to_string(),
+        Op::SheetSet { sheet, inputs, .. } => format!("sheet {sheet}: {} cell(s)", inputs.len()),
         Op::CreateTableFromQuery { name, .. } | Op::CreateSheetFromQuery { name, .. } => format!("{} {name:?}", op_name(op)),
         Op::SqlChange { sql, .. } => format!("sql: {}", sql.chars().take(200).collect::<String>()),
         Op::SaveQuery { name, .. } => format!("save query {name:?}"),
@@ -448,25 +527,28 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
-        Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync {})),
+        Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync { revision: None })),
         Op::SetValidations { table, rules } => (json!(wb.set_validations(&table, rules)?), Some(Event::TableChanged { table, origin, revision: 0 })),
         Op::ApplyTransform { table, transform, name } => (json!(wb.apply_transform(&table, &transform, &name)?), Some(Event::TablesChanged { origin, revision: 0 })),
-        Op::SaveDashboard { saved, name, tiles, slicers } => (json!(wb.save_dashboard(saved.as_deref(), &name, tiles, slicers)?), Some(Event::Resync {})),
-        Op::DeleteDashboard { dashboard } => { wb.delete_dashboard(&dashboard)?; (Value::Null, Some(Event::Resync {})) },
-        Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync {})) },
+        Op::SaveDashboard { saved, name, tiles, slicers } => (json!(wb.save_dashboard(saved.as_deref(), &name, tiles, slicers)?), Some(Event::Resync { revision: None })),
+        Op::DeleteDashboard { dashboard } => { wb.delete_dashboard(&dashboard)?; (Value::Null, Some(Event::Resync { revision: None })) },
+        Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync { revision: None })) },
         Op::MaterializeAnalysis { name, spec } => (json!(wb.materialize_analysis(&name,&spec)?),tables()),
         Op::ReplaceApply { spec, revision } => {let out=wb.replace_apply(&spec,revision)?;let event=changed(out.table.clone());(json!(out),event)},
         Op::ReplaceUndo { revision } => {let out=wb.replace_undo(revision)?;let event=changed(out.table.clone());(json!(out),event)},
-        Op::SavePresentation { table, presentation } => (json!(wb.save_presentation(&table,presentation)?),Some(Event::Resync {})),
+        Op::SavePresentation { table, presentation } => (json!(wb.save_presentation(&table,presentation)?),Some(Event::Resync { revision: None })),
         Op::PublishFunction { definition } => {
             if definition.kind == alephgrid_core::FunctionKind::Sql { require_sql(ctx)?; }
-            (json!(wb.publish_function(definition)?), Some(Event::Resync {}))
+            (json!(wb.publish_function(definition)?), Some(Event::Resync { revision: None }))
         }
         Op::PinFunctions { pins } => {
             if wb.functions()?.iter().any(|f| pins.contains_key(&f.name) && f.versions.iter().any(|v| v.definition.kind == alephgrid_core::FunctionKind::Sql)) { require_sql(ctx)?; }
-            (json!(wb.pin_functions(&pins)?), Some(Event::Resync {}))
+            (json!(wb.pin_functions(&pins)?), Some(Event::Resync { revision: None }))
         }
-        Op::Edit { view_id, edits } => {
+        Op::Edit { view_id, edits, generation } => {
+            if let Some(g) = generation.filter(|_| edits.iter().any(|e| e.record.is_none())) {
+                wb.expect_generation(view_id, g)?;
+            }
             let out = wb.edit(view_id, &edits)?;
             let event = if out.rows_appended > 0 {
                 Event::TableChanged { table: out.table.clone(), origin, revision: 0 }
@@ -475,8 +557,23 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             };
             (json!(out), Some(event))
         }
-        Op::InsertRows { view_id, at, count } => (Value::Null, changed(wb.insert_rows(view_id, at, count)?)),
-        Op::DeleteRows { view_id, start, count } => (Value::Null, changed(wb.delete_rows(view_id, start, count)?)),
+        Op::InsertRows { view_id, at, count, generation } => {
+            if let Some(g) = generation {
+                wb.expect_generation(view_id, g)?;
+            }
+            (Value::Null, changed(wb.insert_rows(view_id, at, count)?))
+        }
+        Op::DeleteRows { view_id, start, count, generation } => {
+            if let Some(g) = generation {
+                wb.expect_generation(view_id, g)?;
+            }
+            (Value::Null, changed(wb.delete_rows(view_id, start, count)?))
+        }
+        Op::Undo { revision, redo } => {
+            let out = wb.undo_change(revision, redo)?;
+            let event = out.as_ref().map(|o| Event::TableChanged { table: o.table.clone(), origin, revision: 0 });
+            (json!(out), event)
+        }
         Op::AddColumn { table, name, sql_type } => {
             wb.add_column(&table, &name, &sql_type)?;
             (Value::Null, changed(table))
@@ -512,15 +609,18 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let name = if name.trim().is_empty() { "Sheet".to_string() } else { name };
             (json!(wb.with_sheets(|s| s.create(&name))?), tables())
         }
-        Op::SheetRename { sheet, name } => {
+        Op::SheetRename { sheet, name, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.rename(sheet, &name))?;
             (Value::Null, tables())
         }
-        Op::SheetDelete { sheet } => {
+        Op::SheetDelete { sheet, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.delete_sheet(sheet)?;
             (Value::Null, tables())
         }
-        Op::SheetSet { sheet, inputs } => {
+        Op::SheetSet { sheet, inputs, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.set_sheet_cells(sheet, &inputs)?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
@@ -537,19 +637,23 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             };
             (json!(changed), changed.then_some(event))
         }
-        Op::SheetInsertRows { sheet, at, count } => {
+        Op::SheetInsertRows { sheet, at, count, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
             (Value::Null, sheet_changed(sheet))
         }
-        Op::SheetDeleteRows { sheet, at, count } => {
+        Op::SheetDeleteRows { sheet, at, count, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.delete_rows(sheet, at, count))?;
             (Value::Null, sheet_changed(sheet))
         }
-        Op::SheetInsertColumns { sheet, at, count } => {
+        Op::SheetInsertColumns { sheet, at, count, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_columns(sheet, at, count))?;
             (Value::Null, sheet_changed(sheet))
         }
-        Op::SheetDeleteColumns { sheet, at, count } => {
+        Op::SheetDeleteColumns { sheet, at, count, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.delete_columns(sheet, at, count))?;
             (Value::Null, sheet_changed(sheet))
         }
@@ -565,15 +669,19 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
         }
-        Op::SheetFill { sheet, area, direction } => {
+        Op::SheetFill { sheet, area, direction, layout } => {
+            expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.fill(sheet, area, direction))?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
-        Op::SheetPaste { from_sheet, source, sheet, row, column, mode, transpose } => {
+        Op::SheetPaste { from_sheet, source, sheet, row, column, mode, transpose, layout, source_layout } => {
+            expect_layout(wb, sheet, layout)?;
+            expect_layout(wb, from_sheet, source_layout)?;
             let area = wb.with_sheets(|s| s.paste(from_sheet, source, sheet, (row, column), mode, transpose))?;
             (json!(area), sheet_changed(sheet))
         }
-        Op::SheetMove { sheet, source, row, column } => {
+        Op::SheetMove { sheet, source, row, column, layout } => {
+            expect_layout(wb, sheet, layout)?;
             let area = wb.with_sheets(|s| s.move_cells(sheet, source, (row, column)))?;
             (json!(area), sheet_changed(sheet))
         }
@@ -618,9 +726,59 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         }
         Op::TableFromView { view_id, name } => (json!(wb.table_from_view(view_id, &name)?), tables()),
         Op::TableToSheet { view_id, name } => (json!(wb.sheet_from_view(view_id, &name, ctx.sheet_copy_rows)?), tables()),
-        Op::SheetToTable { sheet, name } => (json!(wb.sheet_to_table(sheet, &name)?), tables()),
+        Op::SheetToTable { sheet, name, layout } => {
+            expect_layout(wb, sheet, layout)?;
+            (json!(wb.sheet_to_table(sheet, &name)?), tables())
+        }
         other => bail!("{} is not a change", op_name(&other)),
     })
+}
+
+/// Refuse a sheet change computed against another layout of `sheet` (see `SheetInfo::layout`).
+fn expect_layout(wb: &Workbook, sheet: u32, layout: Option<u64>) -> Result<()> {
+    match layout {
+        Some(l) => wb.sheets().expect_layout(sheet, l),
+        None => Ok(()),
+    }
+}
+
+/// Broadcast what a committed change did: its own event (or [`Event::Committed`]), then
+/// tables and sheet cells that changed through formulas reading it. Returns whether the
+/// change restructured something (for the home-screen summary).
+fn announce(
+    events: &tokio::sync::broadcast::Sender<Event>,
+    c: &alephgrid_core::Committed,
+    event: Option<Event>,
+    derived: Vec<(String, bool)>,
+    sheets: bool,
+    origin: u64,
+) -> bool {
+    let Some(ev) = event else {
+        let _ = events.send(Event::Committed { origin, revision: c.revision });
+        return false;
+    };
+    let ev = with_revision(ev, c.revision);
+    let structural = ev.changes_structure();
+    let primary = match &ev {
+        Event::CellsChanged { table, .. } | Event::TableChanged { table, .. } => Some(table.clone()),
+        _ => None,
+    };
+    let resync = matches!(ev, Event::Resync { .. });
+    let _ = events.send(ev);
+    // Origin 0: no session has applied these changes itself.
+    for (table, restructured) in derived.into_iter().filter(|(t, r)| !resync && (*r || primary.as_ref() != Some(t))) {
+        let ev = if restructured || structural {
+            Event::TableChanged { table, origin: 0, revision: c.revision }
+        } else {
+            Event::CellsChanged { table, origin: 0, revision: c.revision }
+        };
+        let _ = events.send(ev);
+    }
+    // Sheet cells that read the changed tables have new values.
+    if sheets && !resync {
+        let _ = events.send(Event::SheetChanged { sheet: None, origin: 0, revision: c.revision });
+    }
+    structural
 }
 
 fn with_revision(ev: Event, rev: u64) -> Event {
@@ -631,6 +789,7 @@ fn with_revision(ev: Event, rev: u64) -> Event {
         Event::SheetChanged { sheet, origin, .. } => Event::SheetChanged { sheet, origin, revision: rev },
         Event::ViewsChanged { table, origin, .. } => Event::ViewsChanged { table, origin, revision: rev },
         Event::QueriesChanged { origin, .. } => Event::QueriesChanged { origin, revision: rev },
+        Event::Resync { .. } => Event::Resync { revision: Some(rev) },
         other => other,
     }
 }
@@ -641,8 +800,17 @@ pub fn error_code(e: &anyhow::Error) -> Option<&'static str> {
         if let Some(j) = c.downcast_ref::<JobError>() {
             return Some(j.code());
         }
+        if let Some(d) = c.downcast_ref::<crate::auth::Denied>() {
+            return Some(d.code());
+        }
+        if c.downcast_ref::<crate::quota::QuotaExceeded>().is_some() {
+            return Some("quota");
+        }
         if c.downcast_ref::<alephgrid_core::limits::TooLarge>().is_some() {
             return Some("too_large");
+        }
+        if c.downcast_ref::<alephgrid_core::Conflict>().is_some() {
+            return Some("conflict");
         }
         if c.downcast_ref::<alephgrid_core::NotAllowed>().is_some() {
             return Some("not_allowed");
@@ -696,6 +864,9 @@ pub struct Outbox {
     bytes: AtomicUsize,
     peak: AtomicUsize,
     lagged: AtomicBool,
+    /// The latest revision this session was told about (or would have been, had its events
+    /// not been dropped).
+    latest: std::sync::atomic::AtomicU64,
     pub too_slow: AtomicBool,
     pause: usize,
     max: usize,
@@ -710,6 +881,7 @@ impl Outbox {
             bytes: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             lagged: AtomicBool::new(false),
+            latest: std::sync::atomic::AtomicU64::new(0),
             too_slow: AtomicBool::new(false),
             pause,
             max,
@@ -721,7 +893,9 @@ impl Outbox {
     fn push(&self, text: String, reply: bool) {
         let len = text.len();
         let now = self.bytes.load(Ordering::SeqCst);
-        if !reply && now + len > self.pause {
+        // Once events are dropped, later ones are too until the resync goes out: the
+        // client refreshes everything then.
+        if !reply && (now + len > self.pause || self.lagged.load(Ordering::SeqCst)) {
             self.lagged.store(true, Ordering::SeqCst);
             return;
         }
@@ -745,7 +919,8 @@ impl Outbox {
             self.drained.notify_waiters();
         }
         if left < self.pause / 2 && self.lagged.swap(false, Ordering::SeqCst) {
-            self.push(serde_json::to_string(&Event::Resync {}).unwrap(), true);
+            let latest = self.latest.load(Ordering::SeqCst);
+            self.push(serde_json::to_string(&Event::Resync { revision: Some(latest) }).unwrap(), true);
         }
     }
 
@@ -764,7 +939,30 @@ pub struct SessionInfo {
     pub outbox: Arc<Outbox>,
 }
 
-pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>) {
+/// Recheck a connection's access: its credential is still valid and it still sees the
+/// workbook's space. Returns the current principal and role.
+fn recheck(state: &Shared, principal: &Principal, workbook: &str) -> Result<(Principal, SpaceRole, crate::auth::Space)> {
+    let p = state.auth.still_valid(principal)?;
+    let (space, role) = state.require_workbook(&p, workbook, Cap::View)?;
+    Ok((p, role, space))
+}
+
+/// What a committed change, an export or a publication puts in the audit log (7.10).
+fn audit(state: &Shared, p: &Principal, space: &crate::auth::Space, workbook: &str, (op, summary): (&str, String), c: &alephgrid_core::Committed) {
+    let (revision, result) = (c.revision, &c.result);
+    let detail = json!({ "op": op, "revision": revision, "summary": summary });
+    state.auth.record(p, "workbook_changed", space, workbook, detail);
+    match op {
+        "publish_function" => {
+            let versions = result["versions"].as_array().map(|v| v.len()).unwrap_or(0);
+            state.auth.record(p, "function_published", space, workbook, json!({ "function": result["name"], "version": versions, "revision": revision }));
+        }
+        "pin_functions" => state.auth.record(p, "functions_pinned", space, workbook, json!({ "revision": revision })),
+        _ => {}
+    }
+}
+
+pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>, principal: Principal, role: SpaceRole, space: crate::auth::Space) {
     let session = state.next_session_id();
     // Subscribe before anything else, so an event during setup (a deletion) is not missed.
     let mut events = handle.events.subscribe();
@@ -783,7 +981,8 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         .unwrap_or(0)
     };
     let (mut sink, mut stream) = socket.split();
-    let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone(), "revision": revision });
+    outbox.latest.fetch_max(revision, Ordering::SeqCst);
+    let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone(), "revision": revision, "role": role });
     outbox.push(hello.to_string(), true);
 
     // Writer: sends queued frames in order; closes the socket when told to.
@@ -846,6 +1045,9 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             loop {
                 match events.recv().await {
                     Ok(ev) => {
+                        if let Some(r) = ev.revision() {
+                            outbox.latest.fetch_max(r, Ordering::SeqCst);
+                        }
                         let end = matches!(ev, Event::WorkbookDeleted { .. } | Event::WorkbookClosed { .. });
                         outbox.push(serde_json::to_string(&ev).unwrap(), end);
                         if end {
@@ -862,6 +1064,47 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         })
     };
 
+    // Access: rechecked whenever identities or roles change and when the credential expires.
+    // Losing it ends the connection; a changed role applies to the next request.
+    let access = Arc::new(Mutex::new((principal, role, space)));
+    let guard = {
+        let (outbox, stop_tx, access, state, workbook) = (outbox.clone(), stop_tx.clone(), access.clone(), state.clone(), handle.id.clone());
+        let mut changes = state.auth.subscribe();
+        let mut stop = stop_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                let expires = access.lock().unwrap().0.expires_at();
+                let until = expires.map(|e| Duration::from_millis(e.saturating_sub(crate::auth::now_ms()))).unwrap_or(Duration::from_secs(3600));
+                tokio::select! {
+                    r = changes.changed() => if r.is_err() { break },
+                    _ = tokio::time::sleep(until) => {}
+                    _ = stop.changed() => break,
+                }
+                let (p, before, _) = access.lock().unwrap().clone();
+                let (s, w) = (state.clone(), workbook.clone());
+                let checked = tokio::task::spawn_blocking(move || recheck(&s, &p, &w)).await;
+                match checked {
+                    Ok(Ok((p, role, space))) => {
+                        *access.lock().unwrap() = (p, role, space);
+                        if role != before {
+                            outbox.push(serde_json::to_string(&Event::RoleChanged { role }).unwrap(), true);
+                        }
+                    }
+                    Ok(Err(e)) if e.chain().any(|c| c.downcast_ref::<crate::auth::Denied>().is_some()) => {
+                        let reason = match e.chain().find_map(|c| c.downcast_ref::<crate::auth::Denied>()) {
+                            Some(crate::auth::Denied::Unauthenticated) => "signed_out",
+                            _ => "no_access",
+                        };
+                        outbox.push(serde_json::to_string(&Event::AccessRevoked { reason: reason.into() }).unwrap(), true);
+                        let _ = stop_tx.send(true);
+                        break;
+                    }
+                    // A failure to check (the control database) is not a revocation; try again.
+                    _ => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
+            }
+        })
+    };
     let views = Arc::new(Mutex::new(HashSet::new()));
     let cancels: Arc<Mutex<HashMap<u64, watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut jobs = tokio::task::JoinSet::new();
@@ -900,6 +1143,22 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             }
         };
         let id = envelope.id;
+        // Authorization of this request: the role as last rechecked, and an expired
+        // credential refuses everything (its revocation follows from the guard).
+        let (expired, role, space_now) = {
+            let a = access.lock().unwrap();
+            (a.0.expires_at().is_some_and(|e| e <= crate::auth::now_ms()), a.1, a.2.clone())
+        };
+        if expired {
+            let e = anyhow::Error::new(crate::auth::Denied::Unauthenticated);
+            outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+            continue;
+        }
+        if let Some(cap) = required_caps(&envelope.op).iter().find(|c| !space_now.allows(role, **c)) {
+            let e = crate::auth::forbidden(cap.describe());
+            outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+            continue;
+        }
         let Some((is_write, class)) = classify(&envelope.op) else {
             let result = match envelope.op {
                 Op::CloseView { view_id } => {
@@ -936,6 +1195,30 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             outbox.push(json!({ "id": id, "ok": true, "result": result }).to_string(), true);
             continue;
         };
+        // Bulk work holds one of the space's job slots while queued and running, and bulk
+        // changes are refused once the space is at its storage limit (7.07).
+        let slot = if class == Class::Bulk {
+            let space_id = access.lock().unwrap().2.id.clone();
+            let s = state.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                if is_write {
+                    s.check_storage(&space_id, 0)?;
+                }
+                s.job_slot(&space_id)
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r);
+            match checked {
+                Ok(slot) => Some(slot),
+                Err(e) => {
+                    outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         let limit = if class == Class::Bulk { state.config.job_timeout } else { state.config.request_timeout };
         let timeout = envelope.timeout_ms.map(Duration::from_millis).unwrap_or(limit).min(limit);
         let job = Job { key: (session, id), class, deadline: Instant::now() + timeout };
@@ -967,14 +1250,23 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             Box::new(move |p: f64| outbox.push(serde_json::to_string(&Event::Progress { request: id, percentage: p }).unwrap(), false))
                 as Box<dyn Fn(f64) + Send>
         });
+        let (principal, space) = {
+            let a = access.lock().unwrap();
+            (a.0.clone(), a.2.clone())
+        };
+        let actor = principal.actor();
+        let audit_state = state.clone();
         let op = envelope.op;
         let mutation_id = envelope.mutation_id;
         jobs.spawn(async move {
+            let _slot = slot;
             let reply = if is_write {
                 let name = op_name(&op);
+                let audit_op = name.clone();
                 let summary = summary(&op);
+                let audit_summary = summary.clone();
                 let view = view_of(&op);
-                let actor = format!("session {session}");
+                let (events, origin) = (handle.events.clone(), session);
                 let work = Work::Write(Box::new(move |wb: &mut Workbook| {
                     let mut event = None;
                     let committed = wb.mutate(
@@ -1004,33 +1296,20 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                     } else {
                         wb.stale_results().unwrap_or_default().into_iter().map(|t| { let k = wb.shared().results_queued(&t); (t, k) }).collect()
                     };
-                    Ok((committed, event, derived, sheets, queued))
+                    // Announced here, on the writer, so events go out in revision order.
+                    let structural = if committed.replayed { None } else { Some(announce(&events, &committed, event, derived, sheets, origin)) };
+                    Ok((committed, structural, queued))
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
-                    Ok((c, event, derived, sheets, queued)) => {
+                    Ok((c, structural, queued)) => {
+                        if !c.replayed {
+                            audit(&audit_state, &principal, &space, &handle.id, (&audit_op, audit_summary), &c);
+                            if class == Class::Bulk {
+                                audit_state.quota.forget(&space.id);
+                            }
+                        }
                         handle.recalculate_later(queued, c.revision, recalc_timeout);
-                        if let Some(ev) = event.filter(|_| !c.replayed) {
-                            let ev = with_revision(ev, c.revision);
-                            let structural = ev.changes_structure();
-                            let primary = match &ev {
-                                Event::CellsChanged { table, .. } | Event::TableChanged { table, .. } => Some(table.clone()),
-                                _ => None,
-                            };
-                            let resync = matches!(ev, Event::Resync {});
-                            let _ = handle.events.send(ev);
-                            // Origin 0: no session has applied these changes itself.
-                            for (table, restructured) in derived.into_iter().filter(|(t, r)| !resync && (*r || primary.as_ref() != Some(t))) {
-                                let ev = if restructured || structural {
-                                    Event::TableChanged { table, origin: 0, revision: c.revision }
-                                } else {
-                                    Event::CellsChanged { table, origin: 0, revision: c.revision }
-                                };
-                                let _ = handle.events.send(ev);
-                            }
-                            // Sheet cells that read the changed tables have new values.
-                            if sheets && !resync {
-                                let _ = handle.events.send(Event::SheetChanged { sheet: None, origin: 0, revision: c.revision });
-                            }
+                        if let Some(structural) = structural {
                             let h = handle.clone();
                             tokio::task::spawn_blocking(move || {
                                 let result = if structural { h.refresh_summary() } else { h.touch(false) };
@@ -1049,6 +1328,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                 }
             } else {
                 let downloads = ctx.downloads.clone();
+                let exporting = matches!(op, Op::ExportQuery { .. });
                 let cancelled = cancel_rx.clone();
                 let work = Work::Read(Box::new(move |r: &Reader| read(r, op, &ctx)));
                 let result = handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await;
@@ -1068,7 +1348,13 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                         }
                         error_reply(id, &anyhow::Error::new(JobError::Cancelled), &data_dir)
                     }
-                    Ok(v) => json!({ "id": id, "ok": true, "result": v }),
+                    Ok(v) => {
+                        if exporting {
+                            let detail = json!({ "kind": "query", "rows": v["rows"], "bytes": v["bytes"], "revision": v["revision"] });
+                            audit_state.auth.record(&principal, "data_exported", &space, &handle.id, detail);
+                        }
+                        json!({ "id": id, "ok": true, "result": v })
+                    }
                     Err(e) => error_reply(id, &e, &data_dir),
                 }
             };
@@ -1085,6 +1371,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     }
     while jobs.join_next().await.is_some() {}
     forwarder.abort();
+    guard.abort();
     let _ = stop_tx.send(true);
     if outbox.too_slow.load(Ordering::SeqCst) {
         writer.abort();
@@ -1113,5 +1400,57 @@ fn error_reply(id: u64, e: &anyhow::Error, data_dir: &std::path::Path) -> Value 
     if let Some(code) = error_code(e) {
         r["code"] = json!(code);
     }
+    // What the change addressed moved: there is nothing to overwrite, only to refresh.
+    if e.chain().any(|c| c.downcast_ref::<alephgrid_core::Conflict>().is_some_and(|c| c.moved)) {
+        r["moved"] = json!(true);
+    }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(revision: u64) -> String {
+        serde_json::to_string(&Event::CellsChanged { table: "t".into(), origin: 1, revision }).unwrap()
+    }
+
+    /// Once a slow client's events are dropped, later ones are dropped too until it has
+    /// caught up; then one resync names the latest revision it was not told about.
+    #[test]
+    fn dropped_events_end_in_one_resync_with_the_latest_revision() {
+        let frame = event(1).len();
+        let outbox = Outbox::new(frame * 3, frame * 100);
+        for r in 1..=3 {
+            outbox.latest.fetch_max(r, Ordering::SeqCst);
+            outbox.push(event(r), false);
+        }
+        // Over the pause threshold: 4 is dropped, and 5 too although there would be room.
+        outbox.latest.fetch_max(4, Ordering::SeqCst);
+        outbox.push(event(4), false);
+        assert!(outbox.lagged.load(Ordering::SeqCst));
+        let first = outbox.pop().unwrap();
+        outbox.sent(first.len());
+        outbox.latest.fetch_max(5, Ordering::SeqCst);
+        outbox.push(event(5), false);
+        // Replies are never dropped.
+        outbox.push("{\"id\":9,\"ok\":true}".into(), true);
+        let mut out = vec![first];
+        while let Some(f) = outbox.pop() {
+            outbox.sent(f.len());
+            out.push(f);
+        }
+        let revisions: Vec<Value> = out.iter().map(|f| serde_json::from_str::<Value>(f).unwrap()).collect();
+        assert_eq!(
+            revisions,
+            vec![
+                json!({ "event": "cells_changed", "table": "t", "origin": 1, "revision": 1 }),
+                json!({ "event": "cells_changed", "table": "t", "origin": 1, "revision": 2 }),
+                json!({ "event": "cells_changed", "table": "t", "origin": 1, "revision": 3 }),
+                json!({ "id": 9, "ok": true }),
+                json!({ "event": "resync", "revision": 5 }),
+            ]
+        );
+        assert!(!outbox.lagged.load(Ordering::SeqCst));
+    }
 }

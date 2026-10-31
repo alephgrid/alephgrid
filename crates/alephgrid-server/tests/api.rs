@@ -19,8 +19,8 @@ fn xlsx_bytes() -> Vec<u8> {
     wb.with_sheets(|s| {
         let sheet = s.create("Budget")?;
         s.set(sheet.index, &[
-            alephgrid_core::SheetInput { row: 0, column: 0, value: "2".into() },
-            alephgrid_core::SheetInput { row: 1, column: 0, value: "=A1*21".into() },
+            alephgrid_core::SheetInput { row: 0, column: 0, value: "2".into(), base: None },
+            alephgrid_core::SheetInput { row: 1, column: 0, value: "=A1*21".into(), base: None },
         ])
     })
     .unwrap();
@@ -131,7 +131,7 @@ async fn interrupted_upload_leaves_no_file_and_no_table() {
     // Promise 1 MB, send 100 bytes, then hang up.
     let mut tcp = tokio::net::TcpStream::connect(server.addr).await.unwrap();
     let head = format!(
-        "POST /api/workbooks/{wb}/import?filename=big.csv HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\n"
+        "POST /api/workbooks/{wb}/import?filename=big.csv HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 1000000\r\n\r\n"
     );
     tcp.write_all(head.as_bytes()).await.unwrap();
     tcp.write_all(&b"a,b\n1,2\n".repeat(13)[..100]).await.unwrap();
@@ -339,6 +339,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SavedView" => conforms::<alephgrid_core::SavedView>(op, v),
         "SavedView[]" => conforms::<Vec<alephgrid_core::SavedView>>(op, v),
         "HistoryEntry[]" => conforms::<Vec<alephgrid_core::HistoryEntry>>(op, v),
+        "UndoOutcome | null" => conforms::<Option<alephgrid_core::UndoOutcome>>(op, v),
         "QueryResult" => conforms::<alephgrid_core::QueryResult>(op, v),
         "TableSchema[]" => conforms::<Vec<alephgrid_core::TableSchema>>(op, v),
         "QueryExport" => conforms::<alephgrid_server::ws::QueryExport>(op, v),
@@ -373,107 +374,10 @@ async fn every_operation_replies_with_its_declared_type() {
     let mut ws = server.ws(&wb).await;
     let mut seen = BTreeSet::new();
     let declared: std::collections::HashMap<&str, &str> = alephgrid_server::protocol::RESULTS.iter().copied().collect();
-    let mut run = |op: &'static str, params: Value| {
-        seen.insert(op);
-        (op, params)
-    };
-    let script = vec![
-        run("tables", json!({})),
-        run("open_view", json!({ "spec": { "table": "t", "sort": [], "filters": [] } })),
-        run("update_view", json!({ "view_id": 1, "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [] } })),
-        run("view_info", json!({ "view_id": 1 })),
-        run("fetch", json!({ "view_id": 1, "row_start": 0, "row_count": 10 })),
-        run("update_view", json!({ "view_id": 1, "spec": { "table": "t" } })),
-        run("edit", json!({ "view_id": 1, "edits": [{ "row": 0, "column": "s", "value": "z" }] })),
-        run("insert_rows", json!({ "view_id": 1, "at": 1, "count": 1 })),
-        run("delete_rows", json!({ "view_id": 1, "start": 1, "count": 1 })),
-        run("stats", json!({ "view_id": 1, "column": "n", "start": 0, "end": 3 })),
-        run("add_column", json!({ "table": "t", "name": "extra", "sql_type": "INTEGER" })),
-        run("add_formula_column", json!({ "table": "t", "name": "twice", "formula": "[n] * 2" })),
-        run("update_formula", json!({ "table": "t", "name": "twice", "formula": "[n] * 3" })),
-        run("rename_column", json!({ "table": "t", "name": "extra", "new_name": "more" })),
-        run("drop_column", json!({ "table": "t", "name": "more" })),
-        run("query", json!({ "sql": "SELECT n, twice FROM t" })),
-        run("create_table_from_query", json!({ "name": "copy", "sql": "SELECT * FROM t" })),
-        run("create_demo_table", json!({ "rows": 10 })),
-        run("rename_table", json!({ "table": "copy", "new_name": "copy2" })),
-        run("drop_table", json!({ "table": "copy2" })),
-        run("sheet_create", json!({ "name": "S" })),
-        run("sheets", json!({})),
-        run("sheet_rename", json!({ "sheet": 0, "name": "Sheet A" })),
-        run("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": "1" }, { "row": 1, "column": 0, "value": "=A1+1" }] })),
-        run("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 5, "column_count": 3 })),
-        run("sheet_undo", json!({})),
-        run("sheet_redo", json!({})),
-        run("sheet_insert_rows", json!({ "sheet": 0, "at": 0, "count": 1 })),
-        run("sheet_delete_rows", json!({ "sheet": 0, "at": 0, "count": 1 })),
-        run("sheet_insert_columns", json!({ "sheet": 0, "at": 0, "count": 1 })),
-        run("sheet_delete_columns", json!({ "sheet": 0, "at": 0, "count": 1 })),
-        run("sheet_define_name", json!({ "name": "FirstCells", "refers_to": "='Sheet A'!$A$1:$A$2" })),
-        run("sheet_update_name", json!({ "name": "FirstCells", "new_name": "Anchor", "new_scope": 0, "refers_to": "='Sheet A'!$A$1" })),
-        run("sheet_names", json!({})),
-        run("sheet_delete_name", json!({ "name": "Anchor", "scope": 0 })),
-        run("sheet_cell_detail", json!({ "sheet": 0, "row": 1, "column": 0 })),
-        run("sheet_check_formula", json!({ "sheet": 0, "row": 0, "column": 1, "formula": "=SUM(1,,"})),
-        run("sheet_fill", json!({ "sheet": 0, "area": { "row": 1, "column": 0, "rows": 3, "columns": 1 }, "direction": "down" })),
-        run("sheet_paste", json!({ "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "sheet": 0, "row": 0, "column": 2, "mode": "values", "transpose": true })),
-        run("sheet_move", json!({ "sheet": 0, "source": { "row": 0, "column": 2, "rows": 1, "columns": 2 }, "row": 5, "column": 2 })),
-        run("create_sheet_from_query", json!({ "name": "Q", "sql": "SELECT * FROM t" })),
-        run("open_view", json!({ "spec": { "table": "t" } })),
-        run("table_to_sheet", json!({ "view_id": 2, "name": "Copy" })),
-        run("sheet_delete", json!({ "sheet": 2 })),
-        run("save_view", json!({ "name": "Top", "spec": { "table": "t", "sort": [{ "column": "n", "desc": true }], "filters": [], "hidden": ["s"] }, "widths": { "n": 120.0 } })),
-        run("saved_views", json!({ "table": "t" })),
-        run("table_from_view", json!({ "view_id": 2, "name": "snap" })),
-        run("sheet_set", json!({ "sheet": 1, "inputs": [{ "row": 0, "column": 0, "value": "h" }, { "row": 1, "column": 0, "value": "1" }] })),
-        run("sheet_to_table", json!({ "sheet": 1, "name": "from_sheet" })),
-        run("sheet_delete", json!({ "sheet": 1 })),
-        run("rename_saved_view", json!({ "saved": "PLACEHOLDER", "name": "Top two" })),
-        run("delete_saved_view", json!({ "saved": "PLACEHOLDER" })),
-        run("close_view", json!({ "view_id": 1 })),
-        run("history", json!({ "after": 0, "limit": 5 })),
-        run("schema", json!({})),
-        run("save_query", json!({ "name": "Big", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }] })),
-        run("query_versions", json!({ "saved": "QUERY" })),
-        run("saved_queries", json!({})),
-        run("rename_query", json!({ "saved": "QUERY", "name": "Bigger" })),
-        run("query", json!({ "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "limit": 1 })),
-        run("export_query", json!({ "sql": "SELECT * FROM t", "format": "csv" })),
-        run("create_table_from_query", json!({ "name": "mat", "sql": "SELECT n FROM t WHERE n > $min", "params": [{ "name": "min", "type": "integer", "value": "1" }], "saved": "QUERY", "version": 1 })),
-        run("materialized", json!({})),
-        run("sql_change", json!({ "sql": "UPDATE t SET s = 'q' WHERE n = 1" })),
-        run("refresh_materialized", json!({ "table": "mat" })),
-        run("delete_query", json!({ "saved": "QUERY" })),
-        run("analyze", json!({"spec":{"kind":"profile","table":"t","columns":["s"]}})),
-        run("analyses", json!({})),
-        run("save_analysis", json!({"saved":null,"name":"Profile","spec":{"kind":"profile","table":"t","columns":["s"]},"chart":false})),
-        run("materialize_analysis", json!({"name":"analysis_copy","spec":{"kind":"profile","table":"t","columns":["s"]}})),
-        run("save_dashboard", json!({"saved":null,"name":"Board","tiles":[{"analysis":"ANALYSIS","x":0,"y":0,"w":6,"h":6}],"slicers":[]})),
-        run("dashboards", json!({})),
-        run("dashboard", json!({"dashboard":"DASHBOARD"})),
-        run("set_validations", json!({"table":"t","rules":[{"column":"s","rule":{"kind":"required"}}]})),
-        run("validations", json!({"table":"t"})),
-        run("preview_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"}})),
-        run("apply_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"},"name":"t_trimmed"})),
-        run("set_validations", json!({"table":"t","rules":[]})),
-        run("inspect_formula", json!({"table":"t","column":"twice"})),
-        run("xlsx_compatibility", json!({})),
-        run("drill", json!({"spec":{"kind":"summary","table":"t","groups":["s"],"aggregate":"count","value":null,"pivot":null},"row":["x",1]})),
-        run("delete_dashboard", json!({"dashboard":"DASHBOARD"})),
-        run("delete_analysis", json!({"analysis":"ANALYSIS"})),
-        run("presentation", json!({"table":"t"})),
-        run("save_presentation", json!({"table":"t","presentation":{"hidden":[],"frozen":1,"formats":{},"rules":[]}})),
-        run("replace_preview", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"}})),
-        run("replace_apply", json!({"spec":{"table":"t","column":"s","find":"q","replacement":"changed"},"revision":"PREVIEW_REV"})),
-        run("replace_undo", json!({"revision":"UNDO_REV"})),
-        run("functions", json!({})),
-        run("test_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [{"arguments":["2"],"expected":"3"}] } })),
-        run("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
-        run("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
-        run("cancel", json!({ "request": 1 })),
-        run("recalculate", json!({ "table": "t" })),
-        run("cancel_recalculation", json!({ "table": "t" })),
-    ];
+    let script = common::operation_script();
+    for (op, _) in &script {
+        seen.insert(*op);
+    }
     let mut saved_id = String::new();
     let mut query_id = String::new();
     let mut analysis_id = String::new();

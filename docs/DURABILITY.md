@@ -15,7 +15,7 @@ A change is **acknowledged** when the server replies `ok: true` to it (WebSocket
    folded into the database file at checkpoints (on idle close, shutdown, and as DuckDB decides).
 3. Sheet changes are part of the same transaction (the IronCalc model is stored in the file); the
    in-memory model is reloaded from the file if any part of the transaction fails.
-4. Metadata (`workbook.json`, workspaces, runtime records) is written to a temporary file, synced,
+4. Metadata (`workbook.json`, runtime records) is written to a temporary file, synced,
    renamed over the old file, and the directory is synced.
 
 A request that was **not** acknowledged (the connection dropped, the server stopped, the request
@@ -23,7 +23,10 @@ was cancelled or timed out) either committed completely or not at all. Clients t
 send the same `mutation_id`: a mutation id found in the history is not applied again (the last
 10,000 revisions are kept for this), and the reply says `replayed: true`.
 
-Revisions start at 0 and increase by exactly one per committed change, with no gaps.
+Revisions start at 0 and increase by exactly one per committed change, with no gaps. Every
+revision is announced to open connections in order, and table changes keep what undo needs in the
+same transaction as the change (storage format 8: `_rf_undo` and its row copies). Overlapping
+edits follow [COLLABORATION.md](COLLABORATION.md).
 
 ## What survives which failure
 

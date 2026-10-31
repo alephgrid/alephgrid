@@ -9,12 +9,13 @@ import { AnalysisWorkspace, dashboardsDialog, replaceDialog } from "./analysis";
 import { dataToolsDialog } from "./tools";
 import type { Validation } from "./protocol";
 import { functionCompletion, functionLibrary } from "./functions";
-import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
+import { api, HttpError, isRuntimeFailure, Rpc, RpcError } from "./api";
 import { importFile } from "./importer";
+import { historyDialog } from "./history";
 
-import { FETCH_LIMIT, RowCache, SheetCache } from "./cache";
+import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
-import { Grid, type Cell, type Range } from "./grid";
+import { Grid, type Cell, type GridEdit, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
@@ -156,7 +157,8 @@ export class WorkbookScreen {
   private commands = new CommandRegistry();
   /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
    *  (formulas, formats) rather than the displayed values. */
-  private clip: { sheet: number; range: Range; text: string; cut: boolean } | null = null;
+  /** Copied sheet cells, with the sheet's layout when copied (a paste is refused once it moved). */
+  private clip: { sheet: number; range: Range; text: string; cut: boolean; layout?: number } | null = null;
   /** Sheet changes run one after another in the order the user made them: a formula's parse
    *  check must not let a later edit (or undo) reach the server first. */
   private sheetQueue: Promise<unknown> = Promise.resolve();
@@ -164,6 +166,14 @@ export class WorkbookScreen {
   private inSheetOrder<T>(task: () => Promise<T>): Promise<T> {
     const run = this.sheetQueue.then(task, task);
     this.sheetQueue = run.catch(() => undefined);
+    return run;
+  }
+  /** Table edits, like sheet changes, are sent one after another in the user's order: an
+   *  edit of a row the previous one appended then knows its record id. */
+  private tableQueue: Promise<unknown> = Promise.resolve();
+  private inTableOrder<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.tableQueue.then(task, task);
+    this.tableQueue = run.catch(() => undefined);
     return run;
   }
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
@@ -231,6 +241,7 @@ export class WorkbookScreen {
           const cell = this.sheetCache.cell(r, c);
           return cell ? cell[2] ?? cell[0] : "";
         },
+        base: (r, c) => this.baseOf(r, c),
       },
       {
         selectionChanged: (range, active) => self.onSelection(range, active),
@@ -444,6 +455,7 @@ export class WorkbookScreen {
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
         el("button", { class: "btn", title: "Search all commands (⌘K)", onclick: () => { commandPalette(this.commands); } }, "Commands"),
+        el("button", { class: "btn", title: "Everyone's recent changes; undo table changes", onclick: () => historyDialog(this.rpc, () => void this.resync()) }, "History"),
         el("button", { class: "btn", onclick: (e: MouseEvent) => this.exportMenu(e) }, "Export ▾"),
         this.fileInput,
       ),
@@ -800,6 +812,7 @@ export class WorkbookScreen {
 
   private applyView(info: ViewInfo, reset: boolean): void {
     this.view = info;
+    this.cache.viewGeneration = info.generation;
     this.updateToolbar();
     this.spec = info.spec;
     if (reset) {
@@ -1005,7 +1018,56 @@ export class WorkbookScreen {
 
   // ------------------------------------------------------------------ edits
 
-  private async commitEdits(edits: { r: number; c: number; value: string | null }[]): Promise<boolean> {
+  /** What an edit of a cell is checked against: the value shown now (see `CellEdit.base`),
+   *  undefined while it is loading or for a row about to be appended. */
+  private baseOf(r: number, c: number): CellValue | undefined {
+    if (this.isSheet()) {
+      const cell = this.sheetCache.cell(r, c);
+      return cell === undefined ? undefined : cell === null ? "" : cell[2] ?? cell[0];
+    }
+    if (!this.view || r >= this.view.row_count) return undefined;
+    return this.cache.value(r, c);
+  }
+
+  /** The table generation of view rows [r0, r1] as shown (see `ViewInfo.generation`), or
+   *  null while the rows on screen belong to another arrangement than the view (a refresh is
+   *  under way): then the change is not sent. */
+  private shownGeneration(r0: number, r1: number): number | null {
+    if (!this.view) return null;
+    const g = this.view.generation;
+    const shown = this.cache.generations(r0, Math.max(r0, r1));
+    if (shown.size === 0 || (shown.size === 1 && shown.has(g))) return g;
+    toast("The rows changed while you were working; they are being refreshed. Try again in a moment.");
+    void this.resync();
+    return null;
+  }
+
+  /** Sheet `index`'s layout for rows [r0, r1] as shown (see `SheetInfo.layout`), or null
+   *  while a refresh mixes layouts (or the sheet is unknown). */
+  private shownLayout(index: number, r0: number, r1: number): number | null {
+    const info = this.sheets.find((s) => s.index === index);
+    if (this.active?.kind !== "sheet" || this.active.index !== index) return info?.layout ?? null;
+    const shown = this.sheetCache.layoutsIn(r0, Math.max(r0, r1));
+    if (shown.size === 1) return [...shown][0];
+    if (shown.size === 0) return info?.layout ?? null;
+    toast("The sheet changed while you were working; it is being refreshed. Try again in a moment.");
+    void this.refreshSheet();
+    return null;
+  }
+
+  /** Report a refused change. A conflict over values offers to overwrite them (`retry`
+   *  resends without the values the edit was based on); one over moved rows or cells only
+   *  refreshes, since the positions it named are out of date. */
+  private reportConflict(e: unknown, retry?: () => void): void {
+    const err = e as RpcError;
+    if (err.code === "conflict" && !err.moved && retry) {
+      toast(`${err.message}. Refreshed to show their change.`, "error", 4000, { label: "Overwrite", run: retry });
+    } else {
+      toast(err.message, "error");
+    }
+  }
+
+  private async commitEdits(edits: GridEdit[], force = false, rebased = false): Promise<boolean> {
     if (!edits.length) return true;
     if (this.active?.kind === "sheet") {
       const index = this.active.index;
@@ -1014,19 +1076,36 @@ export class WorkbookScreen {
         if (edits.length === 1 && only.value?.trimStart().startsWith("=")) {
           if (!await this.formulaParses({ index, r: only.r, c: only.c }, only.value)) return false;
         }
-        return this.commitSheetEdits(index, edits);
+        return this.commitSheetEdits(index, edits, force);
       });
     }
+    return this.inTableOrder(() => this.commitTableEdits(edits, force, rebased));
+  }
+
+  private async commitTableEdits(edits: GridEdit[], force: boolean, rebased: boolean): Promise<boolean> {
     if (!this.view) return true;
     const cols = this.view.columns;
     const rowCount = this.view.row_count;
     // Existing rows are addressed by record id, so the edit lands on the right row even if
-    // rows moved meanwhile; rows at or after the end append by position.
+    // rows moved meanwhile; rows at or after the end append by position. Each cell carries
+    // the value the user saw, so a collaborator's change to it is not silently overwritten.
     const cellEdits = edits.map((e) => {
       const record = e.r < rowCount ? this.cache.record(e.r) : undefined;
-      return { row: e.r, column: cols[e.c].name, value: e.value, ...(record !== undefined ? { record } : {}) };
+      const base = force || e.r >= rowCount ? undefined : e.base !== undefined ? e.base : this.cache.value(e.r, e.c);
+      return { row: e.r, column: cols[e.c].name, value: e.value, ...(record !== undefined ? { record } : {}), ...(base !== undefined ? { base } : {}) };
     });
-    if (!this.fits(cellEdits.length, { op: "edit", view_id: this.view.view_id, edits: cellEdits })) return false;
+    // Rows addressed by position need the arrangement they were read in: appends that of the
+    // view's row count; existing rows without a known record id that of the rows shown.
+    const positional = cellEdits.filter((e) => e.record === undefined).map((e) => e.row);
+    let generation: number | undefined;
+    if (positional.length) generation = this.view.generation;
+    const unknown = positional.filter((r) => r < rowCount);
+    if (unknown.length) {
+      const g = this.shownGeneration(unknown.reduce((a, r) => Math.min(a, r), rowCount), unknown.reduce((a, r) => Math.max(a, r), 0));
+      if (g === null) return false;
+      generation = g;
+    }
+    if (!this.fits(cellEdits.length, { op: "edit", view_id: this.view.view_id, edits: cellEdits, generation })) return false;
     for (const e of edits) {
       const kind = cols[e.c].kind;
       const num = e.value !== null && isNumericKind(kind) ? Number(e.value) : NaN;
@@ -1034,18 +1113,36 @@ export class WorkbookScreen {
     }
     this.grid.invalidate();
     try {
-      const out = await this.rpc.call("edit", { view_id: this.view.view_id, edits: cellEdits });
+      const out = await this.rpc.call("edit", { view_id: this.view.view_id, edits: cellEdits, ...(generation !== undefined ? { generation } : {}) });
       if (out.rows_appended > 0) {
         this.view = await this.rpc.call("view_info", { view_id: this.view.view_id });
+        this.cache.viewGeneration = this.view.generation;
         this.rowsEl.textContent = `${formatCount(this.view.row_count)} rows`;
+        // The new rows sit after the old last one; the next edit of them goes by record.
+        if (out.first_appended !== undefined) this.cache.learn(rowCount, out.first_appended, out.rows_appended, this.view.generation);
       }
       this.cache.refresh();
+      this.cache.settled(edits.map((x) => cellKey(x.r, x.c)), true);
       this.grid.invalidate();
       return true;
     } catch (e) {
-      toast((e as Error).message, "error");
+      this.cache.settled(edits.map((x) => cellKey(x.r, x.c)), false);
       this.cache.refresh();
       this.grid.invalidate();
+      const err = e as RpcError;
+      // Someone else appended rows first: new rows go after theirs (once).
+      if (err.code === "conflict" && err.moved && !rebased && this.view && edits.every((x) => x.r >= rowCount)) {
+        try {
+          this.view = await this.rpc.call("view_info", { view_id: this.view.view_id });
+          this.applyView(this.view, false);
+          const shift = this.view.row_count - rowCount;
+          return await this.commitTableEdits(edits.map((x) => ({ ...x, r: x.r + shift })), force, true);
+        } catch (again) {
+          this.reportConflict(again);
+          return false;
+        }
+      }
+      this.reportConflict(e, () => void this.commitEdits(edits, true));
       return false;
     }
   }
@@ -1061,29 +1158,46 @@ export class WorkbookScreen {
     return false;
   }
 
-  private async commitSheetEdits(sheet: number, edits: { r: number; c: number; value: string | null }[]): Promise<boolean> {
-    const inputs = edits.map((e) => ({ row: e.r, column: e.c, value: e.value ?? "" }));
-    if (!this.fits(inputs.length, { op: "sheet_set", sheet, inputs })) return false;
+  private async commitSheetEdits(sheet: number, edits: GridEdit[], force = false): Promise<boolean> {
+    // Each cell carries what it showed when editing began, and the request the sheet layout
+    // its addresses were read at, so a collaborator's edit or inserted row is not overwritten.
+    const inputs = edits.map((e) => {
+      const base = force ? undefined : e.base !== undefined ? e.base : this.baseOf(e.r, e.c);
+      return { row: e.r, column: e.c, value: e.value ?? "", ...(base !== undefined ? { base: String(base ?? "") } : {}) };
+    });
+    const layout = this.shownLayout(sheet, edits.reduce((a, e) => Math.min(a, e.r), Infinity), edits.reduce((a, e) => Math.max(a, e.r), 0));
+    if (layout === null && this.sheets.some((s) => s.index === sheet)) return false;
+    if (!this.fits(inputs.length, { op: "sheet_set", sheet, inputs, layout })) return false;
     for (const e of edits) this.sheetCache.patch(e.r, e.c, e.value ?? "");
     this.grid.invalidate();
     try {
-      const info = await this.rpc.call("sheet_set", { sheet, inputs });
+      const info = await this.rpc.call("sheet_set", { sheet, inputs, ...(layout !== null ? { layout } : {}) });
       this.sheets = this.sheets.map((s) => (s.index === info.index ? info : s));
       this.applySheetInfo(info, false);
       this.sheetCache.refresh();
+      this.sheetCache.settled(edits.map((x) => cellKey(x.r, x.c)), true);
       this.grid.invalidate();
       return true;
     } catch (e) {
-      toast((e as Error).message, "error");
-      this.sheetCache.refresh();
-      this.grid.invalidate();
+      this.sheetCache.settled(edits.map((x) => cellKey(x.r, x.c)), false);
+      await this.refreshSheet();
+      this.reportConflict(e, () => void this.inSheetOrder(() => this.commitSheetEdits(sheet, edits, true)));
       return false;
     }
   }
 
+
   private async undo(redo: boolean): Promise<void> {
     if (!this.isSheet()) {
-      toast("Undo is available in sheets. Table undo is on the roadmap.");
+      // Tables: take back the caller's own latest change (or redo their latest undo).
+      try {
+        const out = await this.rpc.call("undo", { redo });
+        if (!out) toast(redo ? "Nothing to redo" : "Nothing of yours to undo");
+        else toast(`${out.kind === "redo" ? "Redid" : "Undid"} your change to ${out.table}`, "success");
+        await this.resync();
+      } catch (e) {
+        this.reportConflict(e);
+      }
       return;
     }
     try {
@@ -1328,7 +1442,7 @@ export class WorkbookScreen {
       const data = await this.fetchRange({ ...range, r1 });
       const text = data.map((row) => row.slice(range.c0, range.c1 + 1).map(tsvCell).join("\t")).join("\n");
       await navigator.clipboard.writeText(text);
-      this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false } : null;
+      this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined } : null;
       toast(`Copied ${formatCount(rows * (range.c1 - range.c0 + 1))} cells`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
@@ -1366,16 +1480,24 @@ export class WorkbookScreen {
       if (clip.cut) {
         if (clip.sheet !== sheet) { toast("Moving cells to another sheet is not supported yet. Copy them, then clear the originals.", "error"); return; }
         if (mode !== "all" || transpose) { toast("Paste special applies to copied cells. Cut cells move as they are.", "error"); return; }
-        area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c }));
+        const layout = this.shownLayout(sheet, Math.min(source.row, at.r), Math.max(source.row, at.r) + source.rows - 1);
+        if (layout === null) return;
+        area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c, layout }));
         this.clip = null;
       } else {
-        area = await this.inSheetOrder(() => this.rpc.call("sheet_paste", { from_sheet: clip.sheet, source, sheet, row: at.r, column: at.c, mode, transpose }));
+        const layout = this.shownLayout(sheet, at.r, at.r + (transpose ? source.columns : source.rows) - 1);
+        if (layout === null) return;
+        area = await this.inSheetOrder(() => this.rpc.call("sheet_paste", {
+          from_sheet: clip.sheet, source, sheet, row: at.r, column: at.c, mode, transpose, layout,
+          ...(clip.layout !== undefined ? { source_layout: clip.layout } : {}),
+        }));
       }
       await this.refreshSheet();
       this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
       toast(`${clip.cut ? "Moved" : "Pasted"} ${formatCount(area.rows * area.columns)} cells`, "success");
     } catch (e) {
-      toast((e as Error).message, "error");
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
   }
 
@@ -1431,7 +1553,9 @@ export class WorkbookScreen {
     if (area.rows * area.columns > this.maxEditCells) { toast(`That fill is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
     try {
       const sheet = this.active.index;
-      const info = await this.inSheetOrder(() => this.rpc.call("sheet_fill", { sheet, area, direction }));
+      const layout = this.shownLayout(sheet, area.row, area.row + area.rows - 1);
+      if (layout === null) return;
+      const info = await this.inSheetOrder(() => this.rpc.call("sheet_fill", { sheet, area, direction, layout }));
       this.sheets = this.sheets.map((x) => (x.index === info.index ? info : x));
       this.applySheetInfo(info, false);
       this.sheetCache.refresh();
@@ -1459,6 +1583,7 @@ export class WorkbookScreen {
       sql: () => this.sqlPanel(),
       palette: () => { commandPalette(this.commands); },
       shortcuts: () => { shortcutHelp(this.commands); },
+      history: () => historyDialog(this.rpc, () => void this.resync()),
     }));
   }
 
@@ -1469,11 +1594,17 @@ export class WorkbookScreen {
     params: { at: number; count: number },
   ): Promise<void> {
     if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const rows = op.endsWith("_rows") ? [params.at, params.at + params.count - 1] : [sel.r0, sel.r1];
+    const layout = this.shownLayout(sheet, rows[0], rows[1]);
+    if (layout === null) return;
     try {
-      await this.rpc.call(op, { sheet: this.active.index, ...params });
+      await this.rpc.call(op, { sheet, ...params, layout });
       await this.refreshSheet();
     } catch (e) {
-      toast((e as Error).message, "error");
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
   }
 
@@ -1548,10 +1679,15 @@ export class WorkbookScreen {
     const identity = this.view.can_append;
     const run = async (op: "insert_rows" | "delete_rows", params: { at: number; count: number } | { start: number; count: number }) => {
       try {
-        if (op === "insert_rows" && "at" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params });
-        else if (op === "delete_rows" && "start" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params });
+        // Positions name rows only in the arrangement they were read in.
+        const first = "at" in params ? Math.max(0, params.at - 1) : params.start;
+        const generation = this.shownGeneration(first, first + params.count);
+        if (generation === null) return;
+        if (op === "insert_rows" && "at" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params, generation });
+        else if (op === "delete_rows" && "start" in params) await this.rpc.call(op, { view_id: this.view!.view_id, ...params, generation });
       } catch (e) {
-        toast((e as Error).message, "error");
+        this.reportConflict(e);
+        if ((e as RpcError).code === "conflict") await this.resync();
       }
     };
     showMenu([
@@ -1593,14 +1729,14 @@ export class WorkbookScreen {
         const v = await formDialog("Rename sheet", [{ name: "name", label: "Name", value: s.name }], "Rename");
         if (!v) return;
         try {
-          await this.rpc.call("sheet_rename", { sheet: s.index, name: v.name });
+          await this.rpc.call("sheet_rename", { sheet: s.index, name: v.name, layout: s.layout });
           await this.loadItems();
           if (this.active?.kind === "sheet" && this.active.index === s.index) this.active.name = v.name;
         } catch (e) { toast((e as Error).message, "error"); }
       } },
       { label: "Convert to table", hint: "first row = header", action: async () => {
         try {
-          const info = await this.rpc.call("sheet_to_table", { sheet: s.index, name: s.name });
+          const info = await this.rpc.call("sheet_to_table", { sheet: s.index, name: s.name, layout: s.layout });
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created table ${info.name} (${formatCount(info.row_count)} rows)`, "success");
@@ -1611,7 +1747,7 @@ export class WorkbookScreen {
       { label: "Delete sheet", danger: true, action: async () => {
         if (!(await confirmDialog(`Delete sheet “${s.name}”?`, "Its cells and formulas will be removed. Formulas in other sheets that point at it will show #REF!."))) return;
         try {
-          await this.rpc.call("sheet_delete", { sheet: s.index });
+          await this.rpc.call("sheet_delete", { sheet: s.index, layout: s.layout });
         } catch (e) { toast((e as Error).message, "error"); }
       } },
     ], x, y);
@@ -1998,6 +2134,13 @@ export class WorkbookScreen {
         break;
       case "workbook_deleted":
         this.leaveDeleted();
+        break;
+      case "access_revoked":
+        // Signed out or no longer allowed to see this workbook; the server closed the connection.
+        location.assign(e.reason === "signed_out" ? `/login?next=${encodeURIComponent(location.pathname)}` : "/");
+        break;
+      case "role_changed":
+        toast(e.role === "viewer" ? "You can now only view this workbook." : `Your role in this space is now ${e.role}.`);
         break;
       case "tables_changed": {
         await this.loadItems();

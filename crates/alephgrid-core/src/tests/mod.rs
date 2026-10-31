@@ -58,7 +58,7 @@ pub(crate) fn spec(table: &str) -> ViewSpec {
 }
 
 pub(crate) fn edit(row: u64, column: &str, value: &str) -> CellEdit {
-    CellEdit { row, column: column.into(), value: Some(value.into()), record: None }
+    CellEdit { row, column: column.into(), value: Some(value.into()), record: None, base: None }
 }
 
 /// All rows of a view as JSON values, read in fetch-sized windows.
@@ -84,7 +84,7 @@ pub(crate) fn scalar(wb: &Workbook, sql: &str) -> Value {
 }
 
 pub(crate) fn sheet_input(row: u32, column: u32, value: &str) -> SheetInput {
-    SheetInput { row, column, value: value.into() }
+    SheetInput { row, column, value: value.into(), base: None }
 }
 
 pub(crate) fn cell_text(wb: &Workbook, sheet: u32, row: u32, column: u32) -> Option<String> {
