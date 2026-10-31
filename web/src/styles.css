@@ -153,6 +153,8 @@ kbd { font: 500 11px var(--font-ui); color: var(--muted); border: 1px solid var(
 .status-open { background: var(--success); }
 .status-closed { background: var(--danger); }
 .status-paused { background: var(--warn); }
+.status-text[data-state="failed"] { color: var(--danger); font-weight: 600; }
+.status-text[data-state="unsaved"] { color: var(--warn); font-weight: 600; }
 .menubar { display: flex; gap: 0; margin-left: 0; }
 .menubar-item { border: 0; background: none; padding: 3px 8px; border-radius: 5px; cursor: pointer; font-size: 13px; color: var(--text); }
 .menubar-item:hover, .menubar-item[aria-expanded="true"] { background: var(--control); }

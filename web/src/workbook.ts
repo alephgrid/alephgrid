@@ -274,6 +274,7 @@ export class WorkbookScreen {
     this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
+    this.rpc.onSaveState = () => this.renderStatus();
     this.rpc.onStatus = (s) => {
       this.setStatus(this.rpc.isPaused && s !== "open" ? "paused" : s);
       if (s === "open") this.failureEl.hidden = true;
@@ -303,12 +304,31 @@ export class WorkbookScreen {
     this.themeBtn = next;
   }
 
+  private connection: "connecting" | "open" | "closed" | "paused" = "connecting";
+
   private setStatus(s: "connecting" | "open" | "closed" | "paused"): void {
+    this.connection = s;
     this.statusDot.className = `status-dot status-${s}`;
     this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused — resumes when you continue" : "Disconnected — retrying";
-    // Connection state only: "Saved" would claim a durable acknowledgement this label does not track (U.11).
-    this.statusText.textContent = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused" : "Reconnecting…";
-    this.statusText.title = this.statusDot.title;
+    this.renderStatus();
+  }
+
+  /** Connection and save state in words (U.11): "Saved" only once the server acknowledged every
+   *  change this page sent, which it does after commit. */
+  private renderStatus(): void {
+    const s = this.connection;
+    const save = this.rpc.saveState;
+    const [text, tone, title] =
+      save === "failed" ? ["Not saved", "failed", "A change was lost while the connection was down. Check the last edits and make them again."]
+      : save === "unsaved" ? ["Unsaved changes", "unsaved", "Changes are kept and sent again when the connection is back."]
+      : s === "paused" ? ["Paused", "paused", this.statusDot.title]
+      : s === "connecting" ? ["Connecting…", "connecting", this.statusDot.title]
+      : s === "closed" ? ["Reconnecting…", "closed", this.statusDot.title]
+      : save === "saving" ? ["Saving…", "saving", "Sending changes to the server."]
+      : ["Saved", "saved", "Every change is saved on the server."];
+    this.statusText.textContent = text;
+    this.statusText.title = title;
+    this.statusText.dataset.state = tone;
   }
 
   /**

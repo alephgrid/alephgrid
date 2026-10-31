@@ -29,7 +29,10 @@ colors (blue, purple, orange, cyan) stay distinct from the accent. The type is M
 
 1. **Top bar**: the mark (back to all workbooks), the workbook name (click to rename), the
    connection state, the menu bar, and on the right command search (⌘K), history, compute and
-   theme. It says "Connected", not "Saved": "Saved" is reserved for acknowledged revisions (U.11).
+   theme. The save state is honest (U.11): **Saved** only when the server acknowledged every
+   change this page sent (it acknowledges after commit), **Saving…** while a reply is
+   outstanding, **Unsaved changes** while changes wait for the connection, **Not saved** when one
+   was dropped after the connection stayed down too long.
 2. **Menu bar**: File, Edit, View, Insert, Format, Data, Tools, Help. Every workbook command
    is in a menu; commands that only apply to tables or sheets are disabled, not hidden, so the
    menus keep their shape.

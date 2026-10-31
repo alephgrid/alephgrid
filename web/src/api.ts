@@ -210,6 +210,14 @@ type Pending = {
   keptAt?: number;
 };
 
+/**
+ * Whether this page's changes are saved: "saved" when every change it sent was acknowledged
+ * (the server acknowledges after commit, docs/PROTOCOL.md), "saving" while some are in flight,
+ * "unsaved" while some wait for the connection, "failed" when one was dropped unsaved (until
+ * the next change is acknowledged).
+ */
+export type SaveState = "saved" | "saving" | "unsaved" | "failed";
+
 /** JSON-RPC-ish client over one WebSocket per workbook, with automatic reconnect. */
 export class Rpc {
   private ws: WebSocket | null = null;
@@ -234,6 +242,30 @@ export class Rpc {
   private greeted = false;
   onEvent: (e: ServerEvent) => void = () => {};
   onStatus: (s: "connecting" | "open" | "closed") => void = () => {};
+  /** Called when `saveState` changes. */
+  onSaveState: (s: SaveState) => void = () => {};
+  private lastSave: SaveState = "saved";
+  private lostChange = false;
+
+  /** See `SaveState`. */
+  get saveState(): SaveState {
+    const unacked = [...this.pending.values()].filter((p) => p.mutation).length
+      + this.kept.length + this.connecting.filter((p) => p.mutation).length;
+    if (unacked) return this.ws?.readyState === WebSocket.OPEN ? "saving" : "unsaved";
+    return this.lostChange ? "failed" : "saved";
+  }
+
+  private notifySave(): void {
+    if (this.closed) return;
+    const s = this.saveState;
+    if (s !== this.lastSave) { this.lastSave = s; this.onSaveState(s); }
+  }
+
+  /** A change was given up without being saved (the connection did not come back in time). */
+  private lose(p: Pending, message: string): void {
+    this.lostChange = true;
+    p.reject(new RpcError(message, "unavailable"));
+  }
   /** Called after a reconnect so views can be reopened; kept changes are resent once it settles. */
   onReconnect: () => void | Promise<void> = () => {};
   /** Called when a (re)connect attempt fails before the socket opened. */
@@ -256,6 +288,7 @@ export class Rpc {
         this.retry = 0;
         this.onStatus("open");
         for (const p of this.connecting.splice(0)) this.send(p);
+        this.notifySave();
         resolve();
         if (!reconnecting) return;
         try { await this.onReconnect(); } catch { /* the screen reports its own errors */ }
@@ -268,6 +301,7 @@ export class Rpc {
         for (const p of this.connecting.splice(0)) p.reject(new RpcError("not connected", "unavailable"));
         this.dropped();
         this.onStatus("closed");
+        this.notifySave();
         if (!opened) {
           if (!this.opened && this.retry === 0) reject(new Error("could not connect to workbook"));
           this.onConnectFailed();
@@ -313,6 +347,7 @@ export class Rpc {
     this.connecting = [];
     this.onEvent = () => {};
     this.onStatus = () => {};
+    this.onSaveState = () => {};
     this.onReconnect = () => {};
     this.onConnectFailed = () => {};
     const ws = this.ws;
@@ -353,6 +388,7 @@ export class Rpc {
       // socket opens, or fail if this attempt fails.
       else if (this.ws?.readyState === WebSocket.CONNECTING && !this.closed) this.connecting.push(p);
       else reject(new RpcError("not connected", "unavailable"));
+      this.notifySave();
     });
   }
 
@@ -378,14 +414,15 @@ export class Rpc {
     p.keptAt ??= Date.now();
     this.kept.push(p);
     while (this.kept.length > MUTATION_KEEP_MAX) {
-      this.kept.shift()!.reject(new RpcError("connection lost: too many unsaved changes", "unavailable"));
+      this.lose(this.kept.shift()!, "connection lost: too many unsaved changes");
     }
     const t = window.setTimeout(() => {
       this.timers.delete(t);
       const i = this.kept.indexOf(p);
       if (i >= 0) {
         this.kept.splice(i, 1);
-        p.reject(new RpcError("connection lost: the change could not be saved", "unavailable"));
+        this.lose(p, "connection lost: the change could not be saved");
+        this.notifySave();
       }
     }, Math.max(0, p.keptAt + MUTATION_KEEP_MS - Date.now()));
     this.timers.add(t);
@@ -408,6 +445,7 @@ export class Rpc {
       if (this.ws?.readyState === WebSocket.OPEN) this.send(p);
       else this.keep(p);
     }
+    this.notifySave();
   }
 
   private receive(data: string): void {
@@ -439,9 +477,16 @@ export class Rpc {
     if (!p) return;
     this.pending.delete(msg.id);
     if (msg.ok) {
+      if (p.mutation) this.lostChange = false;
       p.resolve(msg.result);
+      this.notifySave();
       return;
     }
+    try { this.settleFailure(p, msg); } finally { this.notifySave(); }
+  }
+
+  /** A request failed: retry a busy read, keep a change the server could not run yet, or reject. */
+  private settleFailure(p: Pending, msg: { error: string; code?: ErrorCode; moved?: boolean }): void {
     // A busy server: try a read again shortly.
     if (msg.code === "overloaded" && !p.mutation && p.attempt < OVERLOAD_RETRIES.length) {
       const t = window.setTimeout(() => {
