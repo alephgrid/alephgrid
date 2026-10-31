@@ -162,6 +162,7 @@ impl Sheets {
     /// Evaluate every formula again (worker results arrived). No input changes, nothing
     /// enters the undo history. False when there are no sheets.
     pub fn reevaluate(&mut self) -> bool {
+        self.clear_cancel();
         self.attach();
         match self.model.as_mut() {
             Some(m) => {
@@ -357,8 +358,17 @@ impl Sheets {
         self.model.as_ref().ok_or_else(|| anyhow!("this workbook has no sheets"))
     }
 
+    /// A cancel is for the evaluation running when it arrives: a stale one (left by an
+    /// interrupt that came after its evaluation ended) must not stop the next one (SEC.07).
+    fn clear_cancel(&self) {
+        if let Some(c) = &self.cancel {
+            c.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     fn model_mut(&mut self) -> Result<&mut UserModel<'static>> {
         self.changes += 1;
+        self.clear_cancel();
         self.attach();
         self.model.as_mut().ok_or_else(|| anyhow!("this workbook has no sheets"))
     }
