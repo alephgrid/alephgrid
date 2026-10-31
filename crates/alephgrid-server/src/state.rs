@@ -1,8 +1,8 @@
-//! Workbook and workspace registry.
+//! Workbook and space registry.
 //!
 //! ```text
-//! <data-dir>/workspaces.json            [{id, name, created_at}]
-//! <data-dir>/<workbook-id>/workbook.json
+//! <data-dir>/.control/control.duckdb    organizations, users, spaces, roles, sessions, audit (auth/store.rs)
+//! <data-dir>/<workbook-id>/workbook.json  name, space, star, times, summary
 //! <data-dir>/<workbook-id>/data.duckdb  tables, formula metadata, IronCalc sheets, revision history
 //! <data-dir>/<workbook-id>/.owner.lock  flock held by the live allocation (see runtime/local.rs)
 //! <data-dir>/<workbook-id>/owner.json   who holds it, under which epoch
@@ -55,8 +55,13 @@ pub struct WorkbookMeta {
     pub id: String,
     pub name: String,
     pub created_at: u64,
+    /// The space that owns the workbook; its roles decide who may use it.
     #[serde(default)]
-    pub workspace: Option<String>,
+    pub space: String,
+    /// The workspace label of workbooks made before spaces (migrated at startup).
+    #[serde(default, rename = "workspace", skip_serializing)]
+    #[ts(skip)]
+    pub legacy_workspace: Option<String>,
     #[serde(default)]
     pub starred: bool,
     #[serde(default)]
@@ -81,13 +86,17 @@ pub struct WorkbookListing {
     #[serde(flatten)]
     pub meta: WorkbookMeta,
     pub size_bytes: u64,
+    /// The asking principal's role in the workbook's space (workbook lists).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub role: Option<crate::auth::SpaceRole>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-pub struct Workspace {
-    pub id: String,
-    pub name: String,
-    pub created_at: u64,
+/// A workspace label of an older version, read once by the migration to spaces.
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyWorkspace {
+    id: String,
+    name: String,
 }
 
 /// Why a handle stopped serving.
@@ -572,7 +581,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Most rows copied from a table or query into a sheet.
     pub sheet_copy_rows: usize,
-    pub token: Option<String>,
+    /// Sign-in and sessions.
+    pub auth: crate::auth::AuthConfig,
     pub allow_sql: bool,
     /// Memory shared by every open workbook's DuckDB instance. Defaults to 80% of RAM (or
     /// of the container's limit).
@@ -610,7 +620,7 @@ impl Config {
         Config {
             data_dir: data_dir.into(),
             sheet_copy_rows: crate::ws::SHEET_COPY_ROWS,
-            token: None,
+            auth: crate::auth::AuthConfig::default(),
             allow_sql: true,
             memory_budget: None,
             threads: None,
@@ -711,7 +721,10 @@ pub struct AppState {
     pub config: Config,
     pub uploads: Mutex<HashMap<String, Upload>>,
     pub controller: Controller,
-    workspaces: Mutex<()>,
+    /// Identities, roles and sessions.
+    pub auth: crate::auth::Auth,
+    /// Serializes space deletion with workbooks moving into spaces.
+    spaces: Mutex<()>,
     next_session: AtomicU64,
     /// Exclusive lock on the data directory: one server per data directory.
     _dir_lock: File,
@@ -842,11 +855,15 @@ impl AppState {
         if !fixed.is_empty() {
             tracing::info!("marked {} allocation(s) from a previous run as lost", fixed.len());
         }
+        let store = crate::auth::Store::open(&control.join("control.duckdb"))?;
+        migrate_to_spaces(&config.data_dir, &store)?;
+        let auth = crate::auth::Auth::new(config.auth.clone(), store)?;
         Ok(Arc::new(AppState {
             config,
             uploads: open_uploads(),
             controller,
-            workspaces: Mutex::new(()),
+            auth,
+            spaces: Mutex::new(()),
             next_session: AtomicU64::new(1),
             _dir_lock: dir_lock,
             shutting_down: AtomicBool::new(false),
@@ -929,14 +946,17 @@ impl AppState {
             if let Some(h) = self.controller.handle(&meta.id) {
                 meta = h.meta.lock().unwrap().clone();
             }
-            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta });
+            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None });
         }
         out.sort_by_key(|w| std::cmp::Reverse(w.meta.opened_at.max(w.meta.created_at)));
         Ok(out)
     }
 
-    pub fn create(&self, name: &str, workspace: Option<String>) -> Result<Arc<WorkbookHandle>> {
-        let workspace = self.check_workspace(workspace)?;
+    /// Create a workbook in `space` (the caller checked the principal may).
+    pub fn create(&self, name: &str, space: &str) -> Result<Arc<WorkbookHandle>> {
+        if self.auth.store.space(space)?.is_none() {
+            bail!(crate::auth::not_found("space not found"));
+        }
         let id = new_id();
         let dir = self.workbook_dir(&id);
         std::fs::create_dir_all(&dir)?;
@@ -945,7 +965,8 @@ impl AppState {
             id: id.clone(),
             name: name.trim().to_string(),
             created_at: t,
-            workspace,
+            space: space.to_string(),
+            legacy_workspace: None,
             starred: false,
             opened_at: t,
             updated_at: t,
@@ -994,13 +1015,16 @@ impl AppState {
         Ok(meta)
     }
 
-    /// Apply a partial update (name, workspace, starred).
+    /// Apply a partial update (name, space, starred); the caller checked the principal may.
     pub fn update(&self, id: &str, patch: WorkbookPatch) -> Result<WorkbookMeta> {
-        let workspace = match patch.workspace {
-            Some(ws) => Some(self.check_workspace(Some(ws).filter(|w| !w.is_empty()))?),
-            None => None,
-        };
-        self.edit_meta(id, |meta| {
+        let _guard = self.spaces.lock().unwrap();
+        if let Some(space) = &patch.space {
+            if self.auth.store.space(space)?.is_none() {
+                bail!(crate::auth::not_found("space not found"));
+            }
+        }
+        let moved = patch.space.is_some();
+        let out = self.edit_meta(id, |meta| {
             if let Some(name) = patch.name {
                 let name = name.trim();
                 if name.is_empty() {
@@ -1008,14 +1032,19 @@ impl AppState {
                 }
                 meta.name = name.to_string();
             }
-            if let Some(ws) = workspace {
-                meta.workspace = ws;
+            if let Some(space) = patch.space {
+                meta.space = space;
             }
             if let Some(starred) = patch.starred {
                 meta.starred = starred;
             }
             Ok(())
-        })
+        });
+        if moved {
+            // Connections to it now answer to the roles of its new space.
+            self.auth.bump();
+        }
+        out
     }
 
     /// Copy a workbook (tables, formulas, sheets and history) into a new one, from one
@@ -1098,7 +1127,7 @@ impl AppState {
         for entry in entries {
             let dir = entry?.path();
             let Ok(meta) = read_meta(&dir) else { continue };
-            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta });
+            out.push(WorkbookListing { size_bytes: dir_size(&dir), meta, role: None });
         }
         out.sort_by_key(|w| std::cmp::Reverse(w.meta.deleted_at));
         Ok(out)
@@ -1118,10 +1147,8 @@ impl AppState {
             bail!("a workbook with id {id} already exists");
         }
         let mut meta = read_meta(&from)?;
-        if let Some(ws) = &meta.workspace {
-            if !self.workspaces()?.iter().any(|w| &w.id == ws) {
-                meta.workspace = None;
-            }
+        if self.auth.store.space(&meta.space)?.is_none() {
+            bail!("the space of workbook {id} no longer exists");
         }
         meta.deleted_at = None;
         write_meta(&from, &meta)?;
@@ -1162,74 +1189,151 @@ impl AppState {
         self.controller.shutdown();
     }
 
-    // ------------------------------------------------------------ workspaces
+    // ---------------------------------------------------------------- spaces
 
-    fn workspaces_path(&self) -> PathBuf {
-        self.config.data_dir.join("workspaces.json")
+    /// The space a workbook (live, closed or in the trash) belongs to.
+    pub fn workbook_space(&self, id: &str) -> Result<String> {
+        if !valid_id(id) {
+            bail!("invalid workbook id");
+        }
+        if let Some(h) = self.controller.handle(id) {
+            return Ok(h.meta.lock().unwrap().space.clone());
+        }
+        let dir = self.workbook_dir(id);
+        let meta = if dir.join("workbook.json").exists() { read_meta(&dir) } else { read_meta(&self.trash_dir().join(id)) };
+        meta.map(|m| m.space).map_err(|_| anyhow!("workbook {id} not found"))
     }
 
-    pub fn workspaces(&self) -> Result<Vec<Workspace>> {
-        match std::fs::read(self.workspaces_path()) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
-            Err(e) => Err(e.into()),
+    /// The space of a workbook, if `p` may do `cap` there. A workbook in a space `p` cannot
+    /// see is "not found", like one that does not exist.
+    pub fn require_workbook(&self, p: &crate::auth::Principal, id: &str, cap: crate::auth::Cap) -> Result<(crate::auth::Space, crate::auth::SpaceRole)> {
+        let missing = || crate::auth::not_found(format!("workbook {id} not found"));
+        let space = self.workbook_space(id).map_err(|_| missing())?;
+        match self.auth.require_space(p, &space, cap) {
+            Err(e) if matches!(e.downcast_ref::<crate::auth::Denied>(), Some(crate::auth::Denied::NotFound(_))) => Err(missing()),
+            other => other,
         }
     }
 
-    fn save_workspaces(&self, list: &[Workspace]) -> Result<()> {
-        crate::runtime::write_durably(&self.workspaces_path(), &serde_json::to_vec_pretty(list)?)
-    }
-
-    fn check_workspace(&self, id: Option<String>) -> Result<Option<String>> {
-        match id {
-            Some(id) if !self.workspaces()?.iter().any(|w| w.id == id) => bail!("unknown workspace {id}"),
-            other => Ok(other),
-        }
-    }
-
-    pub fn create_workspace(&self, name: &str) -> Result<Workspace> {
-        let _guard = self.workspaces.lock().unwrap();
+    /// Create a space in `org`; `owner` (a user id) becomes its owner.
+    pub fn create_space(&self, org: &str, name: &str, owner: Option<&str>) -> Result<crate::auth::Space> {
         let name = name.trim();
         if name.is_empty() {
             bail!("name cannot be empty");
         }
-        let mut list = self.workspaces()?;
-        if list.iter().any(|w| w.name.eq_ignore_ascii_case(name)) {
-            bail!("a workspace named {name:?} already exists");
+        if self.auth.store.org(org)?.is_none() {
+            bail!(crate::auth::not_found("organization not found"));
         }
-        let ws = Workspace { id: new_id(), name: name.to_string(), created_at: now() };
-        list.push(ws.clone());
-        self.save_workspaces(&list)?;
-        Ok(ws)
+        let space = self.auth.store.txn(|c| {
+            let s = crate::auth::Store::create_space(c, &crate::auth::random_id(), org, name)?;
+            if let Some(u) = owner {
+                crate::auth::Store::set_space_member(c, &s.id, crate::auth::MemberKind::User, u, crate::auth::SpaceRole::Owner)?;
+            }
+            Ok(s)
+        })?;
+        self.auth.bump();
+        Ok(space)
     }
 
-    pub fn rename_workspace(&self, id: &str, name: &str) -> Result<Workspace> {
-        let _guard = self.workspaces.lock().unwrap();
-        let mut list = self.workspaces()?;
-        let ws = list.iter_mut().find(|w| w.id == id).ok_or_else(|| anyhow!("unknown workspace"))?;
-        ws.name = name.trim().to_string();
-        let out = ws.clone();
-        self.save_workspaces(&list)?;
-        Ok(out)
+    /// Delete an empty space. Refused while it holds workbooks, in the trash included.
+    pub fn delete_space(&self, id: &str) -> Result<()> {
+        let _guard = self.spaces.lock().unwrap();
+        let live = self.list()?.into_iter().filter(|w| w.meta.space == id).count();
+        let trashed = self.trash()?.into_iter().filter(|w| w.meta.space == id).count();
+        if live + trashed > 0 {
+            bail!(crate::auth::Denied::BadRequest(format!(
+                "this space still holds {live} workbook(s) and {trashed} in the trash; move or delete them first"
+            )));
+        }
+        self.auth.store.delete_space(id)?;
+        self.auth.bump();
+        Ok(())
     }
+}
 
-    /// Remove a workspace. Its workbooks are kept and become unfiled.
-    pub fn delete_workspace(&self, id: &str) -> Result<()> {
-        let _guard = self.workspaces.lock().unwrap();
-        let mut list = self.workspaces()?;
-        list.retain(|w| w.id != id);
-        self.save_workspaces(&list)?;
-        drop(_guard);
-        for w in self.list()? {
-            if w.meta.workspace.as_deref() == Some(id) {
-                self.edit_meta(&w.meta.id, |meta| {
-                    meta.workspace = None;
-                    Ok(())
-                })?;
+/// Make every workbook belong to a space (7.01). Run at every start; does nothing once done.
+///
+/// * The first start creates the default organization and its `General` space.
+/// * Each workspace of `workspaces.json` becomes a space of the default organization with
+///   the same id, so workbooks keep their grouping.
+/// * A workbook (live or trashed) without a known space joins its former workspace's space,
+///   or `General`.
+/// * `workspaces.json` is then renamed into `.control/`, so the migration is not repeated
+///   and the original stays for inspection.
+///
+/// Every step can be repeated, so a crash midway is finished by the next start.
+pub fn migrate_to_spaces(data_dir: &Path, store: &crate::auth::Store) -> Result<()> {
+    use crate::auth::Store;
+    let org = match store.setting("default_org")? {
+        Some(o) => o,
+        None => store.txn(|c| {
+            let o = Store::create_org(c, &crate::auth::random_id(), "Default organization")?;
+            Store::set_setting(c, "default_org", &o.id)?;
+            Ok(o.id)
+        })?,
+    };
+    let legacy_path = data_dir.join("workspaces.json");
+    let legacy: Vec<LegacyWorkspace> = match std::fs::read(&legacy_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("reading workspaces.json")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let unique = |c: &duckdb::Connection, base: &str| -> Result<String> {
+        for n in 1.. {
+            let name = if n == 1 { base.to_string() } else { format!("{base} ({n})") };
+            let taken: i64 = c.query_row("SELECT count(*) FROM spaces WHERE org_id = ? AND lower(name) = lower(?)", duckdb::params![org, name], |r| r.get(0))?;
+            if taken == 0 {
+                return Ok(name);
+            }
+        }
+        unreachable!()
+    };
+    store.txn(|c| {
+        for w in &legacy {
+            if valid_id(&w.id) && Store::space_in(c, &w.id)?.is_none() {
+                let name = unique(c, if w.name.trim().is_empty() { "Workspace" } else { w.name.trim() })?;
+                Store::create_space(c, &w.id, &org, &name)?;
             }
         }
         Ok(())
+    })?;
+    let general = match store.setting("default_space")?.filter(|s| store.space(s).ok().flatten().is_some()) {
+        Some(s) => s,
+        None => store.txn(|c| {
+            let name = unique(c, "General")?;
+            let s = Store::create_space(c, &crate::auth::random_id(), &org, &name)?;
+            Store::set_setting(c, "default_space", &s.id)?;
+            Ok(s.id)
+        })?,
+    };
+    let mut moved = 0;
+    for parent in [data_dir.to_path_buf(), data_dir.join(".trash")] {
+        let Ok(entries) = std::fs::read_dir(&parent) else { continue };
+        for e in entries {
+            let dir = e?.path();
+            let hidden = dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
+            if (hidden && parent == data_dir) || !dir.join("workbook.json").exists() {
+                continue;
+            }
+            let mut meta = read_meta(&dir)?;
+            if !meta.space.is_empty() && store.space(&meta.space)?.is_some() {
+                continue;
+            }
+            let from = meta.legacy_workspace.take().filter(|w| store.space(w).ok().flatten().is_some());
+            meta.space = from.unwrap_or_else(|| general.clone());
+            write_meta(&dir, &meta)?;
+            moved += 1;
+        }
     }
+    if legacy_path.exists() {
+        std::fs::rename(&legacy_path, data_dir.join(".control").join("workspaces.json.migrated"))?;
+        alephgrid_core::storage::sync_dir(data_dir);
+        tracing::info!("migrated {} workspace(s) to spaces", legacy.len());
+    }
+    if moved > 0 {
+        tracing::info!("placed {moved} workbook(s) into spaces");
+    }
+    Ok(())
 }
 
 /// Background work: close idle workbooks, drop unused view materializations. Runs until
@@ -1266,8 +1370,8 @@ fn open_uploads() -> Mutex<HashMap<String, Upload>> {
 #[ts(optional_fields)]
 pub struct WorkbookPatch {
     pub name: Option<String>,
-    /// Workspace id; an empty string moves the workbook out of any workspace.
-    pub workspace: Option<String>,
+    /// Move the workbook into this space.
+    pub space: Option<String>,
     pub starred: Option<bool>,
 }
 

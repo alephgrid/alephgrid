@@ -1,8 +1,9 @@
 import "./styles.css";
-import { api, HttpError, initToken, isRuntimeFailure, setToken } from "./api";
+import { accountButton, invitePage, isUnauthenticated, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
+import { api, isRuntimeFailure, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
 import { formatCount } from "./format";
-import type { WorkbookListing, Workspace } from "./types";
+import type { WorkbookListing } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
 
@@ -16,22 +17,27 @@ function navigate(path: string): void {
 
 window.addEventListener("popstate", () => route());
 
+let config: Awaited<ReturnType<typeof api.config>> | null = null;
+
 async function route(): Promise<void> {
   current?.dispose();
   current = null;
   const m = location.pathname.match(/^\/w\/([A-Za-z0-9_-]+)/);
   try {
+    config ??= await api.config();
+    if (config.auth === "accounts") {
+      // Pages that work without signing in.
+      if (location.pathname === "/setup") return setupPage(app, (p) => { config = null; navigate(p); });
+      if (config.setup_required) return navigate("/setup");
+      if (location.pathname === "/login") return loginPage(app, config, navigate);
+      if (location.pathname === "/invite") return await invitePage(app, config, navigate);
+    }
     if (m) await showWorkbook(m[1]);
     else await showHome();
   } catch (e) {
-    if (e instanceof HttpError && e.status === 401) {
-      const v = await formDialog("Access token required", [
-        { name: "token", label: "Token", placeholder: "Ask whoever runs this Alephgrid server", hint: "It is stored in this browser only." },
-      ], "Continue");
-      if (v?.token) {
-        setToken(v.token.trim());
-        return route();
-      }
+    if (isUnauthenticated(e)) {
+      history.replaceState(null, "", loginUrl());
+      return route();
     }
     if (isRuntimeFailure(e)) {
       // The server could not open the workbook (incompatible, held elsewhere, out of
@@ -59,7 +65,7 @@ async function showWorkbook(id: string): Promise<void> {
 
 // ------------------------------------------------------------------ home
 
-/** "all" | "starred" | "recent" | "unfiled" | "trash" | a workspace id */
+/** "all" | "starred" | "recent" | "trash" | a space id */
 type Scope = string;
 type SortKey = "recent" | "name" | "created" | "size";
 
@@ -69,7 +75,8 @@ const home = {
   sort: "recent" as SortKey,
   version: "",
   workbooks: [] as WorkbookListing[],
-  workspaces: [] as Workspace[],
+  spaces: [] as SpaceListing[],
+  me: null as Me | null,
   trash: [] as WorkbookListing[],
 };
 
@@ -115,8 +122,7 @@ function inScope(w: WorkbookListing, scope: Scope): boolean {
     case "all": return true;
     case "starred": return !!w.starred;
     case "recent": return Date.now() / 1000 - (w.opened_at ?? 0) < 86400 * 14;
-    case "unfiled": return !w.workspace;
-    default: return w.workspace === scope;
+    default: return w.space === scope;
   }
 }
 
@@ -125,15 +131,19 @@ function scopeTitle(scope: Scope): string {
     case "all": return "All workbooks";
     case "starred": return "Starred";
     case "recent": return "Recent";
-    case "unfiled": return "Not in a workspace";
     case "trash": return "Trash";
-    default: return home.workspaces.find((w) => w.id === scope)?.name ?? "Workspace";
+    default: return home.spaces.find((s) => s.id === scope)?.name ?? "Space";
   }
 }
 
-/** Workspace that new workbooks land in, given the sidebar selection. */
-function targetWorkspace(): string | null {
-  return home.workspaces.some((w) => w.id === home.scope) ? home.scope : null;
+/** Spaces where the principal may create workbooks. */
+function writableSpaces(): SpaceListing[] {
+  return home.spaces.filter((s) => s.role !== "viewer");
+}
+
+/** Space that new workbooks land in, given the sidebar selection (the server picks otherwise). */
+function targetSpace(): string | null {
+  return writableSpaces().some((s) => s.id === home.scope) ? home.scope : null;
 }
 
 function visibleWorkbooks(): WorkbookListing[] {
@@ -154,19 +164,20 @@ function visibleWorkbooks(): WorkbookListing[] {
 async function showHome(): Promise<void> {
   document.title = "Alephgrid";
   home.scope = new URLSearchParams(location.search).get("in") ?? "all";
-  const [workbooks, workspaces, config, trash] = await Promise.all([api.list(), api.workspaces(), api.config(), api.trash()]);
+  const [workbooks, spaces, config, trash, me] = await Promise.all([api.list(), api.spaces(), api.config(), api.trash(), api.me()]);
   home.workbooks = workbooks;
-  home.workspaces = workspaces;
+  home.spaces = spaces;
   home.trash = trash;
+  home.me = me;
   home.version = config.version;
-  if (!["all", "starred", "recent", "unfiled", "trash"].includes(home.scope) && !workspaces.some((w) => w.id === home.scope)) {
+  if (!["all", "starred", "recent", "trash"].includes(home.scope) && !spaces.some((s) => s.id === home.scope)) {
     home.scope = "all";
   }
   renderHome();
 }
 
 async function reloadHome(): Promise<void> {
-  [home.workbooks, home.workspaces, home.trash] = await Promise.all([api.list(), api.workspaces(), api.trash()]);
+  [home.workbooks, home.spaces, home.trash] = await Promise.all([api.list(), api.spaces(), api.trash()]);
   renderHome();
 }
 
@@ -186,11 +197,12 @@ function renderHome(): void {
     }, el("span", { class: "nav-icon", "aria-hidden": "true" }, icon), el("span", { class: "nav-label" }, label),
     el("span", { class: "nav-count" }, String(count(scope))));
 
-  const workspaceItems = home.workspaces.map((ws) => {
-    const item = navItem(ws.id, ws.name, "▤");
-    item.addEventListener("contextmenu", (e) => { e.preventDefault(); workspaceMenu(ws, e.clientX, e.clientY); });
-    item.append(el("span", { class: "nav-more", role: "button", tabindex: "0", "aria-label": `${ws.name} options`, title: "Options",
-      onclick: (e: MouseEvent) => { e.stopPropagation(); workspaceMenu(ws, e.clientX, e.clientY); } }, "⋯"));
+  const spaceItems = home.spaces.map((sp) => {
+    const item = navItem(sp.id, sp.name, "▤");
+    if (sp.role === "viewer") item.querySelector(".nav-label")?.append(el("span", { class: "role-tag" }, "view only"));
+    item.addEventListener("contextmenu", (e) => { e.preventDefault(); spaceMenu(sp, e.clientX, e.clientY); });
+    item.append(el("span", { class: "nav-more", role: "button", tabindex: "0", "aria-label": `${sp.name} options`, title: "Options",
+      onclick: (e: MouseEvent) => { e.stopPropagation(); spaceMenu(sp, e.clientX, e.clientY); } }, "⋯"));
     return item;
   });
 
@@ -202,19 +214,18 @@ function renderHome(): void {
       navItem("starred", "Starred", "★"),
     ),
     el("div", { class: "nav-heading" },
-      el("span", {}, "Workspaces"),
-      el("button", { class: "icon-btn small", title: "New workspace", "aria-label": "New workspace", onclick: newWorkspace }, "+")),
-    el("nav", { class: "nav", "aria-label": "Workspaces" },
-      ...workspaceItems,
-      home.workspaces.length
-        ? navItem("unfiled", "Not in a workspace", "○")
-        : el("p", { class: "nav-empty" }, "Group workbooks by team or project."),
+      el("span", {}, "Spaces"),
+      home.me?.kind === "token" ? null
+        : el("button", { class: "icon-btn small", title: "New space", "aria-label": "New space", onclick: newSpace }, "+")),
+    el("nav", { class: "nav", "aria-label": "Spaces" },
+      ...spaceItems,
+      home.spaces.length ? null : el("p", { class: "nav-empty" }, "You have no spaces yet. Ask an admin to add you to one."),
     ),
     el("nav", { class: "nav nav-bottom", "aria-label": "Trash" }, navItem("trash", "Trash", "🗑")),
     el("div", { class: "sidebar-foot muted" }, `v${home.version} · data stays on this server`),
   );
 
-  const wsName = (id?: string | null) => home.workspaces.find((w) => w.id === id)?.name;
+  const spaceName = (id?: string | null) => home.spaces.find((s) => s.id === id)?.name;
   const list = el("div", { class: "wb-table", role: "table", "aria-label": "Workbooks" });
 
   function renderTrash(): void {
@@ -253,22 +264,23 @@ function renderHome(): void {
           : "No workbooks here yet. Drop a file on this page to start."));
       return;
     }
-    const showWorkspace = ["all", "recent", "starred"].includes(home.scope);
+    const showSpace = ["all", "recent", "starred"].includes(home.scope) && home.spaces.length > 1;
     list.replaceChildren(
       el("div", { class: "wb-row wb-head", role: "row" },
         el("span", { role: "columnheader" }), el("span", { role: "columnheader" }, "Name"),
         el("span", { role: "columnheader", class: "hide-sm" }, "Contents"), el("span", { role: "columnheader", class: "hide-sm num" }, "Size"),
         el("span", { role: "columnheader", class: "hide-xs" }, "Opened"), el("span", { role: "columnheader" })),
       ...items.map((w) => {
-        const workspace = showWorkspace ? wsName(w.workspace) : undefined;
+        const space = showSpace ? spaceName(w.space) : undefined;
         return el("div", { class: "wb-row", role: "row" },
           el("span", { role: "cell", class: "cell-center" },
-            el("button", { class: `star${w.starred ? " on" : ""}`, title: w.starred ? "Unstar" : "Star",
+            el("button", { class: `star${w.starred ? " on" : ""}`, title: w.starred ? "Unstar" : "Star", disabled: w.role === "viewer",
               "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
               onclick: () => toggleStar(w) }, w.starred ? "★" : "☆")),
           el("a", { role: "cell", class: "wb-name", href: `/w/${w.id}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${w.id}`); } },
             el("strong", {}, w.name),
-            workspace ? el("span", { class: "badge" }, workspace) : null),
+            space ? el("span", { class: "badge" }, space) : null,
+            w.role === "viewer" ? el("span", { class: "badge" }, "view only") : null),
           el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
           el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
           el("span", { role: "cell", class: "muted hide-xs", title: w.opened_at ? new Date(w.opened_at * 1000).toLocaleString() : "" }, relativeTime(w.opened_at)),
@@ -308,8 +320,11 @@ function renderHome(): void {
       sort,
       ...(home.scope === "trash"
         ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, onclick: emptyTrash }, "Empty trash")]
-        : [el("button", { class: "btn", onclick: () => fileInput.click() }, "Open file"),
-          el("button", { class: "btn btn-primary", onclick: newWorkbook }, "New workbook")]),
+        : writableSpaces().length
+          ? [el("button", { class: "btn", onclick: () => fileInput.click() }, "Open file"),
+            el("button", { class: "btn btn-primary", onclick: newWorkbook }, "New workbook")]
+          : []),
+      home.me ? accountButton(home.me, navigate) : null,
       fileInput,
     ),
     list,
@@ -334,19 +349,21 @@ function setScope(scope: Scope): void {
 }
 
 async function newWorkbook(): Promise<void> {
+  const spaces = writableSpaces();
   const v = await formDialog("New workbook", [
     { name: "name", label: "Name", value: "Untitled workbook" },
-    { name: "workspace", label: "Workspace", type: "select", value: targetWorkspace() ?? "",
-      options: [{ value: "", label: "No workspace" }, ...home.workspaces.map((w) => ({ value: w.id, label: w.name }))] },
+    ...(spaces.length > 1 ? [{ name: "space", label: "Space", type: "select" as const, value: targetSpace() ?? spaces[0].id,
+      options: spaces.map((s) => ({ value: s.id, label: s.name })) }] : []),
   ], "Create");
-  if (v) navigate(`/w/${(await api.create(v.name, v.workspace || null)).id}`);
+  if (v) navigate(`/w/${(await api.create(v.name, v.space ?? targetSpace())).id}`);
 }
 
-async function newWorkspace(): Promise<void> {
-  const v = await formDialog("New workspace", [{ name: "name", label: "Name", placeholder: "e.g. Finance, Q4 planning" }], "Create",
+async function newSpace(): Promise<void> {
+  const v = await formDialog("New space", [{ name: "name", label: "Name", placeholder: "e.g. Finance, Q4 planning",
+    hint: "You become its owner and can add members." }], "Create",
     async (vals) => {
       try {
-        home.scope = (await api.createWorkspace(vals.name)).id;
+        home.scope = (await api.createSpace(vals.name)).id;
         return null;
       } catch (e) {
         return (e as Error).message;
@@ -358,25 +375,37 @@ async function newWorkspace(): Promise<void> {
   }
 }
 
-function workspaceMenu(ws: Workspace, x: number, y: number): void {
-  showMenu([
-    { label: "Rename…", action: async () => {
-      const v = await formDialog("Rename workspace", [{ name: "name", label: "Name", value: ws.name }], "Rename");
+function spaceMenu(sp: SpaceListing, x: number, y: number): void {
+  const owner = sp.role === "owner";
+  const local = home.me?.kind === "local";
+  const items: MenuItem[] = [
+    { label: "Rename…", disabled: !owner, action: async () => {
+      const v = await formDialog("Rename space", [{ name: "name", label: "Name", value: sp.name }], "Rename");
       if (!v) return;
-      try { await api.renameWorkspace(ws.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
+      try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: "New workbook here", action: async () => navigate(`/w/${(await api.create("Untitled workbook", ws.id)).id}`) },
-    "sep",
-    { label: "Delete workspace", danger: true, action: async () => {
-      const n = home.workbooks.filter((w) => w.workspace === ws.id).length;
-      if (!(await confirmDialog(`Delete workspace “${ws.name}”?`,
-        n ? `Its ${n} workbook${n === 1 ? "" : "s"} will be kept and moved to “Not in a workspace”.` : "It has no workbooks."))) return;
-      await api.removeWorkspace(ws.id);
-      if (home.scope === ws.id) home.scope = "all";
+    { label: "New workbook here", disabled: sp.role === "viewer", action: async () => navigate(`/w/${(await api.create("Untitled workbook", sp.id)).id}`) },
+  ];
+  if (!local) {
+    items.push("sep",
+      { label: owner ? "Members…" : "Who has access…", action: () => membersDialog(sp, () => {}) },
+      ...(owner ? [{ label: "Service tokens…", action: () => tokensDialog(sp) }] : []));
+  }
+  items.push("sep", { label: "Delete space", danger: true, disabled: !owner, action: async () => {
+    const n = home.workbooks.filter((w) => w.space === sp.id).length;
+    if (n) {
+      toast(`Move or delete its ${n} workbook${n === 1 ? "" : "s"} first.`, "error");
+      return;
+    }
+    if (!(await confirmDialog(`Delete space “${sp.name}”?`, "Its members and service tokens are removed."))) return;
+    try {
+      await api.removeSpace(sp.id);
+      if (home.scope === sp.id) home.scope = "all";
       history.replaceState(null, "", homeUrl());
-      await reloadHome();
-    } },
-  ], x, y);
+    } catch (e) { toast((e as Error).message, "error"); }
+    await reloadHome();
+  } });
+  showMenu(items, x, y);
 }
 
 async function toggleStar(w: WorkbookListing): Promise<void> {
@@ -389,33 +418,34 @@ async function toggleStar(w: WorkbookListing): Promise<void> {
 }
 
 function workbookMenu(w: WorkbookListing, x: number, y: number): void {
+  const viewer = w.role === "viewer";
   const items: MenuItem[] = [
     { label: "Open", action: () => navigate(`/w/${w.id}`) },
     { label: "Open in new tab", action: () => window.open(`/w/${w.id}`, "_blank") },
     "sep",
-    { label: "Rename…", action: async () => {
+    { label: "Rename…", disabled: viewer, action: async () => {
       const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename");
       if (!v) return;
       try { await api.update(w.id, { name: v.name }); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: "Duplicate", action: async () => {
+    { label: "Duplicate", disabled: viewer, action: async () => {
       try {
         const copy = await api.duplicate(w.id);
         toast(`Created “${copy.name}”`, "success");
         await reloadHome();
       } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: "Move to workspace…", disabled: !home.workspaces.length, action: async () => {
+    { label: "Move to space…", disabled: viewer || writableSpaces().filter((s) => s.id !== w.space).length === 0, action: async () => {
       const v = await formDialog(`Move “${w.name}”`, [{
-        name: "workspace", label: "Workspace", type: "select", value: w.workspace ?? "",
-        options: [{ value: "", label: "No workspace" }, ...home.workspaces.map((ws) => ({ value: ws.id, label: ws.name }))],
+        name: "space", label: "Space", type: "select", value: w.space,
+        options: writableSpaces().map((s) => ({ value: s.id, label: s.name })),
       }], "Move");
-      if (!v) return;
-      try { await api.update(w.id, { workspace: v.workspace }); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
+      if (!v || v.space === w.space) return;
+      try { await api.update(w.id, { space: v.space }); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: w.starred ? "Unstar" : "Star", action: () => toggleStar(w) },
+    { label: w.starred ? "Unstar" : "Star", disabled: viewer, action: () => toggleStar(w) },
     "sep",
-    { label: "Delete", danger: true, action: async () => {
+    { label: "Delete", danger: true, disabled: viewer, action: async () => {
       if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash."))) return;
       try { await api.remove(w.id); } catch (e) { toast((e as Error).message, "error"); }
       await reloadHome();
@@ -446,7 +476,7 @@ async function emptyTrash(): Promise<void> {
 }
 
 async function openFile(file: File): Promise<void> {
-  const wb = await api.create(file.name.replace(/\.[^.]+$/, ""), targetWorkspace());
+  const wb = await api.create(file.name.replace(/\.[^.]+$/, ""), targetSpace());
   let result = null;
   try {
     result = await importFile(wb.id, file);
@@ -465,9 +495,8 @@ async function openFile(file: File): Promise<void> {
 }
 
 async function createDemo(rows: number): Promise<void> {
-  const wb = await api.create("Demo: US flights", targetWorkspace());
+  const wb = await api.create("Demo: US flights", targetSpace());
   navigate(`/w/${wb.id}?demo=${rows}`);
 }
 
-initToken();
 route();

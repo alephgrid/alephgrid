@@ -1,34 +1,26 @@
 import type { ErrorCode } from "./protocol";
 import type {
-  ImportProblem, ImportRequest, Imported, JobStatus, OpName, Params, Results, ServerEvent, SheetInfo, TableInfo, UploadCreated,
-  UploadPreview, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace,
+  AuditEvent, AuthMode, ImportProblem, ImportRequest, Imported, Invite, JobStatus, MemberKind, Org, OrgMember, OrgRole, OpName, Params,
+  PublicUser, Results, ServerEvent, SheetInfo, Space, SpaceMember, SpaceRole, TableInfo, Token, UploadCreated, UploadPreview,
+  WorkbookListing, WorkbookMeta, WorkbookPatch,
 } from "./types";
 
-const TOKEN_KEY = "alephgrid:token";
+/** A space as listed for the signed-in principal. */
+export type SpaceListing = { id: string; name: string; org_id: string; org_name: string | null; created_at: number; role: SpaceRole };
 
-/** Pick up `?token=` once, remember it, and remove it from the address bar. */
-export function initToken(): void {
-  const url = new URL(location.href);
-  const t = url.searchParams.get("token");
-  if (t) {
-    try { localStorage.setItem(TOKEN_KEY, t); } catch { /* private mode */ }
-    url.searchParams.delete("token");
-    history.replaceState(null, "", url.pathname + url.search + url.hash);
-  }
-}
+/** Who is signed in (`/api/me`). */
+export type Me = {
+  kind: "local" | "user" | "token";
+  user?: PublicUser;
+  instance_admin: boolean;
+  orgs: { org: Org; role: OrgRole }[];
+  expires_at?: number;
+};
 
-export function token(): string | null {
-  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
-}
-
-export function setToken(t: string): void {
-  try { localStorage.setItem(TOKEN_KEY, t); } catch { /* ignore */ }
-}
-
-function authHeaders(): Record<string, string> {
-  const t = token();
-  return t ? { Authorization: `Bearer ${t}` } : {};
-}
+export type InviteInfo = {
+  email: string; organization: string | null; space: string | null; org_role: OrgRole; space_role: SpaceRole | null;
+  expires_at: number; existing_user: boolean; sso: boolean;
+};
 
 export class HttpError extends Error {
   constructor(public status: number, message: string, public problem?: ImportProblem) {
@@ -44,7 +36,7 @@ export function isRuntimeFailure(e: unknown): e is HttpError {
 async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
-    headers: { ...authHeaders(), ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -63,12 +55,19 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export const api = {
   config: () => http<{
-    version: string; auth_required: boolean; allow_sql: boolean; sheet_copy_rows?: number;
+    version: string; auth: AuthMode; setup_required: boolean; sso: { label: string } | null; allow_sql: boolean; sheet_copy_rows?: number;
     max_message_bytes?: number; max_upload_bytes?: number; max_edit_cells?: number;
   }>("GET", "/api/config"),
+  me: () => http<Me>("GET", "/api/me"),
+  login: (email: string, password: string) => http<Me>("POST", "/api/auth/login", { email, password }),
+  logout: () => http<void>("POST", "/api/auth/logout"),
+  setup: (code: string, email: string, name: string, password: string) => http<Me>("POST", "/api/auth/setup", { code, email, name, password }),
+  changePassword: (current: string, next: string) => http<void>("POST", "/api/me/password", { current, new: next }),
+  lookupInvite: (code: string) => http<InviteInfo>("POST", "/api/invites/lookup", { code }),
+  acceptInvite: (code: string, name: string, password: string) => http<Me>("POST", "/api/invites/accept", { code, name, password }),
   list: () => http<WorkbookListing[]>("GET", "/api/workbooks"),
-  create: (name: string, workspace?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, workspace: workspace ?? null }),
-  get: (id: string) => http<{ workbook: WorkbookMeta; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),
+  create: (name: string, space?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, space: space ?? null }),
+  get: (id: string) => http<{ workbook: WorkbookMeta; role: SpaceRole; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),
   update: (id: string, patch: WorkbookPatch) =>
     http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, patch),
   rename: (id: string, name: string) => http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, { name }),
@@ -79,10 +78,28 @@ export const api = {
   restore: (id: string) => http<WorkbookMeta>("POST", `/api/trash/${id}/restore`),
   purge: (id: string) => http<void>("DELETE", `/api/trash/${id}`),
   emptyTrash: () => http<void>("DELETE", "/api/trash"),
-  workspaces: () => http<Workspace[]>("GET", "/api/workspaces"),
-  createWorkspace: (name: string) => http<Workspace>("POST", "/api/workspaces", { name }),
-  renameWorkspace: (id: string, name: string) => http<Workspace>("PATCH", `/api/workspaces/${id}`, { name }),
-  removeWorkspace: (id: string) => http<void>("DELETE", `/api/workspaces/${id}`),
+  spaces: () => http<SpaceListing[]>("GET", "/api/spaces"),
+  createSpace: (name: string, org?: string) => http<Space>("POST", "/api/spaces", { name, org: org ?? null }),
+  renameSpace: (id: string, name: string) => http<Space>("PATCH", `/api/spaces/${id}`, { name }),
+  removeSpace: (id: string) => http<void>("DELETE", `/api/spaces/${id}`),
+  spaceMembers: (id: string) => http<SpaceMember[]>("GET", `/api/spaces/${id}/members`),
+  setSpaceMember: (id: string, kind: MemberKind, principal: string, role: SpaceRole) =>
+    http<void>("PUT", `/api/spaces/${id}/members`, { kind, principal, role }),
+  removeSpaceMember: (id: string, kind: MemberKind, principal: string) =>
+    http<void>("DELETE", `/api/spaces/${id}/members/${kind}/${encodeURIComponent(principal)}`),
+  tokens: (space: string) => http<Token[]>("GET", `/api/spaces/${space}/tokens`),
+  createToken: (space: string, name: string, role: SpaceRole, days: number) =>
+    http<{ token: Token; secret: string }>("POST", `/api/spaces/${space}/tokens`, { name, role, days }),
+  revokeToken: (space: string, token: string) => http<void>("DELETE", `/api/spaces/${space}/tokens/${token}`),
+  orgMembers: (org: string) => http<OrgMember[]>("GET", `/api/orgs/${org}/members`),
+  setOrgRole: (org: string, user: string, role: OrgRole) => http<void>("PATCH", `/api/orgs/${org}/members/${user}`, { role }),
+  removeOrgMember: (org: string, user: string) => http<void>("DELETE", `/api/orgs/${org}/members/${user}`),
+  invites: (org: string) => http<Invite[]>("GET", `/api/orgs/${org}/invites`),
+  invite: (org: string, email: string, org_role: OrgRole, space: string | null, space_role: SpaceRole | null, days = 7) =>
+    http<{ invite: Invite; code: string; path: string }>("POST", `/api/orgs/${org}/invites`, { email, org_role, space, space_role, days }),
+  revokeInvite: (org: string, invite: string) => http<void>("DELETE", `/api/orgs/${org}/invites/${invite}`),
+  audit: (org: string, before?: number) => http<AuditEvent[]>("GET", `/api/orgs/${org}/audit${before ? `?before=${before}` : ""}`),
+  setUserDisabled: (user: string, disabled: boolean) => http<PublicUser | null>("PATCH", `/api/users/${user}`, { disabled }),
   previewUpload: (id: string, upload: string, req: ImportRequest) =>
     http<UploadPreview>("POST", `/api/workbooks/${id}/uploads/${upload}/preview`, req),
   importUpload: (id: string, upload: string, req: ImportRequest) =>
@@ -90,19 +107,16 @@ export const api = {
   cancelUpload: (id: string, upload: string) => http<void>("DELETE", `/api/workbooks/${id}/uploads/${upload}`),
   jobStatus: (id: string, job: string) => http<JobStatus>("GET", `/api/workbooks/${id}/jobs/${job}`),
   cancelJob: (id: string, job: string) => http<void>("DELETE", `/api/workbooks/${id}/jobs/${job}`),
+  // Downloads are authorized by the session cookie; no secret goes into these URLs.
   xlsxUrl(id: string): string {
-    const t = token();
-    return `/api/workbooks/${id}/export.xlsx${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+    return `/api/workbooks/${id}/export.xlsx`;
   },
   /** A finished `export_query` file; it can be downloaded once. */
   downloadUrl(id: string, download: string): string {
-    const t = token();
-    return `/api/workbooks/${id}/downloads/${encodeURIComponent(download)}${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+    return `/api/workbooks/${id}/downloads/${encodeURIComponent(download)}`;
   },
   exportUrl(id: string, spec: unknown, format: string): string {
     const q = new URLSearchParams({ spec: JSON.stringify(spec), format });
-    const t = token();
-    if (t) q.set("token", t);
     return `/api/workbooks/${id}/export?${q}`;
   },
 };
@@ -116,8 +130,6 @@ export function stageUpload(
   const xhr = new XMLHttpRequest();
   const done = new Promise<UploadCreated>((resolve, reject) => {
     xhr.open("POST", `/api/workbooks/${workbookId}/uploads?filename=${encodeURIComponent(file.name)}`);
-    const t = token();
-    if (t) xhr.setRequestHeader("Authorization", `Bearer ${t}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let body: any = null;
@@ -209,8 +221,7 @@ export class Rpc {
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const t = token();
-      const url = `${proto}://${location.host}/ws/${this.workbookId}${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+      const url = `${proto}://${location.host}/ws/${this.workbookId}`;
       this.onStatus("connecting");
       const ws = new WebSocket(url);
       let opened = false;
@@ -369,6 +380,11 @@ export class Rpc {
     const msg = JSON.parse(data);
     if (msg.event) {
       if (msg.event === "hello") this.session = msg.session;
+      // The server closes the connection next; reconnecting would be refused.
+      if (msg.event === "access_revoked") {
+        this.closed = true;
+        clearTimeout(this.retryTimer);
+      }
       if (msg.event === "progress") {
         for (const [id, p] of this.pending) if (id === msg.request) p.opts.onProgress?.(msg.percentage);
       }

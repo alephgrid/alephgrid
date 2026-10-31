@@ -3,9 +3,10 @@
 //! A backup is a directory:
 //!
 //! ```text
-//! manifest.json              format, time, version, and per workbook: revision, storage
-//!                            format, size and SHA-256 of its database file
-//! workspaces.json            (if any)
+//! manifest.json              format, time, version, the control database's SHA-256 and
+//!                            per workbook: revision, storage format, size and SHA-256 of
+//!                            its database file
+//! control.duckdb             organizations, users, spaces, roles, tokens and audit log
 //! <workbook-id>/workbook.json
 //! <workbook-id>/data.duckdb
 //! ```
@@ -21,7 +22,10 @@
 //! directory. It verifies every checksum first, copies into a staging directory, opens each
 //! restored workbook (which also migrates an older format) and checks its revision and
 //! identity against the manifest, and only then moves the staging directory into place.
-//! Trashed workbooks, scratch files and runtime records are not part of a backup.
+//! Trashed workbooks, scratch files, runtime records and sign-in sessions' liveness are not
+//! part of a backup (restored sessions still expire on time). A format-1 backup (before
+//! spaces) carries `workspaces.json` instead of the control database; restoring it lets the
+//! next start migrate its workspaces to spaces.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,13 +37,17 @@ use ts_rs::TS;
 
 use crate::state::{read_meta, Shared, WorkbookMeta};
 
-pub const BACKUP_FORMAT: u32 = 1;
+pub const BACKUP_FORMAT: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct BackupManifest {
     pub format: u32,
     pub created_at_ms: u64,
     pub server_version: String,
+    /// SHA-256 of `control.duckdb` (format 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub control_sha256: Option<String>,
     pub workbooks: Vec<BackupEntry>,
 }
 
@@ -82,14 +90,19 @@ fn entry(meta: &WorkbookMeta, db: &Path, revision: u64) -> Result<BackupEntry> {
     })
 }
 
-fn finish(dest: &Path, workbooks: Vec<BackupEntry>, workspaces: Option<PathBuf>) -> Result<BackupManifest> {
-    if let Some(ws) = workspaces.filter(|p| p.exists()) {
-        alephgrid_core::storage::copy_durably(&ws, &dest.join("workspaces.json"))?;
-    }
+/// Copy the control database into the backup, from one transaction.
+fn control(store: &crate::auth::Store, dest: &Path) -> Result<String> {
+    let path = dest.join("control.duckdb");
+    store.backup_to(&path)?;
+    sha256_file(&path)
+}
+
+fn finish(dest: &Path, workbooks: Vec<BackupEntry>, control_sha256: String) -> Result<BackupManifest> {
     let manifest = BackupManifest {
         format: BACKUP_FORMAT,
         created_at_ms: alephgrid_core::storage::now_ms(),
         server_version: env!("CARGO_PKG_VERSION").into(),
+        control_sha256: Some(control_sha256),
         workbooks,
     };
     // Written last: a backup without a manifest is incomplete and is never restored.
@@ -130,7 +143,9 @@ pub fn backup_online(state: &Shared, dest: &Path) -> Result<BackupManifest> {
             crate::runtime::write_durably(&dir.join("workbook.json"), &serde_json::to_vec_pretty(&meta)?)?;
             entries.push(entry(&meta, &db, revision)?);
         }
-        finish(dest, entries, Some(state.config.data_dir.join("workspaces.json")))
+        // After the workbooks: every space a copied workbook names is in this copy.
+        let sum = control(&state.auth.store, dest)?;
+        finish(dest, entries, sum)
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(dest);
@@ -169,7 +184,11 @@ pub fn backup_offline(data_dir: &Path, dest: &Path) -> Result<BackupManifest> {
             alephgrid_core::storage::copy_durably(&src.join("workbook.json"), &dir.join("workbook.json"))?;
             entries.push(entry(&meta, &db, revision)?);
         }
-        finish(dest, entries, Some(data_dir.join("workspaces.json")))
+        let store = crate::auth::Store::open(&control.join("control.duckdb"))?;
+        crate::state::migrate_to_spaces(data_dir, &store)?;
+        let sum = self::control(&store, dest)?;
+        drop(store);
+        finish(dest, entries, sum)
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(dest);
@@ -184,8 +203,15 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
         &std::fs::read(src.join("manifest.json")).with_context(|| format!("{} has no manifest.json; it is not a complete backup", src.display()))?,
     )
     .context("unreadable manifest")?;
-    if manifest.format != BACKUP_FORMAT {
-        bail!("backup format {} is not supported (this version reads {BACKUP_FORMAT})", manifest.format);
+    if !(1..=BACKUP_FORMAT).contains(&manifest.format) {
+        bail!("backup format {} is not supported (this version reads 1 to {BACKUP_FORMAT})", manifest.format);
+    }
+    if manifest.format >= 2 {
+        let expected = manifest.control_sha256.as_deref().context("the manifest has no checksum for control.duckdb")?;
+        let sum = sha256_file(&src.join("control.duckdb"))?;
+        if sum != expected {
+            bail!("the backup's control database is damaged: checksum {sum} does not match {expected}");
+        }
     }
     if data_dir.exists() && std::fs::read_dir(data_dir)?.next().is_some() {
         bail!("{} is not empty; restore only into an empty data directory", data_dir.display());
@@ -229,7 +255,11 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
                 let _ = std::fs::remove_file(to.join(format!("data.duckdb.v{v}.bak")));
             }
         }
-        if src.join("workspaces.json").exists() {
+        if manifest.format >= 2 {
+            std::fs::create_dir_all(staging.join(".control"))?;
+            alephgrid_core::storage::copy_durably(&src.join("control.duckdb"), &staging.join(".control").join("control.duckdb"))?;
+            crate::auth::Store::open(&staging.join(".control").join("control.duckdb")).context("the restored control database does not open")?;
+        } else if src.join("workspaces.json").exists() {
             alephgrid_core::storage::copy_durably(&src.join("workspaces.json"), &staging.join("workspaces.json"))?;
         }
         if data_dir.exists() {

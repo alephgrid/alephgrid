@@ -22,7 +22,9 @@ use crate::runtime::{
     AllocationState, Capability, ComputePolicy, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
     RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
 };
-use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch, Workspace};
+use crate::auth::store::{AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
+use crate::auth::{AuthMode, Cap, OrgRole, SpaceRole};
+use crate::state::{Summary, WorkbookListing, WorkbookMeta, WorkbookPatch};
 use crate::ws::{Event, Op, QueryExport};
 
 const HEADER: &str = "\
@@ -40,7 +42,8 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = \"overloaded\" | \"deadline_exceeded\" | \"cancelled\" | \"too_large\" | \"capacity\" | \"unavailable\"
-  | \"not_allowed\" | \"sql_change\" | \"bad_parameter\" | \"schema_changed\";
+  | \"not_allowed\" | \"sql_change\" | \"bad_parameter\" | \"schema_changed\"
+  | \"unauthenticated\" | \"forbidden\" | \"not_found\" | \"bad_request\";
 
 /** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
 export type Reply =
@@ -48,7 +51,7 @@ export type Reply =
   | { id: number | null; ok: false; error: string; code?: ErrorCode };
 
 /** Pushed after connecting. */
-export type Hello = { event: \"hello\"; session: number; workbook: WorkbookMeta; revision: number };
+export type Hello = { event: \"hello\"; session: number; workbook: WorkbookMeta; revision: number; role: SpaceRole };
 ";
 
 macro_rules! decls {
@@ -154,7 +157,8 @@ pub fn bindings() -> String {
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
-        HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Workspace, Event, Op,
+        SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent,
+        HistoryEntry, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputePolicy, AllocationState, FailureKind, RuntimeFailure,
         Reservation, Transition, RuntimeAllocation, OwnershipAssignment, RuntimeStatus, RuntimeAction, RuntimeRequest,

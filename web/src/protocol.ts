@@ -12,7 +12,8 @@ export type Request = Op & { id: number; mutation_id?: string; timeout_ms?: numb
 
 /** Machine-readable reason of a failed request. */
 export type ErrorCode = "overloaded" | "deadline_exceeded" | "cancelled" | "too_large" | "capacity" | "unavailable"
-  | "not_allowed" | "sql_change" | "bad_parameter" | "schema_changed";
+  | "not_allowed" | "sql_change" | "bad_parameter" | "schema_changed"
+  | "unauthenticated" | "forbidden" | "not_found" | "bad_request";
 
 /** A WebSocket reply frame. Changes carry the revision they committed as (`replayed` for a retry already applied). */
 export type Reply =
@@ -20,7 +21,7 @@ export type Reply =
   | { id: number | null; ok: false; error: string; code?: ErrorCode };
 
 /** Pushed after connecting. */
-export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number };
+export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number; role: SpaceRole };
 
 export type Rule = { "kind": "one_of", values: Array<string>, } | { "kind": "between", min?: number, max?: number, } | { "kind": "required" };
 
@@ -363,6 +364,52 @@ export type PasteMode = "all" | "formulas" | "values" | "formats";
 
 export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
 
+export type SpaceRole = "viewer" | "editor" | "owner";
+
+export type OrgRole = "member" | "admin";
+
+export type Cap = "view" | "query" | "export" | "edit" | "publish" | "create_workbook" | "delete_workbook" | "purge" | "manage_members" | "manage_space";
+
+export type AuthMode = "local" | "accounts";
+
+export type Org = { id: string, name: string, created_at: number, };
+
+export type Space = { id: string, org_id: string, name: string, created_at: number, };
+
+export type PublicUser = { id: string, email: string, name: string, instance_admin: boolean, disabled: boolean, 
+/**
+ * `password`, `sso` or both.
+ */
+sign_in: Array<string>, groups: Array<string>, last_login?: number, };
+
+export type OrgMember = { user: PublicUser, role: OrgRole, };
+
+export type MemberKind = "user" | "group";
+
+export type SpaceMember = { kind: MemberKind, 
+/**
+ * User id or group name.
+ */
+principal: string, role: SpaceRole, 
+/**
+ * For a user: their email and name.
+ */
+user?: PublicUser, };
+
+export type Token = { id: string, name: string, space_id: string, role: SpaceRole, created_by: string, created_at: number, expires_at: number, revoked_at?: number, last_used?: number, };
+
+export type Invite = { id: string, org_id: string, email: string, org_role: OrgRole, space_id?: string, space_role?: SpaceRole, created_by: string, created_at: number, expires_at: number, accepted_at?: number, revoked_at?: number, };
+
+export type AuditEvent = { seq: number, at: number, 
+/**
+ * `user:<id>`, `token:<id>`, `local` or `system`.
+ */
+actor: string, action: string, org_id?: string, space_id?: string, workbook?: string, 
+/**
+ * `ok` or `denied`.
+ */
+outcome: string, detail: Record<string, unknown>, };
+
 export type HistoryEntry = { revision: number, mutation_id?: string, op: string, actor?: string, at_ms: number, 
 /**
  * Short description of the change, at most [`SUMMARY_BYTES`] bytes.
@@ -371,7 +418,11 @@ summary: string, };
 
 export type Summary = { tables: number, sheets: number, rows: number, };
 
-export type WorkbookMeta = { id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
+export type WorkbookMeta = { id: string, name: string, created_at: number, 
+/**
+ * The space that owns the workbook; its roles decide who may use it.
+ */
+space: string, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
@@ -381,7 +432,15 @@ deleted_at?: number,
  */
 runtime_spec?: string, };
 
-export type WorkbookListing = { size_bytes: number, id: string, name: string, created_at: number, workspace: string | null, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
+export type WorkbookListing = { size_bytes: number, 
+/**
+ * The asking principal's role in the workbook's space (workbook lists).
+ */
+role?: SpaceRole, id: string, name: string, created_at: number, 
+/**
+ * The space that owns the workbook; its roles decide who may use it.
+ */
+space: string, starred: boolean, opened_at: number, updated_at: number, summary: Summary, 
 /**
  * Set while the workbook is in the trash.
  */
@@ -393,13 +452,11 @@ runtime_spec?: string, };
 
 export type WorkbookPatch = { name?: string, 
 /**
- * Workspace id; an empty string moves the workbook out of any workspace.
+ * Move the workbook into this space.
  */
-workspace?: string, starred?: boolean, };
+space?: string, starred?: boolean, };
 
-export type Workspace = { id: string, name: string, created_at: number, };
-
-export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "progress", request: number, percentage: number, };
+export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "access_revoked", reason: string, } | { "event": "role_changed", role: SpaceRole, } | { "event": "progress", request: number, percentage: number, };
 
 export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
 
@@ -543,7 +600,11 @@ export type BackupEntry = { id: string, name: string,
  */
 revision: number, storage_format: number, bytes: number, sha256: string, };
 
-export type BackupManifest = { format: number, created_at_ms: number, server_version: string, workbooks: Array<BackupEntry>, };
+export type BackupManifest = { format: number, created_at_ms: number, server_version: string, 
+/**
+ * SHA-256 of `control.duckdb` (format 2).
+ */
+control_sha256?: string, workbooks: Array<BackupEntry>, };
 
 /** Result type of each operation. */
 export interface Results {

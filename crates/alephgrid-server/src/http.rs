@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use futures_util::StreamExt;
 use alephgrid_core::{ColumnType, ExportFormat, ImportProblem, UploadPreview, ViewSpec};
 use rust_embed::RustEmbed;
@@ -18,6 +18,11 @@ use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
+use std::collections::HashMap;
+
+use anyhow::bail;
+
+use crate::auth::{Cap, Denied, Principal};
 use crate::runtime::{FailureKind, RuntimeFailure};
 use crate::sched::Class;
 use crate::state::Work;
@@ -29,10 +34,10 @@ use crate::ws;
 struct Assets;
 
 /// An error reply: `{"error": message}`, plus `problem` when an import can say what to fix.
-pub struct ApiError(StatusCode, String, Option<Box<ImportProblem>>);
+pub struct ApiError(pub(crate) StatusCode, pub(crate) String, pub(crate) Option<Box<ImportProblem>>);
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> ApiError {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> ApiError {
         ApiError(status, message.into(), None)
     }
 }
@@ -49,6 +54,15 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
+        if let Some(d) = e.chain().find_map(|c| c.downcast_ref::<Denied>()) {
+            let status = match d {
+                Denied::Unauthenticated => StatusCode::UNAUTHORIZED,
+                Denied::Forbidden(_) | Denied::Refused(_) => StatusCode::FORBIDDEN,
+                Denied::NotFound(_) => StatusCode::NOT_FOUND,
+                Denied::BadRequest(_) => StatusCode::BAD_REQUEST,
+            };
+            return ApiError::new(status, d.to_string());
+        }
         if let Some(f) = e.chain().find_map(|c| c.downcast_ref::<RuntimeFailure>()) {
             return ApiError(runtime_status(f.kind), f.message.clone(), None);
         }
@@ -109,7 +123,7 @@ pub struct JobStatus {
     pub total_rows: u64,
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 /// HTTP status for a runtime failure.
 fn runtime_status(kind: FailureKind) -> StatusCode {
@@ -143,6 +157,8 @@ pub enum RuntimeAction {
 
 pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
     let api = Router::new()
+        .route("/api/me", get(crate::auth::routes::me))
+        .route("/api/me/password", post(crate::auth::routes::change_password))
         .route("/api/workbooks", get(list_workbooks).post(create_workbook))
         .route("/api/workbooks/{id}", get(get_workbook).patch(update_workbook).delete(delete_workbook))
         .route("/api/workbooks/{id}/duplicate", post(duplicate_workbook))
@@ -150,8 +166,20 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/trash", get(list_trash).delete(empty_trash))
         .route("/api/trash/{id}", axum::routing::delete(purge_workbook))
         .route("/api/trash/{id}/restore", post(restore_workbook))
-        .route("/api/workspaces", get(list_workspaces).post(create_workspace))
-        .route("/api/workspaces/{id}", patch(rename_workspace).delete(delete_workspace))
+        .route("/api/spaces", get(crate::auth::routes::list_spaces).post(crate::auth::routes::create_space))
+        .route("/api/spaces/{id}", patch(crate::auth::routes::rename_space).delete(crate::auth::routes::delete_space))
+        .route("/api/spaces/{id}/members", get(crate::auth::routes::space_members).put(crate::auth::routes::set_space_member))
+        .route("/api/spaces/{id}/members/{kind}/{principal}", axum::routing::delete(crate::auth::routes::remove_space_member))
+        .route("/api/spaces/{id}/tokens", get(crate::auth::routes::list_tokens).post(crate::auth::routes::create_token))
+        .route("/api/spaces/{id}/tokens/{token}", axum::routing::delete(crate::auth::routes::revoke_token))
+        .route("/api/orgs", get(crate::auth::routes::list_orgs).post(crate::auth::routes::create_org))
+        .route("/api/orgs/{id}", patch(crate::auth::routes::rename_org))
+        .route("/api/orgs/{id}/members", get(crate::auth::routes::org_members))
+        .route("/api/orgs/{id}/members/{user}", patch(crate::auth::routes::set_org_role).delete(crate::auth::routes::remove_org_member))
+        .route("/api/orgs/{id}/invites", get(crate::auth::routes::list_invites).post(crate::auth::routes::create_invite))
+        .route("/api/orgs/{id}/invites/{invite}", axum::routing::delete(crate::auth::routes::revoke_invite))
+        .route("/api/orgs/{id}/audit", get(crate::auth::routes::org_audit))
+        .route("/api/users/{id}", patch(crate::auth::routes::update_user))
         .route(
             "/api/workbooks/{id}/import",
             post(import_file).layer(DefaultBodyLimit::disable()),
@@ -167,10 +195,22 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/admin/resources", get(resources))
         .route("/api/admin/sessions", get(sessions))
         .route("/api/admin/backups", post(create_backup))
+        .route("/api/admin/audit", get(crate::auth::routes::instance_audit))
         .route("/ws/{id}", get(websocket))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+        .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
-    let app = Router::new().route("/api/config", get(config)).merge(api);
+    // Reachable without signing in.
+    let public = Router::new()
+        .route("/api/config", get(config))
+        .route("/api/auth/setup", post(crate::auth::routes::setup))
+        .route("/api/auth/login", post(crate::auth::routes::login))
+        .route("/api/auth/logout", post(crate::auth::routes::logout))
+        .route("/api/auth/oidc/start", get(crate::auth::routes::oidc_start))
+        .route("/api/auth/oidc/callback", get(crate::auth::routes::oidc_callback))
+        .route("/api/invites/lookup", post(crate::auth::routes::lookup_invite))
+        .route("/api/invites/accept", post(crate::auth::routes::accept_invite));
+
+    let app = public.merge(api);
     let app = match web_dir {
         Some(dir) => app.fallback_service(
             tower_http::services::ServeDir::new(&dir)
@@ -178,35 +218,97 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         ),
         None => app.fallback(static_asset),
     };
-    app.with_state(state)
+    app.layer(middleware::from_fn_with_state(state.clone(), guard))
+        .with_state(state)
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
-async fn require_token(State(state): State<Shared>, req: Request, next: Next) -> Response {
-    let Some(expected) = &state.config.token else {
-        return next.run(req).await;
-    };
-    let bearer = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    let query = req.uri().query().and_then(|q| {
-        q.split('&').find_map(|kv| kv.strip_prefix("token=").map(|v| v.to_string()))
-    });
-    if bearer.as_deref() == Some(expected.as_str()) || query.as_deref() == Some(expected.as_str()) {
-        next.run(req).await
-    } else {
-        ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong access token").into_response()
+/// Host part of a `Host` header or URL authority, lower case, without the port.
+fn host_name(authority: &str) -> String {
+    let a = authority.trim().to_ascii_lowercase();
+    if let Some(rest) = a.strip_prefix('[') {
+        return format!("[{}]", rest.split(']').next().unwrap_or(""));
+    }
+    a.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map(|(h, _)| h.to_string()).unwrap_or(a)
+}
+
+/// Checks before anything else, for every request (7.06, 7.17):
+///
+/// * identity headers set by a proxy are refused: Alephgrid never trusts them;
+/// * the `Host` must be one this server answers to (DNS rebinding);
+/// * a request from a browser (`Origin`) that changes something or opens a WebSocket must
+///   come from this server's own pages; with a session cookie, a change must say where it
+///   comes from at all.
+async fn guard(State(state): State<Shared>, req: Request, next: Next) -> Response {
+    let headers = req.headers();
+    if let Some(h) = crate::auth::identity_header(headers) {
+        return ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("this request carries the identity header {h}; Alephgrid does not accept identities asserted by proxies (configure OIDC instead)"),
+        )
+        .into_response();
+    }
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if let Some(allowed) = &state.config.auth.allowed_hosts {
+        let name = host_name(host);
+        if !allowed.iter().any(|a| a == &name) {
+            return ApiError::new(StatusCode::MISDIRECTED_REQUEST, "this server does not answer to that host name").into_response();
+        }
+    }
+    let method = req.method().clone();
+    let upgrade = headers.get(header::UPGRADE).is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"websocket"));
+    let changes = !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS);
+    if changes || upgrade {
+        let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+        let own = |o: &str| {
+            let authority = o.split_once("://").map(|(_, a)| a).unwrap_or("");
+            authority.eq_ignore_ascii_case(host) || state.config.auth.public_url.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(o))
+        };
+        match origin {
+            Some(o) if !own(o) => return ApiError::new(StatusCode::FORBIDDEN, "requests from other sites are refused").into_response(),
+            None if changes && crate::auth::cookie(headers, crate::auth::SESSION_COOKIE).is_some() && headers.get(header::AUTHORIZATION).is_none() => {
+                let same = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) == Some("same-origin");
+                if !same {
+                    return ApiError::new(StatusCode::FORBIDDEN, "a change made with a session cookie must come from this server's pages").into_response();
+                }
+            }
+            _ => {}
+        }
+    }
+    let res = next.run(req).await;
+    if !(res.status().is_client_error() || res.status().is_server_error()) {
+        return res;
+    }
+    // Error messages (DuckDB's included) can name files: never show where the data lives.
+    let (mut parts, body) = res.into_parts();
+    let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap_or_default();
+    let text = crate::ws::redact(&String::from_utf8_lossy(&bytes), &state.config.data_dir);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(text))
+}
+
+/// Who is asking: the principal goes into the request's extensions for the handler.
+async fn authenticate(State(state): State<Shared>, mut req: Request, next: Next) -> Response {
+    let s = state.clone();
+    let headers = req.headers().clone();
+    match tokio::task::spawn_blocking(move || s.auth.authenticate(&headers)).await {
+        Ok(Ok(p)) => {
+            req.extensions_mut().insert(p);
+            next.run(req).await
+        }
+        Ok(Err(e)) => ApiError::from(e).into_response(),
+        Err(e) => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 async fn config(State(state): State<Shared>) -> Json<serde_json::Value> {
+    let auth = &state.auth;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "auth_required": state.config.token.is_some(),
+        "auth": auth.mode(),
+        "setup_required": auth.needs_setup(),
+        "sso": auth.oidc.as_ref().map(|o| json!({ "label": o.config.label })),
         "allow_sql": state.config.allow_sql,
         "sheet_copy_rows": state.config.sheet_copy_rows,
         "max_message_bytes": state.config.max_message_bytes,
@@ -215,59 +317,74 @@ async fn config(State(state): State<Shared>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn list_workbooks(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.list()?))
+/// The workbook's space, if `p` may do `cap` with it (off the async threads).
+async fn allowed(state: &Shared, p: &Principal, id: &str, cap: Cap) -> ApiResult<(crate::auth::Space, crate::auth::SpaceRole)> {
+    let (s, p, id) = (state.clone(), p.clone(), id.to_string());
+    blocking(move || s.require_workbook(&p, &id, cap)).await
 }
 
-#[derive(Deserialize)]
-struct NameBody {
-    name: String,
+/// Workbooks in spaces the principal can see, each with its role there.
+async fn list_workbooks(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    let list = blocking(move || {
+        let spaces: HashMap<String, crate::auth::SpaceRole> = state.auth.visible_spaces(&p)?.into_iter().map(|(s, r)| (s.id, r)).collect();
+        Ok(state
+            .list()?
+            .into_iter()
+            .filter_map(|mut w| {
+                w.role = Some(*spaces.get(&w.meta.space)?);
+                Some(w)
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(list))
 }
 
 #[derive(Deserialize)]
 struct CreateBody {
     name: String,
+    /// Space to create it in; by default the first space where the principal may.
     #[serde(default)]
-    workspace: Option<String>,
+    space: Option<String>,
 }
 
-async fn create_workbook(State(state): State<Shared>, Json(body): Json<CreateBody>) -> ApiResult<impl IntoResponse> {
+async fn create_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Json(body): Json<CreateBody>) -> ApiResult<impl IntoResponse> {
     let name = if body.name.trim().is_empty() { "Untitled workbook".to_string() } else { body.name };
     let meta = blocking(move || {
-        let h = state.create(&name, body.workspace.filter(|w| !w.is_empty()))?;
+        let space = match body.space.filter(|s| !s.is_empty()) {
+            Some(s) => state.auth.require_space(&p, &s, Cap::CreateWorkbook)?.0,
+            None => {
+                let default = state.auth.store.setting("default_space")?;
+                let mut spaces = state.auth.visible_spaces(&p)?.into_iter().filter(|(_, r)| r.allows(Cap::CreateWorkbook)).map(|(s, _)| s).collect::<Vec<_>>();
+                spaces.sort_by_key(|s| Some(&s.id) != default.as_ref());
+                spaces.into_iter().next().ok_or_else(|| crate::auth::forbidden("create workbooks: you are not an editor of any space"))?
+            }
+        };
+        let h = state.create(&name, &space.id)?;
         let meta = h.meta.lock().unwrap().clone();
+        state.auth.audit(&p, "workbook_created", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "name": meta.name }));
         Ok(meta)
     })
     .await?;
     Ok(Json(meta))
 }
 
-async fn duplicate_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(blocking(move || state.duplicate(&id)).await?))
+async fn duplicate_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (space, _) = allowed(&state, &p, &id, Cap::View).await?;
+    let s = state.clone();
+    let (pp, sid) = (p.clone(), space.id.clone());
+    blocking(move || s.auth.require_space(&pp, &sid, Cap::CreateWorkbook)).await?;
+    let meta = blocking(move || {
+        let meta = state.duplicate(&id)?;
+        state.auth.audit(&p, "workbook_duplicated", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "from": id }));
+        Ok(meta)
+    })
+    .await?;
+    Ok(Json(meta))
 }
 
-async fn list_workspaces(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.workspaces()?))
-}
-
-async fn create_workspace(State(state): State<Shared>, Json(body): Json<NameBody>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.create_workspace(&body.name)?))
-}
-
-async fn rename_workspace(
-    State(state): State<Shared>,
-    Path(id): Path<String>,
-    Json(body): Json<NameBody>,
-) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.rename_workspace(&id, &body.name)?))
-}
-
-async fn delete_workspace(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    state.delete_workspace(&id)?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn get_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+async fn get_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (_, role) = allowed(&state, &p, &id, Cap::View).await?;
     let (meta, tables, sheets) = blocking(move || {
         let h = state.get(&id)?;
         let meta = h.meta.lock().unwrap().clone();
@@ -275,25 +392,30 @@ async fn get_workbook(State(state): State<Shared>, Path(id): Path<String>) -> Ap
         Ok((meta, tables, sheets))
     })
     .await?;
-    Ok(Json(json!({ "workbook": meta, "tables": tables, "sheets": sheets })))
+    Ok(Json(json!({ "workbook": meta, "role": role, "tables": tables, "sheets": sheets })))
 }
 
-async fn runtime_status_handler(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+async fn runtime_status_handler(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
     if !crate::state::valid_id(&id) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
     }
+    allowed(&state, &p, &id, Cap::View).await?;
     Ok(Json(blocking(move || state.controller.status(&id)).await?))
 }
 
 /// Start, stop or cancel a workbook's allocation. The workbook's data is unaffected.
 async fn runtime_action(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     Json(req): Json<RuntimeRequest>,
 ) -> ApiResult<impl IntoResponse> {
     if !crate::state::valid_id(&id) {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid workbook id"));
     }
+    // Opening is part of viewing; stopping or cancelling affects everyone using it.
+    let cap = if matches!(req.action, RuntimeAction::Start) { Cap::View } else { Cap::Edit };
+    allowed(&state, &p, &id, cap).await?;
     let status = blocking(move || {
         let c = &state.controller;
         let op = req.operation_id.filter(|o| !o.is_empty()).unwrap_or_else(|| crate::runtime::controller::operation_id("api"));
@@ -316,10 +438,12 @@ async fn runtime_action(
 
 /// Back up every workbook into `<data-dir>/.backups/<time>/`, each from one snapshot while
 /// work continues. The path is chosen by the server, never by the client.
-async fn create_backup(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    state.auth.require_instance_admin(&p)?;
     let out = blocking(move || {
         let dest = state.config.data_dir.join(".backups").join(format!("backup-{}", alephgrid_core::storage::now_ms()));
         let manifest = crate::backup::backup_online(&state, &dest)?;
+        state.auth.audit(&p, "backup_created", None, None, None, json!({ "workbooks": manifest.workbooks.len() }));
         Ok(json!({ "path": dest, "manifest": manifest }))
     })
     .await?;
@@ -327,7 +451,8 @@ async fn create_backup(State(state): State<Shared>) -> ApiResult<impl IntoRespon
 }
 
 /// Open connections with their unsent bytes (to see slow clients).
-async fn sessions(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+async fn sessions(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    state.auth.require_instance_admin(&p)?;
     let list: Vec<serde_json::Value> = state
         .sessions
         .lock()
@@ -338,38 +463,100 @@ async fn sessions(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
     Ok(Json(list))
 }
 
-async fn resources(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
+async fn resources(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    state.auth.require_instance_admin(&p)?;
     Ok(Json(blocking(move || Ok(state.controller.usage())).await?))
 }
 
+/// Rename, star or move a workbook. Moving needs `delete` where it is and `create` where it goes.
 async fn update_workbook(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     Json(body): Json<WorkbookPatch>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.update(&id, body)?))
+    let (space, _) = allowed(&state, &p, &id, Cap::CreateWorkbook).await?;
+    let meta = blocking(move || {
+        let to = match body.space.as_deref().filter(|s| *s != space.id) {
+            Some(to) => {
+                state.require_workbook(&p, &id, Cap::DeleteWorkbook)?;
+                let (dest, _) = state.auth.require_space(&p, to, Cap::CreateWorkbook)?;
+                if dest.org_id != space.org_id {
+                    bail!(crate::auth::Denied::BadRequest("a workbook can move only between spaces of one organization".into()));
+                }
+                Some(dest)
+            }
+            None => None,
+        };
+        let meta = state.update(&id, body)?;
+        if let Some(dest) = to {
+            state.auth.audit(&p, "workbook_moved", Some(&space.org_id), Some(&dest.id), Some(&id), json!({ "from": space.id }));
+        }
+        Ok(meta)
+    })
+    .await?;
+    Ok(Json(meta))
 }
 
-async fn delete_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    blocking(move || state.delete(&id)).await?;
+async fn delete_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (space, _) = allowed(&state, &p, &id, Cap::DeleteWorkbook).await?;
+    blocking(move || {
+        state.delete(&id)?;
+        state.auth.audit(&p, "workbook_deleted", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        Ok(())
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_trash(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.trash()?))
+/// Trashed workbooks of the spaces where the principal may restore them.
+async fn list_trash(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        blocking(move || {
+            let spaces: HashMap<String, crate::auth::SpaceRole> = state.auth.visible_spaces(&p)?.into_iter().map(|(s, r)| (s.id, r)).collect();
+            Ok(state.trash()?.into_iter().filter(|w| spaces.get(&w.meta.space).is_some_and(|r| r.allows(Cap::DeleteWorkbook))).collect::<Vec<_>>())
+        })
+        .await?,
+    ))
 }
 
-async fn restore_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(blocking(move || state.restore(&id)).await?))
+async fn restore_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (space, _) = allowed(&state, &p, &id, Cap::DeleteWorkbook).await?;
+    Ok(Json(
+        blocking(move || {
+            let meta = state.restore(&id)?;
+            state.auth.audit(&p, "workbook_restored", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+            Ok(meta)
+        })
+        .await?,
+    ))
 }
 
-async fn purge_workbook(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
-    blocking(move || state.purge(Some(&id))).await?;
+async fn purge_workbook(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<impl IntoResponse> {
+    let (space, _) = allowed(&state, &p, &id, Cap::Purge).await?;
+    blocking(move || {
+        state.purge(Some(&id))?;
+        state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        Ok(())
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn empty_trash(State(state): State<Shared>) -> ApiResult<impl IntoResponse> {
-    blocking(move || state.purge(None)).await?;
+/// Remove for good every trashed workbook the principal may purge.
+async fn empty_trash(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
+    blocking(move || {
+        let spaces: HashMap<String, crate::auth::Space> =
+            state.auth.visible_spaces(&p)?.into_iter().filter(|(_, r)| r.allows(Cap::Purge)).map(|(s, _)| (s.id.clone(), s)).collect();
+        for w in state.trash()? {
+            if let Some(space) = spaces.get(&w.meta.space) {
+                state.purge(Some(&w.meta.id))?;
+                state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&w.meta.id), json!({}));
+            }
+        }
+        Ok(())
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -382,11 +569,13 @@ struct ImportQuery {
 /// Stream the request body to disk, then let DuckDB ingest it.
 async fn import_file(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     Query(q): Query<ImportQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (scratch, path, size) = receive(&state, &id, &file_name, &headers, body).await?;
@@ -492,11 +681,13 @@ struct UploadQuery {
 /// Stage a file and preview it; nothing is imported until `/import`.
 async fn stage_upload(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     Query(q): Query<UploadQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     let h = open(&state, &id).await?;
     let file_name = upload_name(&q.filename)?;
     let (dir, path, size_bytes) = receive(&state, &id, &file_name, &headers, body).await?;
@@ -523,9 +714,11 @@ async fn stage_upload(
 
 async fn preview_upload(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
     let work = Work::Write(Box::new(move |wb: &mut alephgrid_core::Workbook| wb.preview_any(&u.path, &req.types)));
@@ -536,9 +729,11 @@ async fn preview_upload(
 /// types and try again without uploading the file again.
 async fn import_upload(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path((id, upload)): Path<(String, String)>,
     Json(req): Json<ImportRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     let h = open(&state, &id).await?;
     let u = state.upload(&id, &upload)?;
     let h2 = h.clone();
@@ -557,13 +752,17 @@ async fn import_upload(
     Ok(Json(imported))
 }
 
-async fn cancel_upload(State(state): State<Shared>, Path((id, upload)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+async fn cancel_upload(State(state): State<Shared>,
+    Extension(p): Extension<Principal>, Path((id, upload)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     state.upload(&id, &upload)?;
     state.remove_upload(&upload);
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn job_status(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+async fn job_status(State(state): State<Shared>,
+    Extension(p): Extension<Principal>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::View).await?;
     let h = open(&state, &id).await?;
     let running = h.job.lock().unwrap().as_deref() == Some(job.as_str());
     let p = h.progress.query_progress();
@@ -575,7 +774,9 @@ async fn job_status(State(state): State<Shared>, Path((id, job)): Path<(String, 
 }
 
 /// Cancel a running job. Only the named job is interrupted, never someone else's work.
-async fn cancel_job(State(state): State<Shared>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+async fn cancel_job(State(state): State<Shared>,
+    Extension(p): Extension<Principal>, Path((id, job)): Path<(String, String)>) -> ApiResult<impl IntoResponse> {
+    allowed(&state, &p, &id, Cap::Edit).await?;
     let h = open(&state, &id).await?;
     let current = h.job.lock().unwrap();
     if current.as_deref() != Some(job.as_str()) {
@@ -599,9 +800,11 @@ fn default_format() -> ExportFormat {
 
 async fn export(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     Query(q): Query<ExportQuery>,
 ) -> ApiResult<Response> {
+    allowed(&state, &p, &id, Cap::Export).await?;
     let spec: ViewSpec = serde_json::from_str(&q.spec).map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
     let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
@@ -639,7 +842,9 @@ async fn export(
 }
 
 /// Stream a finished query export (`export_query`) once; the file is removed afterwards.
-async fn download(State(state): State<Shared>, Path((id, download)): Path<(String, String)>) -> ApiResult<Response> {
+async fn download(State(state): State<Shared>,
+    Extension(p): Extension<Principal>, Path((id, download)): Path<(String, String)>) -> ApiResult<Response> {
+    allowed(&state, &p, &id, Cap::Export).await?;
     let d = state
         .downloads
         .take(&id, &download)
@@ -657,7 +862,9 @@ async fn download(State(state): State<Shared>, Path((id, download)): Path<(Strin
 }
 
 /// Download all sheets of a workbook as one .xlsx file.
-async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> ApiResult<Response> {
+async fn export_xlsx(State(state): State<Shared>,
+    Extension(p): Extension<Principal>, Path(id): Path<String>) -> ApiResult<Response> {
+    allowed(&state, &p, &id, Cap::Export).await?;
     let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
     let scratch = state.scratch_dir(".exports", &id)?;
@@ -686,13 +893,15 @@ async fn export_xlsx(State(state): State<Shared>, Path(id): Path<String>) -> Api
 
 async fn websocket(
     State(state): State<Shared>,
+    Extension(p): Extension<Principal>,
     Path(id): Path<String>,
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
+    let (_, role) = allowed(&state, &p, &id, Cap::View).await?;
     let handle = open(&state, &id).await?;
     Ok(upgrade
         .max_message_size(state.config.max_message_bytes)
-        .on_upgrade(move |socket| ws::serve_socket(socket, state, handle)))
+        .on_upgrade(move |socket| ws::serve_socket(socket, state, handle, p, role)))
 }
 
 async fn static_asset(uri: axum::http::Uri) -> Response {
@@ -737,7 +946,7 @@ async fn open(state: &Shared, id: &str) -> ApiResult<std::sync::Arc<crate::state
     blocking(move || state.get(&id)).await
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
+pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?

@@ -1,6 +1,7 @@
 //! Alephgrid server: HTTP API, WebSocket protocol and workbook registry. The `alephgrid`
 //! binary (`main.rs`) is a thin CLI around [`run`]; tests start the same router in-process.
 
+pub mod auth;
 pub mod backup;
 pub mod http;
 pub mod protocol;

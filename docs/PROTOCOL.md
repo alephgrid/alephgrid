@@ -1,7 +1,15 @@
 # WebSocket protocol (v0.6)
 
-Connect to `ws(s)://<host>/ws/<workbook-id>` (add `?token=…` when the server uses a
-token). Every frame is a JSON text message.
+Connect to `ws(s)://<host>/ws/<workbook-id>`. With `--auth accounts` the upgrade request
+carries the session cookie (browsers) or `Authorization: Bearer agt_…` (service tokens); a
+principal that cannot see the workbook gets 404, and an `Origin` other than the server's own
+gets 403. Every frame is a JSON text message.
+
+Each operation needs a capability in the workbook's space (`ws::required_caps`, the table in
+[TEAMS.md](TEAMS.md)): reads need `view`, `query` and `export_query` need `query` (and
+`export`), changes need `edit`, `publish_function` and `pin_functions` need `publish`. A refused
+request gets `code: "forbidden"` and changes nothing; an expired credential gets
+`"unauthenticated"`.
 
 The TypeScript types in [`web/src/protocol.ts`](../web/src/protocol.ts) are generated from
 the Rust types and are the precise definition of every request, event and result
@@ -20,7 +28,7 @@ the Rust types and are the precise definition of every request, event and result
 { "id": 8, "ok": true,  "result": {…}, "revision": 12, "replayed": true }  // a retry of an applied change
 { "id": 9, "ok": false, "error": "this workbook is busy …", "code": "overloaded" }
 // server push (no id)
-{ "event": "hello", "session": 3, "workbook": {…}, "revision": 11 }
+{ "event": "hello", "session": 3, "workbook": {…}, "revision": 11, "role": "editor" }
 { "event": "cells_changed",  "table": "flights", "origin": 3, "revision": 12 }
 { "event": "table_changed",  "table": "flights", "origin": 3, "revision": 13 }  // rows inserted/deleted, columns changed
 { "event": "tables_changed", "origin": 3, "revision": 14 }   // tables or sheets added/removed/renamed
@@ -31,6 +39,8 @@ the Rust types and are the precise definition of every request, event and result
 { "event": "workbook_closed", "reason": "idle" | "stopped" | "shutdown" }  // reconnect to reopen
 { "event": "resync" }        // events were dropped for this slow client: refresh what is shown
 { "event": "progress", "request": 9, "percentage": 41.5 }  // a long request of this connection
+{ "event": "role_changed", "role": "viewer" }  // this connection's role changed; applies to the next request
+{ "event": "access_revoked", "reason": "signed_out" | "no_access" }  // the server then closes the socket; do not reconnect
 ```
 
 Undo/redo sends `tables_changed` instead of `sheet_changed` when it adds, removes or renames a sheet.

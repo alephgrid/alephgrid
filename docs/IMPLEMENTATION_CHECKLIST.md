@@ -309,12 +309,18 @@ Order: F.01–F.04 first; F.05–F.09 next; F.10–F.14 afterwards. Depends on p
 
 Depends on phase 3 and the SQL restrictions in phase 4. Design can begin earlier; do not expose untrusted shared hosting before this gate.
 
-- [ ] **7.01** Implement organization → space → workbook ownership and a migration for existing workspace labels.
-- [ ] **7.02** Add bootstrap admin, OIDC login, secure sessions, logout and scoped service tokens.
-- [ ] **7.03** Implement organization admin, space owner, editor and viewer roles with explicit inheritance and sharing rules.
-- [ ] **7.04** Enforce authorization on every HTTP route and WebSocket operation, including export, SQL, uploads and deletion.
-- [ ] **7.05** Add space membership management and OIDC group mapping or invitations.
-- [ ] **7.06** Remove long-lived secrets from URLs/logs; use authenticated sessions or short-lived download/connection tickets.
+- [x] **7.01** Implement organization → space → workbook ownership and a migration for existing workspace labels.
+  - Control database `.control/control.duckdb` (`auth/store.rs`); `workbook.json` names its space; `state::migrate_to_spaces` turns workspaces into spaces with the same ids, unfiled and trashed workbooks included, repeatable after a crash; backups (format 2) carry the control database. `teams::workspaces_migrate_to_spaces`, `backups_restore_identities_and_roles`.
+- [x] **7.02** Add bootstrap admin, OIDC login, secure sessions, logout and scoped service tokens.
+  - `--auth accounts`: one-time setup code (or bootstrap env), Argon2id passwords with lockout, `HttpOnly`/`SameSite=Lax` (`Secure` with an https `--public-url`) cookie sessions with expiry and logout, OIDC code flow with PKCE/nonce/state and JWKS verification (`auth/oidc.rs`), space-scoped viewer/editor service tokens (header only, ≤366 days). `--token` removed. Tests in `teams.rs`, `e2e/teams.spec.ts`.
+- [x] **7.03** Implement organization admin, space owner, editor and viewer roles with explicit inheritance and sharing rules.
+  - Organization admin/member, space owner/editor/viewer, group grants, admins own every space, members-only grants, last admin kept, empty-only space deletion, moves within one organization (table in docs/TEAMS.md). `every_http_route_follows_the_role_table`, `membership_rules`.
+- [x] **7.04** Enforce authorization on every HTTP route and WebSocket operation, including export, SQL, uploads and deletion.
+  - Each HTTP handler names its capability; `ws::required_caps` lists every operation without a catch-all; invisible objects are 404 with the missing-object message; open connections recheck on every change and at expiry (`access_revoked`, `role_changed`). Route and operation matrices, `ids_from_another_space_are_not_found`, `open_connections_lose_access_when_it_is_revoked`.
+- [x] **7.05** Add space membership management and OIDC group mapping or invitations.
+  - Space members and group grants (`/api/spaces/{id}/members`), organization invitations with an optional space role, single-use, email-bound, ≤30 days; members/people/token dialogs in the UI. `invitations_are_single_use_and_bound_to_their_email`, OIDC group test, `e2e/teams.spec.ts`.
+- [x] **7.06** Remove long-lived secrets from URLs/logs; use authenticated sessions or short-lived download/connection tickets.
+  - No secret in any URL (cookies, bearer header, invitation code in the fragment); only hashes stored; Origin/Host checks against CSRF, cross-site WebSockets and DNS rebinding; HTTP error bodies redact the data directory. `browser_and_proxy_protections`, `secrets_stay_out_of_replies_and_the_audit_log_attributes_actions`.
 - [ ] **7.07** Add per-space storage, job and compute quotas plus administrative usage visibility.
 - [ ] **7.08** Add stale-edit checks, event-gap detection and reconnect/resync using stable IDs and revisions.
 - [ ] **7.09** Expose table operation history/undo and define its behavior under concurrent edits.
@@ -324,8 +330,11 @@ Depends on phase 3 and the SQL restrictions in phase 4. Design can begin earlier
 - [ ] **7.14** Make Open workbook automatically locate/start compatible capacity and route collaborators to its owner; show queued/starting/ready/draining/failed states with actionable errors.
 - [ ] **7.15** Add optional profile selection and dedicated-allocation requests for authorized users; preserve workbook URL, ownership and version pins across controlled resize/restart.
 - [ ] **7.16** Implement idle shutdown based on meaningful activity and active jobs; checkpoint/drain before stopping, retain storage and show its retention/cost implications. Heartbeats alone must not keep compute alive forever.
-- [ ] **7.17** Define identity-provider claim mapping and revocation behavior; keep authorization in Alephgrid and reject untrusted forwarded identity headers.
+- [x] **7.17** Define identity-provider claim mapping and revocation behavior; keep authorization in Alephgrid and reject untrusted forwarded identity headers.
+  - Identity is issuer + subject; new users need a verified email with an invitation (or `--oidc-join any`); emails never link accounts; groups replaced at each sign-in; revocation timing documented in docs/TEAMS.md; proxy identity headers refused with 400. OIDC refusal cases and header test in `teams.rs`.
 - [ ] **7.T01** Test 7.01–7.07, 7.10–7.11 and 7.17: positive/negative role-operation matrix across every HTTP/WS path, cross-space object IDs, export/query/function access, expired/revoked sessions, secret redaction and audit attribution.
+  - [x] 7.01–7.06 and 7.17: role-operation matrices over every HTTP route and WebSocket operation, cross-space ids, expired/revoked sessions and tokens, secret redaction, audit attribution of access changes (`teams.rs`, 16 tests; `e2e/teams.spec.ts`; docs/TEST_MATRIX.md).
+  - [ ] 7.07, 7.10–7.11 (quotas, audit of mutations/exports/publication, sharing of saved objects).
 - [ ] **7.T02** Test 7.08–7.09: same/different-row concurrent edits, structural races, duplicate/delayed/missed events, reconnect and undo under the documented conflict policy.
 - [ ] **7.T03** Test 7.13–7.16: concurrent quota admission, forged profile requests, two collaborators opening a stopped workbook, failed start, controlled resize, heartbeat-only idle and long-running jobs during idle evaluation.
 - [ ] **7.12 — Gate:** Two spaces on one host cannot access each other's data; concurrent/reconnecting users cannot silently lose or misapply edits.
@@ -460,3 +469,4 @@ Add one row when starting work, encountering a blocker or completing a task. Kee
 
 | 2026-10-27 | F | Planning enhanced | Researched Google Sheets; compared 562 names against pinned IronCalc registry; added function matrix, keyboard/upstream plan and formula-at-scale implementation/test tasks. No new product code implemented. |
 | 2026-10-30 | F.01–F.05 | In progress | Commits b5f62fc (vendored IronCalc patch from the Codex handoff), 0966c18 (F.01 done; F.02 coercion matrix, 6 explicit gaps), b58943a (F.03 done; F.04 implemented, real assistive-technology runs not done), b8d5be5 (F.05 spec + compiler). Next: store `sheet`-language calculated columns (format 6), error overlay in row blocks and the grid, then F.06 lookups as grouped joins. Browser suite: 5 failures come from the uncommitted UI redesign, not phase F. Build with `CARGO_TARGET_DIR` pointing at an existing target to avoid rebuilding DuckDB. |
+| 2026-10-31 | 7.01–7.06, 7.17 | Complete | Control database, migration from workspaces, password/OIDC sign-in, roles on every HTTP route and WebSocket operation, invitations, group grants, service tokens, Origin/Host/identity-header guards (docs/TEAMS.md). `--token` removed: `--auth local` (loopback, no sign-in) or `--auth accounts`. 7.T01 partly (quotas, audit of mutations, sharing pending). Next: 7.07, 7.10, 7.11. |

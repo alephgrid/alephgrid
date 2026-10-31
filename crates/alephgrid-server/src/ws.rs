@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
 use ts_rs::TS;
 
+use crate::auth::{Cap, Principal, SpaceRole};
 use crate::sched::{Class, JobError};
 use crate::state::{Job, Shared, Work, WorkbookHandle};
 
@@ -47,6 +48,11 @@ pub enum Event {
     /// Events were dropped because this client was not reading fast enough: refresh
     /// everything shown (sent to that session only).
     Resync {},
+    /// This connection lost its access (signed out, session expired, role removed, token
+    /// revoked or the workbook moved to a space it cannot see); the server closes it.
+    AccessRevoked { reason: String },
+    /// This connection's role in the workbook's space changed.
+    RoleChanged { role: SpaceRole },
     /// A long request's progress (sent to the session that made it).
     Progress { request: u64, percentage: f64 },
 }
@@ -292,6 +298,39 @@ fn default_export_format() -> ExportFormat {
 
 fn default_query_kind() -> QueryKind {
     QueryKind::Query
+}
+
+/// What the connection's principal must be allowed to do in the workbook's space for `op`
+/// (7.04). Every operation is listed, so a new one cannot be added without deciding.
+pub fn required_caps(op: &Op) -> &'static [Cap] {
+    use Op::*;
+    const VIEW: &[Cap] = &[Cap::View];
+    const EDIT: &[Cap] = &[Cap::Edit];
+    const QUERY: &[Cap] = &[Cap::Query];
+    const EDIT_QUERY: &[Cap] = &[Cap::Edit, Cap::Query];
+    match op {
+        Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
+        | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
+        | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
+        TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
+        TestFunction { .. } => VIEW,
+        Query { .. } => QUERY,
+        ExportQuery { .. } => &[Cap::Query, Cap::Export],
+        PublishFunction { .. } | PinFunctions { .. } => &[Cap::Publish],
+        CreateTableFromQuery { .. } | CreateSheetFromQuery { .. } | SqlChange { .. } | RefreshMaterialized { .. } => EDIT_QUERY,
+        SaveAnalysis { .. } | DeleteAnalysis { .. } | SaveDashboard { .. } | DeleteDashboard { .. } | SetValidations { .. }
+        | ApplyTransform { .. } | MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | SavePresentation { .. }
+        | Edit { .. } | InsertRows { .. } | DeleteRows { .. } | AddColumn { .. } | AddFormulaColumn { .. } | UpdateFormula { .. }
+        | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
+        | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
+        | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetPaste { .. } | SheetMove { .. }
+        | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
+        | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
+        | CancelRecalculation { .. } => EDIT,
+    }
 }
 
 /// Where a request runs (see `sched.rs`): `(is_write, class)`; `None` is answered at once.
@@ -641,6 +680,9 @@ pub fn error_code(e: &anyhow::Error) -> Option<&'static str> {
         if let Some(j) = c.downcast_ref::<JobError>() {
             return Some(j.code());
         }
+        if let Some(d) = c.downcast_ref::<crate::auth::Denied>() {
+            return Some(d.code());
+        }
         if c.downcast_ref::<alephgrid_core::limits::TooLarge>().is_some() {
             return Some("too_large");
         }
@@ -764,7 +806,15 @@ pub struct SessionInfo {
     pub outbox: Arc<Outbox>,
 }
 
-pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>) {
+/// Recheck a connection's access: its credential is still valid and it still sees the
+/// workbook's space. Returns the current principal and role.
+fn recheck(state: &Shared, principal: &Principal, workbook: &str) -> Result<(Principal, SpaceRole)> {
+    let p = state.auth.still_valid(principal)?;
+    let (_, role) = state.require_workbook(&p, workbook, Cap::View)?;
+    Ok((p, role))
+}
+
+pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<WorkbookHandle>, principal: Principal, role: SpaceRole) {
     let session = state.next_session_id();
     // Subscribe before anything else, so an event during setup (a deletion) is not missed.
     let mut events = handle.events.subscribe();
@@ -783,7 +833,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         .unwrap_or(0)
     };
     let (mut sink, mut stream) = socket.split();
-    let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone(), "revision": revision });
+    let hello = json!({ "event": "hello", "session": session, "workbook": handle.meta.lock().unwrap().clone(), "revision": revision, "role": role });
     outbox.push(hello.to_string(), true);
 
     // Writer: sends queued frames in order; closes the socket when told to.
@@ -862,6 +912,47 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
         })
     };
 
+    // Access: rechecked whenever identities or roles change and when the credential expires.
+    // Losing it ends the connection; a changed role applies to the next request.
+    let access = Arc::new(Mutex::new((principal, role)));
+    let guard = {
+        let (outbox, stop_tx, access, state, workbook) = (outbox.clone(), stop_tx.clone(), access.clone(), state.clone(), handle.id.clone());
+        let mut changes = state.auth.subscribe();
+        let mut stop = stop_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                let expires = access.lock().unwrap().0.expires_at();
+                let until = expires.map(|e| Duration::from_millis(e.saturating_sub(crate::auth::now_ms()))).unwrap_or(Duration::from_secs(3600));
+                tokio::select! {
+                    r = changes.changed() => if r.is_err() { break },
+                    _ = tokio::time::sleep(until) => {}
+                    _ = stop.changed() => break,
+                }
+                let (p, before) = access.lock().unwrap().clone();
+                let (s, w) = (state.clone(), workbook.clone());
+                let checked = tokio::task::spawn_blocking(move || recheck(&s, &p, &w)).await;
+                match checked {
+                    Ok(Ok((p, role))) => {
+                        *access.lock().unwrap() = (p, role);
+                        if role != before {
+                            outbox.push(serde_json::to_string(&Event::RoleChanged { role }).unwrap(), true);
+                        }
+                    }
+                    Ok(Err(e)) if e.chain().any(|c| c.downcast_ref::<crate::auth::Denied>().is_some()) => {
+                        let reason = match e.chain().find_map(|c| c.downcast_ref::<crate::auth::Denied>()) {
+                            Some(crate::auth::Denied::Unauthenticated) => "signed_out",
+                            _ => "no_access",
+                        };
+                        outbox.push(serde_json::to_string(&Event::AccessRevoked { reason: reason.into() }).unwrap(), true);
+                        let _ = stop_tx.send(true);
+                        break;
+                    }
+                    // A failure to check (the control database) is not a revocation; try again.
+                    _ => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
+            }
+        })
+    };
     let views = Arc::new(Mutex::new(HashSet::new()));
     let cancels: Arc<Mutex<HashMap<u64, watch::Sender<bool>>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut jobs = tokio::task::JoinSet::new();
@@ -900,6 +991,22 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             }
         };
         let id = envelope.id;
+        // Authorization of this request: the role as last rechecked, and an expired
+        // credential refuses everything (its revocation follows from the guard).
+        let (expired, role) = {
+            let a = access.lock().unwrap();
+            (a.0.expires_at().is_some_and(|e| e <= crate::auth::now_ms()), a.1)
+        };
+        if expired {
+            let e = anyhow::Error::new(crate::auth::Denied::Unauthenticated);
+            outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+            continue;
+        }
+        if let Some(cap) = required_caps(&envelope.op).iter().find(|c| !role.allows(**c)) {
+            let e = crate::auth::forbidden(cap.describe());
+            outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+            continue;
+        }
         let Some((is_write, class)) = classify(&envelope.op) else {
             let result = match envelope.op {
                 Op::CloseView { view_id } => {
@@ -967,6 +1074,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             Box::new(move |p: f64| outbox.push(serde_json::to_string(&Event::Progress { request: id, percentage: p }).unwrap(), false))
                 as Box<dyn Fn(f64) + Send>
         });
+        let actor = access.lock().unwrap().0.actor();
         let op = envelope.op;
         let mutation_id = envelope.mutation_id;
         jobs.spawn(async move {
@@ -974,7 +1082,6 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                 let name = op_name(&op);
                 let summary = summary(&op);
                 let view = view_of(&op);
-                let actor = format!("session {session}");
                 let work = Work::Write(Box::new(move |wb: &mut Workbook| {
                     let mut event = None;
                     let committed = wb.mutate(
@@ -1085,6 +1192,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
     }
     while jobs.join_next().await.is_some() {}
     forwarder.abort();
+    guard.abort();
     let _ = stop_tx.send(true);
     if outbox.too_slow.load(Ordering::SeqCst) {
         writer.abort();

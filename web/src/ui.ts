@@ -117,7 +117,7 @@ export interface Field {
   label: string;
   value?: string;
   placeholder?: string;
-  type?: "text" | "textarea" | "select" | "number";
+  type?: "text" | "textarea" | "select" | "number" | "password";
   options?: { value: string; label: string }[];
   hint?: string;
   mono?: boolean;

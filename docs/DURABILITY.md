@@ -15,7 +15,7 @@ A change is **acknowledged** when the server replies `ok: true` to it (WebSocket
    folded into the database file at checkpoints (on idle close, shutdown, and as DuckDB decides).
 3. Sheet changes are part of the same transaction (the IronCalc model is stored in the file); the
    in-memory model is reloaded from the file if any part of the transaction fails.
-4. Metadata (`workbook.json`, workspaces, runtime records) is written to a temporary file, synced,
+4. Metadata (`workbook.json`, runtime records) is written to a temporary file, synced,
    renamed over the old file, and the directory is synced.
 
 A request that was **not** acknowledged (the connection dropped, the server stopped, the request

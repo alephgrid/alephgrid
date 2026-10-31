@@ -142,10 +142,11 @@ Why not one engine for both tiers? IronCalc keeps every cell in memory (great fo
 models, wrong for 100M rows). DuckDB is columnar and set-based (great for 100M rows,
 wrong for `=B4*C2`). Alephgrid keeps both and makes moving data between them one click.
 
-## Workspaces
+## Organizations and spaces
 
-`workspaces.json` in the data dir lists workspaces. Each `workbook.json` carries
-`workspace`, `starred`, `opened_at`, `updated_at` and a cached `summary` (table,
+Organizations, spaces, users, roles, sessions, service tokens, invitations and the audit log live
+in the control database `.control/control.duckdb` (`auth/store.rs`); see [TEAMS.md](TEAMS.md).
+Each `workbook.json` carries its `space`, `starred`, `opened_at`, `updated_at` and a cached `summary` (table,
 sheet and row counts) for the home screen. Rename, star and move rewrite only that
 JSON file, without opening the database. The server refreshes the summary when a
 workbook is opened or its structure changes. Duplicate checkpoints the DuckDB file
@@ -241,18 +242,18 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
 
 ## Security model
 
-* By default it binds to `127.0.0.1`: only you can reach it.
-* `--token` (or `ALEPHGRID_TOKEN`) enables a shared bearer token for the API and
-  WebSocket.
+* By default (`--auth local`) it binds to `127.0.0.1` with no sign-in: only you can reach it,
+  and requests for other host names or from other sites' pages are refused.
+* `--auth accounts`: people sign in with a password or OpenID Connect; organizations, spaces and
+  owner/editor/viewer roles are enforced on every HTTP route and WebSocket operation, and service
+  tokens act for one space. See [TEAMS.md](TEAMS.md).
 * User SQL and formulas are checked by the SQL policy (below) and run in a database that is
   closed to the outside world. `--disable-sql` additionally refuses every user-SQL operation.
-* Saved queries live in the workbook and are visible to anyone who can open it. There are no
-  per-user identities yet (phase 7), so nothing is private beyond that; the unsaved editor draft
-  stays in the browser that typed it.
+* Saved queries live in the workbook and are visible to anyone who can open it (any role in its
+  space); the unsaved editor draft stays in the browser that typed it.
 * All workbooks of a server share one process (`shared_process`): resource limits are DuckDB-level,
   not a security boundary between workbooks. See DURABILITY.md for isolation classes.
-* Planned: OIDC login, per-workbook and per-space roles (phase 7). Completing the SQL
-  restrictions is not organization authorization.
+* Roles are an authorization boundary, not resource isolation: quotas are 7.07.
 
 
 ### Workbook functions

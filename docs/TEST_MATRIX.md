@@ -679,3 +679,24 @@ independent engine (differential tests), never from the code under test.
 | validation bypass attempts | `validation_rules_hold_on_every_write_path` (edit, append, SQL change), `e2e/tools.spec.ts` |
 | XLSX provenance fixtures and incompatibility reports, round trip | `tests::xlsx` round trip, `the_published_sample_workbook_opens_with_its_documented_values`, `xlsx_downloads_say_what_they_leave_out_or_replace`, `e2e/tools.spec.ts` (XLSX notes) |
 | real-browser journeys | the e2e suite in Chromium, WebKit and Firefox; `e2e/analyst.spec.ts` (F.15) |
+
+## Phase 7 (7.01–7.06, 7.17; part of 7.T01)
+
+Expected permissions are written out by hand in the tests from the role table in
+[TEAMS.md](TEAMS.md), never read from `ws::required_caps` or the route handlers. Tests start real
+servers (in-process, and the binary for the browser) with real sessions, tokens and a mock OpenID
+provider that signs ID tokens with a fixture RSA key and checks PKCE.
+
+| Requirement | Evidence |
+|---|---|
+| **7.01** organization → space → workbook; workspace migration | `teams::workspaces_migrate_to_spaces` (live and trashed workbooks, a clashing *General*, ids kept, `workspaces.json` moved, idempotent restart, restore into the migrated space); `teams::backups_restore_identities_and_roles` (control database in backups, damaged copy refused) |
+| **7.02** bootstrap admin, password and OIDC sign-in, sessions, logout, service tokens | `setup_code_creates_the_instance_admin_once`, `password_sign_in_refuses_guessing` (same answer for unknown email and wrong password, lockout after 5), `password_change_needs_the_current_password` (other sessions end), `sessions_expire` (HTTP and an open WebSocket), `service_tokens_are_scoped_to_their_space_and_role` (one space, its role, header only, revocation closes connections, expiry, forged secret), `single_sign_on_maps_claims_to_users_and_roles`; `e2e/teams.spec.ts` (setup code from the console, sign-in, wrong password, sign-out) |
+| **7.03** roles with inheritance and sharing rules | `every_http_route_follows_the_role_table` (every route of the router, checked against a hand-written list, × anonymous, viewer, editor, owner, organization member without a role and admin; `/ws/{id}` and workbook deletion have their own tests), `membership_rules` (organization members only, last admin kept, admins own every space, removal from the organization removes space roles, spaces deleted only when empty, trash included, editors restore but do not purge) |
+| **7.04** every HTTP route and WebSocket operation | the route matrix above; `every_websocket_operation_follows_the_role_table` (every declared operation as viewer and editor; refused operations change nothing); `ids_from_another_space_are_not_found` (workbook, space, token, trash, move, WebSocket and download ids from another space answer exactly like missing ones; listings filtered) |
+| **7.05** space membership, invitations, group mapping | `invitations_are_single_use_and_bound_to_their_email` (forged secret, wrong signed-in user, used once, existing users sign in first, revoked, admins only), group roles in the OIDC test; `e2e/teams.spec.ts` (invite into a space as viewer, accept in a second browser, server refuses a rename, removal sends the open workbook away) |
+| **7.06** no secrets in URLs or replies | `browser_and_proxy_protections` (cross-site `Origin` and missing `Origin` with a cookie refused, same-origin fetch accepted, cross-site WebSocket refused, foreign `Host` refused, cookie `HttpOnly`/`SameSite=Lax`), token in a query string refused, `secrets_stay_out_of_replies_and_the_audit_log_attributes_actions` (no hashes, passwords, token or session secrets in nine admin/listing replies; data directory redacted from HTTP errors; audit actors, spaces, workbooks) |
+| **7.17** claim mapping and revocation, identity headers | the OIDC test: identity by issuer + subject (a changed email is the same user), group removal at the identity provider takes effect at the next sign-in, refusals for wrong audience, wrong issuer, expiry, another nonce, another authorized party, a stranger's key, an unsigned token, an unverified email, a password account's email, an unknown `state`; `next` limited to this server's paths. `browser_and_proxy_protections` refuses five proxy identity headers on private and public routes. `open_connections_lose_access_when_it_is_revoked` (demotion → `role_changed` and refusal, removal, sign-out, disabling, moving the workbook to another space → `access_revoked`) |
+
+Not covered yet: quotas (7.07), audit of mutations/exports/publication (7.10), sharing of saved
+objects (7.11); TLS termination and `Secure` cookies behind a real https proxy are configured by
+`--public-url` but only checked by reading the cookie attributes over http.

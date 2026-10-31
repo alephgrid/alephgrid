@@ -209,7 +209,8 @@ async fn revisions_are_contiguous_across_sessions_and_events_carry_them() {
     let history = a.ok("history", json!({ "after": 1 })).await;
     let h: Vec<u64> = history.as_array().unwrap().iter().map(|e| e["revision"].as_u64().unwrap()).collect();
     assert_eq!(h, (2..=21).collect::<Vec<u64>>());
-    assert!(history[0]["actor"].as_str().unwrap().starts_with("session "));
+    // History names who made each change: here the local user (docs/TEAMS.md).
+    assert_eq!(history[0]["actor"], "local");
     assert_eq!(history[0]["op"], "edit");
     for s in [a, b, watcher] {
         s.close().await;

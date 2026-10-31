@@ -67,9 +67,9 @@ Reproduce with `alephgrid --demo-rows 20000000` and the script in `docs/bench.mj
 | **Sheets** | Excel-style formula grids on [IronCalc](https://github.com/ironcalc/IronCalc): `=SUM`, `XLOOKUP`, cross-sheet references, undo/redo, insert/delete rows and columns with reference shifting. Stored in the same workbook file |
 | Bridges | SQL result → sheet, sheet → columnar table (types sniffed), all sheets → .xlsx |
 | Export | CSV, Parquet or JSON lines for any table or the current filtered and sorted view; .xlsx for sheets. Free |
-| Workspaces | Group workbooks by team or project, star, recent, search, sort by size or date, rename, duplicate, move, delete |
+| Spaces | Organizations own spaces of workbooks; owner, editor and viewer roles (also for identity-provider groups), invitations, service tokens; star, recent, search, sort by size or date, rename, duplicate, move, delete |
 | Collaboration | Several people on one workbook see each other's edits live |
-| Hosting | One binary with the UI embedded, Docker image, token auth, data in a plain directory |
+| Hosting | One binary with the UI embedded, Docker image, password or OpenID Connect sign-in, data in a plain directory |
 
 ## Quick start
 
@@ -89,9 +89,14 @@ The first build compiles DuckDB from source, which takes several minutes.
 ### Docker (for a team)
 
 ```bash
-docker compose up -d        # edit ALEPHGRID_TOKEN in docker-compose.yml first
-open "http://localhost:7878/?token=change-me"
+docker compose up -d
+docker compose logs alephgrid | grep "setup code"   # the one-time code that creates the admin
+open http://localhost:7878/setup
 ```
+
+With `--auth accounts`, people sign in with a password or single sign-on (OpenID Connect), and
+spaces grant them roles; see [docs/TEAMS.md](docs/TEAMS.md). Without it (the default on your own
+machine), there is no sign-in and the server only listens on 127.0.0.1.
 
 ### Options
 
@@ -99,7 +104,10 @@ open "http://localhost:7878/?token=change-me"
 |------|-----|---------|
 | `--data-dir` | `ALEPHGRID_DATA_DIR` | `./alephgrid-data` |
 | `--host` / `--port` | `ALEPHGRID_HOST` / `ALEPHGRID_PORT` | `127.0.0.1` / `7878` |
-| `--token` | `ALEPHGRID_TOKEN` | none (only safe on localhost) |
+| `--auth local\|accounts` | `ALEPHGRID_AUTH` | `local`: no sign-in, loopback only |
+| `--public-url` | `ALEPHGRID_PUBLIC_URL` | how people reach the server (needed for SSO; https makes cookies Secure) |
+| `--oidc-issuer`, `--oidc-client-id` | `ALEPHGRID_OIDC_*` (secret: `ALEPHGRID_OIDC_CLIENT_SECRET`) | no single sign-on |
+| `--session-hours` | `ALEPHGRID_SESSION_HOURS` | 12 |
 | `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
 | `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL console enabled |
@@ -165,10 +173,9 @@ docs/                     architecture, protocol, roadmap
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md). Highlights: login and per-workspace roles,
-sheet formulas that read tables, pivot tables, charts, Postgres,
-Snowflake, BigQuery and S3 connectors (DuckDB extensions), OIDC login with roles, a
-desktop app (Tauri) and a pure in-browser mode (DuckDB-WASM).
+See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/IMPLEMENTATION_CHECKLIST.md](docs/IMPLEMENTATION_CHECKLIST.md).
+Highlights: quotas, audit and shared saved objects for teams, Postgres, Snowflake, BigQuery and
+S3 connectors (DuckDB extensions), a desktop app (Tauri) and a pure in-browser mode (DuckDB-WASM).
 
 ## License
 

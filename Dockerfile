@@ -24,6 +24,7 @@ USER alephgrid
 WORKDIR /home/alephgrid
 ENV ALEPHGRID_HOST=0.0.0.0 \
     ALEPHGRID_PORT=7878 \
+    ALEPHGRID_AUTH=accounts \
     ALEPHGRID_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 7878

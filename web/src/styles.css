@@ -401,3 +401,23 @@ dialog progress, .dialog progress { width: 100%; }
 .analysis-points { font-size: 12px; color: var(--muted); columns: 2; }
 .dashboard-grid { display: grid; grid-template-columns: repeat(12, 1fr); grid-auto-rows: 28px; gap: 8px; }
 .dashboard-tile { border: 1px solid var(--border); border-radius: 6px; padding: 6px; overflow: auto; }
+
+/* ---------------------------------------------------------- sign-in, members (phase 7) */
+.auth-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.auth-card { width: min(400px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 28px; border: 1px solid var(--border, #d0d4dc); border-radius: 10px; background: var(--panel, #fff); }
+.auth-card h1 { font-size: 20px; margin: 0; }
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-or { text-align: center; margin: 0; font-size: 13px; }
+.sso-btn { text-align: center; text-decoration: none; }
+.account-btn { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dialog.wide { width: min(720px, calc(100vw - 32px)); }
+.panel-body { display: flex; flex-direction: column; gap: 12px; max-height: 60vh; overflow: auto; }
+.member-table { display: flex; flex-direction: column; border-top: 1px solid var(--border, #d0d4dc); }
+.member-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border, #d0d4dc); }
+.member-add { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.member-add input:not([type=number]) { flex: 1 1 200px; }
+.member-add input[type=number] { width: 72px; }
+.token-secret:empty { display: none; }
+.token-secret input { width: 100%; }
+.role-tag { margin-left: 6px; font-size: 11px; opacity: 0.7; }
+.role-hint { display: block; font-size: 12px; }

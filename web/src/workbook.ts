@@ -1999,6 +1999,13 @@ export class WorkbookScreen {
       case "workbook_deleted":
         this.leaveDeleted();
         break;
+      case "access_revoked":
+        // Signed out or no longer allowed to see this workbook; the server closed the connection.
+        location.assign(e.reason === "signed_out" ? `/login?next=${encodeURIComponent(location.pathname)}` : "/");
+        break;
+      case "role_changed":
+        toast(e.role === "viewer" ? "You can now only view this workbook." : `Your role in this space is now ${e.role}.`);
+        break;
       case "tables_changed": {
         await this.loadItems();
         const gone = (a?.kind === "table" && !this.tables.some((t) => t.name === a.name))
