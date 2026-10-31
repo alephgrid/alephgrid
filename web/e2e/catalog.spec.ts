@@ -20,7 +20,8 @@ test("formula help searches a bounded catalog and distinguishes registry evidenc
   await search.fill("XLOOKUP");
   const details = dialog.getByRole("region", { name: "Formula details" });
   await expect(details).toContainText("Sheet engine: registered");
-  await expect(details).toContainText("DuckDB table formulas: not supported");
+  await expect(details).toContainText("Table formulas: supported. match_mode 0 (exact), -1/1 (exact or next smaller/larger");
+  await expect(details).toContainText("table_lookups_agree_with_the_sheet_engine");
   await expect(details).toContainText("=XLOOKUP(2,A1:A4,B1:B4)");
   await expect(details).toContainText("tested example");
   await details.getByText("Mode evidence: 14 verified cases, 0 known gaps", { exact: true }).click();

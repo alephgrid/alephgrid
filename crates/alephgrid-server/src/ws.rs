@@ -77,8 +77,33 @@ struct Envelope {
 pub enum Op {
     Analyze { spec: alephgrid_core::AnalysisSpec },
     Analyses,
-    SaveAnalysis { saved: Option<String>, name: String, spec: alephgrid_core::AnalysisSpec, chart: bool },
+    SaveAnalysis {
+        saved: Option<String>,
+        name: String,
+        spec: alephgrid_core::AnalysisSpec,
+        chart: bool,
+        #[serde(default)]
+        #[ts(optional, as = "Option<alephgrid_core::reports::ChartKind>")]
+        chart_kind: alephgrid_core::reports::ChartKind,
+    },
     DeleteAnalysis { analysis: String },
+    /// Dashboards (F.11): tiles of saved analyses on a 12×24 grid, with shared slicers.
+    Dashboards,
+    Dashboard { dashboard: String },
+    SaveDashboard { saved: Option<String>, name: String, tiles: Vec<alephgrid_core::reports::Tile>, slicers: Vec<alephgrid_core::reports::Slicer> },
+    DeleteDashboard { dashboard: String },
+    /// Data tools (F.12): validation rules, transform previews and derived tables, formula
+    /// inspection. Only `set_validations` and `apply_transform` change anything (and run on
+    /// the writer); the others read.
+    Validations { table: String },
+    SetValidations { table: String, rules: Vec<alephgrid_core::tools::Validation> },
+    PreviewTransform { table: String, transform: alephgrid_core::tools::Transform },
+    ApplyTransform { table: String, transform: alephgrid_core::tools::Transform, name: String },
+    InspectFormula { table: String, column: String },
+    /// What an XLSX download leaves out or replaces by values (F.13), one note each.
+    XlsxCompatibility,
+    /// The view spec of the rows behind one result row of a summary or report.
+    Drill { spec: alephgrid_core::AnalysisSpec, #[ts(type = "CellValue[]")] row: Vec<Value> },
     MaterializeAnalysis { name: String, spec: alephgrid_core::AnalysisSpec },
     ReplacePreview { spec: alephgrid_core::ReplaceSpec },
     ReplaceApply { spec: alephgrid_core::ReplaceSpec, revision: u64 },
@@ -231,6 +256,12 @@ pub enum Op {
     /// Cancel this connection's request `request`: removed if it is waiting, interrupted if
     /// it runs. A change that already committed stays committed.
     Cancel { request: u64 },
+    /// Recalculate a table's stored formula results in the background (F.09); for retrying
+    /// after a failure or cancellation. Replies at once; `table_changed` follows when done.
+    Recalculate { table: String },
+    /// Cancel the background recalculation of a table's stored results; the last committed
+    /// results stay, flagged. False when none runs.
+    CancelRecalculation { table: String },
 }
 
 /// Default for the most rows copied from a table or query into a sheet (sheets keep every
@@ -267,10 +298,10 @@ fn default_query_kind() -> QueryKind {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
-        CloseView { .. } | Cancel { .. } => None,
+        CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
@@ -380,6 +411,13 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         }
         Op::Analyze { spec } => json!(r.analyze(&spec)?),
         Op::Analyses => json!(r.analyses()?),
+        Op::Dashboards => json!(r.dashboards()?),
+        Op::Dashboard { dashboard } => json!(r.dashboard_results(&dashboard)?),
+        Op::Drill { spec, row } => json!(r.drill(&spec, &row)?),
+        Op::XlsxCompatibility => json!(r.xlsx_compatibility()?),
+        Op::Validations { table } => json!(r.validations(&table)?),
+        Op::PreviewTransform { table, transform } => json!(r.preview_transform(&table, &transform)?),
+        Op::InspectFormula { table, column } => json!(r.inspect_formula(&table, &column)?),
         Op::ReplacePreview { spec } => json!(r.replace_preview(&spec)?),
         Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {
@@ -395,7 +433,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::SheetFetch { sheet, row_start, row_count, column_count } => json!(r.sheets().fetch(sheet, row_start, row_count, column_count)?),
         Op::SheetNames => json!(r.sheets().names()),
         Op::SheetCellDetail { sheet, row, column } => json!(r.sheets().cell_detail(sheet, row, column)?),
-        Op::SheetCheckFormula { sheet, row, column, formula } => json!(r.sheets().check_formula(sheet, row, column, &formula)?),
+        Op::SheetCheckFormula { sheet, row, column, formula } => json!(r.check_sheet_formula(sheet, row, column, &formula)?),
         Op::SavedViews { table } => json!(r.saved_views(Some(table.as_str()).filter(|t| !t.is_empty()))?),
         Op::History { after, limit } => json!(r.history(after, limit.min(1000))?),
         other => bail!("{} is not a read", op_name(&other)),
@@ -410,7 +448,11 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
     Ok(match op {
-        Op::SaveAnalysis { saved, name, spec, chart } => (json!(wb.save_analysis(saved.as_deref(), &name, spec, chart)?),Some(Event::Resync {})),
+        Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync {})),
+        Op::SetValidations { table, rules } => (json!(wb.set_validations(&table, rules)?), Some(Event::TableChanged { table, origin, revision: 0 })),
+        Op::ApplyTransform { table, transform, name } => (json!(wb.apply_transform(&table, &transform, &name)?), Some(Event::TablesChanged { origin, revision: 0 })),
+        Op::SaveDashboard { saved, name, tiles, slicers } => (json!(wb.save_dashboard(saved.as_deref(), &name, tiles, slicers)?), Some(Event::Resync {})),
+        Op::DeleteDashboard { dashboard } => { wb.delete_dashboard(&dashboard)?; (Value::Null, Some(Event::Resync {})) },
         Op::DeleteAnalysis { analysis } => { wb.delete_analysis(&analysis)?; (Value::Null,Some(Event::Resync {})) },
         Op::MaterializeAnalysis { name, spec } => (json!(wb.materialize_analysis(&name,&spec)?),tables()),
         Op::ReplaceApply { spec, revision } => {let out=wb.replace_apply(&spec,revision)?;let event=changed(out.table.clone());(json!(out),event)},
@@ -475,11 +517,11 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             (Value::Null, tables())
         }
         Op::SheetDelete { sheet } => {
-            wb.with_sheets(|s| s.delete(sheet))?;
+            wb.delete_sheet(sheet)?;
             (Value::Null, tables())
         }
         Op::SheetSet { sheet, inputs } => {
-            wb.with_sheets(|s| s.set(sheet, &inputs))?;
+            wb.set_sheet_cells(sheet, &inputs)?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetUndo | Op::SheetRedo => {
@@ -876,6 +918,19 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                     let found = cancels.lock().unwrap().get(&request).map(|c| c.send(true).is_ok()).unwrap_or(false);
                     json!(found)
                 }
+                Op::CancelRecalculation { table } => json!(handle.cancel_recalculation(&table)),
+                Op::Recalculate { table } => {
+                    let h = handle.clone();
+                    let t = table.clone();
+                    let ticket = tokio::task::spawn_blocking(move || h.with_reader(|r| Ok(r.shared().results_queued(&t)))).await;
+                    match ticket {
+                        Ok(Ok(k)) => {
+                            handle.recalculate_later(vec![(table, k)], 0, state.config.job_timeout);
+                            json!(true)
+                        }
+                        _ => json!(false),
+                    }
+                }
                 _ => unreachable!("classified as immediate"),
             };
             outbox.push(json!({ "id": id, "ok": true, "result": result }).to_string(), true);
@@ -905,6 +960,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
             downloads: state.downloads.clone(),
         };
         let data_dir = state.config.data_dir.clone();
+        let recalc_timeout = state.config.job_timeout;
         let (handle, outbox, cancels) = (handle.clone(), outbox.clone(), cancels.clone());
         let progress: Option<Box<dyn Fn(f64) + Send>> = (class == Class::Bulk).then(|| {
             let outbox = outbox.clone();
@@ -930,14 +986,51 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, handle: Arc<Workbook
                             Ok(value)
                         },
                     )?;
-                    Ok((committed, event))
+                    // Tables whose values changed through formulas that read what changed
+                    // (another table's rows, sheet cells) get their own refresh event.
+                    let derived: Vec<(String, bool)> = if committed.replayed || event.is_none() {
+                        Vec::new()
+                    } else {
+                        wb.changed_tables(committed.revision).unwrap_or_else(|e| {
+                            tracing::warn!("finding tables changed by revision {}: {e:#}", committed.revision);
+                            Vec::new()
+                        })
+                    };
+                    let sheets = !committed.replayed && wb.changed_table_cells();
+                    // Stored formula results this change made stale, queued at once so views
+                    // opened meanwhile show the last results, flagged, without rebuilding.
+                    let queued: Vec<(String, u64)> = if committed.replayed {
+                        Vec::new()
+                    } else {
+                        wb.stale_results().unwrap_or_default().into_iter().map(|t| { let k = wb.shared().results_queued(&t); (t, k) }).collect()
+                    };
+                    Ok((committed, event, derived, sheets, queued))
                 }));
                 match handle.run_queued(ticket, job, Some(cancel_rx), progress, work).await {
-                    Ok((c, event)) => {
+                    Ok((c, event, derived, sheets, queued)) => {
+                        handle.recalculate_later(queued, c.revision, recalc_timeout);
                         if let Some(ev) = event.filter(|_| !c.replayed) {
                             let ev = with_revision(ev, c.revision);
                             let structural = ev.changes_structure();
+                            let primary = match &ev {
+                                Event::CellsChanged { table, .. } | Event::TableChanged { table, .. } => Some(table.clone()),
+                                _ => None,
+                            };
+                            let resync = matches!(ev, Event::Resync {});
                             let _ = handle.events.send(ev);
+                            // Origin 0: no session has applied these changes itself.
+                            for (table, restructured) in derived.into_iter().filter(|(t, r)| !resync && (*r || primary.as_ref() != Some(t))) {
+                                let ev = if restructured || structural {
+                                    Event::TableChanged { table, origin: 0, revision: c.revision }
+                                } else {
+                                    Event::CellsChanged { table, origin: 0, revision: c.revision }
+                                };
+                                let _ = handle.events.send(ev);
+                            }
+                            // Sheet cells that read the changed tables have new values.
+                            if sheets && !resync {
+                                let _ = handle.events.send(Event::SheetChanged { sheet: None, origin: 0, revision: c.revision });
+                            }
                             let h = handle.clone();
                             tokio::task::spawn_blocking(move || {
                                 let result = if structural { h.refresh_summary() } else { h.touch(false) };

@@ -15,7 +15,7 @@ const COPY_ROWS: usize = 10_000;
 const ANALYSES: &str = "analyses";
 const PRESENTATIONS: &str = "presentations";
 const UNDO: &str = "replace_undo";
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum Aggregate {
     Count,
@@ -24,7 +24,7 @@ pub enum Aggregate {
     Min,
     Max,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Pivot {
     pub column: String,
     pub values: Vec<Option<String>>,
@@ -41,6 +41,22 @@ pub enum AnalysisSpec {
     Summary { table: String, groups: Vec<String>, aggregate: Aggregate, value: Option<String>, pivot: Option<Pivot> },
     Join { left: String, right: String, left_key: String, right_key: String, join: JoinKind },
     Profile { table: String, columns: Vec<String> },
+    /// A pivot report (F.11): several measures, calculated measures, totals and subtotals,
+    /// filters, and an optional pivot column. See `reports.rs`.
+    Report {
+        table: String,
+        groups: Vec<String>,
+        measures: Vec<crate::reports::Measure>,
+        #[serde(default)]
+        calculated: Vec<crate::reports::Calculated>,
+        #[serde(default)]
+        totals: bool,
+        #[serde(default)]
+        filters: Vec<crate::Filter>,
+        #[serde(default)]
+        #[ts(optional)]
+        pivot: Option<Pivot>,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct AnalysisResult {
@@ -53,6 +69,9 @@ pub struct SavedAnalysis {
     pub name: String,
     pub spec: AnalysisSpec,
     pub chart: bool,
+    /// How a chart draws it (F.11): bars (default), lines or points.
+    #[serde(default)]
+    pub chart_kind: crate::reports::ChartKind,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ReplaceSpec {
@@ -117,13 +136,13 @@ struct ReplacementUndo {
     cells: Vec<(i64, String)>,
 }
 
-fn read_meta<T: serde::de::DeserializeOwned + Default>(conn: &duckdb::Connection, key: &str) -> Result<T> {
+pub(crate) fn read_meta<T: serde::de::DeserializeOwned + Default>(conn: &duckdb::Connection, key: &str) -> Result<T> {
     match storage::meta_get(conn, key)? {
         Some(s) => Ok(serde_json::from_str(&s)?),
         None => Ok(T::default()),
     }
 }
-fn save_meta<T: Serialize>(conn: &duckdb::Connection, key: &str, value: &T) -> Result<()> {
+pub(crate) fn save_meta<T: Serialize>(conn: &duckdb::Connection, key: &str, value: &T) -> Result<()> {
     let json = serde_json::to_string(value)?;
     if json.len() > 4 << 20 {
         bail!("saved analysis data exceeds 4 MiB");
@@ -147,13 +166,13 @@ pub(crate) fn presentation(db: &Db, table: &str) -> Result<Presentation> {
     p.rules.retain(|r| valid.contains(r.column.as_str()));
     Ok(p)
 }
-fn column(db: &Db, table: &str, name: &str) -> Result<Column> {
+pub(crate) fn column(db: &Db, table: &str, name: &str) -> Result<Column> {
     db.columns(table)?
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| anyhow!("unknown column {name} in {table}; update this analysis after schema changes"))
 }
-fn names(db: &Db, table: &str, list: &[String], max: usize) -> Result<()> {
+pub(crate) fn names(db: &Db, table: &str, list: &[String], max: usize) -> Result<()> {
     if list.len() > max || list.iter().collect::<BTreeSet<_>>().len() != list.len() {
         bail!("select at most {max} different columns");
     }
@@ -216,7 +235,11 @@ fn compile(db: &Db, spec: &AnalysisSpec) -> Result<(String, Option<String>)> {
                     (1..=groups.len()).map(|n| n.to_string()).collect::<Vec<_>>().join(",")
                 )
             };
-            (format!("SELECT {} FROM {}{group}", select.join(","), ident(table)), None)
+            // Formula columns too (F.11): a summary can group by a looked-up value.
+            (format!("SELECT {} FROM ({}) t{group}", select.join(","), db.base_select(table)?), None)
+        }
+        AnalysisSpec::Report { table, groups, measures, calculated, totals, filters, pivot } => {
+            (crate::reports::compile_report(db, table, groups, measures, calculated, *totals, filters, pivot.as_ref(), &[])?, None)
         }
         AnalysisSpec::Join { left, right, left_key, right_key, join } => {
             let l = column(db, left, left_key)?;
@@ -266,7 +289,7 @@ fn compile(db: &Db, spec: &AnalysisSpec) -> Result<(String, Option<String>)> {
 }
 pub(crate) fn analyze(db: &Db, spec: &AnalysisSpec) -> Result<AnalysisResult> {
     db.snapshot(|| {
-        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default() };
+        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() };
         let (sql, diagnostics) = compile(&snap, spec)?;
         let diagnostics = diagnostics.map(|q| snap.run_query(&q, &[], 1)).transpose()?;
         Ok(AnalysisResult { result: snap.run_query(&sql, &[], OUTPUT_ROWS)?, diagnostics })
@@ -285,7 +308,7 @@ fn replace_parts(db: &Db, spec: &ReplaceSpec) -> Result<(String, String)> {
 }
 pub(crate) fn replace_preview(db: &Db, spec: &ReplaceSpec) -> Result<ReplacePreview> {
     db.snapshot(|| {
-        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default() };
+        let snap = Db { conn: db.conn, shared: db.shared, in_txn: true, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() };
         let (cond, expr) = replace_parts(&snap, spec)?;
         let count: u64 = snap.conn.query_row(&format!("SELECT count(*) FROM {} WHERE {cond}", ident(&spec.table)), [], |r| r.get(0))?;
         Ok(ReplacePreview {
@@ -312,12 +335,16 @@ impl Workbook {
         replace_preview(&self.db(), spec)
     }
     pub fn save_analysis(&mut self, id: Option<&str>, name: &str, spec: AnalysisSpec, chart: bool) -> Result<SavedAnalysis> {
+        self.save_analysis_as(id, name, spec, chart, crate::reports::ChartKind::Bar)
+    }
+    /// [`Self::save_analysis`] with a chart kind (F.11).
+    pub fn save_analysis_as(&mut self, id: Option<&str>, name: &str, spec: AnalysisSpec, chart: bool, chart_kind: crate::reports::ChartKind) -> Result<SavedAnalysis> {
         self.mutating("save_analysis", None, |wb| {
             if name.trim().is_empty() || name.len() > 200 {
                 bail!("analysis name must be 1–200 bytes");
             }
             compile(&wb.db(), &spec)?;
-            if chart && !matches!(spec, AnalysisSpec::Summary { .. }) {
+            if chart && !matches!(spec, AnalysisSpec::Summary { .. } | AnalysisSpec::Report { .. }) {
                 bail!("charts require a summary, not raw joined rows");
             }
             let mut all = wb.analyses()?;
@@ -340,7 +367,7 @@ impl Workbook {
                 storage::meta_set(&wb.conn, "analysis_seq", &next.to_string())?;
                 format!("a{next}")
             };
-            let a = SavedAnalysis { id, name: name.trim().into(), spec, chart };
+            let a = SavedAnalysis { id, name: name.trim().into(), spec, chart, chart_kind };
             if let Some(i) = i {
                 all[i] = a.clone();
             } else {

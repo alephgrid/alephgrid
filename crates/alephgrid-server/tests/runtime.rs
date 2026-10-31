@@ -278,7 +278,8 @@ async fn incompatible_requirements_are_refused_without_touching_data() {
     std::fs::write(wbdir.join("workbook.json"), serde_json::to_vec(&meta).unwrap()).unwrap();
     {
         let conn = duckdb::Connection::open(wbdir.join("data.duckdb")).unwrap();
-        conn.execute_batch("UPDATE _rf_meta SET value = '7' WHERE key = 'format'; CHECKPOINT;").unwrap();
+        let newer = alephgrid_core::storage::FORMAT + 1;
+        conn.execute_batch(&format!("UPDATE _rf_meta SET value = '{newer}' WHERE key = 'format'; CHECKPOINT;")).unwrap();
     }
     let (code, err) = server.get(&format!("/api/workbooks/{wb}")).await;
     assert_eq!(code, 409, "{err}");

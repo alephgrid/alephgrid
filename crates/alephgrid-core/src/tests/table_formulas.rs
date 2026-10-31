@@ -194,13 +194,34 @@ fn lookup_read_timings() {
     sorted.sort = vec![SortKey { column: "customer".into(), desc: false }];
     time("open view sorted by the lookup column", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
     time("first page of the sorted view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    // F.09: the first sort stored the formula results (tables of 200,000 rows or more).
+    let mut desc = sorted.clone();
+    desc.sort[0].desc = true;
+    time("sort by the lookup column again (stored)", &mut || { view = t.wb.open_view(desc.clone()).unwrap().view_id; });
+    let mut filtered = spec("orders");
+    filtered.filters = vec![Filter { column: "tier".into(), op: FilterOp::Eq, value: serde_json::json!(3) }];
+    time("filter by the lookup column (stored)", &mut || { view = t.wb.open_view(filtered.clone()).unwrap().view_id; });
+    time("first page of the filtered view", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
     let cv = t.wb.open_view(spec("customers")).unwrap().view_id;
     time("edit one customer name", &mut || {
         t.wb.edit(cv, &[CellEdit { row: 0, column: "name".into(), value: Some("renamed".into()), record: None }]).unwrap();
     });
+    t.wb.shared().results_queued("orders");
+    time("sort while results are stale (last results)", &mut || { view = t.wb.open_view(sorted.clone()).unwrap().view_id; });
+    time("recalculate stored results", &mut || { t.wb.recalculate("orders").unwrap(); });
+    time("sort with the new results", &mut || { view = t.wb.open_view(desc.clone()).unwrap().view_id; });
     let mut view = 0;
     time("open view after the source edit", &mut || { view = t.wb.open_view(spec("orders")).unwrap().view_id; });
     time("first page after the source edit", &mut || { t.wb.fetch(view, 0, 100).unwrap(); });
+    // F.07: nearest-match lookups (one ASOF join per kind of key, no per-row work).
+    time("add nearest-smaller XLOOKUP column", &mut || {
+        t.wb.add_formula_column_as("orders", "near", "=XLOOKUP([@cid]+0.5,customers[id],customers[name],,-1)", FormulaLanguage::Sheet).unwrap();
+    });
+    let mut nview = 0;
+    time("open view with the nearest-match column", &mut || { nview = t.wb.open_view(spec("orders")).unwrap().view_id; });
+    time("first page with the nearest-match column", &mut || { t.wb.fetch(nview, 0, 100).unwrap(); });
+    time("middle page with the nearest-match column", &mut || { t.wb.fetch(nview, rows / 2, 100).unwrap(); });
+    t.wb.drop_column("orders", "near").unwrap();
     // Conditional aggregates the other way: each customer's order total and count.
     time("add SUMIFS and COUNTIFS columns on customers", &mut || {
         t.wb.add_formula_column_as("customers", "total", "=SUMIFS(orders[amount],orders[cid],[@id])", FormulaLanguage::Sheet).unwrap();
@@ -303,4 +324,132 @@ fn conditional_aggregates_across_tables_follow_edits_and_renames() {
     assert!(t.wb.drop_column("orders", "channel").unwrap_err().to_string().contains("customers.\"web\""));
     t.reopen();
     assert_eq!(customers(&mut t.wb), ["150.0|2.0|75.0|100.0|3.0", "0.0|0.0|#DIV/0!|0.0|3.0", "30.0|1.0|30.0|30.0|3.0"]);
+}
+
+/// F.07 in a workbook: tiered rates by nearest match, a sorted VLOOKUP that stops answering
+/// when its keys are no longer sorted, INDEX/MATCH, and dependencies. By hand from the rows:
+/// tiers (min, rate) = (0, 0), (100, 0.05), (500, 0.1), (1000, 0.15); amounts 50, 100,
+/// 750, 2000 and blank.
+#[test]
+fn nearest_sorted_and_positional_lookups_in_a_workbook() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("tiers", "SELECT * FROM (VALUES (0, 0.0), (100, 0.05), (500, 0.1), (1000, 0.15)) v(min, rate)").unwrap();
+    t.wb.create_table_from_query("orders", "SELECT * FROM (VALUES (1, 50), (2, 100), (3, 750), (4, 2000), (5, NULL)) v(id, amount)").unwrap();
+    for (name, f) in [
+        ("rate", "=XLOOKUP([@amount],tiers[min],tiers[rate],,-1)"),
+        ("band", "=VLOOKUP([@amount],tiers,2)"),
+        ("pos", "=MATCH([@amount],tiers[min])"),
+        ("next", "=INDEX(tiers,MATCH([@amount],tiers[min])+1,2)"),
+        ("above", "=XLOOKUP([@amount]+1,tiers[min],tiers[min],-1,1)"),
+    ] {
+        t.wb.add_formula_column_as("orders", name, f, FormulaLanguage::Sheet).unwrap();
+    }
+    let rendered = |wb: &mut Workbook| rendered(&table_block(wb, "orders"));
+    // A blank amount: XLOOKUP's exact match of a blank is the 0 key, VLOOKUP reads it as 0,
+    // MATCH finds nothing.
+    assert_eq!(rendered(&mut t.wb), [
+        "1|50|0.0|0.0|1.0|0.05|100.0",
+        "2|100|0.05|0.05|2.0|0.1|500.0",
+        "3|750|0.1|0.1|3.0|0.15|1000.0",
+        "4|2000|0.15|0.15|4.0|#REF!|-1.0",
+        "5|null|0.0|0.0|#N/A|#N/A|100.0",
+    ].map(String::from));
+    // Unsorted keys: the sorted lookups say #N/A; the nearest match does not need sorting.
+    let v = t.wb.open_view(spec("tiers")).unwrap();
+    t.wb.edit(v.view_id, &[CellEdit { row: 1, column: "min".into(), value: Some("2000".into()), record: None }]).unwrap();
+    assert_eq!(rendered(&mut t.wb)[2], "3|750|0.1|#N/A|#N/A|#N/A|1000.0");
+    // Deleting a column the lookups read is refused, INDEX's column number included.
+    let e = t.wb.drop_column("tiers", "rate").unwrap_err().to_string();
+    assert!(e.contains("orders.\"rate\"") && e.contains("orders.\"next\""), "{e}");
+    // After reopening, with the unsorted mins 0, 2000, 500, 1000: 51 is nearest 500 above.
+    t.reopen();
+    assert_eq!(rendered(&mut t.wb)[0], "1|50|0.0|#N/A|#N/A|#N/A|500.0");
+}
+
+/// F.T02: first and last matches follow the table's persisted order, so inserting a row
+/// above changes which duplicate a lookup returns; an edit to the looked-up table refreshes
+/// the cached relation instead of serving a stale one. By hand from the rows below.
+#[test]
+fn lookups_follow_reordered_sources_and_reject_stale_caches() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("codes", "SELECT * FROM (VALUES ('a', 'first'), ('a', 'second')) v(k, label)").unwrap();
+    t.wb.create_table_from_query("uses", "SELECT * FROM (VALUES (1, 'a')) v(id, k)").unwrap();
+    t.wb.add_formula_column_as("uses", "first", "=XLOOKUP([@k],codes[k],codes[label])", FormulaLanguage::Sheet).unwrap();
+    t.wb.add_formula_column_as("uses", "last", "=XLOOKUP([@k],codes[k],codes[label],,0,-1)", FormulaLanguage::Sheet).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"first\"|\"second\""]);
+    // A new duplicate inserted at the top becomes the first match.
+    let v = t.wb.open_view(spec("codes")).unwrap();
+    t.wb.insert_rows(v.view_id, 0, 1).unwrap();
+    t.wb.edit(v.view_id, &[edit(0, "k", "a"), edit(0, "label", "zeroth")]).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"zeroth\"|\"second\""]);
+    // Deleting the last duplicate: the cached relation is rebuilt, not reused.
+    t.wb.delete_rows(v.view_id, 2, 1).unwrap();
+    assert_eq!(rendered(&table_block(&mut t.wb, "uses")), ["1|\"a\"|\"zeroth\"|\"first\""]);
+}
+
+/// F.T04 benchmark: lookups, conditional aggregates, a sorted view, a report and a source edit
+/// over skewed data with blanks, with latency (cold, warm), peak memory, temporary disk, bytes
+/// of the tables scanned and statements per page, against regression budgets. Opt-in:
+/// `ALEPHGRID_BENCH_ROWS=1000000 cargo test --release -p alephgrid-core --lib analyst_benchmark -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn analyst_benchmark() {
+    let rows: u64 = std::env::var("ALEPHGRID_BENCH_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let customers = (rows / 10).max(10);
+    let mut t = TempWb::new();
+    let ms = |f: &mut dyn FnMut()| { let s = std::time::Instant::now(); f(); s.elapsed().as_secs_f64() * 1000.0 };
+    let probe = |wb: &Workbook, sql: &str| -> i64 { wb.raw_query(sql).ok().and_then(|r| r.first().and_then(|r| match r[0] { duckdb::types::Value::BigInt(n) => Some(n), duckdb::types::Value::HugeInt(n) => Some(n as i64), duckdb::types::Value::Int(n) => Some(n as i64), duckdb::types::Value::UBigInt(n) => Some(n as i64), _ => None })).unwrap_or(-1) };
+    let mut peak_mem = 0i64;
+    let mut peak_tmp = 0i64;
+    let mut sample = |wb: &Workbook| {
+        peak_mem = peak_mem.max(probe(wb, "SELECT CAST(sum(memory_usage_bytes) AS BIGINT) FROM duckdb_memory()"));
+        peak_tmp = peak_tmp.max(probe(wb, "SELECT CAST(coalesce(sum(size), 0) AS BIGINT) FROM duckdb_temporary_files()"));
+    };
+    t.wb.create_table_from_query("customers", &format!("SELECT i AS id, 'c' || i AS name, ['West','East','North'][1 + (i % 3)] AS region FROM range({customers}) r(i)")).unwrap();
+    // Skew: half the orders go to 1% of customers; 5% have no customer.
+    t.wb.create_table_from_query("orders", &format!(
+        "SELECT i AS id, CASE WHEN i % 20 = 0 THEN NULL WHEN i % 2 = 0 THEN (hash(i) % {hot})::BIGINT ELSE (hash(i) % {customers})::BIGINT END AS cid, (i % 1000) * 1.5 AS amount FROM range({rows}) r(i)",
+        hot = (customers / 100).max(1)
+    )).unwrap();
+    sample(&t.wb);
+    t.wb.add_formula_column_as("orders", "region", "=XLOOKUP([@cid],customers[id],customers[region],\"none\")", FormulaLanguage::Sheet).unwrap();
+    t.wb.add_formula_column_as("customers", "total", "=SUMIFS(orders[amount],orders[cid],[@id])", FormulaLanguage::Sheet).unwrap();
+    let v = t.wb.open_view(spec("orders")).unwrap().view_id;
+    let cold = ms(&mut || { t.wb.fetch(v, rows / 2, 100).unwrap(); });
+    let warm = ms(&mut || { t.wb.fetch(v, rows / 3, 100).unwrap(); });
+    sample(&t.wb);
+    let c = t.wb.open_view(spec("customers")).unwrap().view_id;
+    let agg_cold = ms(&mut || { t.wb.fetch(c, 0, 100).unwrap(); });
+    let agg_warm = ms(&mut || { t.wb.fetch(c, customers / 2, 100).unwrap(); });
+    let mut sorted = spec("orders");
+    sorted.sort = vec![SortKey { column: "region".into(), desc: false }];
+    let sort = ms(&mut || { t.wb.open_view(sorted.clone()).unwrap(); });
+    sample(&t.wb);
+    let report = crate::AnalysisSpec::Report { table: "orders".into(), groups: vec!["region".into()],
+        measures: vec![crate::reports::Measure { aggregate: crate::Aggregate::Sum, value: Some("amount".into()), name: "revenue".into() }],
+        calculated: vec![], totals: true, filters: vec![], pivot: None };
+    let pivot = ms(&mut || { t.wb.analyze(&report).unwrap(); });
+    let edit_ms = ms(&mut || { t.wb.edit(c, &[edit(0, "region", "East")]).unwrap(); });
+    let after_edit = ms(&mut || { t.wb.fetch(v, rows / 2, 100).unwrap(); });
+    let recalc = ms(&mut || { t.wb.recalculate("orders").unwrap(); });
+    sample(&t.wb);
+    // Bytes of the workbook file, an upper bound of what a full scan of both tables reads.
+    let scanned = probe(&t.wb, "SELECT CAST(sum(total_blocks * block_size) AS BIGINT) FROM pragma_database_size() WHERE database_name = current_database()");
+    // Statements per page: the same at every size (no per-row queries).
+    let statements = |wb: &mut Workbook| -> i64 {
+        let _ = wb.raw_query("CALL enable_logging('QueryLog')");
+        let before = probe(wb, "SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog'");
+        wb.fetch(v, rows / 4, 100).unwrap();
+        let after = probe(wb, "SELECT count(*) FROM duckdb_logs WHERE type = 'QueryLog'");
+        if before < 0 || after < 0 { -1 } else { after - before - 1 }
+    };
+    let per_page = statements(&mut t.wb);
+    eprintln!("BENCH rows={rows} customers={customers} page_cold_ms={cold:.1} page_warm_ms={warm:.1} sumifs_page_cold_ms={agg_cold:.1} sumifs_page_warm_ms={agg_warm:.1} sort_lookup_ms={sort:.1} report_ms={pivot:.1} source_edit_ms={edit_ms:.1} page_after_edit_ms={after_edit:.1} recalc_ms={recalc:.1} peak_duckdb_mem_mb={:.1} peak_temp_mb={:.1} database_mb={:.1} statements_per_page={per_page}",
+        peak_mem as f64 / 1e6, peak_tmp as f64 / 1e6, scanned as f64 / 1e6);
+    // Regression budgets (release build, an Apple M-series laptop; see TABLE_FORMULAS.md).
+    let scale = if rows > 2_000_000 { 4.0 } else { 1.0 };
+    assert!(warm < 250.0 * scale, "warm page {warm:.1} ms over budget");
+    assert!(agg_warm < 250.0 * scale, "warm SUMIFS page {agg_warm:.1} ms over budget");
+    assert!(sort < 2_000.0 * scale, "sort by lookup {sort:.1} ms over budget");
+    assert!(pivot < 2_000.0 * scale, "report {pivot:.1} ms over budget");
 }

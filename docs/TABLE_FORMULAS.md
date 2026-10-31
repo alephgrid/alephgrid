@@ -64,6 +64,10 @@ values are converted to `DOUBLE` when used: integers beyond ±2^53 and decimals 
 15–17 significant digits lose precision in a table formula (the source column is unchanged).
 A result that is not finite (overflow) is `#NUM!`.
 
+**Dates hold whole days.** A Date plus a fraction keeps the date and drops the fraction, where a
+sheet would keep a time of day (`[@d] + 0.25`); a Date result before the first day (a blank
+date plus a fraction below 1) is `#NUM!`.
+
 **Blank.** A `NULL` source value is blank. Blank is `0` in arithmetic, `""` in text, `FALSE` as
 a condition, and equal to both `0` and `""` in comparisons. A formula whose whole result is
 blank (`=[@note]` on an empty note) stays blank: Alephgrid keeps `NULL` distinct from `0`,
@@ -98,7 +102,9 @@ Each value carries an error code or none. Operators return the first error of th
 operands, left to right, before their own (`#DIV/0!` for division by zero, `#VALUE!` for text
 that is not a number, `#NUM!` for non-finite results and invalid powers). `IF` and `IFS`
 evaluate only the chosen branch; `IFERROR` replaces any error, `IFNA` only `#N/A`;
-`ISERROR`, `ISERR` and `ISNA` inspect errors without propagating them. SQL `NULL` never
+`ISERROR`, `ISERR` and `ISNA` inspect errors without propagating them. `AND` and `OR` return an
+error argument even after a deciding `FALSE` (`AND`) or `TRUE` (`OR`); IronCalc sheets stop at
+the deciding value (see [gaps](FORMULA_GAPS.md#and-and-or-with-an-error-after-the-deciding-value)). SQL `NULL` never
 stands for an error. Error cells read back with their code and show it in the grid.
 
 ## Functions (first increment)
@@ -107,7 +113,7 @@ stands for an error. Error cells read back with their code and show it in the gr
 |---|---|
 | Logic | `IF` (else branch required unless the result is logical), `IFS`, `IFERROR`, `IFNA`, `AND`, `OR`, `NOT` |
 | Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA` |
-| Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `SUM`, `MIN`, `MAX`, `AVERAGE` (row values only) |
+| Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `SUM`, `MIN`, `MAX`, `AVERAGE` (row values, or whole columns), `COUNT`, `COUNTA` (whole columns) |
 | Text | `LEFT`, `RIGHT`, `MID`, `LEN`, `TRIM`, `UPPER`, `LOWER`, `SUBSTITUTE`, `CONCAT` |
 | Date | `DATE`, `YEAR`, `MONTH`, `DAY`, `EDATE`, `EOMONTH` |
 
@@ -116,8 +122,8 @@ blank values are skipped as a sheet skips them in referenced cells, while typed 
 converted. Volatile functions (`TODAY`, `NOW`, `RAND`) are refused until F.10 defines a
 calculation epoch.
 
-Conditional aggregates are described below; recalculation and dependencies with sheets are
-F.09.
+Conditional aggregates are described below; formulas reading sheet cells under
+[Sheet cells](#sheet-cells-f09).
 
 ## Conditional aggregates (F.08)
 
@@ -126,11 +132,13 @@ F.09.
 =COUNTIFS(Orders[customer_id], [@id], Orders[amount], ">100")
 =AVERAGEIFS(Orders[amount], Orders[channel], "w*", Orders[day], ">="&[@start])
 =SUMIF(Orders[customer_id], [@id], Orders[amount])      COUNTIF, AVERAGEIF likewise
+=MINIFS(Orders[amount], Orders[customer_id], [@id])     MAXIFS likewise
+=SUM(Orders[amount])      AVERAGE, MIN, MAX, COUNT, COUNTA of whole columns likewise
 ```
 
 All ranges are whole columns of one table (another table, or the formula's own stored
-columns). The result is a Number: `SUMIFS` and `COUNTIFS` give 0 when nothing matches,
-`AVERAGEIFS` gives `#DIV/0!`. Only number and date cells are summed or averaged (text and
+columns). The result is a Number: `SUMIFS`, `COUNTIFS`, `MINIFS` and `MAXIFS` give 0 when
+nothing matches, `AVERAGEIFS` gives `#DIV/0!`. Only number and date cells are summed or averaged (text and
 logical cells are skipped); an error cell in the aggregated column of a matching row makes the
 result that error (the first in row order).
 
@@ -162,8 +170,16 @@ Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): a
 customers with equality `SUMIFS` and `COUNTIFS` columns takes 45–57 ms; with a text criterion
 taken from each row, 347 ms (not cached).
 
-Not available yet, refused with a message: `COUNT`, `COUNTA`, `MINIFS`, `MAXIFS`, ranges from
-different tables, and array criteria.
+**Whole columns.** `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT` and `COUNTA` take whole columns of
+one table (`SUM(Orders[amount])`, `MAX(Orders[a], Orders[b])`) and give the same value on every
+row, computed in one scan (one aggregate relation joined to the rows). As with ranges in sheets,
+text and logical cells are skipped; `COUNTA` counts every non-blank cell, `""` and errors
+included; the first error in argument, then row, order is the result, except for `COUNT` and
+`COUNTA`. An empty table gives 0 (`AVERAGE`: `#DIV/0!`). Whole columns and row values cannot be
+mixed in one call (`SUM(Orders[a], [@b])` is refused; write `SUM(Orders[a]) + [@b]`).
+Differential-tested against sheet ranges (20 formulas), with hand-checked values.
+
+Not available yet, refused with a message: ranges from different tables, and array criteria.
 
 ## Lookups (F.06)
 
@@ -190,12 +206,10 @@ of different types never equal, and a blank matching `0`, `""`, `FALSE` and blan
 whose key holds an error never match. "First" and "last" mean the table's persisted row order
 (`_rf_ord`), never a view's sort, so a view cannot change a lookup's result.
 
-Not available yet, refused with a message: approximate and wildcard match modes, binary
-search, `VLOOKUP` without `FALSE` (spreadsheets default to approximate match), `HLOOKUP`,
-`XMATCH`, `MATCH`, `INDEX`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, and computed column
-numbers. Spreadsheet `VLOOKUP` treats `*`, `?` and `~` in a text value as a pattern even in
-exact mode; such values give `#VALUE!` here rather than a literal match (use `XLOOKUP`, whose
-exact mode compares them literally).
+Approximate, wildcard and positional modes are described under
+[nearest, wildcard and sorted lookups](#nearest-wildcard-and-sorted-lookups-f07). Refused with
+a message: binary search, `HLOOKUP`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, computed
+column numbers, and several keys with anything but exact match.
 
 **How it runs.** Each lookup compiles to one grouped relation of the other table, built in a
 single scan: every row contributes the keys it matches (its own value, plus the blank
@@ -215,6 +229,50 @@ orders.label → customers.label`. While a lookup relation is built, a column th
 the column being computed shows `#REF!` there instead of looping.
 
 A lookup into the formula's own table sees its stored columns only, not its formula columns.
+
+### Nearest, wildcard and sorted lookups (F.07)
+
+```text
+=XLOOKUP([@amount], Tiers[min], Tiers[rate], , -1)          largest min at most the amount
+=XLOOKUP([@weight], Bands[upto], Bands[price], "too heavy", 1)   smallest upto at least it
+=XLOOKUP([@code] & "*", Products[code], Products[name], , 2)      wildcards
+=VLOOKUP([@amount], Tiers, 2)                                  sorted first column
+=INDEX(Customers[name], MATCH([@id], Customers[id], 0))
+=XMATCH([@sku], Prices[sku])                                   position from 1
+```
+
+Each mode follows the sheet engine (IronCalc) and is differential-tested against it over the
+same rows as sheet ranges:
+
+| Form | Meaning |
+|---|---|
+| `XLOOKUP`/`XMATCH` with `match_mode` -1 or 1 | An exact match if there is one, otherwise the largest smaller (-1) or smallest larger (1) key, searching from the first row (`search_mode` 1) or the last (-1); among equal keys the first in search order wins. The order is the sheet engine's: numbers at 15 digits, then text by its upper case, then logical values, then errors; keys need not be sorted. A blank key compares with the value as 0, "" or FALSE of the value's type, and with other keys as their type's zero, exactly as the engine's pairwise comparison does. |
+| `match_mode` 2 | Text values are wildcard patterns (`*`, `?`, `~` escapes), matched case-insensitively against text keys only; other values match exactly. |
+| `VLOOKUP(value, T, n)`, `VLOOKUP(…, TRUE)` | The last row whose first-column key is at most the value. The first column must be sorted ascending (in the engine's order) with no blanks or errors; otherwise every row gives `#N/A`, where a sheet would give an arbitrary row. A blank value reads as 0. `VLOOKUP(…, FALSE)` reads text values as wildcard patterns, as sheets do. |
+| `MATCH(value, T[k], 0)` | The position (from 1, in table row order) of the first exact match; text values are patterns, nothing converts between types (`1` never matches `"1"`, a blank never matches 0). |
+| `MATCH(value, T[k], [1])`, `MATCH(…, -1)` | The position of the last key at most (1, the default) or at least (-1) the value, in a column sorted ascending (descending) without blanks or errors, else `#N/A`. A blank value gives `#N/A`. |
+| `XMATCH(value, T[k], [mode], [1 or -1])` | XLOOKUP's search, giving the position. |
+| `INDEX(T[c], n)`, `INDEX(T, n, column)` | The value in row `n` (from 1, in table row order; fractions truncate). Row 0 or below gives `#VALUE!` (a sheet spills the whole column for 0; a table cell holds one value), past the end `#REF!`. The column number must be written in the formula; deleting that column is refused. |
+
+**Rejected modes.** Binary search (`search_mode` 2 and -2): on a table it would give the same
+results as a search from the first or last row, which the plans below already do in one pass,
+and on unsorted data it gives arbitrary ones. `HLOOKUP` searches across a row, and table rows
+are records. `LOOKUP`'s vector form depends on sorted data without saying so; XLOOKUP with
+`match_mode` -1 does the same without needing it.
+
+**How they run.** A nearest match is an ASOF join: the looked-up table is grouped once by key
+(first or last row per key, in the engine's order) and joined to each row's value on the
+nearest key, so a page reads only its own rows. Values of another type than the keys need no
+search: every key is on the same side, so the answer is one of a few extremes computed once.
+Both relations are cached like exact lookups. A sorted lookup checks the order of its keys in
+the same pass. Wildcard patterns are matched once per distinct pattern against the text keys
+(equality for patterns without `*`, `?` or `~`), so cost grows with the number of distinct
+patterns times keys. Measured at 1M orders / 100K customers (release build, cached): a page of
+100 rows with a nearest-match XLOOKUP column 56 ms.
+
+Sorted lookups over duplicate keys return the last row of the run; the sheet engine's binary
+search returns whichever duplicate it meets, so duplicates are not differential-tested (see
+[gaps](FORMULA_GAPS.md#sorted-lookups-over-duplicate-keys)).
 
 **Cached lookup results.** Building a grouped relation scans the whole looked-up table, which
 dominated every page read of a large table. Each grouped relation is therefore kept in the
@@ -236,8 +294,8 @@ one VLOOKUP column on orders, looking up customers, about 5% of orders without a
 | Rebuild both cached lookups | — | — | 120–420 ms, once per source change |
 | Open a view sorted by a lookup column | 258 ms | 3.1 s | 3.5 s |
 
-Sorting or filtering by a lookup column evaluates it for every row and is not sped up by the
-cache; that and persisted (materialized) lookup columns belong to F.09.
+Sorting or filtering by a lookup column used to evaluate it for every row; large tables now
+keep [stored formula results](#stored-formula-results-f09) for that.
 
 ## Storage, reads and editing
 
@@ -255,8 +313,169 @@ formulas (other text is kept); deleting a column that a formula reads is refused
 cannot read its own column. **Add column** offers *Spreadsheet formula* (the default) and *SQL
 formula*; the formula bar edits either kind in its own language.
 
-Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output), and
-formulas reading sheet cells (F.09).
+Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output).
+
+## Sheet cells (F.09)
+
+A table formula can read single sheet cells, typically parameters kept in a sheet:
+
+```text
+=[@amount] * (1 + Settings!$B$1)
+=[@amount] * 'FX rates'!C4
+=IF(Settings!B3 = "", "none", Settings!B3)
+```
+
+The sheet name is required (`A1` alone is refused) and is quoted like in sheets when it is not
+a plain name. `$` markers are kept but change nothing: a table formula is not copied between
+cells. Ranges (`Settings!A1:B4`), whole columns and named ranges are refused. A cell is read
+like a referenced cell: its computed value with its type (a number, text, logical or error;
+dates are numbers, as in sheets), and an empty cell is blank, as an empty column value is.
+Because the value has one type at a time, a cell changing from a number to text changes the
+column's type.
+
+**Snapshot reads.** Table reads never consult the live sheet model. Every committed change
+that touches sheets, or the formulas that read them, also saves the value of every cell table
+formulas read (`_rf_links`, storage format 7) in the same transaction. A read takes those values
+from its own snapshot, so a page of rows and the cell values it was computed with always
+belong to the same revision, on every connection.
+
+**References follow their cells.** Each cell read has an anchor: a formula pointing at it in
+a very hidden sheet, written outside the undo history. The sheet engine moves anchors as it
+moves any formula: inserted and deleted rows and columns, cut-and-paste moves, sheet renames,
+and undo or redo of those. After each change the table formulas are rewritten to match
+(`Settings!$B$1` becomes `Settings!$B$2` after a row is inserted above it, `'Plan 2026'!$B$1`
+after a rename), and a deleted cell becomes `#REF!`, as in sheets. As in IronCalc, undoing the
+deletion does not bring the reference back. Deleting a sheet whose cells table formulas read is
+refused with the columns that read it. The hidden sheet is not listed, cannot be addressed, and
+is left out of XLSX exports.
+
+**What a change reaches.** A sheet change that gives a read cell a new value changes the data
+revision of the tables whose formulas read it; a new value type also changes their structure,
+so their views are rebuilt. Unrelated sheet edits change no table. The server then tells every
+session (the editing one included, `origin: 0`) which tables changed this way, and which tables
+read them through lookups or conditional aggregates, so those refresh too. Saved query results
+and live queries count the tables formulas read as sources, so a snapshot made from orders goes
+stale when a customer it looked up changes.
+
+## Sheet cells that read tables (F.09)
+
+A sheet cell can compute over tables with the same formulas:
+
+```text
+=SUMIFS(orders[amount], orders[region], A1)
+=XLOOKUP(Settings!B2, customers[id], customers[name], "unknown")
+=SUM(orders[amount]) * 1.2
+```
+
+The sheet engine cannot read tables, so when it reports a name it does not know before `[`
+(IronCalc's "Table not found"), Alephgrid compiles the whole formula as a table formula over a
+row of nothing: whole columns, lookups, aggregates and sheet cells (on the same sheet, `A1`
+needs no sheet name), but not `[@column]`, and not sheet ranges (`SUM(B1:B3)`) mixed in. A
+formula that does not compile is refused with the place it goes wrong, before it is saved and
+in the formula bar's check. Other formulas stay sheet formulas.
+
+Such a *table cell* keeps its formula in `_rf_table_cells` with a result slot; the sheet engine
+holds `=_rf_links!$B$<slot>`, a reference to the slot's value in the hidden link sheet, so
+other sheet formulas read it like any cell (`=B1*2`). The formula bar and the grid show the
+table formula instead (same-sheet cells without the sheet name). Moving, copying or undoing the
+cell moves, copies or undoes that reference; slots are never reused, so redo finds the formula
+again. A copy refers to the same formula: the cells it reads are not shifted. Values reach the
+sheet with sheet types: numbers, text, logical values, errors, dates as serial numbers, and an
+empty result as an empty cell (which reads as 0, as an empty lookup result does in sheets).
+
+**Atomic recalculation.** Table cells are recomputed inside the transaction of every change
+that could alter them: a change to a table they read (or that a table they read looks up), to
+a sheet cell they read, or to their formula. A table cell's new value can change sheet cells
+that table formulas read, so recalculation runs in rounds until nothing changes (bounded by the
+number of table cells). If any step fails, the whole change is rolled back: tables, sheets and
+values stay as they were committed. After a change that altered table cells the server tells
+every session to refetch the sheets (`sheet_changed`, `sheet: null`, `origin: 0`).
+
+**Circular references across sheets and tables** are refused, with the cells involved:
+`Report!B1` reading `orders`, whose formula reads `Settings!B1`, which is `=Report!B1/1000`,
+gives "circular reference: Report!B1 depends on its own value through the tables and sheet
+cells its formula reads"; two table cells give their path (`Report!B2 → Report!B3 →
+Report!B2`). The check follows table formulas, lookups between tables, and the sheet engine's
+references, ranges, defined names and spilled arrays (at most 200,000 cells). References built
+while evaluating (`INDIRECT`, `OFFSET`) cannot be followed statically; a loop through them
+stops at the round limit with an error and the change is rolled back.
+
+**Dependencies.** Renaming a table or column rewrites table cells too; deleting a table, a
+column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`).
+
+**Export.** XLSX files cannot hold table formulas. A table cell is exported as its current
+value, and the download first lists one note per such cell ("Report!B1: the table formula … is
+exported as its value "80" …"); see [XLSX compatibility](#xlsx-compatibility-f13).
+
+## Table results in sheets (F.10)
+
+A sheet cell can spill rows of a table:
+
+```text
+=SORT(UNIQUE(orders[region]))
+=FILTER(orders[amount], orders[region]="West", "none")
+=TAKE(SORT(orders, 3, -1), 10)            the ten rows with the largest third column
+```
+
+`FILTER(T[c] or T, condition, [if_empty])`, `SORT(array, [column], [1 or -1])`,
+`UNIQUE(array)` and `TAKE(array, n)` over whole columns of one table (or the whole table)
+compile to one ordered query; inside FILTER's condition `T[x]` is the row's `x`, so any
+row formula can filter. Rows keep table order unless sorted; SORT orders numbers, text (by its
+upper case) and logical values, blanks last, ties in table order; UNIQUE compares text
+case-insensitively and keeps the first row of each value; FILTER without a match gives
+`if_empty` (written in the formula) or `#CALC!`. A blank cell of the result spills as an empty
+text. Other array functions, `by_col`/`exactly_once`, and TAKE by columns are refused.
+
+**Spilling.** The result is written, as an array constant, to a very hidden sheet of its own
+(`_rf_spill_<slot>`); the user's cell holds a spill reference to it, so the sheet engine spills
+it as any dynamic array: other formulas read it (`=SUM(C1:C2)`, `C1#`), and a cell in the way
+gives `#SPILL!` until it is cleared. It is recomputed with the tables it reads, in the same
+transaction (see [sheet cells that read tables](#sheet-cells-that-read-tables-f09)).
+
+**Bounded.** At most `MAX_SPILL_CELLS` (10,000) cells. A larger result is refused when entered,
+pointing at the route for big results: sort and filter the table's view, and create a table from
+that view to keep a copy. A result that grows past the bound later shows `#SPILL!`.
+Exports write the spilled values, with a note per range.
+
+**Volatile functions (decision).** Table formulas and table cells refuse `TODAY`, `NOW`, `RAND`,
+`RANDBETWEEN` and `RANDARRAY`: their results are cached, stored and recomputed only when what
+they read changes, so a value that changes on its own would be silently stale, and a seed per
+row would make results depend on when they were computed. Sheets keep the sheet engine's
+behaviour (recalculated whenever the sheets are evaluated). Workbook functions stay
+deterministic: formula functions may call only an allowlist of pure functions and SQL
+functions are refused if they call `NOW`, `CURRENT_DATE` or functions with side effects, so no
+volatile value can enter a table through them either.
+
+## Stored formula results (F.09)
+
+Pages are cheap to compute live, but sorting, filtering or summarizing a view by a formula
+column that reads other tables evaluates that column for every row. Tables of at least
+`RESULTS_MIN_ROWS` (200,000) rows with such formulas therefore keep their formula results in the
+workbook's scratch database:
+
+* **Built from one snapshot**, stamped with the generation and data revision, in that snapshot,
+  of every table they read: the table itself and every table its formulas look up or
+  aggregate, transitively. Results are fresh exactly while the stamp matches the reader's
+  snapshot; nothing is invalidated in place.
+* **Installed atomically**, once complete, and only over older results. A view sorted or
+  filtered by formula columns reads the result set its order was built from for all its pages,
+  so order and values agree; when newer results are installed, it is rebuilt on its next read.
+* **Recalculated in the background.** After a change commits, the server queues a bulk read job
+  for each table whose results it made stale and sends `table_changed` (`origin: 0`) when the
+  job ends. A newer change cancels the job still running for that table. `cancel_recalculation`
+  cancels it on request and `recalculate` queues it again.
+* **Visibly stale.** Meanwhile, and after a failed or cancelled build, sorted and filtered views
+  keep the last committed results and say why (`stale` on view info and row blocks:
+  `recalculating`, `recalculation failed: …`); the grid shows a notice with Cancel or
+  Recalculate. Unsorted views read pages live, exactly. Exports and copies never write stale
+  values: they read fresh results or compute live.
+
+Sorting or filtering only by stored columns reads the table alone. Sorting by formula columns
+with fresh results reads the stored results alone. Smaller tables compute everything live.
+Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): the first sort by
+a lookup column 303 ms (it stores the results), later sorts 151 ms, a filter by a lookup column
+26 ms, recalculation after a customer edit 165 ms; a sort while results are stale reads the last
+results in 247 ms. 10M-row figures are F.T04.
 
 ## Row identity and order
 
@@ -276,3 +495,50 @@ covers XLOOKUP, VLOOKUP and multi-key lookups against sheet ranges with duplicat
 key, `0`, `""` and case variants. Workbook tests cover source edits, one result per row with
 duplicate keys, renames, refused deletes, tables that look each other up and refused circular
 references, before and after reopening.
+
+## XLSX compatibility (F.13)
+
+An XLSX file holds sheets, not Alephgrid tables, so before downloading one the workbook lists
+everything the file leaves out or changes (`xlsx_compatibility`), and the download asks for
+confirmation when there is anything to say. Nothing is replaced silently:
+
+* a **table cell** (a sheet cell reading tables) is written as its current value, or a spilled
+  table result as its values, each with a note naming the cell or range and the formula;
+* a **dynamic array formula** is kept, with a note that Excel 365/2021 spills it and older
+  versions show one value;
+* a formula calling a function **Excel does not have** (by the catalog's sources) is kept, with
+  a note that Excel will show `#NAME?`;
+* every **table** is listed as not in the file (download it as CSV or Parquet), with its
+  presentation, validation and formula columns.
+
+Importing XLSX already reports what it cannot keep (unsupported features as warnings). Sheet
+styles and number formats round-trip through the sheet engine's reader and writer (tested in
+`tests::xlsx`). A reproducible sample workbook lives in [docs/samples](samples/README.md).
+
+## Benchmarks and budgets (F.T04)
+
+`analyst_benchmark` (release build, Apple M-series laptop, 31 October 2026): orders with a
+lookup column (XLOOKUP of the customer's region) and customers with a SUMIFS total of their
+orders; half the orders go to 1% of the customers (skew) and 5% have no customer (blanks).
+Pages are 100 rows. "Cold" is the first read after the formula was added (it builds the cached
+grouped relations); "warm" a later page.
+
+| Measure | 100K orders / 10K customers | 1M / 100K | 10M / 1M |
+|---|---|---|---|
+| lookup page, cold / warm | 12.7 / 12.5 ms | 17.8 / 17.5 ms | 101.6 / 69.8 ms |
+| SUMIFS page, cold / warm | 12.9 / 12.6 ms | 16.2 / 16.2 ms | 36.3 / 31.1 ms |
+| first sort by the lookup column (stores the results) | 59 ms | 169 ms | 3.44 s |
+| report: revenue by region with totals | 115 ms | 293 ms | 2.95 s |
+| edit a customer / next lookup page / recalculate stored results | 7 / 20 / 41 ms | 14 / 124 / 199 ms | 94 / 434 / 2432 ms |
+| peak DuckDB memory | 17 MB | 112 MB | 1,048 MB |
+| temporary disk | 0 | 0 | 0 |
+| statements per page | 21 | 21 | 21 |
+
+**Budgets**, asserted by the benchmark (×4 above 2M rows): a warm page of either formula
+column under 250 ms, a first sort by a lookup column and a report under 2 s. The statement count
+per page is the same at every size: no plan issues a query per row or per cell. No read sends
+full tables to the browser: pages are bounded by `fetch_rows` and `MAX_REPLY_BYTES` (tested in
+`tests::basic` and the browser suite), analyses by 500 rows and charts by 100 groups.
+Not measured: bytes scanned per query (DuckDB reports none without profiling; the workbook file
+is small because the generated columns compress well) and process RSS; a 10M sort after the
+results are stored (1M: 151 ms) was not repeated at 10M.

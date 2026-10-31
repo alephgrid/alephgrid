@@ -35,6 +35,23 @@ the Rust types and are the precise definition of every request, event and result
 
 Undo/redo sends `tables_changed` instead of `sheet_changed` when it adds, removes or renames a sheet.
 
+A change can also change tables it is not about: tables whose formulas read sheet cells that got
+new values, and tables whose formulas read (look up, aggregate) a table that changed. After the
+change's own event, the server sends `cells_changed` for each such table, or `table_changed` when
+its columns changed too (a cell's value type changed, or its formulas were rewritten because a
+cell they read moved), with `origin: 0`, since no session has applied them yet. When the change
+also gave sheet cells that read tables (table cells) new values, it then sends `sheet_changed`
+with `sheet: null` and `origin: 0`. `sheet_delete` is refused while table formulas or table
+cells on other sheets read the sheet. `sheet_set` turns a formula naming a table into a table
+cell, and `sheet_check_formula` checks such formulas as table formulas.
+
+Large tables keep stored formula results (F.09). After a change makes them stale the server
+recalculates them in the background and sends `table_changed` (`origin: 0`) when done, failed
+or cancelled. Until then, views sorted or filtered by formula columns carry `stale` (on
+`ViewInfo` and `RowBlock`: `recalculating`, or `recalculation failed: …`) and keep the last
+committed results. `cancel_recalculation { table }` stops the running job; `recalculate
+{ table }` queues one; both reply at once.
+
 Requests can be pipelined; replies may arrive out of order and are matched by `id`. Requests of one
 connection are queued in the order they arrive.
 

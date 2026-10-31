@@ -37,8 +37,15 @@ pub struct Workbook {
     txn_depth: u32,
     /// Bumped whenever a sheet change was attempted inside the current transaction, so a
     /// rollback knows to reload the sheet model from the file.
-    sheet_epoch: u64,
+    pub(crate) sheet_epoch: u64,
     pub(crate) after_commit: Vec<AfterCommit>,
+    /// Tables changed during the last mutation because of sheet cells they read (see
+    /// `links.rs`), and whether their columns changed (type or formula text) too.
+    pub(crate) linked: std::collections::BTreeMap<String, bool>,
+    /// Table cells changed by the last mutation (their values or formulas).
+    pub(crate) derived_sheets: bool,
+    /// Tables changed in the transaction in progress whose table cells are up to date.
+    pub(crate) settled: std::collections::BTreeSet<String>,
     report: OpenReport,
 }
 
@@ -131,8 +138,9 @@ impl Workbook {
         conn.set_query_progress_tracking(true)?;
         let bytes: Option<Vec<u8>> = conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
         crate::functions::check_runtime(&conn, &crate::functions::list(&conn)?)?;
-        let sheets = Sheets::from_bytes(bytes)?;
-        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], report })
+        let mut sheets = Sheets::from_bytes(bytes)?;
+        sheets.set_table_cells(storage::table_cells(&conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
+        Ok(Workbook { conn, shared: Arc::new(Shared::new(sheets)), txn_depth: 0, sheet_epoch: 0, after_commit: vec![], linked: Default::default(), derived_sheets: false, settled: Default::default(), report })
     }
 
     /// What opening did (a migration, and where the pre-migration copy is).
@@ -152,12 +160,28 @@ impl Workbook {
         &self.shared
     }
 
+    /// Tables whose stored formula results the committed data has made stale (F.09); the
+    /// server recalculates them in the background.
+    pub fn stale_results(&self) -> Result<Vec<String>> {
+        self.db().stale_results()
+    }
+
+    /// Bring a table's stored formula results up to date now (see [`Reader::recalculate`]).
+    pub fn recalculate(&self, table: &str) -> Result<bool> {
+        self.db().recalculate(table, None)
+    }
+
+    /// Whether the last mutation changed table cells' values (sheets read tables it changed).
+    pub fn changed_table_cells(&self) -> bool {
+        self.derived_sheets
+    }
+
     pub(crate) fn db(&self) -> Db<'_> {
         let in_txn = self.txn_depth > 0;
         if !in_txn {
             self.shared.sweep(&self.conn);
         }
-        Db { conn: &self.conn, shared: &self.shared, in_txn, keep: Default::default() }
+        Db { conn: &self.conn, shared: &self.shared, in_txn, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() }
     }
 
     /// Apply DuckDB settings such as `memory_limit` or `threads`.
@@ -265,9 +289,17 @@ impl Workbook {
         }
         let epoch = self.sheet_epoch;
         self.after_commit.clear();
+        self.linked.clear();
+        self.derived_sheets = false;
+        self.settled.clear();
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         self.txn_depth = 1;
-        let result = f(self).and_then(|out| {
+        // SQL changes may not add validation violations (F.12); edits are checked per value.
+        let before = if m.op == "sql_change" { crate::tools::all_violations(&self.conn).ok() } else { None };
+        // Table cells follow whatever the change did to the tables they read.
+        let result = f(self)
+            .and_then(|out| match &before { Some(b) => crate::tools::refuse_new_violations(&self.conn, b).map(|_| out), None => Ok(out) })
+            .and_then(|out| self.sync_links().map(|_| out)).and_then(|out| {
             let encoded = encode(&out);
             let rev = storage::record(&self.conn, m.id, m.op, m.actor, &m.summary, encoded.as_deref().unwrap_or(""))?;
             faults::check("commit")?;
@@ -545,7 +577,7 @@ impl Workbook {
         if !self.table_exists(table)? {
             bail!("unknown table {table:?}");
         }
-        let users: Vec<String> = self.cross_users(table, None)?.into_iter().filter(|u| u.contains('.')).collect();
+        let users: Vec<String> = self.cross_users(table, None)?.into_iter().filter(|u| u.contains('.') || u.starts_with("sheet cell ")).collect();
         if !users.is_empty() {
             bail!("{table:?} is read by formula column{} {}; change or delete {} first",
                 if users.len() == 1 { "" } else { "s" }, users.join(", "), if users.len() == 1 { "it" } else { "them" });
@@ -558,6 +590,7 @@ impl Workbook {
                 lit(table)
             ))?;
             storage::forget_table(&wb.conn, table)?;
+            wb.sync_links()?;
             wb.after_commit.push(AfterCommit::ForgetTable(table.to_string()));
             Ok(())
         })
@@ -574,7 +607,8 @@ impl Workbook {
                 rewritten.push((t, name, updated));
             }
         }
-        if !rewritten.is_empty() && !crate::table_formula::valid_table_name(&new_name) {
+        let read_by_cells = storage::table_cells(&self.conn)?.iter().any(|c| crate::links::tables_read(&c.formula).contains(&table.to_lowercase()));
+        if (!rewritten.is_empty() || read_by_cells) && !crate::table_formula::valid_table_name(&new_name) {
             bail!("formulas refer to {table:?}, so its new name can only use letters, digits, _ and . (not {new_name:?})");
         }
         self.mutating("rename_table", None, |wb| {
@@ -589,6 +623,7 @@ impl Workbook {
                 let t = if t == table { new_name.as_str() } else { t.as_str() };
                 wb.conn.execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![updated, t, name])?;
             }
+            wb.rewrite_table_cells(|f| crate::table_formula::rename_table(f, table, &new_name).map_err(|e| anyhow!("formula error: {e}")))?;
             storage::rename_table(&wb.conn, table, &new_name)?;
             wb.rewrite_saved_views(table, |spec, _| {
                 spec.table = new_name.clone();
@@ -641,6 +676,7 @@ impl Workbook {
                 "INSERT INTO _rf_columns (table_name, name, formula, position, language) VALUES (?, ?, ?, (SELECT coalesce(max(position) + 1, 0) FROM _rf_columns WHERE table_name = ?), ?)",
                 duckdb::params![table, name, formula, table, language],
             )?;
+            wb.sync_links()?;
             wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
         })
@@ -689,13 +725,14 @@ impl Workbook {
                 "UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?",
                 duckdb::params![formula, table, name],
             )?;
+            wb.sync_links()?;
             wb.db().describe(&wb.base_select(table)?).map_err(|e| anyhow!("formula error: {e}"))?;
             storage::update_table(&wb.conn, table, None, None)
         })
     }
 
     /// Every spreadsheet formula in the workbook as (table, column, formula).
-    fn all_sheet_formulas(&self) -> Result<Vec<(String, String, String)>> {
+    pub(crate) fn all_sheet_formulas(&self) -> Result<Vec<(String, String, String)>> {
         let mut out = Vec::new();
         for t in storage::user_tables(&self.conn)? {
             let sheet = self.db().sheet_formulas(&t)?;
@@ -730,6 +767,19 @@ impl Workbook {
             });
             if uses && !(t == table && Some(name.as_str()) == column) {
                 out.push(if t == table { format!("{name:?}") } else { format!("{t}.{name:?}") });
+            }
+        }
+        // Sheet cells that read tables.
+        for (place, f) in self.table_cells_in_use()? {
+            let Ok(refs) = crate::table_formula::references(&f) else { continue };
+            let uses = refs.iter().any(|r| match (r, column) {
+                (Reference::Column { table: rt, .. } | Reference::Table { table: rt, .. }, None) => rt.eq_ignore_ascii_case(table),
+                (Reference::Column { table: rt, column: rc, .. }, Some(c)) => rt.eq_ignore_ascii_case(table) && formula::same_name(rc, c),
+                (Reference::Table { table: rt, positions, .. }, Some(_)) => rt.eq_ignore_ascii_case(table) && position.is_some_and(|p| positions.iter().any(|q| *q >= p)),
+                _ => false,
+            });
+            if uses {
+                out.push(format!("sheet cell {}", place.text((false, false))));
             }
         }
         Ok(out)
@@ -780,6 +830,7 @@ impl Workbook {
             })?;
             if is_formula {
                 wb.conn.execute("DELETE FROM _rf_columns WHERE table_name = ? AND name = ?", duckdb::params![table, name])?;
+                wb.sync_links()?;
             } else {
                 wb.conn.execute_batch(&format!("ALTER TABLE {} DROP COLUMN {};", ident(table), ident(name)))?;
             }
@@ -850,6 +901,7 @@ impl Workbook {
             for (t, fname, updated) in &elsewhere {
                 wb.conn.execute("UPDATE _rf_columns SET formula = ? WHERE table_name = ? AND name = ?", duckdb::params![updated, t, fname])?;
             }
+            wb.rewrite_table_cells(|f| crate::table_formula::rename_table_column(f, table, name, new_name).map_err(|e| anyhow!("formula error: {e}")))?;
             wb.rewrite_saved_views(table, |spec, widths| {
                 for k in &mut spec.sort {
                     if k.column == name {
@@ -1085,13 +1137,17 @@ impl Workbook {
             _ => 0,
         };
 
-        // Validate every value before touching the table.
+        // Validate every value before touching the table, rules (F.12) included.
+        let rules = crate::tools::validations(&self.conn, &table)?;
         let mut by_column: HashMap<&str, Vec<(Target, Option<&str>)>> = HashMap::new();
         for (t, column, value) in &cells {
             by_column.entry(column).or_default().push((*t, *value));
         }
         for (column, values) in &by_column {
             let col = &by_name[*column];
+            for (_, v) in values {
+                crate::tools::check_value(&rules, column, *v)?;
+            }
             for value in values.iter().filter_map(|(_, v)| *v) {
                 crate::wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;
             }
@@ -1388,6 +1444,7 @@ impl Workbook {
                     }
                 }
                 wb.save_sheets()?;
+                wb.sync_links()?;
             }
             Ok(out)
         })
@@ -1395,11 +1452,13 @@ impl Workbook {
 
     fn load_sheets(&self) -> Result<Sheets> {
         let bytes: Option<Vec<u8>> = self.conn.query_row("SELECT data FROM _rf_sheets LIMIT 1", [], |r| r.get(0)).ok();
-        Sheets::from_bytes(bytes)
+        let mut sheets = Sheets::from_bytes(bytes)?;
+        sheets.set_table_cells(storage::table_cells(&self.conn)?.into_iter().map(|c| (c.slot, c.formula)).collect());
+        Ok(sheets)
     }
 
     /// Write the model (inside the caller's transaction).
-    fn save_sheets(&self) -> Result<()> {
+    pub(crate) fn save_sheets(&self) -> Result<()> {
         let bytes = self.sheets().to_bytes();
         self.conn.execute_batch("DELETE FROM _rf_sheets;")?;
         if let Some(bytes) = bytes {
@@ -1642,6 +1701,14 @@ fn update_view(db: &Db, id: u64, spec: ViewSpec) -> Result<ViewInfo> {
 }
 
 impl Reader {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn db_for_reports(&self) -> Db<'_> {
+        self.db()
+    }
+
     pub fn analyze(&self,spec:&crate::AnalysisSpec)->Result<crate::AnalysisResult>{crate::analysis::analyze(&self.db(),spec)}
     pub fn analyses(&self)->Result<Vec<crate::SavedAnalysis>>{crate::analysis::analyses(&self.conn)}
     pub fn presentation(&self,table:&str)->Result<crate::Presentation>{crate::analysis::presentation(&self.db(),table)}
@@ -1668,11 +1735,38 @@ impl Reader {
 
     fn db(&self) -> Db<'_> {
         self.shared.sweep(&self.conn);
-        Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default() }
+        Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() }
     }
 
     pub fn list_tables(&self) -> Result<Vec<TableInfo>> {
         self.db().list_tables()
+    }
+
+    /// Build a table's stored formula results from one snapshot and install them when
+    /// complete; `ticket` from [`Shared::results_queued`]. Interruptible: an interrupted or
+    /// failed build installs nothing. `Ok(false)` when they were already fresh.
+    pub fn recalculate(&self, table: &str, ticket: Option<u64>) -> Result<bool> {
+        self.db().recalculate(table, ticket)
+    }
+
+    /// Everything an XLSX download leaves out or changes (F.13): the sheets' notes (see
+    /// [`crate::sheets::Sheets::xlsx_compatibility`]), and tables, which are not part of the file.
+    pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
+        let mut notes = self.sheets().xlsx_compatibility()?;
+        for t in self.db().list_tables()? {
+            notes.push(format!("table {} ({} rows) is not in the file: download it as CSV or Parquet; formulas over it are exported as values", t.name, t.row_count));
+        }
+        Ok(notes)
+    }
+
+    /// Check a formula as if typed into a sheet cell: the sheet engine's parse, or for a
+    /// formula that reads tables, whether it compiles as a table cell.
+    pub fn check_sheet_formula(&self, sheet: u32, row: u32, column: u32, formula: &str) -> Result<Option<crate::sheets::FormulaProblem>> {
+        let db = self.db();
+        db.snapshot(|| match crate::links::table_cell_problem(&db, sheet, row, column, formula)? {
+            Some(result) => Ok(result.err()),
+            None => self.sheets().check_formula(sheet, row, column, formula),
+        })
     }
 
     pub fn open_view(&self, spec: ViewSpec) -> Result<ViewInfo> {

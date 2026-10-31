@@ -22,17 +22,86 @@ export type Reply =
 /** Pushed after connecting. */
 export type Hello = { event: "hello"; session: number; workbook: WorkbookMeta; revision: number };
 
+export type Rule = { "kind": "one_of", values: Array<string>, } | { "kind": "between", min?: number, max?: number, } | { "kind": "required" };
+
+export type Validation = { column: string, rule: Rule, };
+
+export type ValidationReport = { rules: Array<Validation>, 
+/**
+ * Rows breaking each rule now, in rule order.
+ */
+violations: Array<number>, };
+
+export type Transform = { "kind": "dedupe", keys: Array<string>, } | { "kind": "split", column: string, delimiter: string, parts: number, } | { "kind": "trim", column: string, inner: boolean, } | { "kind": "convert", column: string, to: string, };
+
+export type TransformPreview = { 
+/**
+ * The first rows of the result.
+ */
+sample: QueryPreview, 
+/**
+ * Rows the result would have.
+ */
+rows: number, 
+/**
+ * Rows left out (dedupe) or values that did not convert (convert).
+ */
+affected: number, };
+
+export type FormulaInspection = { table: string, column: string, formula: string, 
+/**
+ * Columns of the table itself, whole columns of other tables, and sheet cells it reads.
+ */
+reads_columns: Array<string>, reads_tables: Array<string>, reads_cells: Array<string>, 
+/**
+ * Formula columns (`table.column`) and sheet cells that read this column.
+ */
+read_by: Array<string>, 
+/**
+ * How it is evaluated: `lookup join`, `aggregate join`, `nearest-match join`, `row
+ * expression`.
+ */
+plan: Array<string>, 
+/**
+ * Rows of the table whose value is an error, by code.
+ */
+errors: Array<[string, number]>, };
+
 export type Aggregate = "count" | "sum" | "average" | "min" | "max";
 
 export type Pivot = { column: string, values: Array<string | null>, };
 
+export type Measure = { aggregate: Aggregate, value?: string, name: string, };
+
+export type Calculated = { name: string, formula: string, };
+
+export type ChartKind = "bar" | "line" | "scatter";
+
+export type Slicer = { table: string, column: string, values: Array<string | null>, };
+
+export type Tile = { analysis: string, x: number, y: number, w: number, h: number, };
+
+export type Dashboard = { id: string, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, };
+
+export type TileResult = { tile: Tile, analysis?: SavedAnalysis, result?: AnalysisResult, 
+/**
+ * Why the tile shows nothing (a deleted analysis, a renamed column, …).
+ */
+error?: string, };
+
+export type DashboardResult = { dashboard: Dashboard, tiles: Array<TileResult>, };
+
 export type JoinKind = "inner" | "left";
 
-export type AnalysisSpec = { "kind": "summary", table: string, groups: Array<string>, aggregate: Aggregate, value: string | null, pivot: Pivot | null, } | { "kind": "join", left: string, right: string, left_key: string, right_key: string, join: JoinKind, } | { "kind": "profile", table: string, columns: Array<string>, };
+export type AnalysisSpec = { "kind": "summary", table: string, groups: Array<string>, aggregate: Aggregate, value: string | null, pivot: Pivot | null, } | { "kind": "join", left: string, right: string, left_key: string, right_key: string, join: JoinKind, } | { "kind": "profile", table: string, columns: Array<string>, } | { "kind": "report", table: string, groups: Array<string>, measures: Array<Measure>, calculated: Array<Calculated>, totals: boolean, filters: Array<Filter>, pivot?: Pivot, };
 
 export type AnalysisResult = { result: QueryResult, diagnostics: QueryResult | null, };
 
-export type SavedAnalysis = { id: string, name: string, spec: AnalysisSpec, chart: boolean, };
+export type SavedAnalysis = { id: string, name: string, spec: AnalysisSpec, chart: boolean, 
+/**
+ * How a chart draws it (F.11): bars (default), lines or points.
+ */
+chart_kind: ChartKind, };
 
 export type ReplaceSpec = { table: string, column: string, find: string, replacement: string, };
 
@@ -102,7 +171,12 @@ export type ViewInfo = { view_id: number, spec: ViewSpec, row_count: number, col
 /**
  * True when rows can be appended by typing below the last row.
  */
-can_append: boolean, };
+can_append: boolean, 
+/**
+ * Why the view's formula values are not current, when it is ordered or filtered by
+ * formula columns whose stored results are being recalculated or failed to be (F.09).
+ */
+stale?: string, };
 
 export type RowBlock = { row_start: number, 
 /**
@@ -121,7 +195,11 @@ truncated: boolean,
 /**
  * Cells of spreadsheet-formula columns that hold an error (their value is `null`).
  */
-errors?: Array<CellErrorMark>, };
+errors?: Array<CellErrorMark>, 
+/**
+ * As [`ViewInfo::stale`]: the formula values are the last committed results.
+ */
+stale?: string, };
 
 export type CellEdit = { 
 /**
@@ -323,7 +401,7 @@ export type Workspace = { id: string, name: string, created_at: number, };
 
 export type Event = { "event": "cells_changed", table: string, origin: number, revision: number, } | { "event": "table_changed", table: string, origin: number, revision: number, } | { "event": "tables_changed", origin: number, revision: number, } | { "event": "sheet_changed", sheet: number | null, origin: number, revision: number, } | { "event": "views_changed", table: string, origin: number, revision: number, } | { "event": "queries_changed", origin: number, revision: number, } | { "event": "workbook_deleted", origin: number, } | { "event": "workbook_closed", reason: string, } | { "event": "resync", } | { "event": "progress", request: number, percentage: number, };
 
-export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, } | { "op": "delete_analysis", analysis: string, } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, };
+export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" } | { "op": "save_analysis", saved: string | null, name: string, spec: AnalysisSpec, chart: boolean, chart_kind?: ChartKind, } | { "op": "delete_analysis", analysis: string, } | { "op": "dashboards" } | { "op": "dashboard", dashboard: string, } | { "op": "save_dashboard", saved: string | null, name: string, tiles: Array<Tile>, slicers: Array<Slicer>, } | { "op": "delete_dashboard", dashboard: string, } | { "op": "validations", table: string, } | { "op": "set_validations", table: string, rules: Array<Validation>, } | { "op": "preview_transform", table: string, transform: Transform, } | { "op": "apply_transform", table: string, transform: Transform, name: string, } | { "op": "inspect_formula", table: string, column: string, } | { "op": "xlsx_compatibility" } | { "op": "drill", spec: AnalysisSpec, row: CellValue[], } | { "op": "materialize_analysis", name: string, spec: AnalysisSpec, } | { "op": "replace_preview", spec: ReplaceSpec, } | { "op": "replace_apply", spec: ReplaceSpec, revision: number, } | { "op": "replace_undo", revision: number, } | { "op": "presentation", table: string, } | { "op": "save_presentation", table: string, presentation: Presentation, } | { "op": "functions" } | { "op": "test_function", definition: FunctionDefinition, } | { "op": "publish_function", definition: FunctionDefinition, } | { "op": "pin_functions", pins: { [key in string]: number }, } | { "op": "tables" } | { "op": "open_view", spec: ViewSpec, } | { "op": "update_view", view_id: number, spec: ViewSpec, } | { "op": "view_info", view_id: number, } | { "op": "close_view", view_id: number, } | { "op": "fetch", view_id: number, row_start: number, row_count: number, column_start?: number, column_count?: number, } | { "op": "edit", view_id: number, edits: Array<CellEdit>, } | { "op": "insert_rows", view_id: number, at: number, count: number, } | { "op": "delete_rows", view_id: number, start: number, count: number, } | { "op": "stats", view_id: number, column: string, start: number, end: number, } | { "op": "add_column", table: string, name: string, sql_type: string, } | { "op": "add_formula_column", table: string, name: string, formula: string, language?: FormulaLanguage, } | { "op": "update_formula", table: string, name: string, formula: string, } | { "op": "drop_column", table: string, name: string, } | { "op": "rename_column", table: string, name: string, new_name: string, } | { "op": "query", sql: string, params?: Array<QueryParam>, limit?: number, } | { "op": "create_table_from_query", name: string, sql: string, params?: Array<QueryParam>, saved?: string, version?: number, } | { "op": "create_demo_table", rows?: number, } | { "op": "drop_table", table: string, } | { "op": "rename_table", table: string, new_name: string, } | { "op": "sheets" } | { "op": "sheet_create", name?: string, } | { "op": "sheet_rename", sheet: number, name: string, } | { "op": "sheet_delete", sheet: number, } | { "op": "sheet_fetch", sheet: number, row_start: number, row_count: number, column_count: number, } | { "op": "sheet_set", sheet: number, inputs: Array<SheetInput>, } | { "op": "sheet_undo" } | { "op": "sheet_redo" } | { "op": "sheet_insert_rows", sheet: number, at: number, count: number, } | { "op": "sheet_delete_rows", sheet: number, at: number, count: number, } | { "op": "sheet_insert_columns", sheet: number, at: number, count: number, } | { "op": "sheet_delete_columns", sheet: number, at: number, count: number, } | { "op": "sheet_names" } | { "op": "sheet_define_name", name: string, scope?: number, refers_to: string, } | { "op": "sheet_update_name", name: string, scope?: number, new_name: string, new_scope?: number, refers_to: string, } | { "op": "sheet_delete_name", name: string, scope?: number, } | { "op": "sheet_cell_detail", sheet: number, row: number, column: number, } | { "op": "sheet_check_formula", sheet: number, row: number, column: number, formula: string, } | { "op": "sheet_fill", sheet: number, area: CellArea, direction: FillDirection, } | { "op": "sheet_paste", from_sheet: number, source: CellArea, sheet: number, row: number, column: number, mode?: PasteMode, transpose?: boolean, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
 
 export type ColumnType = { name: string, sql_type: string, };
 
@@ -473,6 +551,17 @@ export interface Results {
   analyses: SavedAnalysis[];
   save_analysis: SavedAnalysis;
   delete_analysis: null;
+  dashboards: Dashboard[];
+  dashboard: DashboardResult;
+  save_dashboard: Dashboard;
+  delete_dashboard: null;
+  validations: Validation[];
+  set_validations: ValidationReport;
+  preview_transform: TransformPreview;
+  apply_transform: TableInfo;
+  inspect_formula: FormulaInspection;
+  xlsx_compatibility: string[];
+  drill: ViewSpec;
   materialize_analysis: TableInfo;
   replace_preview: ReplacePreview;
   replace_apply: ReplaceOutcome;
@@ -544,6 +633,8 @@ export interface Results {
   materialized: MaterializedTable[];
   refresh_materialized: MaterializedTable;
   cancel: boolean;
+  recalculate: boolean;
+  cancel_recalculation: boolean;
 }
 
 export type OpName = Op["op"];

@@ -45,6 +45,7 @@ pub struct Shared {
     graveyard: Arc<Mutex<Vec<String>>>,
     scratch_seq: AtomicU64,
     pub(crate) lookups: Mutex<LookupCache>,
+    pub(crate) results: crate::results::ResultsStore,
 }
 
 /// Grouped lookup relations built into scratch tables, keyed by their SQL. An entry is valid
@@ -132,6 +133,9 @@ pub struct Materialized {
     pub row_count: u64,
     /// `rf_scratch` table `(_rf_pos, _rf_id)` for sorted or filtered views.
     pub perm: Option<Arc<Scratch>>,
+    /// The stored formula results the permutation was built from; its pages read them too,
+    /// so order and values agree (flagged when stale).
+    pub results: Option<Arc<crate::results::StoredResults>>,
 }
 
 /// A scratch table, dropped (by [`Shared::sweep`]) when its last reference goes.
@@ -160,6 +164,7 @@ impl Shared {
             graveyard: Arc::new(Mutex::new(Vec::new())),
             scratch_seq: AtomicU64::new(0),
             lookups: Mutex::new(LookupCache::default()),
+            results: crate::results::ResultsStore::new(),
         }
     }
 
@@ -255,6 +260,7 @@ impl Shared {
     }
 
     pub(crate) fn forget_table(&self, table: &str) {
+        self.forget_results(table);
         let mut c = self.catalog();
         c.indexes.remove(table);
         c.views.retain(|_, v| v.spec.lock().unwrap_or_else(|e| e.into_inner()).table != table);

@@ -652,3 +652,30 @@ focused catalog/functions/sheets browser suite **9/9 passed**, followed by **3/3
 checks** after adding the unequal-range evidence assertion. Frontend typecheck/build
 and server build passed. These counts distinguish test functions from the 115 passing
 mode fixtures and do not count known failures as supported behavior.
+
+## Phase F (F.T01–F.T03)
+
+Expected values come from hand calculation, documented Excel rules or IronCalc used as an
+independent engine (differential tests), never from the code under test.
+
+| Requirement | Evidence |
+|---|---|
+| **F.T01** golden values per function and mode | `tests::catalog::certification_cases_match_independent_expectations` (351 cases: 44 P0 and 32 P1 functions, 344 verified, 7 known gaps that fail if they change), `catalog_examples_match_independent_expectations` (76) |
+| missing and duplicate keys, first/last matches | catalog XLOOKUP/VLOOKUP/MATCH cases; `table_lookups_agree_with_the_sheet_engine`, `tests::table_formulas` duplicates |
+| wildcard escapes | catalog `a~*b` cases, `approximate_and_wildcard_lookups_agree_with_the_sheet_engine` (`~*`), COUNTIFS `a~*b` |
+| mixed types, blanks, errors | coercion matrix (156 cases over typed F1:G8), `sheet_cells_agree_with_the_sheet_engine` (7 kinds of cell value) |
+| unequal ranges | `sumifs/countifs/averageifs_should_reject_unequal_ranges` |
+| Unicode | lookups with `ärger`/`Ärger`, sheet names `'Prix é'` (parse tests), `TEXTSPLIT`/`TEXTBEFORE` cases |
+| absolute and mixed references | `e2e/references.spec.ts` (F4 cycling), sheet-cell `$` handling in `table_formula::tests` |
+| keyboard-only formula entry, undo, reopen | `e2e/names.spec.ts`, `e2e/commands.spec.ts`, `e2e/tableformulas.spec.ts` (formula bar), `patched_formula_boundaries_survive_reopen`, every certification case checked again after reopening |
+| **F.T02** independent evaluator versus batched plans | differential tests against IronCalc: 99 row formulas, 10 + 11 + 6 lookups, 58 aggregates, 24 + 28 F.07 lookups, 99 sheet-cell formulas, each over 60 typed rows |
+| duplicate/cardinality invariants, stable ordering | one result per row asserted in every differential test; `lookups_follow_reordered_sources_and_reject_stale_caches` (persisted order, inserts) |
+| cycles, rename/delete/reorder of sources | `tests::table_formulas` (circular references, renames, refused deletes), `tests::tablecells::circular_references_between_sheets_and_tables_are_refused`, reorder test above |
+| cross-engine errors | sheet-cell `=1/0` into table formulas; table cells showing `#N/A`, `#REF!`; `tests::links` |
+| concurrent source edits, cancellation, fault rollback | `tests::results` (interrupted build installs nothing, superseded builds, failed builds keep results), `a_failed_recalculation_leaves_tables_and_sheets_as_they_were`, server `stored_results_are_recalculated_in_the_background`, e2e cancel |
+| stale-cache rejection | `cached_lookups_are_rebuilt_only_when_their_source_changes`, `cached_lookups_are_shared_only_when_other_connections_can_see_them`, stored-result stamps |
+| **F.T03** spill collision and size refusal, dynamic arrays | `table_results_spill_into_sheets` (`#SPILL!`, 10,000-cell bound), P1 spill cases, `named_ranges_feed_dynamic_arrays` |
+| pivot/filter totals, chart bounds | `tests::reports`, `e2e/analysis.spec.ts` (100-group chart limit, line chart values) |
+| validation bypass attempts | `validation_rules_hold_on_every_write_path` (edit, append, SQL change), `e2e/tools.spec.ts` |
+| XLSX provenance fixtures and incompatibility reports, round trip | `tests::xlsx` round trip, `the_published_sample_workbook_opens_with_its_documented_values`, `xlsx_downloads_say_what_they_leave_out_or_replace`, `e2e/tools.spec.ts` (XLSX notes) |
+| real-browser journeys | the e2e suite in Chromium, WebKit and Firefox; `e2e/analyst.spec.ts` (F.15) |

@@ -1,5 +1,6 @@
-//! Conditional aggregates over whole table columns: SUMIFS, COUNTIFS, AVERAGEIFS and the
-//! single-criterion SUMIF, COUNTIF, AVERAGEIF.
+//! Conditional aggregates over whole table columns: SUMIFS, COUNTIFS, AVERAGEIFS, MINIFS,
+//! MAXIFS and the single-criterion SUMIF, COUNTIF, AVERAGEIF; and SUM, AVERAGE, MIN, MAX,
+//! COUNT and COUNTA of whole columns.
 //!
 //! Criteria follow the sheet engine's rules (IronCalc `build_criteria`): a criterion value
 //! is classified into a comparison (`op`) with a numeric (`n`) or text (`t`) operand, and a
@@ -37,6 +38,8 @@ enum Agg {
     Sum,
     Count,
     Average,
+    Min,
+    Max,
 }
 
 /// A criterion: its comparison and operands as SQL, and whether it can vary per row.
@@ -187,7 +190,7 @@ fn classify_literal(kind: &ExprKind) -> (String, Option<f64>, Option<String>) {
 
 /// The sheet engine's wildcard-to-regex conversion (`from_wildcard_to_regex`, anchored):
 /// `?` one character, `*` any run, `~` escapes the next character.
-fn wildcard_regex(w: &str) -> String {
+pub(super) fn wildcard_regex(w: &str) -> String {
     // regex::escape: backslash before every meta character.
     let escaped = format!("regexp_replace({w}, '([\\\\.+*?()|\\[\\]{{}}^$#&\\-~])', '\\\\\\1', 'g')");
     let steps = [("\\?", "."), ("\\*", ".*"), ("\\~\\~", "??"), ("\\~.*", "\\*"), ("\\~.", "\\?"), ("\\~", ""), ("??", "\\~")];
@@ -374,11 +377,11 @@ impl Compiler<'_> {
     pub(super) fn conditional(&mut self, name: &str, args: &[Expr], span: Span) -> Result<V, FormulaError> {
         // (aggregated column, [(criteria column, criterion)]).
         let (agg, value, pairs): (Agg, Option<&Expr>, Vec<(&Expr, &Expr)>) = match name {
-            "SUMIFS" | "AVERAGEIFS" => {
+            "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => {
                 if args.len() < 3 || args.len().is_multiple_of(2) {
                     return fail(format!("{name} takes a range to aggregate and then pairs of criteria range and criterion"), span);
                 }
-                let agg = if name == "SUMIFS" { Agg::Sum } else { Agg::Average };
+                let agg = match name { "SUMIFS" => Agg::Sum, "MINIFS" => Agg::Min, "MAXIFS" => Agg::Max, _ => Agg::Average };
                 (agg, Some(&args[0]), args[1..].chunks(2).map(|p| (&p[0], &p[1])).collect())
             }
             "COUNTIFS" => {
@@ -430,7 +433,7 @@ impl Compiler<'_> {
             }
             None => ("CAST(NULL AS DOUBLE)".into(), "CAST(NULL AS VARCHAR)".into()),
         };
-        let outputs = |sum: &str, count: &str, numbers: &str, error: &str| -> (String, String) {
+        let outputs = |sum: &str, count: &str, numbers: &str, error: &str, min: &str, max: &str| -> (String, String) {
             match agg {
                 Agg::Sum => (format!("COALESCE({sum}, 0)"), error.to_string()),
                 Agg::Count => (format!("CAST({count} AS DOUBLE)"), "CAST(NULL AS VARCHAR)".to_string()),
@@ -438,14 +441,18 @@ impl Compiler<'_> {
                     format!("CASE WHEN {numbers} > 0 THEN {sum} / {numbers} END"),
                     format!("COALESCE({error}, CASE WHEN {numbers} = 0 THEN '#DIV/0!' END)"),
                 ),
+                // No matching number: 0, as in sheets.
+                Agg::Min => (format!("COALESCE({min}, 0)"), error.to_string()),
+                Agg::Max => (format!("COALESCE({max}, 0)"), error.to_string()),
             }
         };
         // Over matched source rows `q`: the aggregated cells' sum, the row count, how many of
         // those cells are numbers, and the first error in row order.
         let aggregates = |q: &str| format!(
-            "sum({q}._rf_agg_v) AS sm, count(*) AS ct, count({q}._rf_agg_v) AS cn, arg_min({q}._rf_agg_e, {q}._rf_agg_o) FILTER (WHERE {q}._rf_agg_e IS NOT NULL) AS er"
+            "sum({q}._rf_agg_v) AS sm, count(*) AS ct, count({q}._rf_agg_v) AS cn, min({q}._rf_agg_v) AS mn, max({q}._rf_agg_v) AS mx, \
+             arg_min({q}._rf_agg_e, {q}._rf_agg_o) FILTER (WHERE {q}._rf_agg_e IS NOT NULL) AS er"
         );
-        let (v_out, e_out) = outputs("sm", "ct", "cn", "er");
+        let (v_out, e_out) = outputs("sm", "ct", "cn", "er", "mn", "mx");
         // The source rows with their aggregated value, error and order, under alias `s`;
         // constant criteria filter it.
         let filter: Vec<String> = criteria.iter().filter(|(_, c)| c.constant).map(|(s, c)| matches(c, s)).collect();
@@ -510,5 +517,61 @@ impl Compiler<'_> {
         let value = format!("CASE WHEN {jk} IS NOT NULL THEN {jv} ELSE {} END", no_match.0);
         let error = format!("CASE WHEN {jk} IS NOT NULL THEN {je} ELSE {} END", no_match.1);
         Ok(self.make(value, Some(error), Ty::Number, span))
+    }
+
+    /// SUM, AVERAGE, MIN, MAX, COUNT or COUNTA of whole columns of one table (`SUM(T[c])`,
+    /// `MAX(T[a], T[b])`): one aggregate of the table, the same value for every row. As in
+    /// sheets, text and logical cells are skipped (COUNTA counts every non-blank cell, errors
+    /// included), and the first error in argument then row order is the result, except for
+    /// COUNT and COUNTA, which never fail.
+    pub(super) fn whole_columns(&mut self, name: &str, args: &[Expr], span: Span) -> Result<V, FormulaError> {
+        let mut columns = Vec::new();
+        for a in args {
+            match &a.kind {
+                ExprKind::TableColumn { table, column } => columns.push((table.clone(), column.clone(), a.span)),
+                _ => return fail(format!("{name} of whole columns takes only whole columns of one table, e.g. {name}(Orders[amount]); add other values outside it"), a.span),
+            }
+        }
+        let table = columns[0].0.clone();
+        if let Some((_, _, at)) = columns.iter().find(|(t, _, _)| !t.eq_ignore_ascii_case(&table)) {
+            return fail("all ranges must be columns of the same table", *at);
+        }
+        let rel = self.lookup_relation(&table, columns[0].2)?;
+        let mut parts = Vec::new();
+        for (i, (_, c, at)) in columns.iter().enumerate() {
+            let (col, ty) = Self::lookup_column(&rel, &table, c, *at)?;
+            let x = format!("s.{}", ident(&col));
+            let xe = rel.errors.iter().find(|(n, _)| *n == col).map(|(_, e)| format!("s.{}", ident(e)));
+            let v = match ty { Ty::Number => format!("CAST({x} AS DOUBLE)"), Ty::Date => serial(&x), _ => "CAST(NULL AS DOUBLE)".into() };
+            let filled = match &xe { Some(e) => format!("({x} IS NOT NULL OR {e} IS NOT NULL)"), None => format!("({x} IS NOT NULL)") };
+            let first_error = match &xe { Some(e) => format!("arg_min({e}, s._rf_ord) FILTER (WHERE {e} IS NOT NULL)"), None => "CAST(NULL AS VARCHAR)".into() };
+            parts.push(format!(
+                "sum({v}) AS sm{i}, count({v}) AS cn{i}, min({v}) AS mn{i}, max({v}) AS mx{i}, count(*) FILTER (WHERE {filled}) AS ca{i}, {first_error} AS er{i}"
+            ));
+        }
+        let n = columns.len();
+        let each = |p: &str| (0..n).map(|i| format!("{p}{i}")).collect::<Vec<_>>();
+        let total = |p: &str| each(p).iter().map(|c| format!("COALESCE({c}, 0)")).collect::<Vec<_>>().join(" + ");
+        let error = if n == 1 { "er0".to_string() } else { format!("COALESCE({})", each("er").join(", ")) };
+        let (v, e) = match name {
+            "SUM" => (total("sm"), error),
+            "AVERAGE" => (
+                format!("CASE WHEN ({cn}) > 0 THEN ({sm}) / ({cn}) END", cn = total("cn"), sm = total("sm")),
+                format!("COALESCE({error}, CASE WHEN ({}) = 0 THEN '#DIV/0!' END)", total("cn")),
+            ),
+            "MIN" => (format!("COALESCE(least({}), 0)", each("mn").join(", ")), error),
+            "MAX" => (format!("COALESCE(greatest({}), 0)", each("mx").join(", ")), error),
+            "COUNT" => (format!("CAST({} AS DOUBLE)", total("cn")), "CAST(NULL AS VARCHAR)".into()),
+            _ => (format!("CAST({} AS DOUBLE)", total("ca")), "CAST(NULL AS VARCHAR)".into()),
+        };
+        let e = format!("COALESCE({e}, CASE WHEN NOT isfinite({v}) THEN '#NUM!' END)");
+        let grouped = format!("SELECT '' AS k, {v} AS v, {e} AS e FROM (SELECT {} FROM ({}) s)", parts.join(", "), rel.sql);
+        let alias = format!("{}j{}", self.prefix, self.stages.len());
+        let probe = self.bind("CAST('' AS VARCHAR)".into());
+        let steps = std::mem::take(&mut self.steps);
+        self.stages.push(Stage::Steps(steps));
+        self.stages.push(Stage::Join { alias: alias.clone(), sql: grouped, key: probe, reads: rel.reads.clone() });
+        let (jv, je) = (ident(&format!("{alias}v")), ident(&format!("{alias}e")));
+        Ok(self.make(jv, Some(je), Ty::Number, span))
     }
 }

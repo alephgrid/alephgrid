@@ -8,10 +8,13 @@
 
 use std::collections::BTreeSet;
 
-use super::parse::{parse, BinaryOp, ErrorCode, Expr, ExprKind, FormulaError, Span, UnaryOp};
+use super::parse::{parse, BinaryOp, CellRef, ErrorCode, Expr, ExprKind, FormulaError, Span, UnaryOp};
 use crate::sql::{ident, lit};
 
 mod aggregate;
+mod approx;
+use aggregate::wildcard_regex;
+use approx::{Nearest, Returns, NOT_FOUND};
 
 /// Static type of a table formula value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,9 +74,26 @@ pub struct Relation {
     pub reads: Vec<String>,
 }
 
-/// Resolves table names in `Table[column]` references.
+/// The value of a sheet cell a formula reads, as the sheet engine computed it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellValue {
+    Blank,
+    Number(f64),
+    Text(String),
+    Bool(bool),
+    /// An error value as the sheet shows it: `#DIV/0!`, `#REF!`, …
+    Error(String),
+    /// Rows of values: a table result that spills into a sheet (F.10).
+    Array(Vec<Vec<CellValue>>),
+}
+
+/// Resolves table names in `Table[column]` references, and sheet cells.
 pub trait Relations {
     fn relation(&self, table: &str) -> Result<Option<Relation>, String>;
+    /// The value of a sheet cell, or `None` when there is no such sheet.
+    fn cell(&self, _cell: &CellRef) -> Result<Option<CellValue>, String> {
+        Ok(None)
+    }
 }
 
 struct NoRelations;
@@ -91,6 +111,10 @@ pub enum Stage {
     /// Like `Join`, but `sql` also reads the input relation, under the name `<alias>o`
     /// (conditional aggregates whose criteria come from the rows themselves).
     Correlated { alias: String, sql: String, key: String },
+    /// An ASOF left join of an ordered relation `sql` with columns `r`, `n`, `t`, `v`, `e`
+    /// (nearest-match lookups): `on` relates its columns (`j.`) to the input's (`o.`). Adds
+    /// `<alias>k` (whether a row matched), `<alias>v` and `<alias>e`.
+    Asof { alias: String, sql: String, on: String, reads: Vec<String> },
 }
 
 /// A compiled table formula: `stages` add columns to the input relation in order; `value`
@@ -124,6 +148,10 @@ impl Compiled {
                     "SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM ({sql}) o LEFT JOIN ({sub}) j ON j.k = o.{key}",
                     k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
                 ),
+                Stage::Asof { alias, sql: sub, on, .. } => format!(
+                    "SELECT o.*, (j.r IS NOT NULL) AS {k}, j.v AS {v}, j.e AS {e} FROM ({sql}) o ASOF LEFT JOIN ({sub}) j ON {on}",
+                    k = ident(&format!("{alias}k")), v = ident(&format!("{alias}v")), e = ident(&format!("{alias}e"))
+                ),
                 Stage::Correlated { alias, sql: sub, key } => format!(
                     "WITH {input} AS MATERIALIZED ({sql}) SELECT o.*, j.k AS {k}, j.v AS {v}, j.e AS {e} FROM {input} o LEFT JOIN ({sub}) j ON j.k = o.{key}",
                     input = ident(&format!("{alias}o")),
@@ -138,7 +166,7 @@ impl Compiled {
     pub fn temps(&self) -> Vec<String> {
         self.stages.iter().flat_map(|s| match s {
             Stage::Steps(steps) => steps.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(),
-            Stage::Join { alias, .. } | Stage::Correlated { alias, .. } => vec![format!("{alias}k"), format!("{alias}v"), format!("{alias}e")],
+            Stage::Join { alias, .. } | Stage::Correlated { alias, .. } | Stage::Asof { alias, .. } => vec![format!("{alias}k"), format!("{alias}v"), format!("{alias}e")],
         }).collect()
     }
 }
@@ -210,7 +238,7 @@ fn serial_date(n: &str) -> (String, String) {
 
 impl Compiler<'_> {
     fn bind(&mut self, sql: String) -> String {
-        let n: usize = self.steps.len() + self.stages.iter().map(|s| match s { Stage::Steps(x) => x.len(), Stage::Join { .. } | Stage::Correlated { .. } => 1 }).sum::<usize>();
+        let n: usize = self.steps.len() + self.stages.iter().map(|s| match s { Stage::Steps(x) => x.len(), Stage::Join { .. } | Stage::Correlated { .. } | Stage::Asof { .. } => 1 }).sum::<usize>();
         let name = format!("{}{}", self.prefix, n);
         self.steps.push((name.clone(), sql));
         ident(&name)
@@ -298,6 +326,7 @@ impl Compiler<'_> {
             ExprKind::Error(code) => Ok(V { v: "NULL".into(), e: Some(err_lit(*code)), ty: Ty::Number, is_ref: false, empty_text: false, span }),
             ExprKind::Empty => Ok(V { v: "NULL".into(), e: None, ty: Ty::Blank, is_ref: false, empty_text: false, span }),
             ExprKind::Column { name, .. } => self.column(name, span),
+            ExprKind::Cell { cell, .. } => self.cell(cell, span),
             ExprKind::TableColumn { table, column } => fail(
                 format!("{table}[{column}] is a whole column; use it inside a lookup or conditional aggregate, or [@{column}] for this row"),
                 span,
@@ -331,6 +360,24 @@ impl Compiler<'_> {
         self.refs.insert(actual.clone());
         let e = self.errors.iter().find(|(c, _)| c == actual).map(|(_, err)| ident(err));
         Ok(V { v: ident(actual), e, ty, is_ref: true, empty_text: false, span })
+    }
+
+    /// A sheet cell's value as of this evaluation, used like a referenced cell: blank is a
+    /// NULL value, as an empty column value is.
+    fn cell(&mut self, cell: &CellRef, span: Span) -> Result<V, FormulaError> {
+        let Some(value) = self.relations.cell(cell).map_err(|message| FormulaError { message, span })? else {
+            return fail(format!("there is no sheet named {:?}", cell.sheet), span);
+        };
+        let (v, e, ty) = match value {
+            CellValue::Blank => ("CAST(NULL AS DOUBLE)".to_string(), None, Ty::Number),
+            // A sheet cell holds one value; arrays are table results, never read back.
+            CellValue::Array(_) => ("CAST(NULL AS DOUBLE)".to_string(), Some(lit("#VALUE!")), Ty::Number),
+            CellValue::Number(n) => (num_lit(n), None, Ty::Number),
+            CellValue::Text(t) => (lit(&t), None, Ty::Text),
+            CellValue::Bool(b) => (if b { "TRUE" } else { "FALSE" }.to_string(), None, Ty::Bool),
+            CellValue::Error(code) => ("CAST(NULL AS DOUBLE)".to_string(), Some(lit(&code)), Ty::Number),
+        };
+        Ok(V { v, e, ty, is_ref: true, empty_text: false, span })
     }
 
     fn binary(&mut self, op: BinaryOp, left: &Expr, right: &Expr, span: Span) -> Result<V, FormulaError> {
@@ -633,6 +680,9 @@ impl Compiler<'_> {
                 let e = first_error([a.e.clone(), xe, b.e.clone(), ye, Some(format!("CASE WHEN {y} = 0 THEN '#DIV/0!' WHEN NOT isfinite({r}) THEN '#NUM!' END"))]);
                 Ok(self.make(r, e, Ty::Number, span))
             }
+            "SUM" | "MIN" | "MAX" | "AVERAGE" | "COUNT" | "COUNTA" if args.iter().any(|a| matches!(a.kind, ExprKind::TableColumn { .. })) => {
+                self.whole_columns(&name_upper, args, span)
+            }
             "SUM" | "MIN" | "MAX" | "AVERAGE" => {
                 Self::arity(&name_upper, args, 1, 255, span)?;
                 let mut nums = Vec::new(); // (value or NULL when skipped)
@@ -808,13 +858,14 @@ impl Compiler<'_> {
             ),
             "XLOOKUP" => self.xlookup(args, span),
             "VLOOKUP" => self.vlookup(args, span),
-            "HLOOKUP" | "XMATCH" | "MATCH" | "INDEX" | "LOOKUP" => fail(
-                format!("{name_upper} over table columns is not available yet (planned: exact lookups through batched joins)"),
-                span,
-            ),
-            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" => self.conditional(&name_upper, args, span),
+            "MATCH" => self.match_fn(args, span),
+            "XMATCH" => self.xmatch(args, span),
+            "INDEX" => self.index(args, span),
+            "HLOOKUP" => fail("HLOOKUP is not available for tables: it searches across a row, and table rows are records; use XLOOKUP or VLOOKUP over a column", span),
+            "LOOKUP" => fail("LOOKUP is not available for tables: its vector form depends on sorted data without saying so; use XLOOKUP (match_mode -1 for the nearest smaller) or VLOOKUP", span),
+            "SUMIF" | "SUMIFS" | "COUNTIF" | "COUNTIFS" | "AVERAGEIF" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => self.conditional(&name_upper, args, span),
             "COUNT" | "COUNTA" => fail(
-                format!("{name_upper} over table columns is not available yet; COUNTIFS counts rows that match criteria"),
+                format!("{name_upper} counts whole columns here, e.g. {name_upper}(Orders[amount]); COUNTIFS counts rows that match criteria"),
                 span,
             ),
             _ => fail(format!("{name_upper} is not available in table formulas; see the list in TABLE_FORMULAS.md"), span),
@@ -841,7 +892,10 @@ impl Compiler<'_> {
     /// `keys` columns, left-joined on the row's normalized probes, so every row gets at
     /// most one match (the first, or with `last` the last, in persisted row order). The
     /// source is scanned once. Returns the joined key, value and error columns.
-    fn lookup_join(&mut self, rel: &Relation, keys: &[(V, String, Ty)], ret_col: &str, last: bool) -> (String, String, String) {
+    ///
+    /// `loose`: a blank matches 0, "", FALSE and blank cells (XLOOKUP, VLOOKUP); otherwise
+    /// only blank cells (MATCH with 0).
+    fn lookup_join(&mut self, rel: &Relation, keys: &[(V, String, Ty)], ret: Returns, last: bool, loose: bool) -> (String, String, String) {
         // Spreadsheet exact matching: numbers at 15 digits, text case-insensitively, types
         // never equal each other; a blank matches 0, "", FALSE and blank cells.
         let key_of = |v: &str, t: Ty| -> String {
@@ -867,7 +921,8 @@ impl Compiler<'_> {
         for (_, col, ty) in keys {
             let k = ident(col);
             let blank = format!("list_value('blank', {}, 't', 'bfalse')", key_of("CAST(0 AS DOUBLE)", Ty::Number));
-            let zero = match ty { Ty::Text => Some(format!("{k} = ''")), Ty::Bool => Some(format!("{k} = FALSE")), Ty::Date => None, _ => Some(format!("{k} = 0")) };
+            let zero = match ty { _ if !loose => None, Ty::Text => Some(format!("{k} = ''")), Ty::Bool => Some(format!("{k} = FALSE")), Ty::Date => None, _ => Some(format!("{k} = 0")) };
+            let blank = if loose { blank } else { "list_value('blank')".to_string() };
             let own = key_of(&k, *ty);
             variants.push(match zero {
                 Some(z) => format!("CASE WHEN {k} IS NULL THEN {blank} WHEN {z} THEN list_value({own}, 'blank') ELSE list_value({own}) END"),
@@ -875,10 +930,19 @@ impl Compiler<'_> {
             });
             if let Some(e) = err_of(col) { ok.push(format!("{e} IS NULL")); }
         }
-        let ret_err = err_of(ret_col).unwrap_or_else(|| "CAST(NULL AS VARCHAR)".into());
+        let (ret_v, ret_err) = match ret {
+            Returns::Column(c) => (ident(c), err_of(c).unwrap_or_else(|| "CAST(NULL AS VARCHAR)".into())),
+            Returns::Position => ("CAST(row_number() OVER (ORDER BY _rf_ord) AS DOUBLE)".into(), "CAST(NULL AS VARCHAR)".into()),
+        };
         let lists: String = variants.iter().enumerate().map(|(i, v)| format!(", {v} AS l{i}")).collect();
         let filter = if ok.is_empty() { String::new() } else { format!(" WHERE {}", ok.join(" AND ")) };
-        let mut sql = format!("SELECT {} AS v, {ret_err} AS e, _rf_ord AS o{lists} FROM ({}){filter}", ident(ret_col), rel.sql);
+        // Positions count every row, so they are numbered before the filter.
+        let mut sql = format!("SELECT v, e, o{} FROM (SELECT {ret_v} AS v, {ret_err} AS e, _rf_ord AS o{lists}{} FROM ({})){}",
+            (0..keys.len()).map(|i| format!(", l{i}")).collect::<String>(),
+            if ok.is_empty() { String::new() } else { format!(", ({}) AS ok", ok.join(" AND ")) },
+            rel.sql,
+            if ok.is_empty() { String::new() } else { " WHERE ok".to_string() });
+        let _ = filter;
         for i in 0..keys.len() {
             sql = format!("SELECT * EXCLUDE (l{i}), unnest(l{i}) AS u{i} FROM ({sql})");
         }
@@ -952,8 +1016,8 @@ impl Compiler<'_> {
                 _ => fail(what.to_string(), args[i].span),
             }
         };
-        literal(4, &[0.0], "only exact match (match_mode 0) is available for table lookups; approximate and wildcard modes are not yet")?;
-        let last = literal(5, &[1.0, -1.0], "search_mode must be 1 (first match) or -1 (last match); binary search is not available for tables")? < 0.0;
+        let mode = literal(4, &[0.0, -1.0, 1.0, 2.0], "match_mode must be written in the formula: 0 (exact), -1 (exact or next smaller), 1 (exact or next larger) or 2 (wildcards)")? as i32;
+        let last = literal(5, &[1.0, -1.0], "search_mode must be 1 (from the first row) or -1 (from the last); binary search (2, -2) is not available for tables, where searching gives the same results without needing sorted data")? < 0.0;
         let ExprKind::TableColumn { table: rt, column: rc } = &args[2].kind else {
             return fail("XLOOKUP needs whole columns of a table here, e.g. Customers[name]", args[2].span);
         };
@@ -967,6 +1031,9 @@ impl Compiler<'_> {
         };
         if factors.iter().any(|(t, _, _)| !t.eq_ignore_ascii_case(rt)) {
             return fail("the lookup and return columns must come from the same table", args[2].span);
+        }
+        if factors.len() > 1 && mode != 0 {
+            return fail("lookups by several keys are exact: use match_mode 0", args[4].span);
         }
         let rel = self.lookup_relation(rt, args[1].span)?;
         let (ret_col, ret_ty) = Self::lookup_column(&rel, rt, rc, args[2].span)?;
@@ -984,14 +1051,22 @@ impl Compiler<'_> {
         };
         let ret = V { v: "NULL".into(), e: None, ty: ret_ty, is_ref: false, empty_text: false, span: args[2].span };
         let ty = match &nf { Some(n) => self.unify("XLOOKUP", &[&ret, n], span)?, None => ret_ty };
-        let (jk, jv, je) = self.lookup_join(&rel, &keys, &ret_col, last);
+        let (fv, fe) = if keys.len() == 1 {
+            let (p, col, kty) = keys.pop().expect("one key");
+            self.find(&rel, p, &col, kty, Returns::Column(&ret_col), mode, last)
+        } else {
+            let (jk, jv, je) = self.lookup_join(&rel, &keys, Returns::Column(&ret_col), last, true);
+            (format!("CASE WHEN {jk} IS NOT NULL THEN {jv} END"), format!("CASE WHEN {jk} IS NOT NULL THEN {je} ELSE {NOT_FOUND} END"))
+        };
+        let fe = self.bind(fe);
         let (nv, ne) = match &nf {
             Some(n) => (self.as_ty(n, ty), n.e.clone().unwrap_or_else(|| "NULL".into())),
             None => ("NULL".into(), "'#N/A'".into()),
         };
-        let value = format!("CASE WHEN {jk} IS NOT NULL THEN {jv} ELSE {nv} END");
+        let missing = format!("{fe} IS NOT DISTINCT FROM {NOT_FOUND}");
+        let value = format!("CASE WHEN {missing} THEN {nv} ELSE {fv} END");
         let mut errors = probe_errors;
-        errors.push(Some(format!("CASE WHEN {jk} IS NOT NULL THEN {je} ELSE {ne} END")));
+        errors.push(Some(format!("CASE WHEN {missing} THEN {ne} ELSE {fe} END")));
         Ok(self.make(value, first_error(errors), ty, span))
     }
 
@@ -1005,14 +1080,13 @@ impl Compiler<'_> {
         let ExprKind::Table { table } = &args[1].kind else {
             return fail("VLOOKUP needs a whole table here, e.g. Customers; for one key column and one result column XLOOKUP is clearer", args[1].span);
         };
-        match args.get(3).map(|a| &a.kind) {
-            Some(ExprKind::Bool(false)) => {}
-            Some(ExprKind::Number(n)) if *n == 0.0 => {}
-            _ => return fail(
-                "VLOOKUP without FALSE as its 4th argument finds an approximate match, which is not available for tables yet; add FALSE for an exact match",
-                args.get(3).map_or(span, |a| a.span),
-            ),
-        }
+        // Without FALSE: the nearest smaller key of a first column sorted ascending (F.07).
+        let approximate = match args.get(3).map(|a| &a.kind) {
+            None | Some(ExprKind::Bool(true)) => true,
+            Some(ExprKind::Bool(false)) => false,
+            Some(ExprKind::Number(n)) => *n != 0.0,
+            _ => return fail("the 4th argument must be written in the formula: FALSE for an exact match, TRUE for the nearest smaller key of a sorted first column", args[3].span),
+        };
         let index = match &args[2].kind {
             ExprKind::Number(n) => n.trunc(),
             ExprKind::Unary { op: UnaryOp::Neg, expr } if matches!(expr.kind, ExprKind::Number(_)) => -1.0,
@@ -1031,14 +1105,16 @@ impl Compiler<'_> {
         let (key_col, key_ty) = Self::lookup_column(&rel, table, &key_name, args[1].span)?;
         let ret_name = rel.columns[index as usize - 1].0.clone();
         let (ret_col, ret_ty) = Self::lookup_column(&rel, table, &ret_name, args[2].span)?;
-        let wildcard = match probe.ty {
-            Ty::Text => Some(format!("CASE WHEN regexp_matches(COALESCE({}, ''), '[*?~]') THEN '#VALUE!' END", probe.v)),
-            _ => None,
-        };
         let probe_error = probe.e.clone();
-        let (jk, jv, je) = self.lookup_join(&rel, &[(probe, key_col, key_ty)], &ret_col, false);
-        let value = format!("CASE WHEN {jk} IS NOT NULL THEN {jv} END");
-        let error = first_error([probe_error, wildcard, Some(format!("CASE WHEN {jk} IS NOT NULL THEN {je} ELSE '#N/A' END"))]);
+        // Exact: text values are wildcard patterns, as in sheets.
+        let (fv, fe) = if approximate {
+            self.nearest(&rel, &probe, &key_col, key_ty, Returns::Column(&ret_col), Nearest::Smaller, true, true, Some(true))
+        } else {
+            self.find(&rel, probe, &key_col, key_ty, Returns::Column(&ret_col), 2, false)
+        };
+        let fe = self.bind(fe);
+        let value = format!("CASE WHEN {fe} IS NOT DISTINCT FROM {NOT_FOUND} THEN NULL ELSE {fv} END");
+        let error = first_error([probe_error, Some(format!("CASE WHEN {fe} IS NOT DISTINCT FROM {NOT_FOUND} THEN '#N/A' ELSE {fe} END"))]);
         Ok(self.make(value, error, ret_ty, span))
     }
 
@@ -1078,7 +1154,12 @@ pub fn compile_with_errors(formula: &str, columns: &[(String, String)], errors: 
 
 /// Like [`compile_with_errors`], resolving other tables through `relations`.
 pub fn compile_full(formula: &str, columns: &[(String, String)], errors: &[(String, String)], relations: &dyn Relations, prefix: &str) -> Result<Compiled, FormulaError> {
-    let ast = parse(formula)?;
+    compile_ast(&parse(formula)?, columns, errors, relations, prefix)
+}
+
+/// [`compile_full`] for a parsed formula.
+pub(crate) fn compile_ast(ast: &Expr, columns: &[(String, String)], errors: &[(String, String)], relations: &dyn Relations, prefix: &str) -> Result<Compiled, FormulaError> {
+    let ast = ast.clone();
     let mut c = Compiler { columns, errors, relations, stages: Vec::new(), tables: BTreeSet::new(), steps: Vec::new(), prefix: prefix.to_string(), refs: BTreeSet::new() };
     let top = c.expr(&ast)?;
     let ty = match top.ty {
@@ -1105,20 +1186,91 @@ pub enum Reference {
     /// A whole table (`T`, `T[#Data]`) and the column numbers (from 1) a VLOOKUP reads:
     /// its first column and the returned one.
     Table { table: String, positions: Vec<usize>, span: Span },
+    /// A sheet cell, with its `$` markers as typed.
+    Cell { cell: CellRef, fixed: (bool, bool), span: Span },
+}
+
+/// A sheet cell's table formula with its bare cells (`A1`) qualified by their sheet
+/// (`Report!A1`), as stored, and a map from positions in it back to positions in `formula`.
+pub fn qualify_cells(formula: &str, sheet: &str) -> Result<(String, impl Fn(usize) -> usize), FormulaError> {
+    let chars: Vec<char> = formula.chars().collect();
+    let mut edits = Vec::new();
+    for r in references_of(&super::parse::parse_in(formula, Some(sheet))?) {
+        if let Reference::Cell { cell, fixed, span } = r {
+            if !chars[span.start..span.end].contains(&'!') {
+                edits.push((span, cell.text(fixed)));
+            }
+        }
+    }
+    // (end of the edit in the new text, characters it added), in order.
+    let mut shifts: Vec<(usize, Span, isize)> = Vec::new();
+    let mut sorted = edits.clone();
+    sorted.sort_by_key(|(s, _)| s.start);
+    let mut added = 0isize;
+    for (span, text) in &sorted {
+        let n = text.chars().count() as isize - (span.end - span.start) as isize;
+        let new_start = (span.start as isize + added) as usize;
+        added += n;
+        shifts.push((new_start, *span, added));
+    }
+    let back = move |p: usize| -> usize {
+        let mut out = p as isize;
+        for (new_start, span, total) in shifts.iter().rev() {
+            if p >= *new_start {
+                // Inside a rewritten cell: its start; after it: undo every shift so far.
+                let new_end = (span.end as isize + total) as usize;
+                out = if p < new_end { span.start as isize } else { p as isize - total };
+                break;
+            }
+        }
+        out.max(0) as usize
+    };
+    Ok((splice(formula, edits), back))
+}
+
+/// A stored sheet-cell table formula as shown on sheet `home`: cells on that sheet without
+/// their sheet name. The formula unchanged if it does not parse.
+pub fn unqualify_cells(formula: &str, home: &str) -> String {
+    let Ok(refs) = references(formula) else { return formula.to_string() };
+    let edits = refs.into_iter().filter_map(|r| match r {
+        Reference::Cell { cell, fixed, span } if cell.sheet.to_lowercase() == home.to_lowercase() => {
+            Some((span, format!("{}{}{}{}", if fixed.0 { "$" } else { "" }, super::column_letters(cell.column), if fixed.1 { "$" } else { "" }, cell.row)))
+        }
+        _ => None,
+    }).collect();
+    splice(formula, edits)
 }
 
 /// Everything a formula reads, without compiling it.
 pub fn references(formula: &str) -> Result<Vec<Reference>, FormulaError> {
+    Ok(references_of(&parse(formula)?))
+}
+
+fn references_of(ast: &Expr) -> Vec<Reference> {
     fn walk(e: &Expr, out: &mut Vec<Reference>) {
         match &e.kind {
             ExprKind::Column { name, .. } => out.push(Reference::Own { column: name.clone(), span: e.span }),
             ExprKind::TableColumn { table, column } => out.push(Reference::Column { table: table.clone(), column: column.clone(), span: e.span }),
             ExprKind::Table { table } => out.push(Reference::Table { table: table.clone(), positions: Vec::new(), span: e.span }),
+            ExprKind::Cell { cell, fixed } => out.push(Reference::Cell { cell: cell.clone(), fixed: *fixed, span: e.span }),
             ExprKind::Unary { expr, .. } => walk(expr, out),
             ExprKind::Binary { left, right, .. } => { walk(left, out); walk(right, out); }
             ExprKind::Call { name, args } => {
                 let at = out.len();
                 args.iter().for_each(|a| walk(a, out));
+                // INDEX(Table, n, c) reads the table's c-th column.
+                if name == "INDEX" {
+                    if let (Some(Expr { kind: ExprKind::Table { .. }, span }), Some(Expr { kind: ExprKind::Number(c), .. })) = (args.first(), args.get(2)) {
+                        let c = c.trunc();
+                        for r in &mut out[at..] {
+                            if let Reference::Table { positions, span: s, .. } = r {
+                                if s == span && (1.0..1e6).contains(&c) {
+                                    *positions = vec![c as usize];
+                                }
+                            }
+                        }
+                    }
+                }
                 // VLOOKUP(value, Table, n, …) reads the table's first and n-th columns.
                 if name == "VLOOKUP" {
                     if let (Some(Expr { kind: ExprKind::Table { .. }, span }), Some(Expr { kind: ExprKind::Number(n), .. })) = (args.get(1), args.get(2)) {
@@ -1137,8 +1289,8 @@ pub fn references(formula: &str) -> Result<Vec<Reference>, FormulaError> {
         }
     }
     let mut out = Vec::new();
-    walk(&parse(formula)?, &mut out);
-    Ok(out)
+    walk(ast, &mut out);
+    out
 }
 
 /// Columns of its own table a formula reads (for rename/delete dependency checks).
@@ -1190,6 +1342,19 @@ pub fn rename_table(formula: &str, old: &str, new: &str) -> Result<Option<String
             let n = table.chars().count();
             Some((Span { start: span.start, end: span.start + n }, new.to_string()))
         }
+        _ => None,
+    }).collect();
+    Ok((!edits.is_empty()).then(|| splice(formula, edits)))
+}
+
+/// Rewrite sheet cell references: `map` gives a cell's new place (`Some(None)` when it is
+/// gone, written `#REF!`) or `None` to keep it. `None` when nothing changes.
+pub fn rewrite_cells(formula: &str, map: impl Fn(&CellRef) -> Option<Option<CellRef>>) -> Result<Option<String>, FormulaError> {
+    let edits: Vec<(Span, String)> = references(formula)?.into_iter().filter_map(|r| match r {
+        Reference::Cell { cell, fixed, span } => match map(&cell)? {
+            Some(to) => (to != cell).then(|| (span, to.text(fixed))),
+            None => Some((span, "#REF!".to_string())),
+        },
         _ => None,
     }).collect();
     Ok((!edits.is_empty()).then(|| splice(formula, edits)))

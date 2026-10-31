@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "catalog_version": "2026-10-30.2",
   "engine": "ironcalc-0.9.1",
   "sources": {
@@ -123,12 +123,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "ABS(number)",
       "summary": "Absolute value",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -232,6 +231,10 @@
             "abs-c05"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -479,12 +482,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "AND(logical1, [logical2, …])",
       "summary": "True when every condition is true",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -585,6 +587,12 @@
             "and-c02"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "refusals_explain_and_point_at_the_problem",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -832,12 +840,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "AVERAGE(number1, [number2, …])",
       "summary": "Arithmetic mean of numeric inputs",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -947,6 +954,12 @@
             "average-c02"
           ]
         }
+      ],
+      "table_modes": "Values of the row, or whole columns of one table.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -998,12 +1011,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "AVERAGEIF(range, criteria, [average_range])",
       "summary": "Average values selected by one condition",
       "argument_modes": "Per-argument rules below cite 4 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -1090,6 +1102,10 @@
             "averageif-c02"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -1097,12 +1113,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "AVERAGEIFS(average_range, criteria_range1, criteria1, …)",
       "summary": "Average values selected by multiple conditions",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
         "Original IronCalc 0.9.1 defect covered by local alephgrid-compat-1 regression; other modes remain uncertified."
       ],
@@ -1200,6 +1215,11 @@
             "averageifs-c02"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -1720,21 +1740,69 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "BYCOL(array, lambda)",
+      "summary": "One value per column of an array",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(BYCOL(A1:B4,LAMBDA(c,MAX(c))),1,1)",
+          "expected": "4"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "bycol-01",
+          "mode": "column maxima",
+          "formula": "=BYCOL(A1:B4,LAMBDA(c,MAX(c)))",
+          "expected": "4,40",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "bycol-02",
+          "mode": "column sums",
+          "formula": "=BYCOL(A1:B4,LAMBDA(c,SUM(c)))",
+          "expected": "9,100",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "bycol-01",
+            "bycol-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "LAMBDA(column) returning one value.",
+          "cases": [
+            "bycol-01",
+            "bycol-02"
+          ]
+        }
+      ]
     },
     {
       "name": "BYROW",
@@ -1742,21 +1810,68 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "BYROW(array, lambda)",
+      "summary": "One value per row of an array",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(BYROW(A1:B2,LAMBDA(r,SUM(r))),1,1)",
+          "expected": "11"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "byrow-01",
+          "mode": "row sums",
+          "formula": "=BYROW(A1:B2,LAMBDA(r,SUM(r)))",
+          "expected": "11;22",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "byrow-02",
+          "mode": "row maxima",
+          "formula": "=SUM(BYROW(A1:B4,LAMBDA(r,MAX(r))))",
+          "expected": "100",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "byrow-01",
+            "byrow-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "LAMBDA(row) returning one value.",
+          "cases": [
+            "byrow-01",
+            "byrow-02"
+          ]
+        }
+      ]
     },
     {
       "name": "CEILING",
@@ -2072,21 +2187,75 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "CHOOSECOLS(array, col_num1, [col_num2], …)",
+      "summary": "Chosen columns of an array, in the order given",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(CHOOSECOLS(A1:C4,3),1,1)",
+          "expected": "alpha"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "choosecols-01",
+          "mode": "one column",
+          "formula": "=CHOOSECOLS(A1:C4,3)",
+          "expected": "alpha;beta;beta;gamma",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "choosecols-02",
+          "mode": "negative and reordered",
+          "formula": "=CHOOSECOLS(A1:C2,-1,1)",
+          "expected": "alpha,1;beta,2",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "choosecols-01"
+          ]
+        },
+        {
+          "name": "col_num1",
+          "rule": "A column number from 1; negative counts from the end.",
+          "cases": [
+            "choosecols-01",
+            "choosecols-02"
+          ]
+        },
+        {
+          "name": "col_num2",
+          "rule": "More columns.",
+          "cases": [
+            "choosecols-02"
+          ]
+        }
+      ]
     },
     {
       "name": "CHOOSEROWS",
@@ -2094,21 +2263,74 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "CHOOSEROWS(array, row_num1, [row_num2], …)",
+      "summary": "Chosen rows of an array, in the order given",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(CHOOSEROWS(A1:A4,4,1),1,1)",
+          "expected": "4"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "chooserows-01",
+          "mode": "reordered",
+          "formula": "=CHOOSEROWS(A1:A4,4,1)",
+          "expected": "4;1",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "chooserows-02",
+          "mode": "outside the array",
+          "formula": "=CHOOSEROWS(A1:A4,5)",
+          "expected": "#VALUE!",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference. CHOOSEROWS returns #VALUE! for a row number outside the array."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "chooserows-01"
+          ]
+        },
+        {
+          "name": "row_num1",
+          "rule": "A row number from 1; outside the array #VALUE!.",
+          "cases": [
+            "chooserows-01",
+            "chooserows-02"
+          ]
+        },
+        {
+          "name": "row_num2",
+          "rule": "More rows.",
+          "cases": [
+            "chooserows-01"
+          ]
+        }
+      ]
     },
     {
       "name": "CLEAN",
@@ -2341,12 +2563,11 @@
       "category": "Operator",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "CONCAT(text1, [text2, …])",
       "summary": "Join text values",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -2447,6 +2668,10 @@
             "concat-c04"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -2674,12 +2899,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "COUNT(value1, [value2, …])",
       "summary": "Count numeric values",
       "argument_modes": "Per-argument rules below cite 4 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -2758,6 +2982,11 @@
             "count-c02"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -2765,12 +2994,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "COUNTA(value1, [value2, …])",
       "summary": "Count nonempty cells",
       "argument_modes": "Per-argument rules below cite 4 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -2848,6 +3076,11 @@
             "counta-01"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -2877,12 +3110,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "COUNTIF(range, criteria)",
       "summary": "Count cells selected by one condition",
       "argument_modes": "Per-argument rules below cite 13 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -3061,6 +3293,10 @@
             "countif-c09"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -3068,12 +3304,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "COUNTIFS(criteria_range1, criteria1, …)",
       "summary": "Count rows selected by multiple conditions",
       "argument_modes": "Per-argument rules below cite 4 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
         "Original IronCalc 0.9.1 defect covered by local alephgrid-compat-1 regression; other modes remain uncertified."
       ],
@@ -3153,6 +3388,11 @@
             "countifs-c02"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -3530,12 +3770,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "DATE(year, month, day)",
       "summary": "Construct a spreadsheet date serial",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -3641,6 +3880,11 @@
             "date-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -3734,12 +3978,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "DAY(date)",
       "summary": "Day of the month",
       "argument_modes": "Per-argument rules below cite 3 verified cases and 2 known gaps. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -3821,6 +4064,10 @@
             "day-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -4335,19 +4582,84 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "DROP(array, rows, [columns])",
+      "summary": "An array without its first (or last) rows or columns",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(DROP(A1:A4,1),1,1)",
+          "expected": "2"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "drop-01",
+          "mode": "from the start",
+          "formula": "=DROP(A1:A4,1)",
+          "expected": "2;2;4",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "drop-02",
+          "mode": "from the end",
+          "formula": "=DROP(A1:A4,-3)",
+          "expected": "1",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "drop-03",
+          "mode": "columns",
+          "formula": "=DROP(A1:C1,,2)",
+          "expected": "alpha",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "drop-01"
+          ]
+        },
+        {
+          "name": "rows",
+          "rule": "Rows to remove from the start; negative from the end.",
+          "cases": [
+            "drop-01",
+            "drop-02"
+          ]
+        },
+        {
+          "name": "columns",
+          "rule": "Columns to remove likewise.",
+          "cases": [
+            "drop-03"
+          ]
+        }
+      ]
     },
     {
       "name": "DSTDEV",
@@ -4486,12 +4798,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "EDATE(start_date, months)",
       "summary": "Move a date by calendar months",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -4580,6 +4891,11 @@
             "edate-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -4631,12 +4947,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "EOMONTH(start_date, months)",
       "summary": "Last day of a shifted calendar month",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -4725,6 +5040,10 @@
             "eomonth-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -5235,21 +5554,97 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "FILTER(array, include, [if_empty])",
+      "summary": "Keep the rows of an array where a condition holds",
+      "argument_modes": "Per-argument rules below cite 4 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(FILTER(C1:C4,A1:A4=2),1,1)",
+          "expected": "beta"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "filter-01",
+          "mode": "rows where a key matches",
+          "formula": "=FILTER(C1:C4,A1:A4=2)",
+          "expected": "beta;beta",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "filter-02",
+          "mode": "if_empty when nothing matches",
+          "formula": "=FILTER(A1:A4,A1:A4>9,\"none\")",
+          "expected": "none",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "filter-03",
+          "mode": "several conditions multiply",
+          "formula": "=FILTER(B1:B4,(A1:A4=2)*(B1:B4>20))",
+          "expected": "30",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "filter-04",
+          "mode": "no match without if_empty",
+          "formula": "=FILTER(A1:A4,A1:A4>9)",
+          "expected": "#CALC!",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference. FILTER returns #CALC! for an empty result."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The rows (or columns) to keep from.",
+          "cases": [
+            "filter-01",
+            "filter-03"
+          ]
+        },
+        {
+          "name": "include",
+          "rule": "A Boolean array of the same height; conditions multiply as AND.",
+          "cases": [
+            "filter-01",
+            "filter-03"
+          ]
+        },
+        {
+          "name": "if_empty",
+          "rule": "Returned when no row matches; without it the result is #CALC!.",
+          "cases": [
+            "filter-02",
+            "filter-04"
+          ]
+        }
+      ]
     },
     {
       "name": "FIND",
@@ -6252,21 +6647,68 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "HSTACK(array1, [array2], …)",
+      "summary": "Arrays side by side",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(HSTACK(A1:A2,C1:C2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "hstack-01",
+          "mode": "side by side",
+          "formula": "=HSTACK(A1:A2,C1:C2)",
+          "expected": "1,alpha;2,beta",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "hstack-02",
+          "mode": "padding",
+          "formula": "=IFNA(INDEX(HSTACK(A1:A2,C1),2,2),\"pad\")",
+          "expected": "pad",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference. HSTACK pads shorter arrays with #N/A."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array1",
+          "rule": "The first array.",
+          "cases": [
+            "hstack-01",
+            "hstack-02"
+          ]
+        },
+        {
+          "name": "array2",
+          "rule": "More arrays; shorter ones are padded with #N/A.",
+          "cases": [
+            "hstack-01",
+            "hstack-02"
+          ]
+        }
+      ]
     },
     {
       "name": "HYPERLINK",
@@ -6339,12 +6781,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "IF(condition, value_if_true, [value_if_false])",
       "summary": "Choose a result by condition",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -6463,6 +6904,13 @@
             "if-c05"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values",
+        "refusals_explain_and_point_at_the_problem",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -6470,12 +6918,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "IFERROR(value, value_if_error)",
       "summary": "Replace an error result",
       "argument_modes": "Per-argument rules below cite 4 verified cases and 1 known gap. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -6565,6 +7012,12 @@
             "iferror-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -6572,12 +7025,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "IFNA(value, value_if_na)",
       "summary": "Replace only a missing-value error",
       "argument_modes": "Per-argument rules below cite 3 verified cases and 1 known gap. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -6655,6 +7107,13 @@
             "ifna-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values",
+        "table_lookups_agree_with_the_sheet_engine",
+        "table_vlookups_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -6662,12 +7121,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "IFS(condition1, value1, …)",
       "summary": "Return the first matching branch",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -6757,6 +7215,10 @@
             "ifs-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -7512,12 +7974,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "INDEX(array, row_num, [column_num])",
       "summary": "Select an entry by position",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -7625,7 +8086,13 @@
             "index-c03"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys"
+      ],
+      "table_modes": "A whole column INDEX(T[c], n) or table INDEX(T, n, column) with the column written in the formula; row 0 or below gives #VALUE! (a table cell holds one value), past the end #REF!."
     },
     {
       "name": "INDIRECT",
@@ -7654,12 +8121,11 @@
       "category": "Math",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7669,7 +8135,11 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "INTERCEPT",
@@ -7786,12 +8256,11 @@
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7801,7 +8270,12 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "sheet_cells_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISDATE",
@@ -7852,12 +8326,11 @@
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7867,19 +8340,22 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISERROR",
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7889,7 +8365,12 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
+      ]
     },
     {
       "name": "ISEVEN",
@@ -7940,12 +8421,11 @@
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7955,19 +8435,22 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISNA",
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -7977,7 +8460,11 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISNONTEXT",
@@ -8006,12 +8493,11 @@
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -8021,7 +8507,11 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISO.CEILING",
@@ -8158,12 +8648,11 @@
       "category": "Info",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -8173,7 +8662,12 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "sheet_cells_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "ISURL",
@@ -8287,21 +8781,74 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "LAMBDA(parameter1, [parameter2], …, calculation)",
+      "summary": "A formula with parameters, called with arguments",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=LAMBDA(x,x+1)(A4)",
+          "expected": "5"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "lambda-01",
+          "mode": "called on a cell",
+          "formula": "=LAMBDA(x,x+1)(A4)",
+          "expected": "5",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "lambda-02",
+          "mode": "two parameters",
+          "formula": "=LAMBDA(a,b,a*b)(2,3)",
+          "expected": "6",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "parameter1",
+          "rule": "A parameter name.",
+          "cases": [
+            "lambda-01",
+            "lambda-02"
+          ]
+        },
+        {
+          "name": "parameter2",
+          "rule": "More parameters.",
+          "cases": [
+            "lambda-02"
+          ]
+        },
+        {
+          "name": "calculation",
+          "rule": "The result, in terms of the parameters.",
+          "cases": [
+            "lambda-01",
+            "lambda-02"
+          ]
+        }
+      ]
     },
     {
       "name": "LARGE",
@@ -8352,12 +8899,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "LEFT(text, [num_chars])",
       "summary": "Take characters from the start",
       "argument_modes": "Per-argument rules below cite 10 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -8501,6 +9047,11 @@
             "left-c07"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -8530,12 +9081,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "LEN(text)",
       "summary": "Count text length",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -8639,6 +9189,11 @@
             "len-c05"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -8669,21 +9224,90 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "LET(name1, value1, [name2], [value2], …, calculation)",
+      "summary": "Name intermediate values in a formula",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=LET(x,A2,y,B2,x*y)",
+          "expected": "40"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "let-01",
+          "mode": "two names",
+          "formula": "=LET(x,A2,y,B2,x*y)",
+          "expected": "40",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "let-02",
+          "mode": "a name reading an earlier one",
+          "formula": "=LET(s,SUM(A1:A4),h,s/2,h+1)",
+          "expected": "5.5",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "name1",
+          "rule": "A name, usable in later values and the calculation.",
+          "cases": [
+            "let-01",
+            "let-02"
+          ]
+        },
+        {
+          "name": "value1",
+          "rule": "Its value, computed once.",
+          "cases": [
+            "let-01",
+            "let-02"
+          ]
+        },
+        {
+          "name": "name2",
+          "rule": "More names.",
+          "cases": [
+            "let-01",
+            "let-02"
+          ]
+        },
+        {
+          "name": "value2",
+          "rule": "Their values; they may read earlier names.",
+          "cases": [
+            "let-02"
+          ]
+        },
+        {
+          "name": "calculation",
+          "rule": "The result.",
+          "cases": [
+            "let-01",
+            "let-02"
+          ]
+        }
+      ]
     },
     {
       "name": "LINEST",
@@ -8910,12 +9534,11 @@
       "category": "Text",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -8925,7 +9548,11 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "LT",
@@ -8977,21 +9604,76 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "MAKEARRAY(rows, columns, lambda)",
+      "summary": "An array computed cell by cell",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(MAKEARRAY(2,2,LAMBDA(r,c,r*10+c)),1,1)",
+          "expected": "11"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "makearray-01",
+          "mode": "from the position",
+          "formula": "=MAKEARRAY(2,2,LAMBDA(r,c,r*10+c))",
+          "expected": "11,12;21,22",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "makearray-02",
+          "mode": "sum of row numbers",
+          "formula": "=SUM(MAKEARRAY(3,1,LAMBDA(r,c,r)))",
+          "expected": "6",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "rows",
+          "rule": "Number of rows.",
+          "cases": [
+            "makearray-01",
+            "makearray-02"
+          ]
+        },
+        {
+          "name": "columns",
+          "rule": "Number of columns.",
+          "cases": [
+            "makearray-01",
+            "makearray-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "LAMBDA(row, column, value).",
+          "cases": [
+            "makearray-01",
+            "makearray-02"
+          ]
+        }
+      ]
     },
     {
       "name": "MAKEERROR",
@@ -9019,21 +9701,76 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "MAP(array1, [array2], …, lambda)",
+      "summary": "Apply a LAMBDA to each element",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(MAP(A1:A4,LAMBDA(x,x*2)),1,1)",
+          "expected": "2"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "map-01",
+          "mode": "one array",
+          "formula": "=MAP(A1:A4,LAMBDA(x,x*2))",
+          "expected": "2;4;4;8",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "map-02",
+          "mode": "two arrays",
+          "formula": "=MAP(A1:A2,B1:B2,LAMBDA(a,b,a+b))",
+          "expected": "11;22",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array1",
+          "rule": "The first array.",
+          "cases": [
+            "map-01",
+            "map-02"
+          ]
+        },
+        {
+          "name": "array2",
+          "rule": "More arrays of the same size, passed alongside.",
+          "cases": [
+            "map-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "Takes one argument per array.",
+          "cases": [
+            "map-01",
+            "map-02"
+          ]
+        }
+      ]
     },
     {
       "name": "MARGINOFERROR",
@@ -9062,12 +9799,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MATCH(lookup_value, lookup_array, [match_type])",
       "summary": "Find a matching position",
       "argument_modes": "Per-argument rules below cite 9 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -9208,19 +9944,24 @@
             "match-c04"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys"
+      ],
+      "table_modes": "Type 0 (exact; text values are wildcard patterns), 1 and -1 over a column sorted ascending/descending without blanks or errors (otherwise #N/A); positions count rows in table order; a blank value gives #N/A."
     },
     {
       "name": "MAX",
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MAX(number1, [number2, …])",
       "summary": "Largest numeric input",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -9321,6 +10062,13 @@
             "max-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row, or whole columns of one table.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -9350,12 +10098,11 @@
       "category": "Statistical",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -9365,7 +10112,12 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; compile table criteria to batched aggregate plans",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
+      ]
     },
     {
       "name": "MDETERM",
@@ -9438,12 +10190,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MID(text, start_num, num_chars)",
       "summary": "Extract characters from a position",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -9561,6 +10312,11 @@
             "mid-c04"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -9590,12 +10346,11 @@
       "category": "Statistical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MIN(number1, [number2, …])",
       "summary": "Smallest numeric input",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -9685,6 +10440,12 @@
             "min-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row, or whole columns of one table.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -9714,12 +10475,11 @@
       "category": "Statistical",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -9729,7 +10489,12 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; compile table criteria to batched aggregate plans",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
+      ]
     },
     {
       "name": "MINUS",
@@ -9846,12 +10611,11 @@
       "category": "Math",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -9861,7 +10625,11 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "MODE",
@@ -9934,12 +10702,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "MONTH(date)",
       "summary": "Month of a date",
       "argument_modes": "Per-argument rules below cite 4 verified cases and 1 known gap. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -10021,6 +10788,10 @@
             "month-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -10247,21 +11018,72 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "NETWORKDAYS(start_date, end_date, [holidays])",
+      "summary": "Working days between two dates, both included",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=NETWORKDAYS(DATE(2026,10,26),DATE(2026,11,1))",
+          "expected": "5"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "networkdays-01",
+          "mode": "a week",
+          "formula": "=NETWORKDAYS(DATE(2026,10,26),DATE(2026,11,1))",
+          "expected": "5",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        },
+        {
+          "id": "networkdays-02",
+          "mode": "with a holiday",
+          "formula": "=NETWORKDAYS(DATE(2026,10,26),DATE(2026,11,1),DATE(2026,10,30))",
+          "expected": "4",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "start_date",
+          "rule": "First day.",
+          "cases": [
+            "networkdays-01"
+          ]
+        },
+        {
+          "name": "end_date",
+          "rule": "Last day.",
+          "cases": [
+            "networkdays-01"
+          ]
+        },
+        {
+          "name": "holidays",
+          "rule": "Dates to skip.",
+          "cases": [
+            "networkdays-02"
+          ]
+        }
+      ]
     },
     {
       "name": "NETWORKDAYS.INTL",
@@ -10269,21 +11091,80 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "NETWORKDAYS.INTL(start_date, end_date, [weekend], [holidays])",
+      "summary": "Working days with chosen weekend days",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=NETWORKDAYS.INTL(DATE(2026,10,26),DATE(2026,11,1),11)",
+          "expected": "6"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "networkdaysintl-01",
+          "mode": "Sunday-only weekend",
+          "formula": "=NETWORKDAYS.INTL(DATE(2026,10,26),DATE(2026,11,1),11)",
+          "expected": "6",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        },
+        {
+          "id": "networkdaysintl-02",
+          "mode": "mask",
+          "formula": "=NETWORKDAYS.INTL(DATE(2026,10,26),DATE(2026,11,1),\"0000011\")",
+          "expected": "5",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "start_date",
+          "rule": "First day.",
+          "cases": [
+            "networkdaysintl-01"
+          ]
+        },
+        {
+          "name": "end_date",
+          "rule": "Last day.",
+          "cases": [
+            "networkdaysintl-01"
+          ]
+        },
+        {
+          "name": "weekend",
+          "rule": "A code (1 Sat–Sun, 11 Sunday only, …) or a seven-character mask from Monday, 1 = weekend.",
+          "cases": [
+            "networkdaysintl-01",
+            "networkdaysintl-02"
+          ]
+        },
+        {
+          "name": "holidays",
+          "rule": "Dates to skip.",
+          "cases": [
+            "networkdaysintl-02"
+          ]
+        }
+      ]
     },
     {
       "name": "NOMINAL",
@@ -10488,12 +11369,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "NOT(logical)",
       "summary": "Invert a condition",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -10575,6 +11455,10 @@
             "not-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -10898,12 +11782,11 @@
       "category": "Logical",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "OR(logical1, [logical2, …])",
       "summary": "True when any condition is true",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -10993,6 +11876,10 @@
             "or-c02"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -11879,21 +12766,75 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "REDUCE(initial_value, array, lambda)",
+      "summary": "Fold an array into one value",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=REDUCE(0,B1:B4,LAMBDA(a,x,a+x))",
+          "expected": "100"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "reduce-01",
+          "mode": "sum",
+          "formula": "=REDUCE(0,B1:B4,LAMBDA(a,x,a+x))",
+          "expected": "100",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "reduce-02",
+          "mode": "product",
+          "formula": "=REDUCE(1,A1:A4,LAMBDA(a,x,a*x))",
+          "expected": "16",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "initial_value",
+          "rule": "The starting accumulator.",
+          "cases": [
+            "reduce-01",
+            "reduce-02"
+          ]
+        },
+        {
+          "name": "array",
+          "rule": "Values in row order.",
+          "cases": [
+            "reduce-01",
+            "reduce-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "LAMBDA(accumulator, value).",
+          "cases": [
+            "reduce-01",
+            "reduce-02"
+          ]
+        }
+      ]
     },
     {
       "name": "REGEXEXTRACT",
@@ -12052,12 +12993,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "RIGHT(text, [num_chars])",
       "summary": "Take characters from the end",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -12156,6 +13096,10 @@
             "right-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -12207,12 +13151,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "ROUND(number, num_digits)",
       "summary": "Round to a decimal precision",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -12322,6 +13265,12 @@
             "round-c04"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values",
+        "refusals_explain_and_point_at_the_problem"
       ]
     },
     {
@@ -12329,12 +13278,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "ROUNDDOWN(number, num_digits)",
       "summary": "Round toward zero",
       "argument_modes": "Per-argument rules below cite 4 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -12411,6 +13359,10 @@
             "rounddown-02"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -12418,12 +13370,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "ROUNDUP(number, num_digits)",
       "summary": "Round away from zero",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -12512,6 +13463,11 @@
             "roundup-c01"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -12608,21 +13564,77 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "SCAN(initial_value, array, lambda)",
+      "summary": "Running accumulation over an array",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(SCAN(0,A1:A4,LAMBDA(a,x,a+x)),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "scan-01",
+          "mode": "running total",
+          "formula": "=SCAN(0,A1:A4,LAMBDA(a,x,a+x))",
+          "expected": "1;3;5;9",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "scan-02",
+          "mode": "running text",
+          "formula": "=SCAN(\"\",C1:C2,LAMBDA(a,x,a&LEFT(x,1)))",
+          "expected": "a;ab",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "initial_value",
+          "rule": "The starting accumulator.",
+          "cases": [
+            "scan-01",
+            "scan-02"
+          ]
+        },
+        {
+          "name": "array",
+          "rule": "Values in row order.",
+          "cases": [
+            "scan-01",
+            "scan-02"
+          ]
+        },
+        {
+          "name": "lambda",
+          "rule": "LAMBDA(accumulator, value); each step's result is kept.",
+          "cases": [
+            "scan-01",
+            "scan-02"
+          ]
+        }
+      ]
     },
     {
       "name": "SEARCH",
@@ -12780,21 +13792,81 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "SEQUENCE(rows, [columns], [start], [step])",
+      "summary": "An array of numbers in sequence",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(SEQUENCE(4),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "sequence-01",
+          "mode": "one column",
+          "formula": "=SEQUENCE(4)",
+          "expected": "1;2;3;4",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "sequence-02",
+          "mode": "grid with start and step",
+          "formula": "=SUM(SEQUENCE(2,3,10,5))",
+          "expected": "135",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "rows",
+          "rule": "Number of rows.",
+          "cases": [
+            "sequence-01",
+            "sequence-02"
+          ]
+        },
+        {
+          "name": "columns",
+          "rule": "Number of columns (default 1).",
+          "cases": [
+            "sequence-02"
+          ]
+        },
+        {
+          "name": "start",
+          "rule": "First number (default 1).",
+          "cases": [
+            "sequence-02"
+          ]
+        },
+        {
+          "name": "step",
+          "rule": "Increment (default 1), row by row.",
+          "cases": [
+            "sequence-02"
+          ]
+        }
+      ]
     },
     {
       "name": "SERIESSUM",
@@ -13064,21 +14136,94 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "SORT(array, [sort_index], [sort_order], [by_col])",
+      "summary": "Sort the rows of an array",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(SORT(B1:B4,1,-1),1,1)",
+          "expected": "40"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "sort-01",
+          "mode": "descending",
+          "formula": "=SORT(B1:B4,1,-1)",
+          "expected": "40;30;20;10",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "sort-02",
+          "mode": "text ascending",
+          "formula": "=SORT(C1:C4)",
+          "expected": "alpha;beta;beta;gamma",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "sort-03",
+          "mode": "by the second column",
+          "formula": "=SORT(A1:B4,2,-1)",
+          "expected": "4,40;2,30;2,20;1,10",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array to sort; rows move together.",
+          "cases": [
+            "sort-01",
+            "sort-03"
+          ]
+        },
+        {
+          "name": "sort_index",
+          "rule": "Which column to sort by (default 1).",
+          "cases": [
+            "sort-03"
+          ]
+        },
+        {
+          "name": "sort_order",
+          "rule": "1 ascending (default), -1 descending.",
+          "cases": [
+            "sort-01",
+            "sort-02"
+          ]
+        },
+        {
+          "name": "by_col",
+          "rule": "TRUE sorts columns instead of rows (default FALSE).",
+          "cases": [
+            "sort-02"
+          ]
+        }
+      ]
     },
     {
       "name": "SORTBY",
@@ -13086,19 +14231,88 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "SORTBY(array, by_array1, [sort_order1], [by_array2], [sort_order2], …)",
+      "summary": "Sort an array by other arrays",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(SORTBY(C1:C4,B1:B4,-1),1,1)",
+          "expected": "gamma"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "sortby-01",
+          "mode": "by another column, descending",
+          "formula": "=SORTBY(C1:C4,B1:B4,-1)",
+          "expected": "gamma;beta;beta;alpha",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "sortby-02",
+          "mode": "two keys",
+          "formula": "=SORTBY(B1:B4,A1:A4,-1,B1:B4,1)",
+          "expected": "40;20;30;10",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array to sort.",
+          "cases": [
+            "sortby-01"
+          ]
+        },
+        {
+          "name": "by_array1",
+          "rule": "The first sort key, as tall as the array.",
+          "cases": [
+            "sortby-01",
+            "sortby-02"
+          ]
+        },
+        {
+          "name": "sort_order1",
+          "rule": "1 ascending (default), -1 descending.",
+          "cases": [
+            "sortby-01",
+            "sortby-02"
+          ]
+        },
+        {
+          "name": "by_array2",
+          "rule": "A second key for ties.",
+          "cases": [
+            "sortby-02"
+          ]
+        },
+        {
+          "name": "sort_order2",
+          "rule": "Its order.",
+          "cases": [
+            "sortby-02"
+          ]
+        }
+      ]
     },
     {
       "name": "SORTN",
@@ -13391,12 +14605,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "SUBSTITUTE(text, old_text, new_text, [instance_num])",
       "summary": "Replace literal text occurrences",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -13520,6 +14733,10 @@
             "substitute-c04"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -13528,33 +14745,85 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "SUBTOTAL(function_num, ref1, [ref2], …)",
+      "summary": "An aggregate chosen by number",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=SUBTOTAL(9,B1:B4)",
+          "expected": "100"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "subtotal-01",
+          "mode": "sum",
+          "formula": "=SUBTOTAL(9,B1:B4)",
+          "expected": "100",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "subtotal-02",
+          "mode": "average",
+          "formula": "=SUBTOTAL(1,B1:B4)",
+          "expected": "25",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "function_num",
+          "rule": "1 AVERAGE, 9 SUM, … (101–111 also skip hidden rows).",
+          "cases": [
+            "subtotal-01",
+            "subtotal-02"
+          ]
+        },
+        {
+          "name": "ref1",
+          "rule": "The range.",
+          "cases": [
+            "subtotal-01",
+            "subtotal-02"
+          ]
+        },
+        {
+          "name": "ref2",
+          "rule": "More ranges.",
+          "cases": [
+            "subtotal-01"
+          ]
+        }
+      ]
     },
     {
       "name": "SUM",
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "SUM(number1, [number2, …])",
       "summary": "Add numeric inputs",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -13667,6 +14936,13 @@
             "sum-c05"
           ]
         }
+      ],
+      "table_modes": "Values of the row, or whole columns of one table.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand",
+        "sheet_cells_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -13674,12 +14950,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "SUMIF(range, criteria, [sum_range])",
       "summary": "Sum values selected by one condition",
       "argument_modes": "Per-argument rules below cite 7 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -13799,6 +15074,10 @@
             "sumif-c01"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine"
       ]
     },
     {
@@ -13806,12 +15085,11 @@
       "category": "Math",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "SUMIFS(sum_range, criteria_range1, criteria1, …)",
       "summary": "Sum values selected by multiple conditions",
       "argument_modes": "Per-argument rules below cite 6 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
         "Original IronCalc 0.9.1 defect covered by local alephgrid-compat-1 regression; other modes remain uncertified."
       ],
@@ -13920,6 +15198,11 @@
             "sumifs-c03"
           ]
         }
+      ],
+      "table_modes": "Whole columns of one table; criteria as the sheet engine reads them.",
+      "table_evidence": [
+        "conditional_aggregates_agree_with_the_sheet_engine",
+        "conditional_aggregates_by_hand"
       ]
     },
     {
@@ -14236,19 +15519,84 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TAKE(array, rows, [columns])",
+      "summary": "The first (or, with negative counts, last) rows or columns",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(TAKE(A1:A4,2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "take-01",
+          "mode": "from the start",
+          "formula": "=TAKE(A1:A4,2)",
+          "expected": "1;2",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "take-02",
+          "mode": "from the end",
+          "formula": "=TAKE(A1:A4,-1)",
+          "expected": "4",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "take-03",
+          "mode": "columns",
+          "formula": "=TAKE(A1:C1,,2)",
+          "expected": "1,10",
+          "status": "known_gap",
+          "note": "IronCalc 0.9.1 reads the omitted rows argument as 0 and returns #CALC!; Excel takes all rows (Microsoft TAKE reference). Upstream proposal in F.14.",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference: omitted arguments take their defaults.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "take-01"
+          ]
+        },
+        {
+          "name": "rows",
+          "rule": "Rows to keep from the start; negative counts from the end.",
+          "cases": [
+            "take-01",
+            "take-02"
+          ]
+        },
+        {
+          "name": "columns",
+          "rule": "Columns to keep likewise.",
+          "cases": [
+            "take-03"
+          ]
+        }
+      ]
     },
     {
       "name": "TAN",
@@ -14388,21 +15736,67 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TEXT(value, format_text)",
+      "summary": "A number formatted as text",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=TEXT(0.5,\"0%\")",
+          "expected": "50%"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "text-01",
+          "mode": "percent",
+          "formula": "=TEXT(0.5,\"0%\")",
+          "expected": "50%",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "text-02",
+          "mode": "thousands and decimals",
+          "formula": "=TEXT(1234.5,\"#,##0.00\")",
+          "expected": "1,234.50",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "value",
+          "rule": "The number.",
+          "cases": [
+            "text-01",
+            "text-02"
+          ]
+        },
+        {
+          "name": "format_text",
+          "rule": "A number format such as 0%, #,##0.00 or yyyy-mm-dd.",
+          "cases": [
+            "text-01",
+            "text-02"
+          ]
+        }
+      ]
     },
     {
       "name": "TEXTAFTER",
@@ -14410,19 +15804,102 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+      "summary": "Text after a delimiter",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=TEXTAFTER(\"a-b-c\",\"-\")",
+          "expected": "b-c"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "textafter-01",
+          "mode": "first delimiter",
+          "formula": "=TEXTAFTER(\"a-b-c\",\"-\")",
+          "expected": "b-c",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "textafter-02",
+          "mode": "last delimiter",
+          "formula": "=TEXTAFTER(\"a-b-c\",\"-\",-1)",
+          "expected": "c",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "textafter-03",
+          "mode": "not found",
+          "formula": "=TEXTAFTER(\"abc\",\"-\",,,,\"none\")",
+          "expected": "none",
+          "status": "known_gap",
+          "note": "IronCalc 0.9.1 returns #VALUE! when instance_num, match_mode and match_end are omitted before if_not_found; Excel returns if_not_found. Upstream proposal in F.14.",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference: omitted arguments take their defaults."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "text",
+          "rule": "The text.",
+          "cases": [
+            "textafter-01"
+          ]
+        },
+        {
+          "name": "delimiter",
+          "rule": "What to find.",
+          "cases": [
+            "textafter-01",
+            "textafter-02"
+          ]
+        },
+        {
+          "name": "instance_num",
+          "rule": "Which occurrence (default 1; negative from the end).",
+          "cases": [
+            "textafter-02"
+          ]
+        },
+        {
+          "name": "match_mode",
+          "rule": "1 matches case-insensitively.",
+          "cases": [
+            "textafter-01"
+          ]
+        },
+        {
+          "name": "match_end",
+          "rule": "1 treats the end as a delimiter.",
+          "cases": [
+            "textafter-01"
+          ]
+        },
+        {
+          "name": "if_not_found",
+          "rule": "Returned when the delimiter is missing.",
+          "cases": [
+            "textafter-03"
+          ]
+        }
+      ]
     },
     {
       "name": "TEXTBEFORE",
@@ -14430,19 +15907,102 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+      "summary": "Text before a delimiter",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=TEXTBEFORE(\"a-b-c\",\"-\")",
+          "expected": "a"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "textbefore-01",
+          "mode": "first delimiter",
+          "formula": "=TEXTBEFORE(\"a-b-c\",\"-\")",
+          "expected": "a",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "textbefore-02",
+          "mode": "second delimiter",
+          "formula": "=TEXTBEFORE(\"a-b-c\",\"-\",2)",
+          "expected": "a-b",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "textbefore-03",
+          "mode": "not found",
+          "formula": "=TEXTBEFORE(\"abc\",\"-\",,,,\"none\")",
+          "expected": "none",
+          "status": "known_gap",
+          "note": "IronCalc 0.9.1 returns #VALUE! when instance_num, match_mode and match_end are omitted before if_not_found; Excel returns if_not_found. Upstream proposal in F.14.",
+          "group": "modes",
+          "oracle": "Microsoft Excel function reference: omitted arguments take their defaults."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "text",
+          "rule": "The text.",
+          "cases": [
+            "textbefore-01"
+          ]
+        },
+        {
+          "name": "delimiter",
+          "rule": "What to find.",
+          "cases": [
+            "textbefore-01",
+            "textbefore-02"
+          ]
+        },
+        {
+          "name": "instance_num",
+          "rule": "Which occurrence (default 1; negative from the end).",
+          "cases": [
+            "textbefore-02"
+          ]
+        },
+        {
+          "name": "match_mode",
+          "rule": "1 matches case-insensitively.",
+          "cases": [
+            "textbefore-01"
+          ]
+        },
+        {
+          "name": "match_end",
+          "rule": "1 treats the end as a delimiter.",
+          "cases": [
+            "textbefore-01"
+          ]
+        },
+        {
+          "name": "if_not_found",
+          "rule": "Returned when the delimiter is missing (default #N/A).",
+          "cases": [
+            "textbefore-03"
+          ]
+        }
+      ]
     },
     {
       "name": "TEXTJOIN",
@@ -14571,19 +16131,104 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])",
+      "summary": "Split text into an array",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(TEXTSPLIT(\"a,b,c\",\",\"),1,1)",
+          "expected": "a"
+        }
+      ],
       "sources": [],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "textsplit-01",
+          "mode": "columns",
+          "formula": "=TEXTSPLIT(\"a,b,c\",\",\")",
+          "expected": "a,b,c",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "textsplit-02",
+          "mode": "rows",
+          "formula": "=ROWS(TEXTSPLIT(\"a,b;c,d\",\",\",\";\"))",
+          "expected": "2",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "textsplit-03",
+          "mode": "skip empty parts",
+          "formula": "=COLUMNS(TEXTSPLIT(\"a,,b\",\",\",,TRUE))",
+          "expected": "2",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "text",
+          "rule": "The text.",
+          "cases": [
+            "textsplit-01",
+            "textsplit-02"
+          ]
+        },
+        {
+          "name": "col_delimiter",
+          "rule": "Splits into columns.",
+          "cases": [
+            "textsplit-01",
+            "textsplit-02"
+          ]
+        },
+        {
+          "name": "row_delimiter",
+          "rule": "Splits into rows.",
+          "cases": [
+            "textsplit-02"
+          ]
+        },
+        {
+          "name": "ignore_empty",
+          "rule": "TRUE skips empty parts.",
+          "cases": [
+            "textsplit-03"
+          ]
+        },
+        {
+          "name": "match_mode",
+          "rule": "1 matches delimiters case-insensitively.",
+          "cases": [
+            "textsplit-03"
+          ]
+        },
+        {
+          "name": "pad_with",
+          "rule": "Fills short rows.",
+          "cases": [
+            "textsplit-02"
+          ]
+        }
+      ]
     },
     {
       "name": "TIME",
@@ -14677,21 +16322,84 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TOCOL(array, [ignore], [scan_by_column])",
+      "summary": "An array as one column",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(TOCOL(A1:B2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "tocol-01",
+          "mode": "row by row",
+          "formula": "=TOCOL(A1:B2)",
+          "expected": "1;10;2;20",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "tocol-02",
+          "mode": "column by column",
+          "formula": "=TOCOL(A1:B2,0,TRUE)",
+          "expected": "1;2;10;20",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "tocol-03",
+          "mode": "skip blanks",
+          "formula": "=ROWS(TOCOL(F3:F4,1))",
+          "expected": "1",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "tocol-01"
+          ]
+        },
+        {
+          "name": "ignore",
+          "rule": "0 keep all (default), 1 skip blanks, 2 skip errors, 3 both.",
+          "cases": [
+            "tocol-03"
+          ]
+        },
+        {
+          "name": "scan_by_column",
+          "rule": "TRUE reads column by column (default row by row).",
+          "cases": [
+            "tocol-02"
+          ]
+        }
+      ]
     },
     {
       "name": "TODAY",
@@ -14721,21 +16429,73 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TOROW(array, [ignore], [scan_by_column])",
+      "summary": "An array as one row",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(TOROW(A1:B2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "torow-01",
+          "mode": "row by row",
+          "formula": "=TOROW(A1:B2)",
+          "expected": "1,10,2,20",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "torow-02",
+          "mode": "skip blanks and errors",
+          "formula": "=COLUMNS(TOROW(F3:F5,3))",
+          "expected": "1",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "torow-01"
+          ]
+        },
+        {
+          "name": "ignore",
+          "rule": "0 keep all, 1 skip blanks, 2 skip errors, 3 both.",
+          "cases": [
+            "torow-02"
+          ]
+        },
+        {
+          "name": "scan_by_column",
+          "rule": "TRUE reads column by column.",
+          "cases": [
+            "torow-01"
+          ]
+        }
+      ]
     },
     {
       "name": "TO_DATE",
@@ -14853,21 +16613,60 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "TRANSPOSE(array)",
+      "summary": "Rows become columns",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(TRANSPOSE(A1:B2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "transpose-01",
+          "mode": "2×2",
+          "formula": "=TRANSPOSE(A1:B2)",
+          "expected": "1,2;10,20",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "transpose-02",
+          "mode": "a row becomes a column",
+          "formula": "=ROWS(TRANSPOSE(A1:C1))",
+          "expected": "3",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array to turn.",
+          "cases": [
+            "transpose-01",
+            "transpose-02"
+          ]
+        }
+      ]
     },
     {
       "name": "TREND",
@@ -14896,12 +16695,11 @@
       "category": "Text",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "TRIM(text)",
       "summary": "Normalize ordinary surrounding and repeated spaces",
       "argument_modes": "Per-argument rules below cite 5 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -14983,6 +16781,11 @@
             "trim-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {
@@ -15289,21 +17092,75 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "UNIQUE(array, [by_col], [exactly_once])",
+      "summary": "Distinct rows of an array, in first-appearance order",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(UNIQUE(C1:C4),1,1)",
+          "expected": "alpha"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "unique-01",
+          "mode": "distinct text",
+          "formula": "=UNIQUE(C1:C4)",
+          "expected": "alpha;beta;gamma",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "unique-02",
+          "mode": "exactly once",
+          "formula": "=UNIQUE(A1:A4,FALSE,TRUE)",
+          "expected": "1;4",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array",
+          "rule": "The array.",
+          "cases": [
+            "unique-01",
+            "unique-02"
+          ]
+        },
+        {
+          "name": "by_col",
+          "rule": "TRUE compares columns (default FALSE).",
+          "cases": [
+            "unique-02"
+          ]
+        },
+        {
+          "name": "exactly_once",
+          "rule": "TRUE keeps only values that appear once.",
+          "cases": [
+            "unique-02"
+          ]
+        }
+      ]
     },
     {
       "name": "UPLUS",
@@ -15332,12 +17189,11 @@
       "category": "Text",
       "priority": "P2",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": null,
       "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
       "argument_modes": "Not reviewed.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [],
@@ -15347,7 +17203,13 @@
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "multi_key_lookups_agree_with_the_sheet_engine",
+        "table_lookups_agree_with_the_sheet_engine"
+      ]
     },
     {
       "name": "VALUE",
@@ -15355,21 +17217,70 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "VALUE(text)",
+      "summary": "Text read as a number",
+      "argument_modes": "Per-argument rules below cite 3 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=VALUE(\"1.5\")",
+          "expected": "1.5"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "value-01",
+          "mode": "decimal text",
+          "formula": "=VALUE(\"1.5\")",
+          "expected": "1.5",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "value-02",
+          "mode": "not a number",
+          "formula": "=VALUE(\"abc\")",
+          "expected": "#VALUE!",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        },
+        {
+          "id": "value-03",
+          "mode": "numeric text cell",
+          "formula": "=VALUE(F2)",
+          "expected": "2",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "text",
+          "rule": "Text that reads as a number; numbers pass through; other text #VALUE!.",
+          "cases": [
+            "value-01",
+            "value-02",
+            "value-03"
+          ]
+        }
+      ]
     },
     {
       "name": "VAR",
@@ -15530,12 +17441,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "VLOOKUP(lookup_value, table_array, column_index, [approximate])",
       "summary": "Find a key in the first column",
       "argument_modes": "Per-argument rules below cite 10 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
         "Original IronCalc 0.9.1 defect covered by local alephgrid-compat-1 regression; other modes remain uncertified."
       ],
@@ -15694,6 +17604,14 @@
             "vlookup-04"
           ]
         }
+      ],
+      "table_modes": "Exact (FALSE; text values are wildcard patterns) or approximate (TRUE or omitted: the last row whose first-column key is at most the value, in a first column sorted ascending without blanks or errors; otherwise #N/A).",
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine",
+        "sorted_lookups_refuse_unsorted_keys",
+        "table_vlookups_agree_with_the_sheet_engine",
+        "vlookup_reads_patterns_and_xlookup_compares_literally"
       ]
     },
     {
@@ -15702,21 +17620,68 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "VSTACK(array1, [array2], …)",
+      "summary": "Arrays one below another",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=INDEX(VSTACK(A1:A2,C1:C2),1,1)",
+          "expected": "1"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "vstack-01",
+          "mode": "stacked",
+          "formula": "=VSTACK(A1:A2,C1:C2)",
+          "expected": "1;2;alpha;beta",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition.",
+          "spill": true
+        },
+        {
+          "id": "vstack-02",
+          "mode": "height",
+          "formula": "=ROWS(VSTACK(A1:A4,B1:B2))",
+          "expected": "6",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Hand-calculated from the shared fixture and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "array1",
+          "rule": "The first array.",
+          "cases": [
+            "vstack-01",
+            "vstack-02"
+          ]
+        },
+        {
+          "name": "array2",
+          "rule": "More arrays.",
+          "cases": [
+            "vstack-01",
+            "vstack-02"
+          ]
+        }
+      ]
     },
     {
       "name": "WEEKDAY",
@@ -15832,21 +17797,73 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "WORKDAY(start_date, days, [holidays])",
+      "summary": "The date a number of working days away",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=TEXT(WORKDAY(DATE(2026,10,30),1),\"yyyy-mm-dd\")",
+          "expected": "2026-11-02"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "workday-01",
+          "mode": "over a weekend",
+          "formula": "=TEXT(WORKDAY(DATE(2026,10,30),1),\"yyyy-mm-dd\")",
+          "expected": "2026-11-02",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        },
+        {
+          "id": "workday-02",
+          "mode": "over a holiday and a weekend",
+          "formula": "=TEXT(WORKDAY(DATE(2026,12,24),1,DATE(2026,12,25)),\"yyyy-mm-dd\")",
+          "expected": "2026-12-28",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "start_date",
+          "rule": "The start.",
+          "cases": [
+            "workday-01"
+          ]
+        },
+        {
+          "name": "days",
+          "rule": "Working days forward (negative: back).",
+          "cases": [
+            "workday-01",
+            "workday-02"
+          ]
+        },
+        {
+          "name": "holidays",
+          "rule": "Dates to skip.",
+          "cases": [
+            "workday-02"
+          ]
+        }
+      ]
     },
     {
       "name": "WORKDAY.INTL",
@@ -15854,21 +17871,81 @@
       "priority": "P1",
       "sheet_status": "registered",
       "table_status": "not_supported",
-      "signature": null,
-      "summary": "Compatibility inventory entry; usage has not been reviewed in Alephgrid.",
-      "argument_modes": "Not reviewed.",
+      "signature": "WORKDAY.INTL(start_date, days, [weekend], [holidays])",
+      "summary": "WORKDAY with chosen weekend days",
+      "argument_modes": "Per-argument rules below cite 2 hand-checked cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
         "Spreadsheet-style references to DuckDB tables are not supported.",
-        "Registry recognition is not a full Excel/Sheets compatibility guarantee."
+        "Reviewed in F.10 (P1): the cited cases are verified; other modes are not certified."
       ],
-      "evidence": [],
-      "examples": [],
+      "evidence": [
+        "certification_cases_match_independent_expectations"
+      ],
+      "examples": [
+        {
+          "formula": "=TEXT(WORKDAY.INTL(DATE(2026,10,30),1,11),\"yyyy-mm-dd\")",
+          "expected": "2026-10-31"
+        }
+      ],
       "sources": [
         "google"
       ],
       "implementation": "Reuse IronCalc in sheets; verify arguments/errors and publish compatibility tests; table execution only after shape/semantic validation",
       "upstream": "No new function needed; contribute reproduced semantic/performance fixes",
-      "verification_cases": []
+      "verification_cases": [
+        {
+          "id": "workdayintl-01",
+          "mode": "Saturday works",
+          "formula": "=TEXT(WORKDAY.INTL(DATE(2026,10,30),1,11),\"yyyy-mm-dd\")",
+          "expected": "2026-10-31",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        },
+        {
+          "id": "workdayintl-02",
+          "mode": "backwards with a mask",
+          "formula": "=TEXT(WORKDAY.INTL(DATE(2026,10,30),-1,\"0000011\"),\"yyyy-mm-dd\")",
+          "expected": "2026-10-29",
+          "status": "verified",
+          "note": "",
+          "group": "modes",
+          "oracle": "Calendar facts (2026-10-26 is a Monday) and the function definition."
+        }
+      ],
+      "arguments": [
+        {
+          "name": "start_date",
+          "rule": "The start.",
+          "cases": [
+            "workdayintl-01"
+          ]
+        },
+        {
+          "name": "days",
+          "rule": "Working days forward (negative: back).",
+          "cases": [
+            "workdayintl-01",
+            "workdayintl-02"
+          ]
+        },
+        {
+          "name": "weekend",
+          "rule": "A code or a seven-character mask from Monday.",
+          "cases": [
+            "workdayintl-01",
+            "workdayintl-02"
+          ]
+        },
+        {
+          "name": "holidays",
+          "rule": "Dates to skip.",
+          "cases": [
+            "workdayintl-01"
+          ]
+        }
+      ]
     },
     {
       "name": "WRAPCOLS",
@@ -15941,12 +18018,11 @@
       "category": "Lookup",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "XLOOKUP(lookup_value, lookup_array, return_array, [if_not_found], [match_mode], [search_mode])",
       "summary": "Return a corresponding value for a key",
       "argument_modes": "Per-argument rules below cite 14 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee.",
         "Local alephgrid-compat-1 supports one-dimensional inline lookup arrays with equally shaped array/range results. Range lookup with inline result arrays and multi-column result spills remain unsupported."
       ],
@@ -16164,6 +18240,14 @@
             "xlookup-09"
           ]
         }
+      ],
+      "table_modes": "match_mode 0 (exact), -1/1 (exact or next smaller/larger, in the sheet engine's comparison order) and 2 (wildcards), from the first or last row (search_mode 1/-1); lookup and return arrays are columns of one table, or exact multi-key conditions such as (T[a]=x)*(T[b]=y). Binary search (search_mode 2/-2) is refused.",
+      "table_evidence": [
+        "approximate_and_wildcard_lookups_agree_with_the_sheet_engine",
+        "multi_key_lookups_agree_with_the_sheet_engine",
+        "refusals_explain_and_point_at_the_problem",
+        "table_lookups_agree_with_the_sheet_engine",
+        "vlookup_reads_patterns_and_xlookup_compares_literally"
       ]
     },
     {
@@ -16171,12 +18255,11 @@
       "category": "Other",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "XMATCH(lookup_value, lookup_array, [match_mode], [search_mode])",
       "summary": "Find a matching position with explicit modes",
       "argument_modes": "Per-argument rules below cite 11 verified cases. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -16344,7 +18427,12 @@
             "xmatch-08"
           ]
         }
-      ]
+      ],
+      "table_evidence": [
+        "refusals_explain_and_point_at_the_problem",
+        "sorted_lookups_matches_and_positions_agree_with_the_sheet_engine"
+      ],
+      "table_modes": "match_mode 0, -1, 1 and 2 from the first or last row, as XLOOKUP; positions count rows in table order. Binary search is refused."
     },
     {
       "name": "XNPV",
@@ -16395,12 +18483,11 @@
       "category": "Date",
       "priority": "P0",
       "sheet_status": "registered",
-      "table_status": "not_supported",
+      "table_status": "supported",
       "signature": "YEAR(date)",
       "summary": "Year of a date",
       "argument_modes": "Per-argument rules below cite 4 verified cases and 1 known gap. Inputs and modes not listed remain uncertified; this is not a full Excel or Sheets compatibility claim.",
       "limitations": [
-        "Spreadsheet-style references to DuckDB tables are not supported.",
         "Registry recognition is not a full Excel/Sheets compatibility guarantee."
       ],
       "evidence": [
@@ -16482,6 +18569,11 @@
             "year-c03"
           ]
         }
+      ],
+      "table_modes": "Values of the row and of earlier columns, with sheet-engine coercion and error rules.",
+      "table_evidence": [
+        "compiled_formulas_agree_with_the_sheet_engine",
+        "golden_values"
       ]
     },
     {

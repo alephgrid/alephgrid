@@ -15,6 +15,8 @@ export interface GridModel {
   color?(value: CellValue, column: Column): string | undefined;
   columns(): Column[];
   canAppend(): boolean;
+  /** Values a list rule allows in a column (shown as a dropdown while editing). */
+  choices?(column: string): string[];
   sort(): SortKey[];
   filters(): Filter[];
   /** Cached value of a table cell, or undefined while loading. */
@@ -75,6 +77,7 @@ export class Grid {
   private scroller: HTMLDivElement;
   private spacer: HTMLDivElement;
   private editor: HTMLInputElement;
+  private choiceList = Object.assign(document.createElement("datalist"), { id: `grid-choices-${Math.random().toString(36).slice(2)}` });
   private colors = palette();
 
   private widths: number[] = [];
@@ -120,6 +123,7 @@ export class Grid {
     this.spacer.className = "grid-spacer";
     this.scroller.appendChild(this.spacer);
     this.editor = document.createElement("input");
+    document.body.append(this.choiceList);
     this.editor.className = "grid-editor";
     this.editor.spellcheck = false;
     this.editor.setAttribute("aria-label", "Edit cell");
@@ -317,6 +321,10 @@ export class Grid {
     }
     if (this.active.r >= this.model.rowCount() && !this.model.canAppend()) return;
     this.editing = { ...this.active };
+    // A column with a list rule (F.12) offers its values as a dropdown.
+    const choices = this.model.choices?.(col.name) ?? [];
+    this.choiceList.replaceChildren(...choices.map(v => { const o = document.createElement("option"); o.value = v; return o; }));
+    if (choices.length) this.editor.setAttribute("list", this.choiceList.id); else this.editor.removeAttribute("list");
     this.editor.value = initial ?? this.currentText(this.active);
     this.placeEditor();
     this.editor.style.display = "block";

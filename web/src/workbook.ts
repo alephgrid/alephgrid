@@ -5,7 +5,9 @@ import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
 import type { PasteMode } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
-import { AnalysisWorkspace, replaceDialog } from "./analysis";
+import { AnalysisWorkspace, dashboardsDialog, replaceDialog } from "./analysis";
+import { dataToolsDialog } from "./tools";
+import type { Validation } from "./protocol";
 import { functionCompletion, functionLibrary } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc } from "./api";
 import { importFile } from "./importer";
@@ -141,10 +143,16 @@ export class WorkbookScreen {
   private formulaOrigin: { index: number; r: number; c: number } | null = null;
   private formulaProblem = el("p", { class: "formula-problem", role: "alert", hidden: true });
   private cellNote = el("p", { class: "cell-note", role: "status", hidden: true });
+  /** Shown while a sorted or filtered view reads stored formula results that are stale. */
+  private staleNote = el("p", { class: "stale-note", role: "status", hidden: true });
   private cellNoteSeq = 0;
   /** The cell the note was last looked up for, so data loads do not repeat the request. */
   private cellNoteKey = "";
   private closeNames: (() => void) | null = null;
+  private closeDashboards: (() => void) | null = null;
+  private closeTools: (() => void) | null = null;
+  /** Validation rules of the open table (F.12). */
+  private rules: Validation[] = [];
   private commands = new CommandRegistry();
   /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
    *  (formulas, formats) rather than the displayed values. */
@@ -209,6 +217,7 @@ export class WorkbookScreen {
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
         columns: () => (this.isSheet() ? this.sheetCols : this.view?.columns ?? []),
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
+        choices: (column: string) => this.isSheet() ? [] : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
         sort: () => (this.isSheet() ? [] : this.spec.sort),
         filters: () => (this.isSheet() ? [] : this.spec.filters),
         value: (r, c) => this.cache.value(r, c),
@@ -427,7 +436,10 @@ export class WorkbookScreen {
         ...this.sheetButtons,
         el("button", { class: "btn", onclick: () => this.fileInput.click() }, "Import"),
         ...this.tableButtons,
-        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); }); } }, "Analyze"),
+        el("button", { class: "btn", onclick: () => { this.analysis?.close(); this.analysis = new AnalysisWorkspace(this.rpc, async name => { await this.loadItems(); await this.openTable(name); },
+          async spec => { await this.loadItems(); await this.openTable(spec.table); await this.setSpec(spec); }); } }, "Analyze"),
+        el("button", { class: "btn", onclick: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); } }, "Dashboards"),
+        el("button", { class: "btn", onclick: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); } }, "Data tools"),
         el("button", { class: "btn", onclick: () => this.sqlPanel() }, "SQL"),
         el("button", { class: "btn", onclick: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); } }, "Functions"),
         el("button", { class: "btn", onclick: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); } }, "Formula help"),
@@ -440,6 +452,7 @@ export class WorkbookScreen {
       el("div", { class: "formula-bar" }, this.cellRef, el("span", { class: "fx" }, "ƒx"), this.formulaInput, this.referenceLegend),
       this.formulaProblem,
       this.cellNote,
+      this.staleNote,
       this.gridWrap,
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
@@ -799,10 +812,28 @@ export class WorkbookScreen {
     const saved = this.loadWidths();
     this.grid.setColumns(info.columns.map((c) => saved[c.name] ?? defaultWidth(c)));
     this.rowsEl.textContent = `${formatCount(info.row_count)} rows`;
+    this.renderStale(info);
+    void this.rpc.call("validations", { table: info.spec.table }).then(r => { this.rules = r; }).catch(() => { this.rules = []; });
     this.setKind("table");
     this.renderChips();
     this.grid.invalidate();
     this.onSelection(this.grid.selection(), this.grid.active);
+  }
+
+  /** Say when the view's order and formula values are the last committed results, with a
+   *  way to stop the recalculation or try it again. */
+  private renderStale(info: ViewInfo): void {
+    const why = info.stale;
+    this.gridWrap.classList.toggle("stale-results", !!why);
+    if (!why) { this.staleNote.hidden = true; this.staleNote.replaceChildren(); return; }
+    const table = info.spec.table;
+    const running = why === "recalculating";
+    const action = running
+      ? el("button", { class: "btn btn-small", onclick: () => this.rpc.call("cancel_recalculation", { table }).catch((e: Error) => toast(e.message, "error")) }, "Cancel")
+      : el("button", { class: "btn btn-small", onclick: () => this.rpc.call("recalculate", { table }).then(() => this.reopen()).catch((e: Error) => toast(e.message, "error")) }, "Recalculate");
+    this.staleNote.replaceChildren(
+      `Sorted and filtered by the last committed formula results: ${why}. Values may be out of date. `, action);
+    this.staleNote.hidden = false;
   }
 
   private async reopen(): Promise<void> {
@@ -1620,7 +1651,15 @@ export class WorkbookScreen {
     this.navigateDownload(api.exportUrl(this.meta.id, spec, format));
   }
 
-  private downloadXlsx(): void {
+  /** XLSX holds the sheets only and cannot hold table formulas: say what it leaves out or
+   *  replaces by values before downloading (F.13), never silently. */
+  private async downloadXlsx(): Promise<void> {
+    let notes: string[] = [];
+    try { notes = await this.rpc.call("xlsx_compatibility", {}); } catch (e) { toast((e as Error).message, "error"); return; }
+    if (notes.length) {
+      const shown = notes.slice(0, 20).join("\n") + (notes.length > 20 ? `\n… and ${notes.length - 20} more` : "");
+      if (!(await confirmDialog("XLSX compatibility", `${notes.length} note${notes.length === 1 ? "" : "s"} for this download:\n${shown}`, "Download anyway"))) return;
+    }
     this.navigateDownload(api.xlsxUrl(this.meta.id));
   }
 
@@ -1917,6 +1956,11 @@ export class WorkbookScreen {
         if (a?.kind === "table" && e.table === a.name && e.origin !== this.rpc.session) {
           this.cache.refresh();
           this.grid.invalidate();
+        }
+        // A sorted or filtered view may now read stale stored results: say so.
+        if (a?.kind === "table" && e.table === a.name && this.view && !this.view.can_append) {
+          const id = this.view.view_id;
+          this.rpc.call("view_info", { view_id: id }).then((info) => { if (this.view?.view_id === id) { this.view = info; this.renderStale(info); } }).catch(() => {});
         }
         // A snapshot or one of its sources was edited.
         if (this.materialized.length) this.reloadMaterializedSoon();

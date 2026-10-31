@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod editing;
+mod links;
+pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
+pub(crate) use links::{slot_input, slot_of};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
 
 const LANG: &str = "en";
@@ -73,6 +76,9 @@ pub struct Sheets {
     /// Bumped whenever the model is about to change (after validation), so a caller can
     /// tell a rejected request from a failure part-way through a change.
     changes: u64,
+    /// Formulas of the table cells (F.09), by result slot: shown in place of the
+    /// `=_rf_links!$B$n` reference the sheet engine holds for them.
+    table_cells: std::collections::HashMap<u32, String>,
 }
 
 /// A sheet column converted for a table: its inferred SQL type and canonical text values.
@@ -88,7 +94,7 @@ impl Sheets {
             Some(b) => Some(UserModel::from_bytes(&b, LANG).map_err(|e| anyhow!("corrupt sheet data: {e}"))?),
             None => None,
         };
-        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0 })
+        Ok(Sheets { model, undo_groups: vec![], redo_groups: vec![], changes: 0, table_cells: Default::default() })
     }
 
     /// Record that the last user operation added `entries` IronCalc history entries.
@@ -154,9 +160,10 @@ impl Sheets {
         self.changes
     }
 
+    /// Only visible sheets can be addressed; the link sheet (see `links.rs`) is internal.
     fn check_index(&self, index: u32) -> Result<()> {
-        let n = self.model()?.get_worksheets_properties().len() as u32;
-        if index >= n {
+        let visible = self.model()?.get_worksheets_properties().get(index as usize).is_some_and(|p| p.state == "visible");
+        if !visible {
             bail!("unknown sheet {index}");
         }
         Ok(())
@@ -249,7 +256,7 @@ impl Sheets {
 
     pub fn delete(&mut self, index: u32) -> Result<()> {
         self.check_index(index)?;
-        if self.model()?.get_worksheets_properties().len() == 1 {
+        if self.list().len() == 1 {
             // IronCalc needs at least one worksheet; drop the whole model instead.
             self.changes += 1;
             self.model = None;
@@ -282,7 +289,7 @@ impl Sheets {
                 }
                 let (row, col) = (r as i32 + 1, c);
                 let display = m.get_formatted_cell_value(index, row, col).unwrap_or_default();
-                let input = m.get_cell_content(index, row, col).unwrap_or_default();
+                let input = self.shown_input(index, m.get_cell_content(index, row, col).unwrap_or_default());
                 if display.is_empty() && input.is_empty() {
                     continue;
                 }
@@ -318,6 +325,10 @@ impl Sheets {
         for i in inputs {
             if i.row >= MAX_ROWS || i.column >= MAX_COLUMNS {
                 bail!("cell row {} column {} is outside the sheet ({MAX_ROWS} rows × {MAX_COLUMNS} columns)", i.row + 1, i.column + 1);
+            }
+            // Table cells hold exactly a slot reference; nothing else may read the link sheet.
+            if i.value.starts_with('=') && links::slot_of(&i.value).is_none() && links::mentions_link_sheet(&i.value) {
+                bail!("{}{}: {LINK_SHEET} is reserved for Alephgrid's own use", column_name(i.column), i.row + 1);
             }
         }
         let m = self.model_mut()?;
@@ -496,11 +507,119 @@ impl Sheets {
         scratch.import_xlsx(path)
     }
 
-    pub fn export_xlsx(&self, path: &std::path::Path) -> Result<()> {
+    /// Without the internal link sheet. Table cells (F.09), which other spreadsheets cannot
+    /// compute, are written as their current values; each one is listed in the returned
+    /// notes, so the replacement is never silent.
+    pub fn export_xlsx(&self, path: &std::path::Path) -> Result<Vec<String>> {
         let file = std::fs::File::create(path)?;
-        ironcalc::export::save_xlsx_to_writer(self.model()?.get_model(), file)
-            .map_err(|e| anyhow!("could not write xlsx: {e}"))?;
-        Ok(())
+        let m = self.model()?;
+        let hidden = m.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET && p.state != "visible");
+        let mut notes = Vec::new();
+        match hidden {
+            None => ironcalc::export::save_xlsx_to_writer(m.get_model(), file),
+            Some(i) => {
+                let mut copy = UserModel::from_bytes(&m.to_bytes(), LANG).map_err(|e| anyhow!(e))?;
+                for placed in self.slot_cells() {
+                    let Some((index, _)) = self.visible_sheet(&placed.cell.sheet) else { continue };
+                    let (row, column) = (placed.cell.row as i32, placed.cell.column as i32);
+                    let shown = m.get_formatted_cell_value(index, row, column).unwrap_or_default();
+                    let value = match (m.get_cell_type(index, row, column), m.get_model().get_cell_value_by_index(index, row, column)) {
+                        (Ok(CellType::ErrorValue), _) => shown.clone(),
+                        (_, Ok(CellValue::Number(n))) => format!("{n}"),
+                        (_, Ok(CellValue::Boolean(b))) => if b { "TRUE".into() } else { "FALSE".into() },
+                        (_, Ok(CellValue::String(t))) => format!("'{t}"),
+                        _ => String::new(),
+                    };
+                    let content = m.get_cell_content(index, row, column).unwrap_or_default();
+                    let formula = self.shown_input(index, content.clone());
+                    // A table result: every spilled cell becomes its value.
+                    let (rows, columns) = if content.ends_with('#') {
+                        let spill = m.get_worksheets_properties().iter().position(|p| p.name == format!("{}{}", links::SPILL_PREFIX, placed.slot));
+                        match spill.and_then(|k| m.get_model().workbook.worksheet(k as u32).ok()).map(|w| w.dimension()) {
+                            Some(d) => (d.max_row, d.max_column),
+                            None => (1, 1),
+                        }
+                    } else {
+                        (1, 1)
+                    };
+                    if rows == 1 && columns == 1 {
+                        copy.set_user_input(index, row, column, &value).map_err(|e| anyhow!(e))?;
+                    }
+                    for r in 0..rows {
+                        for c in 0..columns {
+                            if rows == 1 && columns == 1 { continue; }
+                            let (rr, cc) = (row + r, column + c);
+                            let v = match (m.get_cell_type(index, rr, cc), m.get_model().get_cell_value_by_index(index, rr, cc)) {
+                                (Ok(CellType::ErrorValue), _) => m.get_formatted_cell_value(index, rr, cc).unwrap_or_default(),
+                                (_, Ok(CellValue::Number(n))) => format!("{n}"),
+                                (_, Ok(CellValue::Boolean(b))) => if b { "TRUE".into() } else { "FALSE".into() },
+                                (_, Ok(CellValue::String(t))) => format!("'{t}"),
+                                _ => String::new(),
+                            };
+                            copy.set_user_input(index, rr, cc, &v).map_err(|e| anyhow!(e))?;
+                        }
+                    }
+                    let place = if rows == 1 && columns == 1 {
+                        placed.cell.text((false, false))
+                    } else {
+                        format!("{}:{}{}", placed.cell.text((false, false)), column_name((column + columns - 2) as u32), row + rows - 1)
+                    };
+                    let what = if rows == 1 && columns == 1 { format!("its value {shown:?}") } else { format!("its {rows}×{columns} values") };
+                    notes.push(format!("{place}: the table formula {formula} is exported as {what}; other spreadsheets cannot read Alephgrid tables"));
+                }
+                // Without the hidden sheets: table results, then the link sheet.
+                let hidden: Vec<usize> = copy.get_worksheets_properties().iter().enumerate()
+                    .filter(|(_, p)| p.name.starts_with(links::SPILL_PREFIX) && p.state != "visible").map(|(k, _)| k).collect();
+                for k in hidden.into_iter().rev() {
+                    copy.delete_sheet(k as u32).map_err(|e| anyhow!(e))?;
+                }
+                let i = copy.get_worksheets_properties().iter().position(|p| p.name == LINK_SHEET).unwrap_or(i);
+                copy.delete_sheet(i as u32).map_err(|e| anyhow!(e))?;
+                ironcalc::export::save_xlsx_to_writer(copy.get_model(), file)
+            }
+        }
+        .map_err(|e| anyhow!("could not write xlsx: {e}"))?;
+        Ok(notes)
+    }
+
+    /// What an XLSX export of the sheets cannot keep (F.13), one note per finding, without
+    /// writing a file the user sees: table cells exported as values, dynamic arrays that need
+    /// Excel 365/2021 to spill, and functions Excel does not have.
+    pub fn xlsx_compatibility(&self) -> Result<Vec<String>> {
+        let path = std::env::temp_dir().join(format!("alephgrid-compat-{}-{}.xlsx", std::process::id(), crate::storage::now_ms()));
+        let notes = self.export_xlsx(&path);
+        let _ = std::fs::remove_file(&path);
+        let mut notes = notes?;
+        let m = self.model()?;
+        let catalog: serde_json::Value = serde_json::from_str(include_str!("../data/function_catalog.json"))?;
+        let not_excel: Vec<String> = catalog["functions"].as_array().into_iter().flatten()
+            .filter(|f| f["sheet_status"] == "registered" && !f["sources"].as_array().is_some_and(|s| s.iter().any(|x| x == "excel")))
+            .filter_map(|f| f["name"].as_str().map(str::to_string)).collect();
+        for info in self.list() {
+            let Ok(ws) = m.get_model().workbook.worksheet(info.index) else { continue };
+            for (row, column, cell) in ws.sheet_data.cells() {
+                let array = matches!(*cell, ironcalc::base::types::Cell::ArrayFormula { .. });
+                if !array && !matches!(*cell, ironcalc::base::types::Cell::CellFormula { .. }) {
+                    continue;
+                }
+                let content = m.get_cell_content(info.index, row, column).unwrap_or_default();
+                if links::slot_of(&content).is_some() {
+                    continue;
+                }
+                let at = format!("{}!{}{}", info.name, column_name(column as u32 - 1), row);
+                if array {
+                    notes.push(format!("{at}: {content} is a dynamic array formula; Excel 365 or 2021 spills it, older versions show one value"));
+                }
+                let upper = content.to_uppercase();
+                for f in &not_excel {
+                    let hit = upper.match_indices(&format!("{f}(")).any(|(i, _)| i == 0 || !upper.as_bytes()[i - 1].is_ascii_alphanumeric() && upper.as_bytes()[i - 1] != b'.' && upper.as_bytes()[i - 1] != b'_');
+                    if hit {
+                        notes.push(format!("{at}: {f} is not an Excel function; Excel will show #NAME?"));
+                    }
+                }
+            }
+        }
+        Ok(notes)
     }
 
     /// The used range as typed table columns (first row = header). Reads every row,

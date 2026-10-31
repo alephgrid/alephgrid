@@ -135,6 +135,9 @@ impl Sheets {
         if let Some(s) = scope {
             self.check_index(s)?;
         }
+        if super::links::mentions_link_sheet(refers_to) {
+            bail!("{} is reserved for Alephgrid's own use", super::LINK_SHEET);
+        }
         if ironcalc::base::language::get_default_language().functions.lookup(name).is_some() {
             bail!("{name} is a built-in function name; choose another name");
         }
@@ -247,7 +250,7 @@ impl Sheets {
         let m = self.model()?;
         let (r, c) = (row as i32 + 1, column as i32 + 1);
         let display = m.get_formatted_cell_value(index, r, c).map_err(|e| anyhow!(e))?;
-        let input = m.get_cell_content(index, r, c).map_err(|e| anyhow!(e))?;
+        let input = self.shown_input(index, m.get_cell_content(index, r, c).map_err(|e| anyhow!(e))?);
         let cell = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?.cell(r, c).map(|c| c.into_owned());
         let error = match cell {
             Some(Cell::CellFormula { v: FormulaValue::Error { d, .. }, .. } | Cell::ArrayFormula { v: FormulaValue::Error { d, .. }, .. }) => {

@@ -348,6 +348,15 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "QueryVersion[]" => conforms::<Vec<alephgrid_core::QueryVersion>>(op, v),
         "MaterializedTable" => conforms::<alephgrid_core::MaterializedTable>(op, v),
         "MaterializedTable[]" => conforms::<Vec<alephgrid_core::MaterializedTable>>(op, v),
+        "Dashboard" => conforms::<alephgrid_core::reports::Dashboard>(op, v),
+        "Dashboard[]" => conforms::<Vec<alephgrid_core::reports::Dashboard>>(op, v),
+        "DashboardResult" => conforms::<alephgrid_core::reports::DashboardResult>(op, v),
+        "ViewSpec" => conforms::<alephgrid_core::ViewSpec>(op, v),
+        "string[]" => conforms::<Vec<String>>(op, v),
+        "Validation[]" => conforms::<Vec<alephgrid_core::tools::Validation>>(op, v),
+        "ValidationReport" => conforms::<alephgrid_core::tools::ValidationReport>(op, v),
+        "TransformPreview" => conforms::<alephgrid_core::tools::TransformPreview>(op, v),
+        "FormulaInspection" => conforms::<alephgrid_core::tools::FormulaInspection>(op, v),
         "boolean" => assert!(v.is_boolean(), "{op}: {v}"),
         "string" => assert!(v.is_string(), "{op}: {v}"),
         "null" => assert!(v.is_null(), "{op}: {v}"),
@@ -439,6 +448,18 @@ async fn every_operation_replies_with_its_declared_type() {
         run("analyses", json!({})),
         run("save_analysis", json!({"saved":null,"name":"Profile","spec":{"kind":"profile","table":"t","columns":["s"]},"chart":false})),
         run("materialize_analysis", json!({"name":"analysis_copy","spec":{"kind":"profile","table":"t","columns":["s"]}})),
+        run("save_dashboard", json!({"saved":null,"name":"Board","tiles":[{"analysis":"ANALYSIS","x":0,"y":0,"w":6,"h":6}],"slicers":[]})),
+        run("dashboards", json!({})),
+        run("dashboard", json!({"dashboard":"DASHBOARD"})),
+        run("set_validations", json!({"table":"t","rules":[{"column":"s","rule":{"kind":"required"}}]})),
+        run("validations", json!({"table":"t"})),
+        run("preview_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"}})),
+        run("apply_transform", json!({"table":"t","transform":{"kind":"trim","column":"s"},"name":"t_trimmed"})),
+        run("set_validations", json!({"table":"t","rules":[]})),
+        run("inspect_formula", json!({"table":"t","column":"twice"})),
+        run("xlsx_compatibility", json!({})),
+        run("drill", json!({"spec":{"kind":"summary","table":"t","groups":["s"],"aggregate":"count","value":null,"pivot":null},"row":["x",1]})),
+        run("delete_dashboard", json!({"dashboard":"DASHBOARD"})),
         run("delete_analysis", json!({"analysis":"ANALYSIS"})),
         run("presentation", json!({"table":"t"})),
         run("save_presentation", json!({"table":"t","presentation":{"hidden":[],"frozen":1,"formats":{},"rules":[]}})),
@@ -450,14 +471,19 @@ async fn every_operation_replies_with_its_declared_type() {
         run("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
         run("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
         run("cancel", json!({ "request": 1 })),
+        run("recalculate", json!({ "table": "t" })),
+        run("cancel_recalculation", json!({ "table": "t" })),
     ];
     let mut saved_id = String::new();
     let mut query_id = String::new();
     let mut analysis_id = String::new();
+    let mut dashboard_id = String::new();
     let mut preview_revision = Value::Null;
     let mut undo_revision = Value::Null;
     for (op, mut params) in script {
         if params["analysis"]=="ANALYSIS" {params["analysis"]=json!(analysis_id);}
+        if params["tiles"][0]["analysis"]=="ANALYSIS" {params["tiles"][0]["analysis"]=json!(analysis_id);}
+        if params["dashboard"]=="DASHBOARD" {params["dashboard"]=json!(dashboard_id);}
         if params["revision"]=="PREVIEW_REV" {params["revision"]=preview_revision.clone();}
         if params["revision"]=="UNDO_REV" {params["revision"]=undo_revision.clone();}
         if params["saved"] == "PLACEHOLDER" {
@@ -469,6 +495,7 @@ async fn every_operation_replies_with_its_declared_type() {
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
         if op=="save_analysis" {analysis_id=v["id"].as_str().unwrap().to_string();}
+        if op=="save_dashboard" {dashboard_id=v["id"].as_str().unwrap().to_string();}
         if op=="replace_preview" {preview_revision=v["sample"]["revision"].clone();}
         if op=="replace_apply" {undo_revision=v["undo_revision"].clone();}
         if op == "save_view" {
@@ -487,5 +514,121 @@ async fn every_operation_replies_with_its_declared_type() {
     let err = ws.call("fetch", json!({ "view_id": "x" })).await.unwrap_err();
     assert!(err.contains("bad request"), "{err}");
     ws.close().await;
+    server.stop().await;
+}
+
+/// F.09: a sheet edit reaches the tables whose formulas read the cell, and the tables that
+/// look those up; every session hears about it, the one that edited the sheet included.
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_cells_read_by_tables_notify_their_readers() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("links").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    a.ok("create_table_from_query", json!({ "name": "customers", "sql": "SELECT * FROM (VALUES (1, 'Ann')) v(id, name)" })).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT * FROM (VALUES (10, 1)) v(id, cid)" })).await;
+    a.ok("sheet_create", json!({ "name": "Settings" })).await;
+    a.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": " (vip)" }] })).await;
+    a.ok("add_formula_column", json!({ "table": "customers", "name": "label", "formula": "=[@name]&Settings!A1", "language": "sheet" })).await;
+    a.ok("add_formula_column", json!({ "table": "orders", "name": "who", "formula": "=XLOOKUP([@cid],customers[id],customers[label])", "language": "sheet" })).await;
+    let id = a.send("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": " (gold)" }] })).await;
+    let rev = a.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        let mut tables = Vec::new();
+        for _ in 0..2 {
+            let e = ws.event("cells_changed").await.unwrap();
+            assert_eq!((e["origin"].clone(), e["revision"].clone()), (json!(0), rev.clone()), "{e}");
+            tables.push(e["table"].as_str().unwrap().to_string());
+        }
+        tables.sort();
+        assert_eq!(tables, ["customers", "orders"]);
+    }
+    let v = b.ok("open_view", json!({ "spec": { "table": "orders" } })).await["view_id"].as_u64().unwrap();
+    assert_eq!(b.ok("fetch", json!({ "view_id": v, "row_start": 0, "row_count": 1 })).await["rows"], json!([[10, 1, "Ann (gold)"]]));
+    let err = a.call("sheet_delete", json!({ "sheet": 0 })).await.unwrap_err();
+    assert!(err.contains("read by formula column"), "{err}");
+    a.close().await;
+    b.close().await;
+    server.stop().await;
+}
+
+/// F.09: a sheet cell that reads a table is recomputed in the same change as the table, and
+/// every session is told to refetch the sheets.
+#[tokio::test(flavor = "multi_thread")]
+async fn sheet_cells_that_read_tables_follow_table_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("tablecells").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT * FROM (VALUES (1, 2.0), (2, 1.0)) v(id, amount)" })).await;
+    a.ok("sheet_create", json!({ "name": "Report" })).await;
+    let problem = a.ok("sheet_check_formula", json!({ "sheet": 0, "row": 0, "column": 1, "formula": "=SUM(orders[nope])" })).await;
+    assert_eq!(problem["position"], json!(5), "{problem}");
+    a.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 1, "value": "=SUM(orders[amount])" }] })).await;
+    let cell = |block: &Value| block["rows"][0][1].clone();
+    assert_eq!(cell(&a.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await), json!(["3", "right", "=SUM(orders[amount])"]));
+    let v = b.ok("open_view", json!({ "spec": { "table": "orders" } })).await["view_id"].as_u64().unwrap();
+    let id = b.send("edit", json!({ "view_id": v, "edits": [{ "row": 0, "column": "amount", "value": "5" }] })).await;
+    let rev = b.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        loop {
+            // Entering the table cell itself was announced at an earlier revision.
+            let e = ws.event("sheet_changed").await.unwrap();
+            if e["revision"] == rev {
+                assert_eq!((e["sheet"].clone(), e["origin"].clone()), (Value::Null, json!(0)), "{e}");
+                break;
+            }
+        }
+    }
+    assert_eq!(cell(&a.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await), json!(["6", "right", "=SUM(orders[amount])"]));
+    a.close().await;
+    b.close().await;
+    server.stop().await;
+}
+
+/// F.09: after a change, a large table's stored formula results are recalculated in the
+/// background; sorted views keep the last results, flagged, until then, and every session
+/// hears when they are replaced. A cancelled recalculation says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn stored_results_are_recalculated_in_the_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("results").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    // 200,000 orders (the threshold for stored results) over 1,000 customers.
+    a.ok("create_table_from_query", json!({ "name": "customers", "sql": "SELECT i AS id, 'c' || lpad(CAST(i AS VARCHAR), 4, '0') AS name FROM range(1000) t(i)" })).await;
+    a.ok("create_table_from_query", json!({ "name": "orders", "sql": "SELECT i AS id, i % 1000 AS cid FROM range(200000) t(i)" })).await;
+    a.ok("add_formula_column", json!({ "table": "orders", "name": "who", "formula": "=XLOOKUP([@cid],customers[id],customers[name])", "language": "sheet" })).await;
+    let sorted = json!({ "spec": { "table": "orders", "sort": [{ "column": "who", "desc": true }] } });
+    let v = b.ok("open_view", sorted.clone()).await;
+    assert!(v.get("stale").is_none(), "{v}");
+    let first = b.ok("fetch", json!({ "view_id": v["view_id"], "row_start": 0, "row_count": 1 })).await;
+    assert_eq!(first["rows"][0], json!([999, 999, "c0999"]));
+    // Renaming customer 999 makes orders' stored results stale; they are rebuilt in the
+    // background and every session is told.
+    let c = a.ok("open_view", json!({ "spec": { "table": "customers" } })).await["view_id"].as_u64().unwrap();
+    let id = a.send("edit", json!({ "view_id": c, "edits": [{ "row": 999, "column": "name", "value": "a999" }] })).await;
+    let rev = a.reply(id).await.unwrap()["revision"].clone();
+    for ws in [&mut a, &mut b] {
+        loop {
+            let e = ws.event("table_changed").await.unwrap();
+            if e["table"] == "orders" && e["revision"] == rev {
+                assert_eq!(e["origin"], json!(0), "{e}");
+                break;
+            }
+        }
+    }
+    let v = b.ok("open_view", sorted.clone()).await;
+    assert!(v.get("stale").is_none(), "{v}");
+    let first = b.ok("fetch", json!({ "view_id": v["view_id"], "row_start": 0, "row_count": 1 })).await;
+    assert_eq!(first["rows"][0], json!([998, 998, "c0998"]), "the renamed customer sorts last now");
+    // Nothing to cancel now; a retry request is accepted.
+    assert_eq!(a.ok("cancel_recalculation", json!({ "table": "orders" })).await, json!(false));
+    assert_eq!(a.ok("recalculate", json!({ "table": "orders" })).await, json!(true));
+    a.close().await;
+    b.close().await;
     server.stop().await;
 }
