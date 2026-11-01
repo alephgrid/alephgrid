@@ -706,7 +706,8 @@ export class Grid {
     e.preventDefault();
   }
 
-  private clearSelection(): void {
+  /** Clear the selected cells (Delete), for menus. */
+  clearSelection(): void {
     const s = this.selection();
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
     if (cells > 100_000) return;

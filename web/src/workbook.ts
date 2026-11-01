@@ -630,7 +630,19 @@ export class WorkbookScreen {
         "sep",
         { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       ]],
-      ["Format", () => [
+      ["Format", () => this.isSheet() ? [
+        { label: "Bold", hint: "⌘B", action: () => this.commands.list().find((c) => c.id === "format.bold")?.run?.() },
+        { label: "Italic", hint: "⌘I", action: () => this.commands.list().find((c) => c.id === "format.italic")?.run?.() },
+        { label: "Underline", hint: "⌘U", action: () => this.commands.list().find((c) => c.id === "format.underline")?.run?.() },
+        "sep",
+        { label: "Number: 1,234.56", action: () => void this.applyStyle({ num_fmt: "#,##0.00" }) },
+        { label: "Percent: 12.35%", action: () => void this.applyStyle({ num_fmt: "0.00%" }) },
+        { label: "Currency: $1,234.56", action: () => void this.applyStyle({ num_fmt: "$#,##0.00" }) },
+        { label: "Date: 2026-11-01", action: () => void this.applyStyle({ num_fmt: "yyyy-mm-dd" }) },
+        { label: "General number format", action: () => void this.applyStyle({ num_fmt: "" }) },
+        "sep",
+        { label: "Clear formatting", action: () => void this.applyStyle(null) },
+      ] : [
         { label: "Format table…", hint: tableOnly() ? "Tables" : undefined, disabled: tableOnly(), action: act.formatTable },
       ]],
       ["Data", () => [
@@ -2116,15 +2128,28 @@ export class WorkbookScreen {
   private rowMenu(r: number, x: number, y: number): void {
     const sel = this.grid.selection();
     if (this.isSheet()) {
-      const count = Math.max(1, sel.r1 - sel.r0 + 1);
+      // S.03: the cell menu; the same commands are in the menus and the command palette.
+      const rows = Math.max(1, sel.r1 - sel.r0 + 1);
+      const cols = Math.max(1, sel.c1 - sel.c0 + 1);
       showMenu([
+        { label: "Cut", hint: "⌘X", action: () => void this.cut() },
         { label: "Copy", hint: "⌘C", action: () => this.copy(sel) },
+        { label: "Paste", hint: "⌘V", action: async () => {
+          try { this.paste({ r: sel.r0, c: sel.c0 }, await navigator.clipboard.readText()); }
+          catch { toast("Paste with ⌘V: this browser does not let the page read the clipboard from a menu"); }
+        } },
+        { label: "Paste special…", hint: "⌘⇧V", action: () => this.pasteSpecialDialog() },
         "sep",
-        { label: "Insert row above", action: () => this.sheetOp("sheet_insert_rows", { at: r, count: 1 }) },
-        { label: "Insert row below", action: () => this.sheetOp("sheet_insert_rows", { at: r + 1, count: 1 }) },
-        { label: count > 1 ? `Delete ${count} rows` : "Delete row", danger: true,
-          action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count }) },
-      ], x, y);
+        { label: rows > 1 ? `Insert ${rows} rows above` : "Insert row above", action: () => this.sheetOp("sheet_insert_rows", { at: sel.r0, count: rows }) },
+        { label: rows > 1 ? `Insert ${rows} rows below` : "Insert row below", action: () => this.sheetOp("sheet_insert_rows", { at: sel.r1 + 1, count: rows }) },
+        { label: cols > 1 ? `Insert ${cols} columns left` : "Insert column left", action: () => this.sheetOp("sheet_insert_columns", { at: sel.c0, count: cols }) },
+        { label: cols > 1 ? `Insert ${cols} columns right` : "Insert column right", action: () => this.sheetOp("sheet_insert_columns", { at: sel.c1 + 1, count: cols }) },
+        { label: rows > 1 ? `Delete ${rows} rows` : "Delete row", danger: true, action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count: rows }) },
+        { label: cols > 1 ? `Delete ${cols} columns` : "Delete column", danger: true, action: () => this.sheetOp("sheet_delete_columns", { at: sel.c0, count: cols }) },
+        "sep",
+        { label: "Clear contents", hint: "Delete", action: () => this.grid.clearSelection() },
+        { label: "Clear formatting", action: () => void this.applyStyle(null) },
+      ], x, y, { label: "Cell actions" });
       return;
     }
     if (!this.view) return;

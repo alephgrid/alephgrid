@@ -65,3 +65,31 @@ test("format a sheet range from the toolbar and the keyboard", async ({ page }) 
   await expect(page.getByRole("toolbar", { name: "Cell format" })).toBeHidden();
   ws.close();
 });
+
+test("S.03: the cell menu inserts, deletes, clears and formats", async ({ page }) => {
+  const wb = await server.createWorkbook("Cell menu"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "a" }, { row: 1, column: 0, value: "b" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("a");
+  const cell = async () => {
+    const box = (await page.locator(".grid-scroller").boundingBox())!;
+    await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+    return page.getByRole("menu", { name: "Cell actions" });
+  };
+  let menu = await cell();
+  for (const item of ["Cut", "Copy", "Paste", "Paste special…", "Insert row above", "Insert column left", "Delete row", "Delete column", "Clear contents", "Clear formatting"]) {
+    await expect(menu.getByRole("menuitem", { name: new RegExp(`^${item.replace(".", "\\.")}`) }).first()).toBeVisible();
+  }
+  await menu.getByRole("menuitem", { name: "Insert row above" }).click();
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 3, column_count: 1 })).rows.map((r: unknown[]) => (r[0] as string[] | null)?.[0] ?? null)).toEqual([null, "a", "b"]);
+  menu = await cell();
+  await menu.getByRole("menuitem", { name: "Delete row" }).click();
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 2, column_count: 1 })).rows.map((r: unknown[]) => (r[0] as string[] | null)?.[0] ?? null)).toEqual(["a", "b"]);
+  menu = await cell();
+  await menu.getByRole("menuitem", { name: "Clear contents" }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("");
+  ws.close();
+});
