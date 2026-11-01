@@ -82,7 +82,7 @@ pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
 pub enum Isolation {
     /// macOS Seatbelt (`sandbox-exec`) with a deny-by-default profile.
     Seatbelt,
-    /// Linux bubblewrap: new namespaces (no network), read-only binds, a private /tmp.
+    /// Linux bubblewrap: new namespaces (no network), read-only binds, an empty read-only /tmp.
     Bubblewrap(PathBuf),
     /// No OS sandbox: allowed only when asked for (`--python-isolation none`, local mode).
     None,
@@ -237,6 +237,9 @@ impl PythonRuntime {
             Isolation::Bubblewrap(bwrap) => {
                 let mut c = Command::new(bwrap);
                 c.args(["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+                // An empty /tmp first: the binds below may lie under /tmp (a runtime kept there)
+                // and must stay visible, so they are mounted inside it, not hidden by it.
+                c.args(["--tmpfs", "/tmp"]);
                 for dir in ["/usr", "/lib", "/lib64", "/bin", "/etc/ld.so.cache"] {
                     if Path::new(dir).exists() {
                         c.arg("--ro-bind").arg(dir).arg(dir);
@@ -246,7 +249,9 @@ impl PythonRuntime {
                     c.arg("--ro-bind").arg(p).arg(p);
                 }
                 c.arg("--ro-bind").arg(work).arg("/work");
-                c.args(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", "/work"]);
+                // Workers have no files (docs/PYTHON_FUNCTIONS.md): /tmp is read-only too, as
+                // on macOS, where the profile denies every write.
+                c.args(["--remount-ro", "/tmp", "--proc", "/proc", "--dev", "/dev", "--chdir", "/work"]);
                 c.arg(exe).args(python_args).arg("/work/runner.py");
                 c
             }

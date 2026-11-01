@@ -10,7 +10,9 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) still apply.
 | **check** | `run_check = true` | web type check and bundle; `cargo test --workspace` (with the protocol drift check and the disk-full tests); clippy with warnings as errors; browser journeys in Chromium |
 | **full** | `run_full = true` | everything in check, plus browser journeys in Firefox and WebKit, 2,000-case property tests, and the server's integration and crash suites five times |
 
-The configuration is [.circleci/config.yml](../.circleci/config.yml). Rust jobs run on an Ubuntu
+The configuration is [.circleci/config.yml](../.circleci/config.yml). One job compiles everything
+(`rust-build`); the Rust tests (run with `--no-fail-fast`, so one run reports every failure),
+clippy and the browser tests then run side by side, so one failure does not hide the others. Rust jobs run on an Ubuntu
 24.04 VM (the disk-full tests mount a tmpfs, and Python function tests need bubblewrap). The
 Cargo registry and `target/` are cached by `Cargo.lock` and `rust-toolchain.toml`, so DuckDB's
 long C++ build happens once per dependency change. Playwright traces and screenshots of failing

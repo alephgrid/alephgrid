@@ -52,15 +52,26 @@ commands:
             - ~/.cargo/registry
             - ~/.cargo/git
             - target
+  python-sandbox:
+    steps:
+      - run:
+          name: Python and its sandbox (bubblewrap) for the Python function tests
+          command: |
+            sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap python3-venv
+            # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor; bwrap needs them.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            bwrap --ro-bind / / true && echo "bwrap works"
   node-setup:
     steps:
       - run:
-          name: Node 22
+          name: Node 22 (pinned, from nodejs.org)
           command: |
-            echo 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"' >> "$BASH_ENV"
+            v=22.12.0
+            case "$(uname -m)" in x86_64) a=x64 ;; aarch64) a=arm64 ;; esac
+            curl -fsSL "https://nodejs.org/dist/v$v/node-v$v-linux-$a.tar.xz" | tar -xJ -C "$HOME"
+            echo "export PATH=\"$HOME/node-v$v-linux-$a/bin:\$PATH\"" >> "$BASH_ENV"
             source "$BASH_ENV"
-            nvm install 22 && nvm alias default 22
-            node --version
+            node --version && npm --version
 
 jobs:
   web:
@@ -89,7 +100,9 @@ jobs:
           paths:
             - web/dist
 
-  rust:
+  # Compiles everything once: the server binary for the browser tests, and the test and clippy
+  # artifacts kept in the cargo cache for the jobs that follow.
+  rust-build:
     executor: vm
     environment:
       CARGO_INCREMENTAL: "0"
@@ -101,6 +114,30 @@ jobs:
           at: .
       - rust-setup
       - run:
+          name: Server binary and the tests (DuckDB compiles here on a cold cache)
+          command: |
+            cargo build -p alephgrid-server --locked
+            cargo test --workspace --locked --no-run
+          no_output_timeout: 40m
+      - rust-save
+      - persist_to_workspace:
+          root: .
+          paths:
+            - target/debug/alephgrid
+
+  rust-test:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: always
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - python-sandbox
+      - run:
           name: A small filesystem for the disk-full tests (tests/storage_faults.rs)
           command: |
             sudo mkdir -p /mnt/rfsmall
@@ -108,23 +145,27 @@ jobs:
             sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
       - run:
           name: Tests (includes the protocol drift check)
-          command: cargo test --workspace --locked
+          command: cargo test --workspace --locked --no-fail-fast
           no_output_timeout: 40m
           environment:
             PROPTEST_CASES: "96"
             ALEPHGRID_SMALL_FS: /mnt/rfsmall
+
+  clippy:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: always
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
       - run:
           name: Clippy
           command: cargo clippy --workspace --all-targets --locked -- -D warnings
           no_output_timeout: 40m
-      - run:
-          name: Server binary for the browser tests
-          command: cargo build -p alephgrid-server --locked
-      - rust-save
-      - persist_to_workspace:
-          root: .
-          paths:
-            - target/debug/alephgrid
 
   e2e:
     executor: vm
@@ -143,12 +184,7 @@ jobs:
           command: |
             PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
             npx playwright install --with-deps << parameters.browser >>
-      - run:
-          name: Python sandbox (bubblewrap) for the Python function tests
-          command: |
-            sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap python3-venv
-            # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor; bwrap needs them.
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - python-sandbox
       - run:
           name: Browser journeys (<< parameters.browser >>)
           working_directory: web
@@ -174,6 +210,7 @@ jobs:
       - attach_workspace:
           at: .
       - rust-setup
+      - python-sandbox
       - run:
           name: Property and state-machine tests, 2000 cases
           command: cargo test --locked -p alephgrid-core --lib props
@@ -196,24 +233,32 @@ workflows:
         - not: << pipeline.parameters.run_full >>
     jobs:
       - web
-      - rust:
+      - rust-build:
           requires: [web]
+      - rust-test:
+          requires: [rust-build]
+      - clippy:
+          requires: [rust-build]
       - e2e:
           name: e2e-chromium
           browser: chromium
-          requires: [rust]
+          requires: [rust-build]
 
   full:
     when: << pipeline.parameters.run_full >>
     jobs:
       - web
-      - rust:
+      - rust-build:
           requires: [web]
+      - rust-test:
+          requires: [rust-build]
+      - clippy:
+          requires: [rust-build]
       - e2e:
           name: e2e-<< matrix.browser >>
           matrix:
             parameters:
               browser: [chromium, firefox, webkit]
-          requires: [rust]
+          requires: [rust-build]
       - long-runs:
           requires: [web]
