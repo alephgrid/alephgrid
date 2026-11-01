@@ -289,7 +289,7 @@ export class WorkbookScreen {
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
         columns: () => (this.isSheet() ? this.sheetCols : this.view?.columns ?? []),
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
-        choices: (column: string) => this.isSheet() ? [] : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
+        choices: (column: string) => this.isSheet() ? this.sheetChoices() : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
         sort: () => (this.isSheet() ? [] : this.spec.sort),
         filters: () => (this.isSheet() ? [] : this.spec.filters),
         value: (r, c) => this.cache.value(r, c),
@@ -2226,6 +2226,14 @@ export class WorkbookScreen {
     }
     try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
     catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.10: the allowed values of the active sheet cell, offered while editing it. */
+  private sheetChoices(): string[] {
+    const { r, c } = this.grid.active;
+    return this.sheetRules.validations
+      .filter((v) => r >= v.area.row && r < v.area.row + v.area.rows && c >= v.area.column && c < v.area.column + v.area.columns)
+      .flatMap((v) => v.list ?? []);
   }
 
   /** S.10: remove the rules that touch the selection. */
