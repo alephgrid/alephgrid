@@ -4,8 +4,8 @@
 //   root directory: site
 //   build command:  npm ci && npm run build
 //   build watch paths: site/**   (pushes that don't touch site/ skip the build)
-// When the custom domain is live, add it to this Worker in the dashboard and
-// set SITE_URL=https://<domain> as a build-time variable. SITE_BASE stays "/".
+// Production serves https://alephgrid.dev (custom domain attached to this
+// Worker in the dashboard; apex + www). SITE_BASE stays "/".
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "alephgrid-site",
