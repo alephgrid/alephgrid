@@ -1,5 +1,5 @@
 {
-  "comment": "Release manifest: the single source of truth for every download control on the site. CI must never show a channel as ready unless its entry here is published:true with a real url and sha256. See docs/WEBSITE_LAUNCH_PLAN.md W.05.",
+  "comment": "Release manifest: the single source of truth for every download control on the site. CI must never show a channel as ready unless its entry here is published:true with a real url and sha256. See docs/WEBSITE_LAUNCH_PLAN.md W.05 and docs/RELEASING.md.",
   "current": {
     "version": "0.1.0",
     "maturity": "pre-release",
@@ -16,11 +16,27 @@
       "requires": "Rust 1.88+, Node 20+",
       "docs": "/docs/getting-started/"
     },
-    { "id": "macos-binary", "name": "macOS binaries", "published": false },
-    { "id": "homebrew", "name": "Homebrew tap", "published": false },
-    { "id": "windows-installer", "name": "Windows installer / WinGet", "published": false },
-    { "id": "linux-binary", "name": "Linux binaries", "published": false },
-    { "id": "oci-image", "name": "Container image (registry)", "published": false },
-    { "id": "helm", "name": "Helm chart", "published": false }
+    {
+      "id": "github-binaries",
+      "name": "Binaries (GitHub Releases)",
+      "platforms": ["Linux x86_64 + arm64", "macOS Apple silicon + Intel"],
+      "published": false,
+      "notes": "tar.gz downloads with SHA256SUMS"
+    },
+    {
+      "id": "npm",
+      "name": "npm — npx alephgrid",
+      "published": false,
+      "notes": "also pnpm dlx / yarn dlx / bunx"
+    },
+    {
+      "id": "docker",
+      "name": "Docker — ghcr.io/alephgrid/alephgrid",
+      "platforms": ["linux/amd64", "linux/arm64"],
+      "published": false
+    },
+    { "id": "homebrew", "name": "Homebrew tap", "published": false, "notes": "after v0.1.0" },
+    { "id": "winget", "name": "Windows installer / WinGet", "published": false, "notes": "needs native Windows build" },
+    { "id": "helm", "name": "Helm chart", "published": false, "notes": "after v0.1.0" }
   ]
 }
