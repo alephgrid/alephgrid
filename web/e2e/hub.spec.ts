@@ -15,11 +15,8 @@ test("hub: three recent cards, sort by name, search and Clear search, state kept
   for (const n of names) ids.push(await server.createWorkbook(n));
   await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
   // Open each once so it counts as recent.
-  // Workbooks start one at a time; under a loaded test run a start can queue for a while.
-  for (const id of ids) {
-    await page.goto(`${server.url}/w/${id}`);
-    await expect(page.locator(".status-dot.status-open")).toBeVisible({ timeout: 60_000 });
-  }
+  // Opening a workbook's connection records it as opened (no browser page needed).
+  for (const id of ids) (await server.connect(id)).close();
   await page.goto(server.url);
   const cards = page.getByRole("region", { name: "Recently opened" }).locator(".wb-card");
   await expect(cards).toHaveCount(3);
