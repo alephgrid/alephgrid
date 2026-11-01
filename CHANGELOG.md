@@ -12,6 +12,16 @@ docs/OPERATIONS.md, Upgrades). Only the latest release receives fixes.
 - Find and replace in a sheet or all sheets; range sort (formulas move with their rows); range filters.
 - Tabs: duplicate, colour, hide, reorder.
 - Charts placed on the sheet, colour rules and scales, allowed values, comments with replies.
+- Insert chart shows a preview that is saved only on Create chart; deleting a chart offers Undo.
+- Fill handle: drag the selection's corner to continue a series, count text such as Week 1, or repeat a pattern; one undo step.
+- Mod+A selects the filled block first, then the sheet; the copied range is outlined until Escape; paste special is a menu at the cell.
+- Copying, filling or dragging a formula that reads a table gives each copy its own formula with its references shifted.
+
+### Workbooks and functions
+- New workbooks open straight into a blank sheet; SQL stays closed until opened.
+- Functions are edited in a resizable side panel beside the grid (Code, Tests, Docs, Versions) with editable test rows and a results strip.
+- Disabled menu items say why they are unavailable.
+- Hub: one-line empty state, Clear search, Try again on errors.
 
 ### Tables and analysis
 - Analyze side pane, header value filters, find bar, charts, first-run guidance.
