@@ -89,9 +89,12 @@ the result was issued.
   from other sites cannot post to it.
 - Cell contents and query results are data. The server's instructions tell agents so, and
   nothing in a cell can change what a connection may do.
-- At most 4 requests run at once per connection. Jobs are forgotten after an hour.
+- At most 4 requests run at once per connection. Jobs live in the server process: they are
+  forgotten after an hour or when the server restarts (stored results and their handles survive).
   Cancelling a job discards its result; a query that is already running finishes within the
   server's time limit.
+- Time-zone functions (`AT TIME ZONE` and other ICU functions) are not available: DuckDB's ICU
+  extension is not in this build, and extensions cannot be loaded. Work in UTC with `epoch_us`.
 - Catalog search matches words in names and SQL. It does not use DuckDB's full-text search
   extension, because extension installs are refused (see SECURITY.md).
 

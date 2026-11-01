@@ -76,3 +76,34 @@ test("a change made while the server is down is Unsaved, then Saved after it com
   await expect(status(page)).toHaveText("Saved", { timeout: 30_000 });
   expect(await storedA1(wb)).toBe("7");
 });
+
+test("U.02: leaving a workbook with unsent changes asks first; staying keeps them and they are saved", async ({ page }) => {
+  const wb = await sheetWorkbook("Leave guard");
+  // Arrive from the hub inside the app, so Back is an in-app navigation.
+  await page.goto(server.url);
+  await expect(page.getByRole("navigation", { name: "Spaces" })).toBeVisible();
+  await page.evaluate((id) => { history.pushState(null, "", `/w/${id}`); dispatchEvent(new PopStateEvent("popstate")); }, wb);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await expect(page.getByRole("grid", { name: /^Sheet / })).toHaveAttribute("aria-colcount", /\d+/);
+  await server.stop("SIGTERM");
+  await expect(page.locator(".status-dot.status-closed")).toBeVisible();
+  await typeA1(page, "11");
+  await expect(status(page)).toHaveText("Unsaved changes");
+  // The brand button goes to the hub: it asks, and Cancel stays.
+  await page.getByRole("button", { name: /all workbooks/ }).click();
+  const ask = page.getByRole("alertdialog", { name: "Leave with unsaved changes?" });
+  await expect(ask).toBeVisible();
+  await ask.getByRole("button", { name: "Cancel" }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${wb}$`));
+  // The browser's Back button stays too.
+  await page.goBack();
+  await expect(page.getByRole("alertdialog", { name: "Leave with unsaved changes?" })).toBeVisible();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Cancel" }).click();
+  await expect(page).toHaveURL(new RegExp(`/w/${wb}$`));
+  await server.start();
+  await expect(status(page)).toHaveText("Saved", { timeout: 30_000 });
+  expect(await storedA1(wb)).toBe("11");
+  // Once saved, leaving does not ask.
+  await page.getByRole("button", { name: /all workbooks/ }).click();
+  await expect(page.getByRole("navigation", { name: "Spaces" })).toBeVisible();
+});

@@ -61,5 +61,6 @@ Hub (/)                 All workbooks · Recent · Starred · Spaces (sidebar) �
 - Sheets keep a stable internal id. Comments, rules and charts are attached to it, so they follow
   renames and tab moves.
 - Unsent changes are kept in the page and resent after a reconnect. The save state shows
-  **Unsaved changes** until they are acknowledged. Whether they survive leaving the workbook
-  before then has not yet been checked on every navigation path (U.02, open).
+  **Unsaved changes** until they are acknowledged. Leaving the workbook before then asks first,
+  whether through the brand or menu links or the browser's Back button. Closing the tab gets the
+  browser's own warning. Staying keeps the changes (`e2e/savestate.spec.ts`).
