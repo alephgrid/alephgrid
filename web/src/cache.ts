@@ -1,5 +1,6 @@
 import type { Rpc } from "./api";
 import type { CellValue, Params, RowBlock, SheetCell } from "./types";
+import type { CellStyle } from "./protocol";
 
 /** Rows per block. */
 export const ROW_BLOCK = 100;
@@ -359,6 +360,8 @@ const SHEET_BLOCK = 100;
 /** Block cache for IronCalc sheets (display values, alignment and formula text). */
 export class SheetCache {
   private blocks = new Map<number, (SheetCell | null)[][]>();
+  /** Styles of each loaded block (S.01), by cell key. */
+  private styles = new Map<number, Map<string, CellStyle>>();
   private stale = new Map<number, (SheetCell | null)[][]>();
   /** The sheet layout each block (fresh or stale) was read at. */
   private layouts = new Map<number, number>();
@@ -371,6 +374,11 @@ export class SheetCache {
   columns = 26;
 
   constructor(private rpc: Rpc, private onLoaded: () => void, private onError: (e: Error) => void) {}
+
+  /** The style of a sheet cell, if it has one and its block is loaded. */
+  style(r: number, c: number): CellStyle | undefined {
+    return this.styles.get(Math.floor(r / SHEET_BLOCK))?.get(cellKey(r, c));
+  }
 
   cell(r: number, c: number): SheetCell | null | undefined {
     const b = Math.floor(r / SHEET_BLOCK);
@@ -440,6 +448,7 @@ export class SheetCache {
       });
       if (gen !== this.generation) return;
       this.blocks.set(b, res.rows);
+      this.styles.set(b, new Map((res.styles ?? []).map((s) => [cellKey(s.row, s.column), s.style])));
       this.layouts.set(b, res.layout);
       this.loadedAt.set(b, gen);
       this.stale.delete(b);

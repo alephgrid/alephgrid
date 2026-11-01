@@ -48,7 +48,7 @@ pub struct Workbook {
     pub(crate) settled: std::collections::BTreeSet<String>,
     report: OpenReport,
     /// Who changes made without an explicit [`Mutation`] (imports, refreshes) are recorded as.
-    actor: Option<String>,
+    pub(crate) actor: Option<String>,
     /// The change in progress: who makes it and the revision it will commit as.
     pub(crate) txn_actor: Option<String>,
     pub(crate) txn_revision: u64,
@@ -121,7 +121,7 @@ pub enum Imported {
 /// A second connection to a workbook for reads. Reads see committed data only, run at the
 /// same time as the writer's work, and share open views with it.
 pub struct Reader {
-    conn: Connection,
+    pub(crate) conn: Connection,
     shared: Arc<Shared>,
 }
 

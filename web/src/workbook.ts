@@ -30,6 +30,11 @@ import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuIte
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
+import { formatBar } from "./formatbar";
+import { CommentsPane } from "./commentspane";
+import { renderChart, type ChartType } from "./charts";
+import type { CellComment, SheetRules } from "./protocol";
+import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
 
 /** "1.2M rows" for the explorer. */
@@ -234,6 +239,20 @@ export class WorkbookScreen {
   private closePresentation: (() => void) | null = null;
   private closeReplace: (() => void) | null = null;
   private findBar = new FindBar(() => this.grid.focus());
+  /** S.11: comments of the open sheet (cell keys) and the comments pane. */
+  private commentCells = new Set<string>();
+  private commentsPane: CommentsPane | null = null;
+  /** S.09: the open range chart, redrawn when the sheet changes. */
+  private rangeChart: { close: () => void; draw: () => void } | null = null;
+  /** S.10: the open sheet's colour and validation rules. */
+  private sheetRules: SheetRules = { colors: [], validations: [] };
+  /** S.01: the sheet format toolbar (hidden for tables). */
+  private formatBarEl = formatBar({
+    current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
+    apply: (patch) => this.applyStyle(patch),
+    clear: () => this.applyStyle(null),
+    border: (kind) => this.applyBorder(kind),
+  }) as HTMLElement & { sync?: () => void };
   private replaceRevision = 0;
   /** Tables made from a query, and the saved queries they may name. */
   private materialized: MaterializedTable[] = [];
@@ -260,17 +279,17 @@ export class WorkbookScreen {
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
-    this.sheetCache = new SheetCache(this.rpc, onLoaded, onError);
+    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) { this.formatBarEl.sync?.(); this.rangeChart?.draw(); } }, onError);
     const self = this;
     this.grid = new Grid(
       {
-        frozen: () => this.isSheet() ? 0 : this.presentation.frozen,
+        frozen: () => this.isSheet() ? (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.frozen_columns ?? 0) : this.presentation.frozen,
         format: (value, column) => displayValue(value, column, this.presentation.formats[column.name]),
         color: (value, column) => cellColor(value, column.name, this.presentation.rules),
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
         columns: () => (this.isSheet() ? this.sheetCols : this.view?.columns ?? []),
         canAppend: () => !this.isSheet() && (this.view?.can_append ?? false),
-        choices: (column: string) => this.isSheet() ? [] : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
+        choices: (column: string) => this.isSheet() ? this.sheetChoices() : this.rules.filter(r => r.column === column && r.rule.kind === "one_of").flatMap(r => r.rule.kind === "one_of" ? r.rule.values : []),
         sort: () => (this.isSheet() ? [] : this.spec.sort),
         filters: () => (this.isSheet() ? [] : this.spec.filters),
         value: (r, c) => this.cache.value(r, c),
@@ -280,6 +299,8 @@ export class WorkbookScreen {
           const cell = this.sheetCache.cell(r, c);
           return cell ? { text: cell[0], align: cell[1] } : cell;
         },
+        style: (r, c) => this.ruleStyle(r, c),
+        comment: (r, c) => this.commentCells.has(`${r}:${c}`),
         editText: (r, c) => {
           const cell = this.sheetCache.cell(r, c);
           return cell ? cell[2] ?? cell[0] : "";
@@ -448,6 +469,7 @@ export class WorkbookScreen {
       this.maxMessageBytes = config.max_message_bytes ?? this.maxMessageBytes;
       this.maxEditCells = config.max_edit_cells ?? this.maxEditCells;
     } catch { /* keep default */ }
+    try { const z = Number(localStorage.getItem(`alephgrid-zoom-${this.meta.id}`)); if (z && z !== 1) requestAnimationFrame(() => this.grid.setZoom(z)); } catch { /* private mode */ }
     try {
       await this.rpc.connect();
     } catch (e) {
@@ -608,6 +630,15 @@ export class WorkbookScreen {
         { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
       ]],
       ["View", () => [
+        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
+        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5, action: () => this.setZoom(this.grid.getZoom() - 0.1) },
+        { label: "Actual size (100%)", action: () => this.setZoom(1) },
+        "sep" as const,
+        ...(this.isSheet() ? [
+          { label: `Freeze columns A–${String.fromCharCode(65 + Math.min(25, this.grid.active.c))}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
+          { label: "Unfreeze columns", action: () => void this.freezeColumns(0) },
+          "sep" as const,
+        ] : []),
         { label: `${this.explorerOpen ? "✓ " : ""}Explorer`, action: () => this.toggleExplorer() },
         { label: "Saved views…", disabled: tableOnly(), action: () => this.viewsMenu(this.menuAnchor) },
         "sep",
@@ -621,7 +652,19 @@ export class WorkbookScreen {
         "sep",
         { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       ]],
-      ["Format", () => [
+      ["Format", () => this.isSheet() ? [
+        { label: "Bold", hint: "⌘B", action: () => this.commands.list().find((c) => c.id === "format.bold")?.run?.() },
+        { label: "Italic", hint: "⌘I", action: () => this.commands.list().find((c) => c.id === "format.italic")?.run?.() },
+        { label: "Underline", hint: "⌘U", action: () => this.commands.list().find((c) => c.id === "format.underline")?.run?.() },
+        "sep",
+        { label: "Number: 1,234.56", action: () => void this.applyStyle({ num_fmt: "#,##0.00" }) },
+        { label: "Percent: 12.35%", action: () => void this.applyStyle({ num_fmt: "0.00%" }) },
+        { label: "Currency: $1,234.56", action: () => void this.applyStyle({ num_fmt: "$#,##0.00" }) },
+        { label: "Date: 2026-11-01", action: () => void this.applyStyle({ num_fmt: "yyyy-mm-dd" }) },
+        { label: "General number format", action: () => void this.applyStyle({ num_fmt: "" }) },
+        "sep",
+        { label: "Clear formatting", action: () => void this.applyStyle(null) },
+      ] : [
         { label: "Format table…", hint: tableOnly() ? "Tables" : undefined, disabled: tableOnly(), action: act.formatTable },
       ]],
       ["Data", () => [
@@ -701,6 +744,7 @@ export class WorkbookScreen {
         this.exportBtn = tool("download", "Export", (e) => this.exportMenu(anchor(e)), { text: "Export", menu: true, title: "Download this table or the sheets" }),
         this.fileInput,
       ),
+      this.formatBarEl,
       this.chips,
       this.snapshotEl,
       this.welcome(),
@@ -932,6 +976,8 @@ export class WorkbookScreen {
 
   private updateToolbar(): void {
     const sheet = this.isSheet();
+    this.formatBarEl.hidden = !sheet;
+    if (sheet) this.formatBarEl.sync?.();
     for (const b of this.tableButtons) {
       b.hidden = sheet || !this.active;
       b.disabled = !this.view;
@@ -1034,7 +1080,19 @@ export class WorkbookScreen {
         onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
         onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
-      }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name);
+        // S.07: drag a sheet tab onto another to move it there.
+        draggable: "true",
+        ondragstart: (e: DragEvent) => { e.dataTransfer?.setData("application/x-alephgrid-sheet", String(s.index)); },
+        ondragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("application/x-alephgrid-sheet")) e.preventDefault(); },
+        ondrop: async (e: DragEvent) => {
+          const from = Number(e.dataTransfer?.getData("application/x-alephgrid-sheet"));
+          if (!Number.isInteger(from) || from === s.index) return;
+          e.preventDefault();
+          try { await this.rpc.call("sheet_reorder", { sheet: from, to: s.index }); await this.loadItems(); }
+          catch (err) { toast((err as Error).message, "error"); }
+        },
+      }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name,
+        s.color ? el("span", { class: "tab-color", "aria-hidden": "true", style: `background:${s.color}` }) : null);
     });
     const tabsHadFocus = this.tabsEl.contains(document.activeElement);
     this.tabsEl.replaceChildren(...tableTabs, ...sheetTabs);
@@ -1093,6 +1151,7 @@ export class WorkbookScreen {
   }
 
   private async openSheet(index: number): Promise<void> {
+    queueMicrotask(() => void this.loadComments());
     this.gridWrap.querySelector(".empty")?.remove();
     this.closeTableView();
     const info = this.sheets.find((s) => s.index === index);
@@ -1271,6 +1330,7 @@ export class WorkbookScreen {
   // -------------------------------------------------------------- selection
 
   private onSelection(range: Range, active: Cell): void {
+    if (this.isSheet()) this.formatBarEl.sync?.();
     clearTimeout(this.statsTimer);
     this.statsEl.textContent = "";
     if (this.isSheet()) {
@@ -1919,6 +1979,7 @@ export class WorkbookScreen {
       history: () => historyDialog(this.rpc, () => void this.resync()),
       compute: () => computeDialog(this.meta.id),
       find: (replace) => this.openFind(replace),
+      toggleStyle: (key) => void this.applyStyle({ [key]: !(this.sheetCache.style(this.grid.active.r, this.grid.active.c)?.[key] ?? false) }),
     }));
   }
 
@@ -1988,6 +2049,42 @@ export class WorkbookScreen {
         },
       };
     }
+    if (this.active?.kind === "sheet") {
+      const sheet = this.active.index;
+      let last = { text: "", matchCase: false };
+      return {
+        label: this.active.name,
+        sheetOptions: true,
+        find: (text, matchCase, from, backwards, count) => {
+          last = { text, matchCase };
+          const search = { text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas };
+          return this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count });
+        },
+        active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
+        go: (row, c) => this.grid.select({ r: row, c }),
+        replace: {
+          preview: async (_column, find) => (await this.rpc.call("sheet_find", { sheet, search: { text: find, match_case: last.matchCase }, count: true })).matches ?? 0,
+          apply: async () => {
+            const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
+            const n = await this.rpc.call("sheet_replace", { sheet, search: { text: last.text, match_case: last.matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas }, replacement: input });
+            await this.refreshSheet();
+            return `Replaced in ${formatCount(n)} cells. Undo (⌘Z) takes it back in one step.`;
+          },
+          undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
+          one: async (find, replacement, matchCase) => {
+            const { r, c } = this.grid.active;
+            const text = this.sheetCache.cell(r, c)?.[2] ?? this.sheetCache.cell(r, c)?.[0] ?? "";
+            const esc = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const next = text.replace(new RegExp(esc, matchCase ? "g" : "gi"), () => replacement);
+            if (next === text) return;
+            const layout = this.shownLayout(sheet, r, r);
+            if (layout === null) return;
+            await this.rpc.call("sheet_set", { sheet, inputs: [{ row: r, column: c, value: next }], layout });
+            await this.refreshSheet();
+          },
+        },
+      };
+    }
     return null;
   }
 
@@ -2010,6 +2107,202 @@ export class WorkbookScreen {
       this.reportConflict(e);
       if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
+  }
+
+  /** S.01: format the selected cells of the current sheet (null clears their formats). */
+  private async applyStyle(patch: StylePatch | null): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try {
+      if (patch) await this.rpc.call("sheet_style", { sheet, area, style: patch, layout });
+      else await this.rpc.call("sheet_clear_format", { sheet, area, layout });
+      await this.refreshSheet();
+      this.formatBarEl.sync?.();
+    } catch (e) {
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+    }
+  }
+
+  /** S.01: borders on the selected cells. */
+  private async applyBorder(kind: string): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try { await this.rpc.call("sheet_border", { sheet, area, kind, weight: "thin", layout }); await this.refreshSheet(); }
+    catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.09: a chart of the selected range, docked under the grid and redrawn as the cells
+   *  change. The first column gives the categories, the first row the series names. */
+  private chartFromSelection(): void {
+    if (this.active?.kind !== "sheet") return;
+    const sel = this.grid.selection();
+    const sheet = this.active.index;
+    const kind = el("select", { "aria-label": "Chart type" }, ...["column", "bar", "line", "area", "scatter", "pie"].map((k) => el("option", { value: k }, k))) as HTMLSelectElement;
+    const box = el("div", { class: "chart-box" });
+    const draw = () => {
+      if (this.active?.kind !== "sheet" || this.active.index !== sheet) return;
+      const text = (r: number, c: number) => this.sheetCache.cell(r, c)?.[0] ?? "";
+      const series = [];
+      for (let c = sel.c0 + 1; c <= sel.c1; c++) {
+        series.push({ name: text(sel.r0, c) || `Column ${c - sel.c0}`, values: Array.from({ length: sel.r1 - sel.r0 }, (_, i) => { const v = Number(text(sel.r0 + 1 + i, c).replace(/,/g, "")); return text(sel.r0 + 1 + i, c) === "" || Number.isNaN(v) ? null : v; }) });
+      }
+      const labels = Array.from({ length: sel.r1 - sel.r0 }, (_, i) => text(sel.r0 + 1 + i, sel.c0));
+      renderChart(box, { labels, series, title: "Chart of the selection" }, kind.value as ChartType);
+    };
+    kind.addEventListener("change", draw);
+    const panel = el("section", { class: "analyze-results", "aria-label": "Range chart" }, el("h2", {}, "Chart"), el("label", { class: "analyze-field" }, el("span", {}, "Type"), kind), box);
+    this.rangeChart?.close();
+    const handle = dockPanel(this.mainEl, panel, "Chart", () => { this.rangeChart = null; });
+    this.rangeChart = { close: handle.close, draw };
+    draw();
+  }
+
+  /** S.08: zoom the grid; remembered per workbook in this browser. */
+  private setZoom(z: number): void {
+    this.grid.setZoom(z);
+    try { localStorage.setItem(`alephgrid-zoom-${this.meta.id}`, String(this.grid.getZoom())); } catch { /* private mode */ }
+    toast(`Zoom ${Math.round(this.grid.getZoom() * 100)}%`);
+  }
+
+  /** S.06: sort the selected rows of the sheet by the first selected column. */
+  private async sortRange(desc: boolean, header: boolean): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try {
+      await this.rpc.call("sheet_sort", { sheet, area, by: [{ column: 0, desc }], header, layout });
+      await this.refreshSheet();
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.11: the comments pane beside the grid. */
+  private openComments(): void {
+    if (this.commentsPane && !this.commentsPane.closed) { void this.commentsPane.reload(); return; }
+    const body = this.mainEl.parentElement!;
+    this.commentsPane = new CommentsPane(this.rpc, {
+      sheet: () => (this.active?.kind === "sheet" ? this.active.index : null),
+      go: (r, c) => { this.grid.select({ r, c }); this.grid.focus(); },
+      pane: (panel) => { body.append(panel); return { close: () => { panel.remove(); this.grid.focus(); } }; },
+      changed: (list) => this.setComments(list),
+    });
+  }
+
+  /** A cell's style with the first matching colour rule's fill (S.10). */
+  private ruleStyle(r: number, c: number) {
+    const own = this.sheetCache.style(r, c);
+    const rule = this.sheetRules.colors.find((x) => r >= x.area.row && r < x.area.row + x.area.rows && c >= x.area.column && c < x.area.column + x.area.columns && (() => {
+      const t = this.sheetCache.cell(r, c)?.[0] ?? "";
+      const n = Number(t.replace(/,/g, "")), v = Number(x.value);
+      switch (x.condition) {
+        case "greater": return t !== "" && n > v;
+        case "less": return t !== "" && n < v;
+        case "equal": return t === x.value;
+        case "contains": return t.toLowerCase().includes(x.value.toLowerCase());
+        case "empty": return t === "";
+        case "not_empty": return t !== "";
+        case "scale": return t !== "" && !Number.isNaN(Number(t.replace(/,/g, "")));
+        default: return false;
+      }
+    })());
+    if (rule?.condition === "scale" && !own?.fill) {
+      // Colour scale: the rule's colour, stronger the closer the value is to the top of "low,high".
+      const [lo, hi] = rule.value.split(",").map(Number);
+      const n = Number((this.sheetCache.cell(r, c)?.[0] ?? "").replace(/,/g, ""));
+      const t = Math.max(0, Math.min(1, (n - lo) / ((hi - lo) || 1)));
+      const alpha = Math.round(40 + t * 215).toString(16).padStart(2, "0");
+      return { ...(own ?? {}), fill: `${rule.color}${alpha}` };
+    }
+    return rule && !own?.fill ? { ...(own ?? {}), fill: rule.color } : own;
+  }
+
+  private async editRules(kind: "color" | "list"): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const rules = await this.rpc.call("sheet_rules", { sheet });
+    if (kind === "color") {
+      const v = await formDialog("Colour cells that…", [
+        { name: "condition", label: "Condition", type: "select", options: [["greater", "are greater than"], ["less", "are less than"], ["equal", "equal"], ["contains", "contain"], ["empty", "are empty"], ["not_empty", "are not empty"], ["scale", "shade by value (low,high)"]].map(([value, label]) => ({ value, label })) },
+        { name: "value", label: "Value" }, { name: "color", label: "Fill (#RRGGBB)", value: "#FFC7CE" }], "Add rule");
+      if (!v) return;
+      rules.colors.push({ area, condition: v.condition, value: v.value, color: v.color.trim().toUpperCase() });
+    } else {
+      const v = await formDialog("Allowed values", [{ name: "list", label: "Values, separated by commas", placeholder: "yes, no" }], "Save");
+      if (!v) return;
+      rules.validations.push({ area, list: v.list.split(",").map((x) => x.trim()).filter(Boolean) });
+    }
+    try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
+    catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.10: the allowed values of the active sheet cell, offered while editing it. */
+  private sheetChoices(): string[] {
+    const { r, c } = this.grid.active;
+    return this.sheetRules.validations
+      .filter((v) => r >= v.area.row && r < v.area.row + v.area.rows && c >= v.area.column && c < v.area.column + v.area.columns)
+      .flatMap((v) => v.list ?? []);
+  }
+
+  /** S.10: remove the rules that touch the selection. */
+  private async clearRules(): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const touches = (a: { row: number; column: number; rows: number; columns: number }) =>
+      a.row <= sel.r1 && a.row + a.rows - 1 >= sel.r0 && a.column <= sel.c1 && a.column + a.columns - 1 >= sel.c0;
+    const rules = await this.rpc.call("sheet_rules", { sheet });
+    const next = { colors: rules.colors.filter((r) => !touches(r.area)), validations: rules.validations.filter((r) => !touches(r.area)) };
+    const removed = rules.colors.length + rules.validations.length - next.colors.length - next.validations.length;
+    if (!removed) { toast("No rule covers these cells"); return; }
+    try { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); this.sheetRules = next; this.grid.invalidate(); toast(`Removed ${removed} rule${removed === 1 ? "" : "s"}`); }
+    catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  private setComments(list: CellComment[]): void {
+    this.commentCells = new Set(list.filter((c) => !c.resolved).map((c) => `${c.row}:${c.column}`));
+    this.grid.invalidate();
+  }
+
+  /** Load the open sheet's comments (for the cell markers), and refresh the pane. */
+  private async loadComments(): Promise<void> {
+    if (this.active?.kind !== "sheet") { this.commentCells.clear(); return; }
+    try { this.sheetRules = await this.rpc.call("sheet_rules", { sheet: this.active.index }); this.grid.invalidate(); } catch { /* colours only */ }
+    if (this.commentsPane && !this.commentsPane.closed) { await this.commentsPane.reload(); return; }
+    try { this.setComments(await this.rpc.call("comments", { sheet: this.active.index })); } catch { /* markers only */ }
+  }
+
+  private async addComment(row: number, column: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const v = await formDialog(`Comment on ${columnLetter(column)}${row + 1}`, [{ name: "text", label: "Comment", type: "textarea" }], "Comment");
+    if (!v || !v.text.trim()) return;
+    try {
+      await this.rpc.call("add_comment", { sheet: this.active.index, row, column, text: v.text });
+      this.openComments();
+      await this.loadComments();
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.05: keep the first `columns` columns of the sheet in view (0 unfreezes). */
+  private async freezeColumns(columns: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    try {
+      await this.rpc.call("sheet_freeze", { sheet: this.active.index, columns });
+      await this.loadItems();
+      this.grid.invalidate();
+    } catch (e) { toast((e as Error).message, "error"); }
   }
 
   /** U.16: the value filter popup of a table column. */
@@ -2083,15 +2376,41 @@ export class WorkbookScreen {
   private rowMenu(r: number, x: number, y: number): void {
     const sel = this.grid.selection();
     if (this.isSheet()) {
-      const count = Math.max(1, sel.r1 - sel.r0 + 1);
+      // S.03: the cell menu; the same commands are in the menus and the command palette.
+      const rows = Math.max(1, sel.r1 - sel.r0 + 1);
+      const cols = Math.max(1, sel.c1 - sel.c0 + 1);
       showMenu([
+        { label: "Cut", hint: "⌘X", action: () => void this.cut() },
         { label: "Copy", hint: "⌘C", action: () => this.copy(sel) },
+        { label: "Paste", hint: "⌘V", action: async () => {
+          try { this.paste({ r: sel.r0, c: sel.c0 }, await navigator.clipboard.readText()); }
+          catch { toast("Paste with ⌘V: this browser does not let the page read the clipboard from a menu"); }
+        } },
+        { label: "Paste special…", hint: "⌘⇧V", action: () => this.pasteSpecialDialog() },
         "sep",
-        { label: "Insert row above", action: () => this.sheetOp("sheet_insert_rows", { at: r, count: 1 }) },
-        { label: "Insert row below", action: () => this.sheetOp("sheet_insert_rows", { at: r + 1, count: 1 }) },
-        { label: count > 1 ? `Delete ${count} rows` : "Delete row", danger: true,
-          action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count }) },
-      ], x, y);
+        { label: rows > 1 ? `Insert ${rows} rows above` : "Insert row above", action: () => this.sheetOp("sheet_insert_rows", { at: sel.r0, count: rows }) },
+        { label: rows > 1 ? `Insert ${rows} rows below` : "Insert row below", action: () => this.sheetOp("sheet_insert_rows", { at: sel.r1 + 1, count: rows }) },
+        { label: cols > 1 ? `Insert ${cols} columns left` : "Insert column left", action: () => this.sheetOp("sheet_insert_columns", { at: sel.c0, count: cols }) },
+        { label: cols > 1 ? `Insert ${cols} columns right` : "Insert column right", action: () => this.sheetOp("sheet_insert_columns", { at: sel.c1 + 1, count: cols }) },
+        { label: rows > 1 ? `Delete ${rows} rows` : "Delete row", danger: true, action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count: rows }) },
+        { label: cols > 1 ? `Delete ${cols} columns` : "Delete column", danger: true, action: () => this.sheetOp("sheet_delete_columns", { at: sel.c0, count: cols }) },
+        "sep",
+        ...(rows > 1 ? [
+          { label: `Sort rows by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, false) },
+          { label: `Sort rows by ${columnLetter(sel.c0)}, Z → A`, action: () => void this.sortRange(true, false) },
+          { label: `Sort below the header row by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, true) },
+          "sep" as const,
+        ] : []),
+        ...(rows > 1 ? [{ label: "Chart from selection", action: () => this.chartFromSelection() }] : []),
+        { label: "Conditional colour…", action: () => void this.editRules("color") },
+        { label: "Allowed values…", action: () => void this.editRules("list") },
+        { label: "Clear colour and value rules here", action: () => void this.clearRules() },
+        { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
+        { label: "Show comments", action: () => this.openComments() },
+        "sep",
+        { label: "Clear contents", hint: "Delete", action: () => this.grid.clearSelection() },
+        { label: "Clear formatting", action: () => void this.applyStyle(null) },
+      ], x, y, { label: "Cell actions" });
       return;
     }
     if (!this.view) return;
@@ -2145,6 +2464,40 @@ export class WorkbookScreen {
 
   private sheetTabMenu(s: SheetInfo, x: number, y: number): void {
     showMenu([
+      { label: "Duplicate", action: async () => {
+        try { const copy = await this.rpc.call("sheet_duplicate", { sheet: s.index }); await this.loadItems(); await this.openSheet(copy.index); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      ...(() => {
+        const pos = this.sheets.findIndex((x) => x.index === s.index);
+        const move = async (to: number) => {
+          try { await this.rpc.call("sheet_reorder", { sheet: s.index, to }); await this.loadItems(); }
+          catch (e) { toast((e as Error).message, "error"); }
+        };
+        return [
+          { label: "Move left", disabled: pos <= 0, action: () => void move(this.sheets[pos - 1].index) },
+          { label: "Move right", disabled: pos < 0 || pos >= this.sheets.length - 1, action: () => void move(this.sheets[pos + 1].index) },
+        ];
+      })(),
+      { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
+        try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      { label: "Unhide sheet…", action: async () => {
+        const hidden = await this.rpc.call("hidden_sheets", {});
+        if (!hidden.length) { toast("No sheet is hidden"); return; }
+        const v = await formDialog("Unhide a sheet", [{ name: "name", label: "Sheet", type: "select", options: hidden.map((n) => ({ value: n, label: n })) }], "Unhide");
+        if (!v) return;
+        try { await this.rpc.call("sheet_unhide", { name: v.name }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      { label: "Tab colour…", action: async () => {
+        const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply");
+        if (!v) return;
+        try { await this.rpc.call("sheet_color", { sheet: s.index, color: v.color.trim() }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      "sep",
       { label: "Rename…", action: async () => {
         const v = await formDialog("Rename sheet", [{ name: "name", label: "Name", value: s.name }], "Rename");
         if (!v) return;
@@ -2545,6 +2898,7 @@ export class WorkbookScreen {
         this.loadItems().catch(() => {});
         break;
       case "sheet_changed":
+        void this.loadComments();
         if (a?.kind === "sheet" && e.origin !== this.rpc.session && (e.sheet === null || e.sheet === a.index)) {
           await this.refreshSheet();
         }

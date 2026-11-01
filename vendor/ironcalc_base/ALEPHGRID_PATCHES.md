@@ -80,3 +80,9 @@ This identifies the original archive, not the patched directory.
   the history.
 
 Regression evidence: alephgrid-core `tests::security`. These are not upstream behaviour.
+
+## Scientific format sign (S.02; 1 November 2026)
+
+- `formatter/format.rs`: a value from 1 to 10 formatted with `0.00E+00` showed `E-00`; the
+  exponent is negative only below 1. Regression: alephgrid-core
+  `tests::sheetformat::number_formats_change_the_display_not_the_value`.

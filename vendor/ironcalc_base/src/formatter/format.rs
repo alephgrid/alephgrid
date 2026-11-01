@@ -444,7 +444,8 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
             );
             let mut value_abs = value.abs();
             let mut exponent_part: Vec<char> = vec![];
-            let mut exponent_is_negative = value_abs < 10.0;
+            // Alephgrid patch: the exponent is negative below 1, not below 10 (3.14 is 3.14E+00).
+            let mut exponent_is_negative = value_abs < 1.0;
             if p.is_scientific {
                 if value_abs == 0.0 {
                     exponent_part = vec!['0'];

@@ -20,6 +20,8 @@ mod sheets;
 mod sql;
 mod sqlwork;
 mod cleanup;
+mod comments;
+mod sheetformat;
 mod security;
 mod storage;
 mod table_formulas;

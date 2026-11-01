@@ -15,7 +15,11 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod editing;
+mod find;
+mod format;
+pub use find::{SheetSearch, SortBy};
 mod links;
+pub use format::{CellStyle, StyledCell, StylePatch};
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
 pub(crate) use links::{slot_input, slot_of};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
@@ -41,6 +45,13 @@ pub struct SheetInfo {
     /// (`layout`): they are refused, not misapplied, once it moved on.
     #[serde(default)]
     pub layout: u64,
+    /// Columns kept in view while scrolling sideways (S.05).
+    #[serde(default)]
+    pub frozen_columns: u32,
+    /// The tab's colour, `#RRGGBB` (S.07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -65,6 +76,10 @@ pub struct SheetBlock {
     /// As [`SheetInfo::layout`]: the layout these addresses were read at.
     #[serde(default)]
     pub layout: u64,
+    /// Cells of this block whose style is not the default (S.01), empty cells included.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<StyledCell>>")]
+    pub styles: Vec<StyledCell>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -395,7 +410,10 @@ impl Sheets {
             .filter(|(_, p)| p.state == "visible")
             .map(|(i, p)| {
                 let (rows, columns) = used_size(m, i as u32);
-                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32) }
+                let ws = m.get_model().workbook.worksheet(i as u32).ok();
+                let frozen_columns = ws.map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
+                let color = ws.and_then(|w| format::rgb(&w.color));
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, color }
             })
             .collect()
     }
@@ -508,6 +526,7 @@ impl Sheets {
         let row_count = crate::limits::fetch_rows(row_count as u64, columns as usize) as u32;
         let end = row_start.saturating_add(row_count).min(MAX_ROWS);
         let mut rows = Vec::with_capacity(end.saturating_sub(row_start) as usize);
+        let mut styles = Vec::new();
         for r in row_start..end {
             let mut out: Vec<Option<SheetCell>> = Vec::new();
             let mut any = false;
@@ -517,6 +536,12 @@ impl Sheets {
                     continue;
                 }
                 let (row, col) = (r as i32 + 1, c);
+                if let Ok(st) = m.get_cell_style(index, row, col) {
+                    let style = CellStyle::of(&st);
+                    if !style.is_default() {
+                        styles.push(StyledCell { row: r, column: ci, style });
+                    }
+                }
                 let display = m.get_formatted_cell_value(index, row, col).unwrap_or_default();
                 let input = self.shown_input(index, m.get_cell_content(index, row, col).unwrap_or_default());
                 if display.is_empty() && input.is_empty() {
@@ -537,7 +562,7 @@ impl Sheets {
             }
             rows.push(if any { out } else { vec![] });
         }
-        Ok(SheetBlock { row_start, rows, layout: self.layout_of(index) })
+        Ok(SheetBlock { row_start, rows, layout: self.layout_of(index), styles })
     }
 
     /// Write cell inputs as one undoable step. Every coordinate is validated before the

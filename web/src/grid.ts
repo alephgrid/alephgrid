@@ -4,6 +4,7 @@
 import { formatValue, isNumericKind, rawText } from "./format";
 import { applyReferenceLock } from "./references";
 import type { Align, CellValue, Column, Filter, SortKey } from "./types";
+import type { CellStyle } from "./protocol";
 
 export interface Cell { r: number; c: number }
 export interface Range { r0: number; c0: number; r1: number; c1: number }
@@ -27,6 +28,10 @@ export interface GridModel {
   mode?(): "table" | "sheet";
   /** Sheet mode: rendered cell, null when empty, undefined while loading. */
   cell?(r: number, c: number): { text: string; align: Align } | null | undefined;
+  /** Sheet mode: the cell's format (S.01), if any. */
+  style?(r: number, c: number): CellStyle | undefined;
+  /** Sheet mode: whether the cell has a comment (S.11). */
+  comment?(r: number, c: number): boolean;
   /** Text shown in the editor (formula source for sheets). */
   editText?(r: number, c: number): string;
   /** What an edit of the cell is checked against on the server (the value shown when
@@ -423,30 +428,46 @@ export class Grid {
     };
   }
 
+  /** S.08: drawing scale (0.5–2); layout works in unscaled units, the canvas stays crisp. */
+  private zoom = 1;
+
+  setZoom(z: number): void {
+    this.zoom = Math.max(0.5, Math.min(2, Math.round(z * 100) / 100));
+    this.resize();
+    this.updateSpacer();
+    this.syncScroller();
+    if (this.editing) this.placeEditor();
+  }
+
+  getZoom(): number {
+    return this.zoom;
+  }
+
   private resize(): void {
     const dpr = window.devicePixelRatio || 1;
-    this.width = this.host.clientWidth;
-    this.height = this.host.clientHeight;
-    this.canvas.width = Math.round(this.width * dpr);
-    this.canvas.height = Math.round(this.height * dpr);
-    this.canvas.style.width = `${this.width}px`;
-    this.canvas.style.height = `${this.height}px`;
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pw = this.host.clientWidth, ph = this.host.clientHeight;
+    this.width = pw / this.zoom;
+    this.height = ph / this.zoom;
+    this.canvas.width = Math.round(pw * dpr);
+    this.canvas.height = Math.round(ph * dpr);
+    this.canvas.style.width = `${pw}px`;
+    this.canvas.style.height = `${ph}px`;
+    this.ctx.setTransform(dpr * this.zoom, 0, 0, dpr * this.zoom, 0, 0);
     this.invalidate();
   }
 
   private updateSpacer(): void {
     const h = Math.min(this.contentHeight() + ROW_H, MAX_SCROLL_PX) + HEADER_H;
     const w = this.colX[this.colX.length - 1] + this.rowHeaderWidth() + 80;
-    this.spacer.style.height = `${h}px`;
-    this.spacer.style.width = `${w}px`;
+    this.spacer.style.height = `${h * this.zoom}px`;
+    this.spacer.style.width = `${w * this.zoom}px`;
     this.scrollY = Math.min(this.scrollY, this.maxScrollY());
   }
 
   private syncScroller(): void {
-    const top = Math.round(this.scrollY / this.ratio());
+    const top = Math.round((this.scrollY / this.ratio()) * this.zoom);
     this.scroller.scrollTop = top;
-    this.scroller.scrollLeft = this.scrollX;
+    this.scroller.scrollLeft = this.scrollX * this.zoom;
     this.expectTop = this.scroller.scrollTop;
   }
 
@@ -466,10 +487,10 @@ export class Grid {
 
   private onScroll(): void {
     if (Math.abs(this.scroller.scrollTop - this.expectTop) > 1) {
-      this.scrollY = Math.min(this.maxScrollY(), this.scroller.scrollTop * this.ratio());
+      this.scrollY = Math.min(this.maxScrollY(), (this.scroller.scrollTop / this.zoom) * this.ratio());
     }
     this.expectTop = -1;
-    this.scrollX = this.scroller.scrollLeft;
+    this.scrollX = this.scroller.scrollLeft / this.zoom;
     if (this.editing) this.placeEditor();
     this.invalidate();
   }
@@ -491,7 +512,7 @@ export class Grid {
 
   private point(e: MouseEvent): { x: number; y: number } {
     const r = this.host.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    return { x: (e.clientX - r.left) / this.zoom, y: (e.clientY - r.top) / this.zoom };
   }
 
   private resizeHandleAt(x: number, y: number): number {
@@ -703,7 +724,8 @@ export class Grid {
     e.preventDefault();
   }
 
-  private clearSelection(): void {
+  /** Clear the selected cells (Delete), for menus. */
+  clearSelection(): void {
     const s = this.selection();
     const cells = (s.r1 - s.r0 + 1) * (s.c1 - s.c0 + 1);
     if (cells > 100_000) return;
@@ -718,8 +740,8 @@ export class Grid {
     if (!this.editing) return;
     const rect = this.cellRect(this.editing);
     Object.assign(this.editor.style, {
-      left: `${rect.x}px`, top: `${rect.y}px`,
-      width: `${Math.max(rect.w, 120)}px`, height: `${rect.h}px`,
+      left: `${rect.x * this.zoom}px`, top: `${rect.y * this.zoom}px`,
+      width: `${Math.max(rect.w, 120) * this.zoom}px`, height: `${rect.h * this.zoom}px`, fontSize: `${13 * this.zoom}px`,
     });
   }
 
@@ -807,6 +829,19 @@ export class Grid {
         if (r >= rowCount) continue;
         if (sheetCells) {
           const cell = sheetCells(r, c);
+          const st = this.model.style?.(r, c);
+          if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, ROW_H); }
+          if (st?.borders) {
+            ctx.fillStyle = colors.text;
+            if (st.borders.includes("t")) ctx.fillRect(x, y, w, 1);
+            if (st.borders.includes("b")) ctx.fillRect(x, y + ROW_H - 1, w, 1);
+            if (st.borders.includes("l")) ctx.fillRect(x, y, 1, ROW_H);
+            if (st.borders.includes("r")) ctx.fillRect(x + w - 1, y, 1, ROW_H);
+          }
+          if (this.model.comment?.(r, c)) {
+            ctx.fillStyle = "#D97706";
+            ctx.beginPath(); ctx.moveTo(x + w - 7, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + 7); ctx.closePath(); ctx.fill();
+          }
           if (cell === undefined) {
             if (c === c0) {
               ctx.fillStyle = colors.placeholder;
@@ -815,10 +850,20 @@ export class Grid {
             continue;
           }
           if (!cell || !cell.text) continue;
-          ctx.fillStyle = cell.text.startsWith("#") && cell.align === "center" ? colors.danger : colors.text;
-          ctx.textAlign = cell.align;
-          const tx = cell.align === "right" ? x + w - 8 : cell.align === "center" ? x + w / 2 : x + 8;
-          ctx.fillText(cell.text, tx, y + ROW_H / 2 + 1);
+          ctx.fillStyle = st?.color ?? (cell.text.startsWith("#") && cell.align === "center" ? colors.danger : colors.text);
+          const align: CanvasTextAlign = st?.h === "left" || st?.h === "center" || st?.h === "right" ? st.h : cell.align;
+          ctx.textAlign = align;
+          if (st) ctx.font = `${st.i ? "italic " : ""}${st.b ? "700 " : ""}${Math.min(st.size ?? 13, 20)}px ${colors.ui}`;
+          const tx = align === "right" ? x + w - 8 : align === "center" ? x + w / 2 : x + 8;
+          const ty = st?.v === "top" ? y + 9 : y + ROW_H / 2 + 1;
+          ctx.fillText(cell.text, tx, ty);
+          if (st?.u || st?.s) {
+            const tw = Math.min(ctx.measureText(cell.text).width, w - 16);
+            const lx = align === "right" ? tx - tw : align === "center" ? tx - tw / 2 : tx;
+            ctx.fillRect(lx, st.u ? ty + 7 : ty, tw, 1);
+            if (st.u && st.s) ctx.fillRect(lx, ty, tw, 1);
+          }
+          if (st) ctx.font = `13px ${colors.ui}`;
           continue;
         }
         const v = this.model.value(r, c);

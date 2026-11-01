@@ -11,6 +11,8 @@ export interface WorkbookActions {
   goTo(): void; names(): void | Promise<void>; formulaHelp(): void; sql(): void;
   palette(): void; shortcuts(): void; history(): void; compute(): void;
   find(replace: boolean): void;
+  /** Toggle bold, italic or underline on the selected sheet cells. */
+  toggleStyle(key: "b" | "i" | "u"): void;
 }
 
 /** Every workbook command with its keys. Grid keys without `run` are handled by the grid;
@@ -35,6 +37,9 @@ export function workbookCommands(a: WorkbookActions): Command[] {
     { id: "select.rows", label: "Select whole rows", group: "Select", shortcuts: [{ key: " ", shift: true }], contexts: ["grid"], run: () => a.selectEntire("rows") },
     { id: "select.columns", label: "Select whole columns", group: "Select", shortcuts: [{ key: " ", ctrl: true }], contexts: ["grid"], run: () => a.selectEntire("columns"),
       note: isMac() ? "macOS switches input sources with Ctrl+Space by default; use the command palette if the key does nothing" : undefined },
+    { id: "format.bold", label: "Bold", group: "Format", shortcuts: [{ key: "b", mod: true }], contexts: ["grid"], unavailable: () => a.isSheet() ? null : "Formatting works in sheets; tables use Format table", run: () => a.toggleStyle("b") },
+    { id: "format.italic", label: "Italic", group: "Format", shortcuts: [{ key: "i", mod: true }], contexts: ["grid"], unavailable: () => a.isSheet() ? null : "Formatting works in sheets; tables use Format table", run: () => a.toggleStyle("i") },
+    { id: "format.underline", label: "Underline", group: "Format", shortcuts: [{ key: "u", mod: true }], contexts: ["grid"], unavailable: () => a.isSheet() ? null : "Formatting works in sheets; tables use Format table", run: () => a.toggleStyle("u") },
     { id: "edit.find", label: "Find…", group: "Edit", shortcuts: [{ key: "f", mod: true }], contexts: ["grid"], run: () => a.find(false),
       note: "Searches every row of a table on the server, not only what is on screen" },
     { id: "edit.replace", label: "Find and replace…", group: "Edit", shortcuts: [{ key: "h", mod: true }, { key: "h", mod: true, shift: true }], contexts: ["grid"], run: () => a.find(true),

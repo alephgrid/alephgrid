@@ -11,15 +11,20 @@ export interface FindHit { row: number; columns: number[] }
 
 export interface FindProvider {
   label: string;
+  /** Sheets offer whole-cell and in-formulas matching (S.04). */
+  sheetOptions?: boolean;
   find(text: string, matchCase: boolean, from: number, backwards: boolean, count: boolean): Promise<{ matches?: number; hits: FindHit[] }>;
   active(): { r: number; c: number };
   go(row: number, column: number): void;
   columnName?(c: number): string;
   replace?: {
-    columns(): string[];
+    /** Tables replace in one column; sheets in every matching cell (no column). */
+    columns?(): string[];
     preview(column: string, find: string, replacement: string): Promise<number>;
     apply(): Promise<string>;
     undo(): Promise<string>;
+    /** Replace in the current match only (sheets). */
+    one?(find: string, replacement: string, matchCase: boolean): Promise<void>;
   };
 }
 
@@ -33,6 +38,12 @@ export class FindBar {
   private replacement = el("input", { type: "text", placeholder: "Replace with", "aria-label": "Replace with" }) as HTMLInputElement;
   private applyBtn = el("button", { class: "btn btn-primary", type: "button", disabled: true }, "Replace all");
   private matchCase = false;
+  private oneBtn: HTMLElement | null = null;
+  /** Sheet options, read by the sheet provider. */
+  whole = false;
+  formulas = false;
+  private wholeBtn = el("button", { class: "icon-btn find-case", type: "button", title: "Whole cell", "aria-label": "Whole cell", "aria-pressed": "false", hidden: true }, "[ ]");
+  private formulaBtn = el("button", { class: "icon-btn find-case", type: "button", title: "In formulas", "aria-label": "In formulas", "aria-pressed": "false", hidden: true }, "ƒ");
   private seq = 0;
   private timer = 0;
   private provider: FindProvider | null = null;
@@ -46,9 +57,17 @@ export class FindBar {
     const close = el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", "aria-label": "Close find" }, icon("x", 14));
     const preview = el("button", { class: "btn", type: "button" }, "Preview");
     const undo = el("button", { class: "btn btn-ghost", type: "button" }, "Undo replace");
-    this.replaceRow.append(this.column, this.replacement, preview, this.applyBtn, undo);
+    const one = el("button", { class: "btn", type: "button" }, "Replace");
+    one.addEventListener("click", async () => {
+      const r = this.provider?.replace;
+      if (!r?.one || !this.input.value) return;
+      try { await r.one(this.input.value, this.replacement.value, this.matchCase); await this.step(false); await this.refresh(); }
+      catch (e) { toast((e as Error).message, "error"); }
+    });
+    this.oneBtn = one;
+    this.replaceRow.append(this.column, this.replacement, one, preview, this.applyBtn, undo);
     this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true },
-      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, prev, next, close),
+      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, prev, next, close),
       this.replaceRow);
 
     this.input.addEventListener("input", () => { window.clearTimeout(this.timer); this.timer = window.setTimeout(() => this.refresh(), 200); });
@@ -63,6 +82,8 @@ export class FindBar {
       this.caseBtn.setAttribute("aria-pressed", String(this.matchCase));
       void this.refresh();
     });
+    this.wholeBtn.addEventListener("click", () => { this.whole = !this.whole; this.wholeBtn.setAttribute("aria-pressed", String(this.whole)); void this.refresh(); });
+    this.formulaBtn.addEventListener("click", () => { this.formulas = !this.formulas; this.formulaBtn.setAttribute("aria-pressed", String(this.formulas)); void this.refresh(); });
     prev.addEventListener("click", () => void this.step(true));
     next.addEventListener("click", () => void this.step(false));
     close.addEventListener("click", () => this.close());
@@ -97,6 +118,7 @@ export class FindBar {
     this.provider = provider;
     this.el.setAttribute("aria-label", `Find in ${provider.label}`);
     this.el.hidden = false;
+    this.wholeBtn.hidden = this.formulaBtn.hidden = !provider.sheetOptions;
     this.showReplace(replace && !!provider.replace);
     this.input.focus();
     this.input.select();
@@ -115,7 +137,10 @@ export class FindBar {
     const show = on && !!r;
     this.replaceRow.hidden = !show;
     this.el.querySelector(".find-main .icon-btn")?.setAttribute("aria-expanded", String(show));
-    if (show && r) {
+    this.column.hidden = !r?.columns;
+    if (this.oneBtn) this.oneBtn.hidden = !r?.one;
+    if (show && r && !r.columns) this.count.textContent = "";
+    if (show && r && r.columns) {
       const cols = r.columns();
       this.column.replaceChildren(...cols.map((c) => el("option", { value: c }, c)));
       const a = this.provider!.active();
