@@ -306,11 +306,37 @@ test("S.06: a range filter hides the rows whose value is not kept, and clears", 
   const cells = await ws.call("sheet_fetch", { sheet: 0, row_start: 2, row_count: 1, column_count: 1 });
   expect(JSON.stringify(cells.rows)).toContain("pear");
   // The keyboard walks only the kept rows.
-  expect(await shown(page, 2, 0)).toBe("apple");
+  await expect.poll(() => shown(page, 2, 0)).toBe("apple");
   await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
   await page.getByRole("menuitem", { name: /^Filter by column A/ }).click();
   await expect(page.locator(".fp-item", { hasText: "pear" }).locator("input")).not.toBeChecked();
   await page.getByRole("button", { name: "Clear", exact: true }).click();
   await expect.poll(hidden).toEqual([]);
+  ws.close();
+});
+
+test("S.05: merge and centre a range; a click inside selects the merged cell", async ({ page }) => {
+  const wb = await server.createWorkbook("Merge"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "Title" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("Title");
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowRight");
+  const menus = page.getByRole("navigation", { name: "Workbook menus" });
+  await menus.getByRole("button", { name: "Format", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Merge and centre" }).click();
+  await expect.poll(async () => (await ws.call("sheet_layout", { sheet: 0 })).merged).toEqual([{ row: 0, column: 0, rows: 1, columns: 3 }]);
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  await page.mouse.click(box.x + 54 + 104 + 50, box.y + 32 + 12);
+  await expect(page.locator(".cell-ref")).toContainText("A1");
+  // The keyboard leaves the merged cell from its far edge.
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".cell-ref")).toContainText("D1");
+  await menus.getByRole("button", { name: "Format", exact: true }).click();
+  await page.keyboard.press("Escape");
   ws.close();
 });

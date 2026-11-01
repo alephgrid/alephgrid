@@ -118,6 +118,8 @@ export class Grid {
   private rowIdx: number[] = [];
   private rowSize: number[] = [];
   private rowCum: number[] = [0];
+  /** S.05: merged ranges of the sheet; the top-left cell holds the value. */
+  private merges: Range[] = [];
   private editing: Cell | null = null;
   /** The edited cell's value when editing started (see `GridModel.base`). */
   private editingBase: CellValue | undefined;
@@ -311,6 +313,9 @@ export class Grid {
     const clamp = (p: Cell): Cell => ({ r: Math.max(0, Math.min(maxR, p.r)), c: Math.max(0, Math.min(maxC, p.c)) });
     this.active = clamp(active);
     this.anchor = clamp(anchor);
+    // A merged cell is selected whole, with its top-left cell active.
+    const m = this.active.r === this.anchor.r && this.active.c === this.anchor.c ? this.mergeAt(this.active) : undefined;
+    if (m) { this.active = { r: m.r0, c: m.c0 }; this.anchor = { r: m.r1, c: m.c1 }; }
     if (scroll) this.scrollIntoView(this.active);
     this.handlers.selectionChanged(this.selection(), this.active);
     this.invalidate();
@@ -388,6 +393,20 @@ export class Grid {
 
   private contentHeight(): number {
     return this.rowTop(this.displayRows());
+  }
+
+  /** True while a column or row edge is being dragged (sizes from elsewhere wait). */
+  isResizing(): boolean {
+    return !!(this.resizing || this.resizingRow);
+  }
+
+  setMerges(list: Range[]): void {
+    this.merges = list.slice(0, 10_000);
+    this.invalidate();
+  }
+
+  private mergeAt(cell: Cell): Range | undefined {
+    return this.merges.find((m) => cell.r >= m.r0 && cell.r <= m.r1 && cell.c >= m.c0 && cell.c <= m.c1);
   }
 
   /** S.05: set the rows whose height differs from the default (size 0 hides a row). */
@@ -819,8 +838,10 @@ export class Grid {
     const lastRow = Math.max(0, this.model.rowCount() - 1);
     const lastCol = this.widths.length - 1;
     const move = (dr: number, dc: number) => {
-      let r = this.active.r + dr;
-      let c = this.active.c + dc;
+      // Leave a merged cell from its far edge.
+      const m = e.shiftKey ? undefined : this.mergeAt(this.active);
+      let r = (m && dr > 0 ? m.r1 : this.active.r) + dr;
+      let c = (m && dc > 0 ? m.c1 : this.active.c) + dc;
       if (mod && dr) r = dr > 0 ? lastRow : 0;
       if (mod && dc) c = dc > 0 ? lastCol : 0;
       if (dr) r = this.shownLine(r, Math.sign(dr), Math.max(lastRow, this.displayRows() - 1), (i) => this.rowHeight(i) === 0);
@@ -1055,6 +1076,34 @@ export class Grid {
       ctx.fillRect(0, HEADER_H + fh - 1, W, 2);
     }
     const selTop = (r: number) => (r < fr ? HEADER_H : HEADER_H + fh);
+
+    // Merged cells: one box with the top-left cell's value (S.05).
+    if (sheetCells && this.merges.length) {
+      ctx.save(); ctx.beginPath(); ctx.rect(rhw, HEADER_H, W - rhw, H - HEADER_H); ctx.clip();
+      for (const m of this.merges) {
+        if (m.r0 > last || (m.r1 < first && m.r0 >= fr)) continue;
+        const a = this.cellRect({ r: m.r0, c: m.c0 }), b = this.cellRect({ r: m.r1, c: m.c1 });
+        const x = a.x, y = a.y, w = b.x + b.w - a.x, h = b.y + b.h - a.y;
+        if (w <= 0 || h <= 0 || x > W || y > H || x + w < rhw || y + h < HEADER_H) continue;
+        const st = this.model.style?.(m.r0, m.c0);
+        ctx.fillStyle = st?.fill ?? colors.bg;
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = colors.grid; ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(x) - 0.5, Math.round(y) - 0.5, Math.round(w), Math.round(h));
+        const cell = sheetCells(m.r0, m.c0);
+        if (!cell?.text) continue;
+        ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+        ctx.fillStyle = st?.color ?? colors.text;
+        ctx.font = `${st?.i ? "italic " : ""}${st?.b ? "700 " : ""}${Math.min(st?.size ?? 13, 20)}px ${colors.ui}`;
+        const align: CanvasTextAlign = st?.h === "left" || st?.h === "center" || st?.h === "right" ? st.h : cell.align;
+        ctx.textAlign = align;
+        const tx = align === "right" ? x + w - 8 : align === "center" ? x + w / 2 : x + 8;
+        ctx.fillText(cell.text, tx, st?.v === "top" ? y + 9 : y + h / 2 + 1);
+        ctx.restore();
+      }
+      ctx.restore();
+      ctx.font = `13px ${colors.ui}`;
+    }
 
     // Clip selection to each pane so scrolling cells cannot highlight frozen cells.
     if (cols.length && frozen) {

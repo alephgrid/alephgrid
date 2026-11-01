@@ -668,6 +668,11 @@ export class WorkbookScreen {
         { label: "Date: 2026-11-01", action: () => void this.applyStyle({ num_fmt: "yyyy-mm-dd" }) },
         { label: "General number format", action: () => void this.applyStyle({ num_fmt: "" }) },
         "sep",
+        { label: "Merge cells", action: () => void this.mergeCells("merge") },
+        { label: "Merge and centre", action: () => void this.mergeCells("center") },
+        { label: "Merge each row", action: () => void this.mergeCells("across") },
+        { label: "Unmerge cells", action: () => void this.mergeCells("unmerge") },
+        "sep",
         { label: "Clear formatting", action: () => void this.applyStyle(null) },
       ] : [
         { label: "Format table…", hint: tableOnly() ? "Tables" : undefined, disabled: tableOnly(), action: act.formatTable },
@@ -1184,7 +1189,7 @@ export class WorkbookScreen {
       else { this.sheetCache.columns = cols; this.sheetCache.refresh(); }
       this.grid.setColumns(this.sheetWidths());
     }
-    if (reset) { this.sheetLayout = null; this.grid.setRowSizes([]); }
+    if (reset) { this.sheetLayout = null; this.grid.setRowSizes([]); this.grid.setMerges([]); }
     void this.loadSheetLayout();
     this.rowsEl.textContent = info.rows ? `Used ${columnLetter(Math.max(0, info.columns - 1))}${info.rows}` : "Empty sheet";
     this.setKind("sheet");
@@ -2302,6 +2307,7 @@ export class WorkbookScreen {
 
   /** S.05: the sheet's sizes, hidden lines and frozen panes, kept in the workbook. */
   private sheetLayout: SheetLayout | null = null;
+  private layoutSeq = 0;
   /** S.06: the last range filter of this sheet, so its popup shows what is kept. */
   private rangeFilter: { sheet: number; area: { row: number; column: number; rows: number; columns: number }; header: boolean; column: number; keep: string[] | null } | null = null;
 
@@ -2313,13 +2319,17 @@ export class WorkbookScreen {
   private async loadSheetLayout(): Promise<void> {
     if (this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
+    const mine = ++this.layoutSeq;
     try {
       const l = await this.rpc.call("sheet_layout", { sheet });
-      if (this.active?.kind !== "sheet" || this.active.index !== sheet) return;
+      if (mine !== this.layoutSeq || this.active?.kind !== "sheet" || this.active.index !== sheet) return;
+      // A drag in progress keeps its size; its own save reloads the layout after.
+      if (this.grid.isResizing()) return;
       this.sheetLayout = l;
       const widths = this.sheetWidths();
       if (widths.join() !== this.grid.columnWidths().join()) this.grid.setColumns(widths);
       this.grid.setRowSizes(l.rows.map((x) => ({ index: x.index, size: x.hidden ? 0 : x.size })));
+      this.grid.setMerges(l.merged.map((a) => ({ r0: a.row, c0: a.column, r1: a.row + a.rows - 1, c1: a.column + a.columns - 1 })));
     } catch { /* the grid keeps default sizes */ }
   }
 
@@ -2372,6 +2382,17 @@ export class WorkbookScreen {
       .then((texts) => { if (this.active?.kind === "sheet" && this.active.index === sheet) this.grid.fitColumn(c, texts); })
       .catch((e) => toast((e as Error).message, "error"));
     return true;
+  }
+
+  /** S.05: merge the selection (or unmerge the merges in it), as one undo step. */
+  private async mergeCells(mode: "merge" | "center" | "across" | "unmerge"): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sel = this.grid.selection();
+    try {
+      await this.rpc.call("sheet_merge", { sheet: this.active.index, area: { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 }, mode });
+      this.sheetCache.refresh();
+    } catch (e) { toast((e as Error).message, "error"); }
+    await this.loadSheetLayout();
   }
 
   private async freezeRows(rows: number): Promise<void> {
