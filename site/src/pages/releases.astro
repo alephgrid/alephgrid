@@ -73,7 +73,7 @@ const url = (p: string) => `${base}${p}`;
                     ? <span class="ag-status ready">Ready</span>
                     : <span class="ag-status planned">Planned</span>}
                 </td>
-                <td>{c.published ? `${c.requires ?? ''}` : 'Arrives with v0.1.0 artifacts'}</td>
+                <td>{c.published ? (c.requires ?? '') : (c.notes ?? 'Arrives with v0.1.0 artifacts')}</td>
               </tr>
             ))}
           </tbody>
