@@ -205,3 +205,23 @@ test("S.09: a chart of a selected range follows the cells", async ({ page }) => 
   await expect(values).toContainText("West200");
   ws.close();
 });
+
+test("S.10: a validation rule refuses a value; a colour rule fills matching cells", async ({ page }) => {
+  const wb = await server.createWorkbook("Rules"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("set_sheet_rules", { sheet: 0, rules: { colors: [{ area: { row: 0, column: 0, rows: 5, columns: 1 }, condition: "greater", value: "5", color: "#FFC7CE" }], validations: [{ area: { row: 0, column: 1, rows: 5, columns: 1 }, list: ["yes", "no"] }] } });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  const bar = page.getByRole("textbox", { name: "Cell value or formula", exact: true });
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await bar.fill("maybe");
+  await bar.press("Enter");
+  await expect(page.getByText(/not one of the allowed values/)).toBeVisible();
+  const cells = await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 });
+  expect(JSON.stringify(cells.rows)).not.toContain("maybe");
+  expect((await ws.call("sheet_rules", { sheet: 0 })).colors.length).toBe(1);
+  ws.close();
+});

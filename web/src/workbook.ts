@@ -33,7 +33,7 @@ import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
 import { renderChart, type ChartType } from "./charts";
-import type { CellComment } from "./protocol";
+import type { CellComment, SheetRules } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
 
@@ -244,6 +244,8 @@ export class WorkbookScreen {
   private commentsPane: CommentsPane | null = null;
   /** S.09: the open range chart, redrawn when the sheet changes. */
   private rangeChart: { close: () => void; draw: () => void } | null = null;
+  /** S.10: the open sheet's colour and validation rules. */
+  private sheetRules: SheetRules = { colors: [], validations: [] };
   /** S.01: the sheet format toolbar (hidden for tables). */
   private formatBarEl = formatBar({
     current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
@@ -297,7 +299,7 @@ export class WorkbookScreen {
           const cell = this.sheetCache.cell(r, c);
           return cell ? { text: cell[0], align: cell[1] } : cell;
         },
-        style: (r, c) => this.sheetCache.style(r, c),
+        style: (r, c) => this.ruleStyle(r, c),
         comment: (r, c) => this.commentCells.has(`${r}:${c}`),
         editText: (r, c) => {
           const cell = this.sheetCache.cell(r, c);
@@ -2186,6 +2188,46 @@ export class WorkbookScreen {
     });
   }
 
+  /** A cell's style with the first matching colour rule's fill (S.10). */
+  private ruleStyle(r: number, c: number) {
+    const own = this.sheetCache.style(r, c);
+    const rule = this.sheetRules.colors.find((x) => r >= x.area.row && r < x.area.row + x.area.rows && c >= x.area.column && c < x.area.column + x.area.columns && (() => {
+      const t = this.sheetCache.cell(r, c)?.[0] ?? "";
+      const n = Number(t.replace(/,/g, "")), v = Number(x.value);
+      switch (x.condition) {
+        case "greater": return t !== "" && n > v;
+        case "less": return t !== "" && n < v;
+        case "equal": return t === x.value;
+        case "contains": return t.toLowerCase().includes(x.value.toLowerCase());
+        case "empty": return t === "";
+        case "not_empty": return t !== "";
+        default: return false;
+      }
+    })());
+    return rule && !own?.fill ? { ...(own ?? {}), fill: rule.color } : own;
+  }
+
+  private async editRules(kind: "color" | "list"): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const rules = await this.rpc.call("sheet_rules", { sheet });
+    if (kind === "color") {
+      const v = await formDialog("Colour cells that…", [
+        { name: "condition", label: "Condition", type: "select", options: [["greater", "are greater than"], ["less", "are less than"], ["equal", "equal"], ["contains", "contain"], ["empty", "are empty"], ["not_empty", "are not empty"]].map(([value, label]) => ({ value, label })) },
+        { name: "value", label: "Value" }, { name: "color", label: "Fill (#RRGGBB)", value: "#FFC7CE" }], "Add rule");
+      if (!v) return;
+      rules.colors.push({ area, condition: v.condition, value: v.value, color: v.color.trim().toUpperCase() });
+    } else {
+      const v = await formDialog("Allowed values", [{ name: "list", label: "Values, separated by commas", placeholder: "yes, no" }], "Save");
+      if (!v) return;
+      rules.validations.push({ area, list: v.list.split(",").map((x) => x.trim()).filter(Boolean) });
+    }
+    try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
+    catch (e) { toast((e as Error).message, "error"); }
+  }
+
   private setComments(list: CellComment[]): void {
     this.commentCells = new Set(list.filter((c) => !c.resolved).map((c) => `${c.row}:${c.column}`));
     this.grid.invalidate();
@@ -2194,6 +2236,7 @@ export class WorkbookScreen {
   /** Load the open sheet's comments (for the cell markers), and refresh the pane. */
   private async loadComments(): Promise<void> {
     if (this.active?.kind !== "sheet") { this.commentCells.clear(); return; }
+    try { this.sheetRules = await this.rpc.call("sheet_rules", { sheet: this.active.index }); this.grid.invalidate(); } catch { /* colours only */ }
     if (this.commentsPane && !this.commentsPane.closed) { await this.commentsPane.reload(); return; }
     try { this.setComments(await this.rpc.call("comments", { sheet: this.active.index })); } catch { /* markers only */ }
   }
@@ -2316,6 +2359,8 @@ export class WorkbookScreen {
           "sep" as const,
         ] : []),
         ...(rows > 1 ? [{ label: "Chart from selection", action: () => this.chartFromSelection() }] : []),
+        { label: "Conditional colour…", action: () => void this.editRules("color") },
+        { label: "Allowed values…", action: () => void this.editRules("list") },
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
         "sep",
