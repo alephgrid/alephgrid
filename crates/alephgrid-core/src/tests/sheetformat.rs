@@ -369,3 +369,28 @@ fn cells_merge_and_unmerge() {
     s.merge(0, &area(6, 0, 2, 2), MergeMode::Unmerge).unwrap();
     assert!(s.layout(0).unwrap().merged.is_empty());
 }
+
+/// S.04: find counts matches in every visible sheet; replace in all sheets is one undo step.
+#[test]
+fn find_and_replace_in_all_sheets() {
+    use crate::sheets::{SheetMatches, SheetSearch};
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("One").unwrap();
+    s.create("Two").unwrap();
+    s.create("Three").unwrap();
+    s.set(0, &[sheet_input(0, 0, "red apple"), sheet_input(3, 2, "Red")]).unwrap();
+    s.set(2, &[sheet_input(5, 0, "apple red")]).unwrap();
+    s.set(1, &[sheet_input(0, 0, "blue")]).unwrap();
+    let search = SheetSearch { text: "red".into(), ..Default::default() };
+    assert_eq!(s.find_all_sheets(&search).unwrap(), vec![
+        SheetMatches { sheet: 0, name: "One".into(), matches: 2 },
+        SheetMatches { sheet: 2, name: "Three".into(), matches: 1 },
+    ]);
+    assert_eq!(s.replace_all_sheets(&search, "green").unwrap(), 3);
+    assert_eq!(shown(&s, 0, 0), "green apple");
+    assert_eq!(s.fetch(2, 5, 1, 1).unwrap().rows[0][0].clone().unwrap().0, "apple green");
+    assert!(s.find_all_sheets(&search).unwrap().is_empty());
+    assert!(s.undo().unwrap());
+    assert_eq!(shown(&s, 0, 0), "red apple");
+    assert_eq!(s.fetch(2, 5, 1, 1).unwrap().rows[0][0].clone().unwrap().0, "apple red", "one undo step covers every sheet");
+}

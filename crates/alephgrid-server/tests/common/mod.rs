@@ -422,6 +422,8 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("sheet_style", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 2, "columns": 2 }, "style": { "b": true, "fill": "#FFEEAA", "num_fmt": "0.00" } })),
         ("sheet_find", json!({ "sheet": 0, "search": { "text": "1" }, "count": true })),
         ("sheet_replace", json!({ "sheet": 0, "search": { "text": "zzz-none" }, "replacement": "y" })),
+        ("sheet_find_all", json!({ "search": { "text": "a" } })),
+        ("sheet_replace_all", json!({ "search": { "text": "zzz-none" }, "replacement": "y" })),
         ("add_comment", json!({ "sheet": 0, "row": 0, "column": 0, "text": "Check this" })),
         ("comments", json!({ "sheet": 0 })),
         ("edit_comment", json!({ "sheet": 0, "comment": "COMMENT", "text": "Checked" })),

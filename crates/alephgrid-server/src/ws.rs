@@ -240,6 +240,10 @@ pub enum Op {
     SheetFind { sheet: u32, search: alephgrid_core::SheetSearch, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
     /// Replace in every matching cell of a sheet, as one undo step; replies how many changed.
     SheetReplace { sheet: u32, search: alephgrid_core::SheetSearch, replacement: String },
+    /// The visible sheets with matches and their counts (S.04, all sheets).
+    SheetFindAll { search: alephgrid_core::SheetSearch },
+    /// Replace in every visible sheet as one undo step (S.04).
+    SheetReplaceAll { search: alephgrid_core::SheetSearch, replacement: String },
     /// The comments of a sheet (S.11).
     Comments { sheet: u32 },
     /// Comment on a cell, or reply to a thread (S.11).
@@ -410,7 +414,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -428,7 +432,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetResize { .. } | SheetSetHidden { .. } | SheetMerge { .. } | SheetFilter { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetResize { .. } | SheetSetHidden { .. } | SheetMerge { .. } | SheetFilter { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetReplaceAll { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -441,7 +445,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
     match op {
         Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
-        Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
+        Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
@@ -575,6 +579,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::SheetColumnTexts { sheet, column } => json!(r.sheets().column_texts(sheet, column)?),
         Op::SheetRangeValues { sheet, area, header, column } => json!(r.sheets().range_values(sheet, &area, header, column)?),
         Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
+        Op::SheetFindAll { search } => json!(r.sheets().find_all_sheets(&search)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
         Op::Query { sql, params, limit } => {
@@ -860,6 +865,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
                 None => s.freeze_columns(sheet, columns),
             })?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
+        }
+        Op::SheetReplaceAll { search, replacement } => {
+            let n = wb.with_sheets(|s| s.replace_all_sheets(&search, &replacement))?;
+            (json!(n), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
         }
         Op::SheetReplace { sheet, search, replacement } => {
             let n = wb.with_sheets(|s| s.replace_all(sheet, &search, &replacement))?;

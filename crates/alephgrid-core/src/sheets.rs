@@ -19,7 +19,7 @@ mod find;
 mod format;
 mod layout;
 pub use layout::{Axis, LineSize, MergeMode, SheetLayout, GRID_COLUMN_WIDTH, GRID_ROW_HEIGHT};
-pub use find::{SheetSearch, SortBy};
+pub use find::{SheetMatches, SheetSearch, SortBy};
 mod links;
 pub use format::{CellStyle, StyledCell, StylePatch};
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};

@@ -2060,25 +2060,58 @@ export class WorkbookScreen {
       };
     }
     if (this.active?.kind === "sheet") {
-      const sheet = this.active.index;
+      // The provider follows the open sheet: with "All sheets" it moves between them.
+      const opened = this.active.index;
+      const current = () => (this.active?.kind === "sheet" ? this.active.index : opened);
       let last = { text: "", matchCase: false };
+      const searchOf = (text: string, matchCase: boolean) => ({ text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas });
       return {
         label: this.active.name,
         sheetOptions: true,
-        find: (text, matchCase, from, backwards, count) => {
+        find: async (text, matchCase, from, backwards, count) => {
           last = { text, matchCase };
-          const search = { text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas };
-          return this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count });
+          const search = searchOf(text, matchCase);
+          const sheet = current();
+          const out = await this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count: count && !this.findBar.allSheets });
+          if (count && this.findBar.allSheets) {
+            const all = await this.rpc.call("sheet_find_all", { search });
+            return { ...out, matches: all.reduce((n, s) => n + s.matches, 0) };
+          }
+          return out;
+        },
+        nextSheet: async (backwards) => {
+          const search = searchOf(last.text, last.matchCase);
+          const found = await this.rpc.call("sheet_find_all", { search });
+          if (!found.length) return false;
+          const order = this.sheets.map((s) => s.index);
+          const here = order.indexOf(current());
+          const ranked = found.map((f) => ({ f, d: ((order.indexOf(f.sheet) - here) * (backwards ? -1 : 1) + order.length) % order.length || order.length }));
+          ranked.sort((a, b) => a.d - b.d);
+          const target = ranked[0].f;
+          if (target.sheet !== current()) await this.openSheet(target.sheet);
+          const hits = (await this.rpc.call("sheet_find", { sheet: target.sheet, search, from: backwards ? 1_048_575 : 0, backwards })).hits;
+          const h = hits[0];
+          if (!h) return false;
+          this.grid.select({ r: h.row, c: backwards ? h.columns[h.columns.length - 1] : h.columns[0] });
+          if (target.sheet !== opened || found.length > 1) toast(`Found in ${target.name}`);
+          return true;
         },
         active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
         go: (row, c) => this.grid.select({ r: row, c }),
         replace: {
-          preview: async (_column, find) => (await this.rpc.call("sheet_find", { sheet, search: { text: find, match_case: last.matchCase }, count: true })).matches ?? 0,
+          preview: async (_column, find) => {
+            const search = { ...searchOf(find, last.matchCase) };
+            if (this.findBar.allSheets) return (await this.rpc.call("sheet_find_all", { search })).reduce((n, s) => n + s.matches, 0);
+            return (await this.rpc.call("sheet_find", { sheet: current(), search, count: true })).matches ?? 0;
+          },
           apply: async () => {
             const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
-            const n = await this.rpc.call("sheet_replace", { sheet, search: { text: last.text, match_case: last.matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas }, replacement: input });
+            const search = searchOf(last.text, last.matchCase);
+            const n = this.findBar.allSheets
+              ? await this.rpc.call("sheet_replace_all", { search, replacement: input })
+              : await this.rpc.call("sheet_replace", { sheet: current(), search, replacement: input });
             await this.refreshSheet();
-            return `Replaced in ${formatCount(n)} cells. Undo (⌘Z) takes it back in one step.`;
+            return `Replaced in ${formatCount(n)} cells${this.findBar.allSheets ? " across the sheets" : ""}. Undo (⌘Z) takes it back in one step.`;
           },
           undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
           one: async (find, replacement, matchCase) => {
@@ -2087,6 +2120,7 @@ export class WorkbookScreen {
             const esc = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             const next = text.replace(new RegExp(esc, matchCase ? "g" : "gi"), () => replacement);
             if (next === text) return;
+            const sheet = current();
             const layout = this.shownLayout(sheet, r, r);
             if (layout === null) return;
             await this.rpc.call("sheet_set", { sheet, inputs: [{ row: r, column: c, value: next }], layout });

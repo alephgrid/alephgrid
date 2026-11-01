@@ -328,6 +328,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "EditOutcome" => conforms::<EditOutcome>(op, v),
         "Stats" => conforms::<Stats>(op, v),
         "FindResult" => conforms::<alephgrid_core::FindResult>(op, v),
+        "SheetMatches[]" => conforms::<Vec<alephgrid_core::SheetMatches>>(op, v),
         "SheetLayout" => conforms::<alephgrid_core::SheetLayout>(op, v),
         "ValueCount[]" => conforms::<Vec<alephgrid_core::ValueCount>>(op, v),
         "SheetRules" => conforms::<alephgrid_core::SheetRules>(op, v),

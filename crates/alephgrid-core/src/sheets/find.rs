@@ -36,7 +36,50 @@ impl SheetSearch {
     }
 }
 
+/// How many cells of a sheet match a search (S.04, all sheets).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SheetMatches {
+    pub sheet: u32,
+    pub name: String,
+    pub matches: u64,
+}
+
 impl Sheets {
+    /// The visible sheets with matching cells, in tab order, with their counts.
+    pub fn find_all_sheets(&self, search: &SheetSearch) -> Result<Vec<SheetMatches>> {
+        let mut out = Vec::new();
+        for s in self.list() {
+            let n = self.matches(s.index, search)?.len() as u64;
+            if n > 0 {
+                out.push(SheetMatches { sheet: s.index, name: s.name, matches: n });
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Sheets::replace_all`] in every visible sheet, as one undo step. Returns how many
+    /// cells changed.
+    pub fn replace_all_sheets(&mut self, search: &SheetSearch, replacement: &str) -> Result<usize> {
+        let found = self.find_all_sheets(search)?;
+        let total: u64 = found.iter().map(|s| s.matches).sum();
+        if total as usize > MAX_BULK_CELLS {
+            bail!(crate::limits::TooLarge(format!("{total} cells match; at most {MAX_BULK_CELLS} can be replaced at once")));
+        }
+        let before = self.undo_groups.len();
+        let mut n = 0;
+        for s in found {
+            n += self.replace_all(s.sheet, search, replacement)?;
+        }
+        // Every sheet's write forms one user step.
+        while self.undo_groups.len() > before + 1 {
+            let last = self.undo_groups.pop().unwrap_or(0);
+            if let Some(prev) = self.undo_groups.last_mut() {
+                *prev += last;
+            }
+        }
+        Ok(n)
+    }
+
     /// Every matching cell of a sheet, in row then column order (0-based).
     fn matches(&self, index: u32, search: &SheetSearch) -> Result<Vec<(u32, u32, String)>> {
         self.check_index(index)?;

@@ -340,3 +340,35 @@ test("S.05: merge and centre a range; a click inside selects the merged cell", a
   await page.keyboard.press("Escape");
   ws.close();
 });
+
+test("S.04: find and replace across all sheets", async ({ page }) => {
+  const wb = await server.createWorkbook("All sheets find"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "One" });
+  await ws.call("sheet_create", { name: "Two" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "plum" }] });
+  await ws.call("sheet_set", { sheet: 1, inputs: [{ row: 4, column: 2, value: "plum jam" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^One/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("plum");
+  await page.keyboard.press("ControlOrMeta+f");
+  const bar = page.getByRole("search", { name: "Find in One" });
+  await bar.getByRole("searchbox", { name: "Find" }).fill("plum");
+  await expect(bar.getByRole("status")).toHaveText("1 match");
+  await bar.getByRole("button", { name: "All sheets" }).click();
+  await expect(bar.getByRole("status")).toHaveText("2 matches");
+  // Next goes on to the other sheet's match.
+  await bar.getByRole("searchbox", { name: "Find" }).press("Enter");
+  await expect(page.getByRole("tab", { name: /^Two/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".cell-ref")).toContainText("C5");
+  await bar.getByRole("button", { name: "Show replace" }).click();
+  await bar.getByRole("textbox", { name: "Replace with" }).fill("pear");
+  await bar.getByRole("button", { name: "Preview" }).click();
+  await bar.getByRole("button", { name: "Replace all" }).click();
+  await expect.poll(async () => (await ws.call("sheet_find_all", { search: { text: "pear" } })).map((s: { name: string }) => s.name)).toEqual(["One", "Two"]);
+  // One undo takes back both sheets.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => ws.call("sheet_find_all", { search: { text: "pear" } })).toEqual([]);
+  ws.close();
+});
