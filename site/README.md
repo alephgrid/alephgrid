@@ -15,16 +15,19 @@ npm run preview
 
 ## Deployment and the custom domain
 
-`.github/workflows/site.yml` builds and deploys to GitHub Pages on pushes to `main` that touch
-`site/**`. Defaults assume the project-pages URL `https://alephgrid.github.io/alephgrid/`.
+Hosting is **Cloudflare Workers static assets** (`wrangler.jsonc`); the application's CI stays
+on CircleCI and never builds the site.
 
-When the custom domain is bought, set two repository **Actions variables** — no code change:
-
-- `SITE_URL=https://<your-domain>`
-- `SITE_BASE=/`
-
-and configure the domain under Settings → Pages. Every internal link is base-relative, so the
-switch is atomic.
+- **Connect once** in the Cloudflare dashboard: Workers & Pages → import the GitHub repo →
+  root directory `site`, build command `npm ci && npm run build`, deploy command
+  `npx wrangler deploy`, **build watch paths `site/**`** — pushes that don't touch `site/`
+  skip the build.
+- **Manual deploy:** `cd site && npm ci && npm run build && npx wrangler deploy`.
+- Until the domain exists the site serves at the Worker's `*.workers.dev` URL, at the root
+  path. When the custom domain is bought (Cloudflare Registrar), add it to the Worker and set
+  the build variable `SITE_URL=https://<your-domain>` — no code change.
+- `SITE_BASE` defaults to `/`; set it only for a host that serves under a subpath (e.g. a
+  GitHub Pages project site). Every internal link is base-relative either way.
 
 ## Honesty rules (from docs/WEBSITE_LAUNCH_PLAN.md)
 

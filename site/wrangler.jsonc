@@ -1,0 +1,17 @@
+// Cloudflare Workers static hosting for the public site.
+// Deploy manually with:  cd site && npm ci && npm run build && npx wrangler deploy
+// Or connect the repo in the Cloudflare dashboard (Workers Builds) with:
+//   root directory: site
+//   build command:  npm ci && npm run build
+//   build watch paths: site/**   (pushes that don't touch site/ skip the build)
+// When the custom domain is live, add it to this Worker in the dashboard and
+// set SITE_URL=https://<domain> as a build-time variable. SITE_BASE stays "/".
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "alephgrid-site",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}

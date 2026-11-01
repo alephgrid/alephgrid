@@ -167,7 +167,7 @@ Start with one clear funding route; adding several payment buttons before a comm
 
 - [x] **W.01 (partial)** Repo (`alephgrid/alephgrid`) and binary naming (`alephgrid`) confirmed. Open: domain, package publisher identity, funding recipient. Record decisions; no guessed IDs.
 - [ ] **W.02** Audit shipped claims, README prerequisites and documentation gaps against the release; classify platform/channel readiness.
-- [x] **W.03** Done (1 Nov 2026): `site/` Astro + Starlight foundation, brand assets with OFL font license, neutral charcoal dark tokens, routing, static build. Deploy workflow: `.github/workflows/site.yml` (GitHub Pages; set `SITE_URL`/`SITE_BASE` repo variables when the domain is live).
+- [x] **W.03** Done (1 Nov 2026): `site/` Astro + Starlight foundation, brand assets with OFL font license, neutral charcoal dark tokens, routing, static build. Hosting decision (owner, 1 Nov 2026): **Cloudflare Workers static assets** (`site/wrangler.jsonc`), connected to the GitHub repo with build watch paths on `site/**`; application CI stays on CircleCI. Custom domain later via Cloudflare Registrar + `SITE_URL` build variable.
 - [x] **W.04** Done (1 Nov 2026): responsive homepage; install page shows the source channel and explicit Planned states driven by `site/src/data/releases.json`; copy buttons with manual-copy fallback.
 - [ ] **W.05** Implement release manifest and macOS/Linux/Windows artifact pipelines, integrity metadata and clean-machine smoke tests. Enable each OS separately when it passes.
 - [ ] **W.06** Publish and test Homebrew/WinGet channels; link direct-download alternatives and verified update/uninstall docs.
