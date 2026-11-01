@@ -12,6 +12,7 @@
 </p>
 
 <p align="center">
+  <a href="https://alephgrid.dev"><img alt="Website: alephgrid.dev" src="https://img.shields.io/badge/website-alephgrid.dev-047857"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0B7A53"></a>
   <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-E8A33D">
   <img alt="Built with Rust and TypeScript" src="https://img.shields.io/badge/built%20with-Rust%20%2B%20TypeScript-555">
