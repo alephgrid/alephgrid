@@ -317,6 +317,9 @@ export class WorkbookScreen {
         headerFilter: (c, x, y) => self.headerFilter(c, x, y),
         rowMenu: (r, x, y) => self.rowMenu(r, x, y),
         copy: (range) => self.copy(range),
+        dragFill: (source, target) => void self.dragFill(source, target),
+        copyCancelled: () => { self.clip = null; },
+        region: (at) => self.sheetRegion(at),
         paste: (at, text) => self.paste(at, text),
         columnResized: (c, w) => self.columnResized(c, w),
         rowResized: (r, h) => void self.resizeLines("rows", r, 1, h),
@@ -1873,6 +1876,7 @@ export class WorkbookScreen {
       const text = data.map((row) => row.slice(range.c0, range.c1 + 1).map(tsvCell).join("\t")).join("\n");
       await navigator.clipboard.writeText(text);
       this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined } : null;
+      this.grid.setCopied({ ...range, r1 });
       toast(`Copied ${formatCount(rows * (range.c1 - range.c0 + 1))} cells`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
@@ -1914,6 +1918,7 @@ export class WorkbookScreen {
         if (layout === null) return;
         area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c, layout }));
         this.clip = null;
+        this.grid.setCopied(null);
       } else {
         const layout = this.shownLayout(sheet, at.r, at.r + (transpose ? source.columns : source.rows) - 1);
         if (layout === null) return;
@@ -1943,27 +1948,24 @@ export class WorkbookScreen {
     return work;
   }
 
+  /** Paste special (⇧⌘V): a small menu at the active cell, not a dialog (F.04d). */
   private pasteSpecialDialog(): void {
     if (!this.clip || this.clip.cut) {
       toast(this.clip ? "Paste special applies to copied cells. Cut cells move as they are." : "Copy cells in this workbook first. Text from other apps pastes as values with ⌘V.");
       return;
     }
     const at = this.grid.active;
-    const modes: [PasteMode, string][] = [["all", "All (values, formulas and formats)"], ["formulas", "Formulas (no formats)"], ["values", "Values only"], ["formats", "Formats only"]];
-    const radios = modes.map(([m, label], i) => el("label", { class: "radio" }, el("input", { type: "radio", name: "paste-mode", value: m, ...(i === 0 ? { checked: true } : {}) }), label));
-    const transpose = el("input", { type: "checkbox" });
-    const go = () => {
-      const mode = (panel.querySelector<HTMLInputElement>('input[name="paste-mode"]:checked')?.value ?? "all") as PasteMode;
-      modal.close();
-      void this.pasteCells(at, mode, transpose.checked);
-    };
-    const panel = el("section", { class: "dialog" }, el("h2", {}, "Paste special"),
-      el("fieldset", {}, el("legend", {}, "Paste"), ...radios),
-      el("label", { class: "radio" }, transpose, "Transpose rows and columns"),
-      el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Cancel"), el("button", { class: "btn btn-primary", onclick: go }, "Paste")));
-    panel.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
-    const modal = openModal(panel, () => modal.close());
-    panel.querySelector<HTMLInputElement>("input")?.focus();
+    const paste = (mode: PasteMode, transpose: boolean) => () => void this.pasteCells(at, mode, transpose);
+    const box = this.grid.cellBox(at.r, at.c), host = this.grid.host.getBoundingClientRect();
+    showMenu([
+      { label: "All (values, formulas and formats)", action: paste("all", false) },
+      { label: "Formulas (no formats)", action: paste("formulas", false) },
+      { label: "Values only", action: paste("values", false) },
+      { label: "Formats only", action: paste("formats", false) },
+      "sep",
+      { label: "All, transposed", action: paste("all", true) },
+      { label: "Values only, transposed", action: paste("values", true) },
+    ], host.left + box.x + 8, host.top + box.y + 28, { label: "Paste special" });
   }
 
   /** Ctrl/Cmd+D and +R: copy the selection's first row (column) over the rest. With a single
@@ -1995,6 +1997,40 @@ export class WorkbookScreen {
     }
   }
 
+  /** The fill handle was dragged: continue series, count on text, or repeat the pattern. */
+  private async dragFill(source: Range, target: Range): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const area = (r: Range) => ({ row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 });
+    const back = () => this.grid.select({ r: source.r1, c: source.c1 }, { r: source.r0, c: source.c0 }, false);
+    const t = area(target);
+    if (t.rows * t.columns > this.maxEditCells) { toast(`That fill is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); back(); return; }
+    try {
+      const sheet = this.active.index;
+      const layout = this.shownLayout(sheet, target.r0, target.r1);
+      if (layout === null) { back(); return; }
+      const info = await this.inSheetOrder(() => this.rpc.call("sheet_drag_fill", { sheet, source: area(source), target: t, layout }));
+      this.sheets = this.sheets.map((x) => (x.index === info.index ? info : x));
+      this.applySheetInfo(info, false);
+      this.sheetCache.refresh();
+      this.grid.invalidate();
+    } catch (e) {
+      back();
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+    }
+  }
+
+  /** Ctrl/Cmd+A in a sheet: the block of filled cells around `at`. */
+  private async sheetRegion(at: Cell): Promise<Range | null> {
+    if (this.active?.kind !== "sheet") return null;
+    try {
+      const a = await this.rpc.call("sheet_region", { sheet: this.active.index, row: at.r, column: at.c });
+      return { r0: a.row, c0: a.column, r1: a.row + a.rows - 1, c1: a.column + a.columns - 1 };
+    } catch {
+      return null;
+    }
+  }
+
   private registerCommands(): void {
     this.commands.register(...workbookCommands({
       isSheet: () => this.isSheet(),
@@ -2005,7 +2041,7 @@ export class WorkbookScreen {
       cut: () => this.cut(),
       pasteSpecial: () => this.pasteSpecialDialog(),
       fill: (d) => this.fill(d),
-      selectAll: () => this.grid.selectAll(),
+      selectAll: () => void this.grid.contextSelectAll(),
       selectEntire: (w) => this.grid.selectEntire(w),
       goTo: () => this.goTo(),
       names: async () => { this.closeNames?.(); this.closeNames = await namesDialog(this.namesContext()); },
