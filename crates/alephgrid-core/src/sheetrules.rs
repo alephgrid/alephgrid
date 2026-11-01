@@ -44,7 +44,7 @@ pub struct SheetRules {
     pub validations: Vec<SheetValidation>,
 }
 
-const CONDITIONS: &[&str] = &["greater", "less", "equal", "contains", "empty", "not_empty"];
+const CONDITIONS: &[&str] = &["greater", "less", "equal", "contains", "empty", "not_empty", "scale"];
 
 fn inside(a: &CellArea, row: u32, column: u32) -> bool {
     row >= a.row && row < a.row + a.rows && column >= a.column && column < a.column + a.columns

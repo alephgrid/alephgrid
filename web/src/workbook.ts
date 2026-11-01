@@ -2212,9 +2212,18 @@ export class WorkbookScreen {
         case "contains": return t.toLowerCase().includes(x.value.toLowerCase());
         case "empty": return t === "";
         case "not_empty": return t !== "";
+        case "scale": return t !== "" && !Number.isNaN(Number(t.replace(/,/g, "")));
         default: return false;
       }
     })());
+    if (rule?.condition === "scale" && !own?.fill) {
+      // Colour scale: the rule's colour, stronger the closer the value is to the top of "low,high".
+      const [lo, hi] = rule.value.split(",").map(Number);
+      const n = Number((this.sheetCache.cell(r, c)?.[0] ?? "").replace(/,/g, ""));
+      const t = Math.max(0, Math.min(1, (n - lo) / ((hi - lo) || 1)));
+      const alpha = Math.round(40 + t * 215).toString(16).padStart(2, "0");
+      return { ...(own ?? {}), fill: `${rule.color}${alpha}` };
+    }
     return rule && !own?.fill ? { ...(own ?? {}), fill: rule.color } : own;
   }
 
@@ -2226,7 +2235,7 @@ export class WorkbookScreen {
     const rules = await this.rpc.call("sheet_rules", { sheet });
     if (kind === "color") {
       const v = await formDialog("Colour cells that…", [
-        { name: "condition", label: "Condition", type: "select", options: [["greater", "are greater than"], ["less", "are less than"], ["equal", "equal"], ["contains", "contain"], ["empty", "are empty"], ["not_empty", "are not empty"]].map(([value, label]) => ({ value, label })) },
+        { name: "condition", label: "Condition", type: "select", options: [["greater", "are greater than"], ["less", "are less than"], ["equal", "equal"], ["contains", "contain"], ["empty", "are empty"], ["not_empty", "are not empty"], ["scale", "shade by value (low,high)"]].map(([value, label]) => ({ value, label })) },
         { name: "value", label: "Value" }, { name: "color", label: "Fill (#RRGGBB)", value: "#FFC7CE" }], "Add rule");
       if (!v) return;
       rules.colors.push({ area, condition: v.condition, value: v.value, color: v.color.trim().toUpperCase() });
