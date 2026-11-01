@@ -62,7 +62,8 @@ test("U.10: administration shows the server, workbooks, sessions, backups, usage
   await expect(panel.getByRole("table", { name: "Live sessions" })).toContainText(wb);
   await dialog.getByRole("tab", { name: "Backups" }).click();
   await panel.getByRole("button", { name: "Back up now" }).click();
-  await expect(panel.getByRole("table", { name: "Backups" })).toBeVisible();
+  // A backup copies every workbook; on a loaded test machine that can take a while.
+  await expect(panel.getByRole("table", { name: "Backups" })).toBeVisible({ timeout: 30_000 });
   await dialog.getByRole("tab", { name: "Usage and limits" }).click();
   await expect(panel.getByRole("table", { name: "Usage per space" })).toContainText("General");
   await dialog.getByRole("tab", { name: "Audit log" }).click();

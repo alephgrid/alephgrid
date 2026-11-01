@@ -49,9 +49,11 @@ test("blank sheet in a new workbook, edits, errors, and live updates for a secon
   await page.goto(server.url);
   await page.getByRole("button", { name: /New (blank )?workbook/ }).first().click();
   await page.getByRole("dialog", { name: "New workbook" }).getByRole("button", { name: "Create" }).click();
-  await expect(page.getByRole("heading", { name: "This workbook is empty" })).toBeVisible();
-  await page.getByRole("button", { name: "New blank sheet" }).click();
+  // U.03b: straight into a blank sheet, with A1 ready for typing.
   await expect(page.getByRole("tab", { name: /Sheet/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".grid-host")).toBeFocused();
+  // U.05: SQL stays closed until asked for.
+  await expect(page.getByRole("region", { name: /SQL/ })).toHaveCount(0);
   await expect(page.locator(".kind-badge")).toHaveText("Sheet");
   await sheetReady(page);
 
@@ -106,7 +108,7 @@ test("gate: a new user creates, imports, edits and reopens a table and a sheet w
   const create = page.getByRole("dialog", { name: "New workbook" });
   await create.getByLabel("Name").fill("Budget 2026");
   await create.getByRole("button", { name: "Create" }).click();
-  await expect(page.getByRole("heading", { name: "This workbook is empty" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Sheet 1/ })).toBeVisible();
 
   // Import a table.
   await page.locator('.workbook input[type="file"]').setInputFiles({ name: "costs.csv", mimeType: "text/csv", buffer: Buffer.from("item,cost\nrent,1200\nfood,350.5\n") });
@@ -118,9 +120,8 @@ test("gate: a new user creates, imports, edits and reopens a table and a sheet w
   await type(page, [2, 1], "99.5");
   await expect(page.locator(".row-count")).toHaveText("3 rows");
 
-  // A blank sheet next to it.
-  await page.getByRole("button", { name: "New table or sheet" }).click();
-  await page.getByRole("menuitem", { name: /New sheet/ }).click();
+  // The blank sheet the workbook started with, next to it.
+  await page.getByRole("tab", { name: /Sheet 1/ }).click();
   await sheetReady(page);
   await type(page, [0, 0], "1650");
   await type(page, [1, 0], "=A1/12");

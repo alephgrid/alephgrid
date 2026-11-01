@@ -505,11 +505,15 @@ export class WorkbookScreen {
       if (await this.goneToTrash()) return;
       throw e;
     }
-    const demo = Number(new URLSearchParams(location.search).get("demo"));
-    if (demo > 0) history.replaceState(null, "", location.pathname);
+    const params = new URLSearchParams(location.search);
+    const demo = Number(params.get("demo"));
+    // U.03b: "New workbook" in the hub opens straight into a blank sheet (?start=sheet).
+    const blank = params.get("start") === "sheet";
+    if (demo > 0 || blank) history.replaceState(null, "", location.pathname);
     if (this.tables.length) await this.openTable(this.tables[0].name);
     else if (this.sheets.length) await this.openSheet(this.sheets[0].index);
     else if (demo > 0) await this.createDemo(demo);
+    else if (blank) await this.createSheet();
     else this.renderEmpty();
     // Start on the grid, unless the user has already moved focus while it was loading.
     const focused = document.activeElement;
