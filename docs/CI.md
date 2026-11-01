@@ -8,6 +8,7 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) still apply.
 | Run | Parameter | What it does |
 |---|---|---|
 | **check** | `run_check = true` | web type check and bundle; `cargo test --workspace` (with the protocol drift check and the disk-full tests); clippy with warnings as errors; browser journeys in Chromium |
+| **release** | `run_release = true`, `release_version`, on a tag | binaries, draft release, then (after approval) GitHub release, Docker image and npm; see [RELEASING.md](RELEASING.md) |
 | **full** | `run_full = true` | everything in check, plus browser journeys in Firefox and WebKit, 2,000-case property tests, and the server's integration and crash suites five times |
 
 The configuration is [.circleci/config.yml](../.circleci/config.yml). One job compiles everything

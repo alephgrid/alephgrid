@@ -37,6 +37,7 @@
 | [DESIGN.md](DESIGN.md) · [UI_IMPLEMENTATION_GUIDE.md](UI_IMPLEMENTATION_GUIDE.md) · [UI_STATES.md](UI_STATES.md) | Interface design, components and states |
 | [TEST_STRATEGY.md](TEST_STRATEGY.md) · [TEST_MATRIX.md](TEST_MATRIX.md) | How changes are tested, and which test covers what |
 | [CI.md](CI.md) | CircleCI, run on demand: setup and how to start a run |
+| [RELEASING.md](RELEASING.md) | Building and publishing a release: binaries, Docker image, npm |
 | [ACCESSIBILITY_TESTING.md](ACCESSIBILITY_TESTING.md) | Manual keyboard and screen-reader checks |
 | [UPSTREAM.md](UPSTREAM.md) | Work contributed to IronCalc |
 | [BRAND.md](BRAND.md) | Logo and brand asset provenance |

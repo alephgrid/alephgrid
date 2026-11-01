@@ -86,6 +86,19 @@ The full inventory, including what is partial or not planned, is in
 
 ## Quick start
 
+### Install a release
+
+From v0.1.0 (being prepared; see [releasing](docs/RELEASING.md)):
+
+```bash
+npx alephgrid flights.parquet                         # npm, or: pnpm dlx / yarn dlx / bunx alephgrid
+docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid
+```
+
+or download `alephgrid-VERSION-TARGET.tar.gz` for Linux (x86_64, arm64) or macOS (Apple
+silicon, Intel) from GitHub Releases and check it against `SHA256SUMS`. On Windows, use Docker
+or WSL.
+
 ### From source
 
 Requires Rust 1.88+ and Node 20+.

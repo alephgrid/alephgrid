@@ -4,6 +4,8 @@
 #   tools/ci.sh check [branch]     build, Rust tests, clippy, Chromium browser journeys
 #   tools/ci.sh full  [branch]     the check plus WebKit, Firefox and the long runs
 #   tools/ci.sh status [number]    the workflows of a pipeline (default: the latest)
+#   tools/ci.sh release vX.Y.Z     build, test and package a release from tag vX.Y.Z (pushed);
+#                                  publishes only after approval in CircleCI (docs/RELEASING.md)
 #
 # branch defaults to the current git branch, which must be pushed.
 #
@@ -51,6 +53,23 @@ case "${1:-}" in
     echo "Started $1 on $branch: pipeline $number"
     app_url "$number"
     ;;
+  release)
+    need
+    tag=${2:?usage: tools/ci.sh release vX.Y.Z}
+    case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "a release tag looks like v0.1.0" >&2; exit 2 ;; esac
+    git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || { echo "tag $tag is not on origin; push it first (docs/RELEASING.md)" >&2; exit 1; }
+    params=$(jq -n --arg v "${tag#v}" '{run_release: true, release_version: $v}')
+    if [ -n "${CIRCLECI_DEFINITION_ID:-}" ]; then
+      body=$(jq -n --arg d "$CIRCLECI_DEFINITION_ID" --arg t "$tag" --argjson p "$params" '{definition_id:$d, config:{tag:$t}, checkout:{tag:$t}, parameters:$p}')
+      reply=$(call POST "/project/$SLUG/pipeline/run" "$body")
+    else
+      body=$(jq -n --arg t "$tag" --argjson p "$params" '{tag:$t, parameters:$p}')
+      reply=$(call POST "/project/$SLUG/pipeline" "$body")
+    fi
+    number=$(jq -r '.number' <<<"$reply")
+    echo "Started release $tag: pipeline $number. Approve \"approve-publish\" there once the draft release looks right."
+    app_url "$number"
+    ;;
   status)
     need
     if [ -n "${2:-}" ]; then
@@ -64,7 +83,7 @@ case "${1:-}" in
     app_url "$number"
     ;;
   *)
-    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
