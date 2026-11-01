@@ -783,3 +783,4 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .comment-meta { font-size: 12px; }
 .comment-text { margin: 2px 0 0; font-size: 13px; white-space: pre-wrap; color: var(--text); }
 .comment-actions { display: flex; gap: 6px; }
+.fmt-size { width: 58px; }

@@ -74,6 +74,12 @@ export function formatBar(host: FormatHost): HTMLElement {
     b.addEventListener("click", () => void host.apply({ num_fmt: stepDecimals(host.current()?.num_fmt ?? "", more) }));
     return b;
   };
+  const size = el("select", { "aria-label": "Font size", class: "fmt-select fmt-size" },
+    ...[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36].map((n) => el("option", { value: String(n), selected: n === 12 }, String(n)))) as HTMLSelectElement;
+  size.addEventListener("change", () => void host.apply({ size: Number(size.value) }));
+  const valign = el("select", { "aria-label": "Vertical alignment", class: "fmt-select" },
+    ...[["bottom", "Bottom"], ["center", "Middle"], ["top", "Top"]].map(([v, l]) => el("option", { value: v }, l))) as HTMLSelectElement;
+  valign.addEventListener("change", () => void host.apply({ v: valign.value === "bottom" ? "" : valign.value }));
   const borders = el("select", { "aria-label": "Borders", class: "fmt-select" },
     ...[["", "Borders…"], ["all", "All borders"], ["outer", "Outside borders"], ["inner", "Inside borders"], ["top", "Top border"], ["bottom", "Bottom border"], ["left", "Left border"], ["right", "Right border"], ["none", "No borders"]]
       .map(([v, l]) => el("option", { value: v }, l))) as HTMLSelectElement;
@@ -81,15 +87,17 @@ export function formatBar(host: FormatHost): HTMLElement {
   const clear = el("button", { class: "fmt-btn", type: "button", "aria-label": "Clear formatting", title: "Clear formatting" }, "⌫");
   clear.addEventListener("click", () => void host.clear());
   const bar = el("div", { class: "format-bar", role: "toolbar", "aria-label": "Cell format" },
-    toggle("Bold", "b", "B", "⌘B"), toggle("Italic", "i", "I", "⌘I"), toggle("Underline", "u", "U", "⌘U"), toggle("Strikethrough", "s", "S"),
+    toggle("Bold", "b", "B", "⌘B"), toggle("Italic", "i", "I", "⌘I"), toggle("Underline", "u", "U", "⌘U"), toggle("Strikethrough", "s", "S"), size,
     el("span", { class: "fmt-sep" }), colour("Text colour", "color", "#102D25"), colour("Fill colour", "fill", "#FFF2CC"),
-    el("span", { class: "fmt-sep" }), align("left", "⇤"), align("center", "↔"), align("right", "⇥"), wrap,
+    el("span", { class: "fmt-sep" }), align("left", "⇤"), align("center", "↔"), align("right", "⇥"), valign, wrap,
     el("span", { class: "fmt-sep" }), borders, el("span", { class: "fmt-sep" }), fmt, dec(false), dec(true), el("span", { class: "fmt-sep" }), clear);
   /** Show the active cell's format on the controls. */
   (bar as HTMLElement & { sync?: () => void }).sync = () => {
     const st = host.current();
     for (const k of ["b", "i", "u", "s"] as const) bar.querySelector(`.fmt-${k}`)?.setAttribute("aria-pressed", String(!!st?.[k]));
     wrap.setAttribute("aria-pressed", String(!!st?.wrap));
+    size.value = String(st?.size ?? 12);
+    valign.value = st?.v ?? "bottom";
     const code = st?.num_fmt ?? "";
     fmt.value = NUMBER_FORMATS.some((f) => f.code === code) ? code : "__custom";
   };
