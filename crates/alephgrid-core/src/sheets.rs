@@ -45,6 +45,9 @@ pub struct SheetInfo {
     /// (`layout`): they are refused, not misapplied, once it moved on.
     #[serde(default)]
     pub layout: u64,
+    /// Columns kept in view while scrolling sideways (S.05).
+    #[serde(default)]
+    pub frozen_columns: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -403,7 +406,8 @@ impl Sheets {
             .filter(|(_, p)| p.state == "visible")
             .map(|(i, p)| {
                 let (rows, columns) = used_size(m, i as u32);
-                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32) }
+                let frozen_columns = m.get_model().workbook.worksheet(i as u32).map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns }
             })
             .collect()
     }

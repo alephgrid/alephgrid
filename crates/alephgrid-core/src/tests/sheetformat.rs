@@ -124,3 +124,22 @@ fn sheet_find_and_replace() {
     assert_eq!(shown(&s, 0, 0), "North");
     assert_eq!(shown(&s, 0, 2), "north pole");
 }
+
+/// S.05: frozen columns are kept with the sheet, undo, and survive XLSX.
+#[test]
+fn frozen_columns_persist_and_undo() {
+    let mut s = sheet();
+    s.freeze_columns(0, 2).unwrap();
+    assert_eq!(s.info(0).unwrap().frozen_columns, 2);
+    let back = Sheets::from_bytes(Some(s.to_bytes().unwrap())).unwrap();
+    assert_eq!(back.info(0).unwrap().frozen_columns, 2);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    assert_eq!(t.info(0).unwrap().frozen_columns, 2);
+    assert!(s.undo().unwrap());
+    assert_eq!(s.info(0).unwrap().frozen_columns, 0);
+    assert!(s.freeze_columns(0, 51).is_err());
+}

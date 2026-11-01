@@ -202,6 +202,18 @@ impl Sheets {
         Ok(())
     }
 
+    /// Keep the first `columns` columns of a sheet in view while scrolling (S.05; 0 unfreezes).
+    pub fn freeze_columns(&mut self, index: u32, columns: u32) -> Result<()> {
+        self.check_index(index)?;
+        if columns > 50 {
+            bail!("at most 50 columns can be frozen");
+        }
+        let m = self.model_mut()?;
+        m.set_frozen_columns_count(index, columns as i32).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
     /// The style of one cell (row and column 0-based).
     pub fn cell_style(&self, index: u32, row: u32, column: u32) -> Result<CellStyle> {
         let m = self.model()?;

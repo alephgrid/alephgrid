@@ -272,7 +272,7 @@ export class WorkbookScreen {
     const self = this;
     this.grid = new Grid(
       {
-        frozen: () => this.isSheet() ? 0 : this.presentation.frozen,
+        frozen: () => this.isSheet() ? (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.frozen_columns ?? 0) : this.presentation.frozen,
         format: (value, column) => displayValue(value, column, this.presentation.formats[column.name]),
         color: (value, column) => cellColor(value, column.name, this.presentation.rules),
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
@@ -617,6 +617,11 @@ export class WorkbookScreen {
         { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
       ]],
       ["View", () => [
+        ...(this.isSheet() ? [
+          { label: `Freeze columns A–${String.fromCharCode(65 + Math.min(25, this.grid.active.c))}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
+          { label: "Unfreeze columns", action: () => void this.freezeColumns(0) },
+          "sep" as const,
+        ] : []),
         { label: `${this.explorerOpen ? "✓ " : ""}Explorer`, action: () => this.toggleExplorer() },
         { label: "Saved views…", disabled: tableOnly(), action: () => this.viewsMenu(this.menuAnchor) },
         "sep",
@@ -2078,6 +2083,16 @@ export class WorkbookScreen {
       this.reportConflict(e);
       if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
+  }
+
+  /** S.05: keep the first `columns` columns of the sheet in view (0 unfreezes). */
+  private async freezeColumns(columns: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    try {
+      await this.rpc.call("sheet_freeze", { sheet: this.active.index, columns });
+      await this.loadItems();
+      this.grid.invalidate();
+    } catch (e) { toast((e as Error).message, "error"); }
   }
 
   /** U.16: the value filter popup of a table column. */

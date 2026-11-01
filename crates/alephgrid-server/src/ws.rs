@@ -240,6 +240,8 @@ pub enum Op {
     SheetFind { sheet: u32, search: alephgrid_core::SheetSearch, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
     /// Replace in every matching cell of a sheet, as one undo step; replies how many changed.
     SheetReplace { sheet: u32, search: alephgrid_core::SheetSearch, replacement: String },
+    /// Freeze the first columns of a sheet (S.05; 0 unfreezes).
+    SheetFreeze { sheet: u32, columns: u32 },
     /// Clear every format of an area; values stay.
     SheetClearFormat { sheet: u32, area: alephgrid_core::CellArea, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
@@ -386,7 +388,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -746,6 +748,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetDeleteName { name, scope } => {
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetFreeze { sheet, columns } => {
+            wb.with_sheets(|s| s.freeze_columns(sheet, columns))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetReplace { sheet, search, replacement } => {
             let n = wb.with_sheets(|s| s.replace_all(sheet, &search, &replacement))?;
