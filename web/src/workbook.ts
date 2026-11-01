@@ -32,7 +32,7 @@ import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
-import { renderChart, type ChartType } from "./charts";
+import { SheetChartsLayer } from "./sheetcharts";
 import type { CellComment, SheetLayout, SheetRules } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
@@ -243,7 +243,7 @@ export class WorkbookScreen {
   private commentCells = new Set<string>();
   private commentsPane: CommentsPane | null = null;
   /** S.09: the open range chart, redrawn when the sheet changes. */
-  private rangeChart: { close: () => void; draw: () => void } | null = null;
+  private chartsLayer!: SheetChartsLayer;
   /** S.10: the open sheet's colour and validation rules. */
   private sheetRules: SheetRules = { colors: [], validations: [] };
   /** S.01: the sheet format toolbar (hidden for tables). */
@@ -279,7 +279,7 @@ export class WorkbookScreen {
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
-    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) { this.formatBarEl.sync?.(); this.rangeChart?.draw(); } }, onError);
+    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) this.formatBarEl.sync?.(); }, onError);
     const self = this;
     this.grid = new Grid(
       {
@@ -320,13 +320,25 @@ export class WorkbookScreen {
         columnResized: (c, w) => self.columnResized(c, w),
         rowResized: (r, h) => void self.resizeLines("rows", r, 1, h),
         autoFit: (c) => self.autoFitSheetColumn(c),
+        afterDraw: () => self.chartsLayer?.position(),
         undo: () => self.undo(false),
         redo: () => self.undo(true),
         command: (e) => self.commands.handle(e, "grid", (m) => toast(m)),
       },
     );
     this.registerCommands();
-    this.gridWrap.append(this.grid.host, this.busyEl, this.failureEl, this.findBar.el);
+    this.chartsLayer = new SheetChartsLayer({
+      cellBox: (r, c) => this.grid.cellBox(r, c),
+      zoom: () => this.grid.getZoom(),
+      bodyOrigin: () => this.grid.bodyOrigin(),
+      cellAt: (x, y) => this.grid.cellAtPoint(x, y),
+      values: (a) => this.chartValues(a),
+      save: async (charts) => {
+        if (this.active?.kind !== "sheet") throw new Error("Open a sheet to place charts");
+        await this.rpc.call("set_sheet_charts", { sheet: this.active.index, charts });
+      },
+    });
+    this.gridWrap.append(this.grid.host, this.chartsLayer.el, this.busyEl, this.failureEl, this.findBar.el);
     this.root = this.render();
     this.titleEl.textContent = meta.name;
     this.rpc.onSaveState = () => this.renderStatus();
@@ -1189,7 +1201,7 @@ export class WorkbookScreen {
       else { this.sheetCache.columns = cols; this.sheetCache.refresh(); }
       this.grid.setColumns(this.sheetWidths());
     }
-    if (reset) { this.sheetLayout = null; this.grid.setRowSizes([]); this.grid.setMerges([]); }
+    if (reset) { this.sheetLayout = null; this.grid.setRowSizes([]); this.grid.setMerges([]); this.chartsLayer.clear(); void this.loadSheetCharts(); }
     void this.loadSheetLayout();
     this.rowsEl.textContent = info.rows ? `Used ${columnLetter(Math.max(0, info.columns - 1))}${info.rows}` : "Empty sheet";
     this.setKind("sheet");
@@ -1214,6 +1226,7 @@ export class WorkbookScreen {
   }
 
   private applyView(info: ViewInfo, reset: boolean): void {
+    if (reset) this.chartsLayer.clear();
     this.view = info;
     this.cache.viewGeneration = info.generation;
     this.updateToolbar();
@@ -2184,30 +2197,28 @@ export class WorkbookScreen {
     catch (e) { toast((e as Error).message, "error"); }
   }
 
-  /** S.09: a chart of the selected range, docked under the grid and redrawn as the cells
-   *  change. The first column gives the categories, the first row the series names. */
-  private chartFromSelection(): void {
+  /** S.09: place a chart of the selected range on the sheet, kept with the workbook. */
+  private insertChart(): void {
     if (this.active?.kind !== "sheet") return;
     const sel = this.grid.selection();
+    if (sel.r1 - sel.r0 > 1000 || sel.c1 - sel.c0 > 20) { toast("A chart reads at most 1,000 rows and 20 series: select a smaller range", "error"); return; }
+    void this.chartsLayer.add({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 });
+  }
+
+  private async loadSheetCharts(): Promise<void> {
+    if (this.active?.kind !== "sheet") { this.chartsLayer.clear(); return; }
     const sheet = this.active.index;
-    const kind = el("select", { "aria-label": "Chart type" }, ...["column", "bar", "line", "area", "scatter", "pie"].map((k) => el("option", { value: k }, k))) as HTMLSelectElement;
-    const box = el("div", { class: "chart-box" });
-    const draw = () => {
-      if (this.active?.kind !== "sheet" || this.active.index !== sheet) return;
-      const text = (r: number, c: number) => this.sheetCache.cell(r, c)?.[0] ?? "";
-      const series = [];
-      for (let c = sel.c0 + 1; c <= sel.c1; c++) {
-        series.push({ name: text(sel.r0, c) || `Column ${c - sel.c0}`, values: Array.from({ length: sel.r1 - sel.r0 }, (_, i) => { const v = Number(text(sel.r0 + 1 + i, c).replace(/,/g, "")); return text(sel.r0 + 1 + i, c) === "" || Number.isNaN(v) ? null : v; }) });
-      }
-      const labels = Array.from({ length: sel.r1 - sel.r0 }, (_, i) => text(sel.r0 + 1 + i, sel.c0));
-      renderChart(box, { labels, series, title: "Chart of the selection" }, kind.value as ChartType);
-    };
-    kind.addEventListener("change", draw);
-    const panel = el("section", { class: "analyze-results", "aria-label": "Range chart" }, el("h2", {}, "Chart"), el("label", { class: "analyze-field" }, el("span", {}, "Type"), kind), box);
-    this.rangeChart?.close();
-    const handle = dockPanel(this.mainEl, panel, "Chart", () => { this.rangeChart = null; });
-    this.rangeChart = { close: handle.close, draw };
-    draw();
+    try {
+      const charts = await this.rpc.call("sheet_charts", { sheet });
+      if (this.active?.kind === "sheet" && this.active.index === sheet) this.chartsLayer.set(charts);
+    } catch { /* charts are optional to viewing */ }
+  }
+
+  /** The shown text of a chart's data range, read from the server (bounded by the chart). */
+  private async chartValues(a: { row: number; column: number; rows: number; columns: number }): Promise<string[][]> {
+    if (this.active?.kind !== "sheet") return [];
+    const block = await this.rpc.call("sheet_fetch", { sheet: this.active.index, row_start: a.row, row_count: a.rows, column_count: a.column + a.columns });
+    return Array.from({ length: a.rows }, (_, i) => Array.from({ length: a.columns }, (_, j) => block.rows[i]?.[a.column + j]?.[0] ?? ""));
   }
 
   /** S.08: zoom the grid; remembered per workbook in this browser. */
@@ -2587,7 +2598,7 @@ export class WorkbookScreen {
           { label: `Sort below the header row by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, true) },
           "sep" as const,
         ] : []),
-        ...(rows > 1 ? [{ label: "Chart from selection", action: () => this.chartFromSelection() }] : []),
+        ...(rows > 1 && cols > 1 ? [{ label: "Insert chart", action: () => this.insertChart() }] : []),
         { label: "Conditional colour…", action: () => void this.editRules("color") },
         { label: "Allowed values…", action: () => void this.editRules("list") },
         { label: "Clear colour and value rules here", action: () => void this.clearRules() },
@@ -3093,6 +3104,7 @@ export class WorkbookScreen {
         break;
       case "sheet_changed":
         void this.loadComments();
+        if (a?.kind === "sheet" && (e.sheet === null || e.sheet === a.index)) void this.loadSheetCharts();
         if (a?.kind === "sheet" && e.origin !== this.rpc.session && (e.sheet === null || e.sheet === a.index)) {
           await this.refreshSheet();
         }

@@ -59,6 +59,8 @@ export interface GridHandlers {
   rowResized?(row: number, height: number): void;
   /** Auto-fit a column from all of its cells (double-click on its edge); true when handled. */
   autoFit?(col: number): boolean;
+  /** After each frame: overlays (sheet charts) follow scrolling and zoom. */
+  afterDraw?(): void;
   undo?(): void;
   redo?(): void;
   /** The command registry gets each grid key first; true when it used the key. */
@@ -297,6 +299,7 @@ export class Grid {
       this.updateSpacer();
       this.draw();
       this.updateA11y();
+      this.handlers.afterDraw?.();
     });
   }
 
@@ -393,6 +396,26 @@ export class Grid {
 
   private contentHeight(): number {
     return this.rowTop(this.displayRows());
+  }
+
+  /** Top-left of a cell in CSS pixels relative to the grid (zoom applied). */
+  cellBox(r: number, c: number): { x: number; y: number } {
+    const rect = this.cellRect({ r, c });
+    return { x: rect.x * this.zoom, y: rect.y * this.zoom };
+  }
+
+  /** The body's top-left in CSS pixels (below the header, right of the row numbers). */
+  bodyOrigin(): { x: number; y: number } {
+    return { x: this.rowHeaderWidth() * this.zoom, y: HEADER_H * this.zoom };
+  }
+
+  /** The cell under a viewport point, or null outside the cells. */
+  cellAtPoint(clientX: number, clientY: number): Cell | null {
+    const r = this.host.getBoundingClientRect();
+    const x = (clientX - r.left) / this.zoom, y = (clientY - r.top) / this.zoom;
+    if (x < this.rowHeaderWidth() || y < HEADER_H || x > this.width || y > this.height) return null;
+    const c = this.colAt(x), row = this.rowAt(y);
+    return c >= 0 && row >= 0 ? { r: row, c } : null;
   }
 
   /** True while a column or row edge is being dragged (sizes from elsewhere wait). */

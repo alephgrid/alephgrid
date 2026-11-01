@@ -179,7 +179,7 @@ test("S.08: zoom scales the grid, keeps clicks on the right cell, and is remembe
   ws.close();
 });
 
-test("S.09: a chart of a selected range follows the cells", async ({ page }) => {
+test("S.09: a chart placed on the sheet follows the cells, moves, changes type and is kept", async ({ page }) => {
   const wb = await server.createWorkbook("Range chart"), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "S" });
   await ws.call("sheet_set", { sheet: 0, inputs: [
@@ -196,13 +196,40 @@ test("S.09: a chart of a selected range follows the cells", async ({ page }) => 
   await page.keyboard.press("Shift+ArrowDown");
   const box = (await page.locator(".grid-scroller").boundingBox())!;
   await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
-  await page.getByRole("menuitem", { name: "Chart from selection" }).click();
-  const chart = page.getByRole("region", { name: "Range chart" });
+  await page.getByRole("menuitem", { name: "Insert chart" }).click();
+  const chart = page.getByRole("region", { name: "Chart of A1:B3" });
   await expect(chart.getByRole("img")).toBeVisible();
   const values = chart.getByRole("table", { name: "Chart values" });
   await expect(values).toContainText("West125");
+  const stored = async () => (await ws.call("sheet_charts", { sheet: 0 }))[0];
+  // Placed right of the data (column D), kept with the workbook.
+  await expect.poll(async () => (await stored())?.column).toBe(3);
+  // The chart follows a collaborator's edit.
   await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 2, column: 1, value: "200" }] });
   await expect(values).toContainText("West200");
+  // Change its type, then move it down by dragging its title bar.
+  await chart.getByRole("combobox", { name: "Chart type" }).selectOption("line");
+  await expect.poll(async () => (await stored())?.kind).toBe("line");
+  const bar = chart.locator(".sheet-chart-bar");
+  const b = (await bar.boundingBox())!;
+  await page.mouse.move(b.x + 20, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + 20, b.y + b.height / 2 + 24 * 3, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => (await stored())?.row).toBe(3);
+  // Resize from the corner.
+  const g = (await chart.locator(".sheet-chart-grip").boundingBox())!;
+  await page.mouse.move(g.x + 7, g.y + 7);
+  await page.mouse.down();
+  await page.mouse.move(g.x + 107, g.y + 47, { steps: 5 });
+  await page.mouse.up();
+  await expect.poll(async () => { const c = await stored(); return [c?.width, c?.height]; }).toEqual([580, 340]);
+  await page.reload();
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West200");
+  // Deleting removes it from the workbook.
+  await page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("button", { name: "Delete chart" }).click();
+  await expect.poll(async () => (await ws.call("sheet_charts", { sheet: 0 })).length).toBe(0);
   ws.close();
 });
 

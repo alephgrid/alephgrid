@@ -1945,6 +1945,25 @@ impl Reader {
                 calling.len()
             ));
         }
+        // What sheets hold beside their cells that the file format does not get (S.09–S.11).
+        let infos = self.sheets().list();
+        for info in infos {
+            let charts = self.sheet_charts(info.index).map(|c| c.len()).unwrap_or(0);
+            if charts > 0 {
+                notes.push(format!("sheet {}: {charts} chart(s) are not in the file; they stay in the workbook", info.name));
+            }
+            let rules = self.sheet_rules(info.index).unwrap_or_default();
+            if !rules.colors.is_empty() || !rules.validations.is_empty() {
+                notes.push(format!(
+                    "sheet {}: {} colour rule(s) and {} allowed-value rule(s) are not in the file; values and fixed formats are",
+                    info.name, rules.colors.len(), rules.validations.len()
+                ));
+            }
+            let comments = self.comments(info.index).map(|c| c.len()).unwrap_or(0);
+            if comments > 0 {
+                notes.push(format!("sheet {}: {comments} comment(s) are not in the file; they stay in the workbook", info.name));
+            }
+        }
         for t in self.db().list_tables()? {
             notes.push(format!("table {} ({} rows) is not in the file: download it as CSV or Parquet; formulas over it are exported as values", t.name, t.row_count));
         }

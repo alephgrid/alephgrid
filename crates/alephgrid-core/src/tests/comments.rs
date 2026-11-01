@@ -76,3 +76,30 @@ fn comments_are_in_the_history() {
     t.wb.add_comment(0, 0, 0, "note", None).unwrap();
     assert!(t.wb.revision().unwrap() > before);
 }
+
+/// S.09: charts placed on a sheet are kept with the workbook (by the sheet's stable id, so
+/// they follow renames), validated, and listed in the XLSX compatibility notes.
+#[test]
+fn sheet_charts_are_kept_and_noted_for_xlsx() {
+    use crate::sheetcharts::SheetChart;
+    use crate::sheets::CellArea;
+    let mut t = TempWb::new();
+    t.wb.with_sheets(|s| s.create("S").map(|_| ())).unwrap();
+    let chart = SheetChart {
+        chart: "c1".into(), kind: "line".into(), title: "Sales".into(),
+        data: CellArea { row: 0, column: 0, rows: 4, columns: 3 }, row: 6, column: 4, width: 420, height: 260,
+    };
+    t.wb.set_sheet_charts(0, vec![chart.clone()]).unwrap();
+    t.wb.with_sheets(|s| s.rename(0, "Renamed")).unwrap();
+    t.reopen();
+    assert_eq!(t.wb.sheet_charts(0).unwrap(), vec![chart.clone()]);
+    let notes = t.wb.reader().unwrap().xlsx_compatibility().unwrap();
+    assert!(notes.iter().any(|n| n.contains("sheet Renamed: 1 chart(s) are not in the file")), "{notes:?}");
+    let bad = |f: fn(&mut SheetChart)| { let mut c = chart.clone(); f(&mut c); c };
+    assert!(t.wb.set_sheet_charts(0, vec![bad(|c| c.kind = "radar".into())]).is_err());
+    assert!(t.wb.set_sheet_charts(0, vec![bad(|c| c.data.columns = 1)]).is_err());
+    assert!(t.wb.set_sheet_charts(0, vec![bad(|c| c.width = 10)]).is_err());
+    assert!(t.wb.set_sheet_charts(0, vec![chart.clone(), chart.clone()]).is_err(), "ids are unique");
+    t.wb.set_sheet_charts(0, vec![]).unwrap();
+    assert!(t.wb.sheet_charts(0).unwrap().is_empty());
+}

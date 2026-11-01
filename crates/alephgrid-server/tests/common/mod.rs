@@ -500,6 +500,8 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("recalculate", json!({ "table": "t" })),
         ("cancel_recalculation", json!({ "table": "t" })),
         ("sheet_duplicate", json!({ "sheet": 0 })),
+        ("set_sheet_charts", json!({ "sheet": 0, "charts": [{ "chart": "c1", "kind": "column", "title": "T", "data": { "row": 0, "column": 0, "rows": 3, "columns": 2 }, "row": 5, "column": 3, "width": 400, "height": 260 }] })),
+        ("sheet_charts", json!({ "sheet": 0 })),
         ("set_sheet_rules", json!({ "sheet": 0, "rules": { "colors": [{ "area": { "row": 0, "column": 0, "rows": 5, "columns": 1 }, "condition": "greater", "value": "5", "color": "#FFC7CE" }], "validations": [{ "area": { "row": 30, "column": 30, "rows": 2, "columns": 1 }, "list": ["yes", "no"] }] } })),
         ("sheet_rules", json!({ "sheet": 0 })),
         ("sheet_reorder", json!({ "sheet": 1, "to": 0 })),
