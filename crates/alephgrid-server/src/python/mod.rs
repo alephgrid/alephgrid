@@ -82,7 +82,8 @@ pub fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
 pub enum Isolation {
     /// macOS Seatbelt (`sandbox-exec`) with a deny-by-default profile.
     Seatbelt,
-    /// Linux bubblewrap: new namespaces (no network), read-only binds, an empty read-only /tmp.
+    /// Linux bubblewrap: new namespaces (no network), read-only binds, an empty read-only /tmp,
+    /// and a seccomp filter (installed by the runner) refusing new programs and processes.
     Bubblewrap(PathBuf),
     /// No OS sandbox: allowed only when asked for (`--python-isolation none`, local mode).
     None,
@@ -252,7 +253,9 @@ impl PythonRuntime {
                 // Workers have no files (docs/PYTHON_FUNCTIONS.md): /tmp is read-only too, as
                 // on macOS, where the profile denies every write.
                 c.args(["--remount-ro", "/tmp", "--proc", "/proc", "--dev", "/dev", "--chdir", "/work"]);
-                c.arg(exe).args(python_args).arg("/work/runner.py");
+                // The runner installs a seccomp filter before any function code: no programs
+                // and no processes (threads only), as macOS's profile allows (8.03).
+                c.arg(exe).args(python_args).arg("/work/runner.py").arg("--forbid-processes");
                 c
             }
             Isolation::None => {

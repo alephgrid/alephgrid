@@ -1,11 +1,91 @@
 # Alephgrid Python worker (docs/PYTHON_FUNCTIONS.md). Runs inside the sandbox, isolated (-I),
-# without site (-S) or bytecode files (-B). Reads one JSON job from stdin:
+# without site (-S) or bytecode files (-B). With --forbid-processes (Linux, under bubblewrap) it
+# first installs a seccomp filter that refuses new programs and processes. Reads one JSON job from stdin:
 #   {"source", "entry", "returns", "context", "site": [dirs], "calls": [[value, ...], ...]}
 # and writes one JSON line: {"results": [result, ...]}, one result per call, in order.
 # Values and results use the server's encoding (crate::external::WorkerValue / CallResult).
 import sys
 
+
+# Linux system call numbers (the kernel's tables) and seccomp architecture ids.
+ARCHES = {
+    "x86_64": (0xC000003E, {"execve": 59, "execveat": 322, "fork": 57, "vfork": 58, "clone": 56, "clone3": 435}),
+    "aarch64": (0xC00000B7, {"execve": 221, "execveat": 281, "clone": 220, "clone3": 435}),
+}
+LD_W_ABS, JEQ, JGE, JSET, RET = 0x20, 0x15, 0x35, 0x45, 0x06
+ALLOW, KILL, ERRNO = 0x7FFF0000, 0x80000000, 0x00050000
+EPERM, ENOSYS, CLONE_THREAD = 1, 38, 0x00010000
+
+
+def process_filter(machine):
+    """The classic-BPF seccomp program for `machine`, as (code, jt, jf, k) tuples: kill on a
+    foreign architecture; refuse execve, execveat, fork, vfork and x32 calls (EPERM); clone3
+    reports ENOSYS so the C library falls back to clone; clone is allowed only for a thread
+    (CLONE_THREAD); everything else is allowed."""
+    if machine not in ARCHES:
+        raise OSError("no process filter for the %s architecture" % machine)
+    arch, nr = ARCHES[machine]
+    # Instructions with symbolic jump targets; a 1-tuple marks a label.
+    prog = [(LD_W_ABS, None, None, 4),                      # seccomp_data.arch
+            (JEQ, None, "kill", arch),
+            (LD_W_ABS, None, None, 0)]                      # seccomp_data.nr
+    if machine == "x86_64":
+        prog.append((JGE, "eperm", None, 0x40000000))      # x32 system calls
+    for name in ("execve", "execveat", "fork", "vfork"):
+        if name in nr:
+            prog.append((JEQ, "eperm", None, nr[name]))
+    prog += [(JEQ, "enosys", None, nr["clone3"]),
+             (JEQ, "clone", None, nr["clone"]),
+             (RET, None, None, ALLOW),                      # any other call
+             ("clone",), (LD_W_ABS, None, None, 16),       # clone's flags: low word of args[0]
+             (JSET, "allow", "eperm", CLONE_THREAD),
+             ("allow",), (RET, None, None, ALLOW),
+             ("eperm",), (RET, None, None, ERRNO | EPERM),
+             ("enosys",), (RET, None, None, ERRNO | ENOSYS),
+             ("kill",), (RET, None, None, KILL)]
+    labels, code = {}, []
+    for ins in prog:
+        if len(ins) == 1:
+            labels[ins[0]] = len(code)
+        else:
+            code.append(ins)
+    jump = lambda i, label: 0 if label is None else labels[label] - i - 1
+    return [(c, jump(i, t), jump(i, f), k) for i, (c, t, f, k) in enumerate(code)]
+
+
+def forbid_new_processes():
+    """Linux: install process_filter() so neither this worker nor the function can start a
+    program or a process (docs/PYTHON_FUNCTIONS.md). It cannot be removed once installed and is
+    installed before the function's source is read. Raises if it cannot be installed; the caller
+    then refuses to run anything (fail closed)."""
+    import ctypes, os
+
+    code = process_filter(os.uname().machine)
+
+    class Filter(ctypes.Structure):
+        _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte), ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32)]
+
+    class Program(ctypes.Structure):
+        _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(Filter))]
+
+    filters = (Filter * len(code))(*[Filter(*ins) for ins in code])
+    program = Program(len(code), filters)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 38, 22, 2
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS failed")
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.addressof(program), 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "installing the process filter failed")
+
+
 def main():
+    if "--forbid-processes" in sys.argv:
+        try:
+            forbid_new_processes()
+        except BaseException as e:
+            sys.stderr.write("the Python sandbox could not forbid new processes: %s\n" % e)
+            sys.exit(70)
     import json
     job = json.loads(sys.stdin.buffer.read())
     for d in job.get("site", []):
