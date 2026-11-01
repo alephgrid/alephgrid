@@ -8,6 +8,7 @@
 //! * Free-form Excel-style sheets run on IronCalc and live in the same file.
 
 pub mod comments;
+pub mod sheetrules;
 pub mod analysis;
 pub use analysis::*;
 pub mod catalog;
@@ -38,6 +39,7 @@ mod workbook;
 
 pub use model::*;
 pub use comments::CellComment;
+pub use sheetrules::{SheetColorRule, SheetRules, SheetValidation};
 pub use sheets::{SortBy, SheetSearch, CellStyle, StyledCell, StylePatch, Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
 pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
 pub use queries::SchemaChanged;

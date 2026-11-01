@@ -38,3 +38,31 @@ fn comments_thread_and_follow_their_cells() {
     t.wb.delete_comment(&b.id).unwrap();
     assert!(t.wb.comments(0).unwrap().is_empty());
 }
+
+/// S.10: validation rules refuse values outside the list or range, before anything is
+/// written; rules are kept with the sheet.
+#[test]
+fn sheet_validation_refuses_bad_inputs() {
+    use crate::sheetrules::{SheetColorRule, SheetRules, SheetValidation};
+    use crate::sheets::CellArea;
+    let mut t = TempWb::new();
+    t.wb.with_sheets(|s| s.create("S").map(|_| ())).unwrap();
+    let area = CellArea { row: 0, column: 0, rows: 10, columns: 1 };
+    let rules = SheetRules {
+        colors: vec![SheetColorRule { area: area.clone(), condition: "greater".into(), value: "5".into(), color: "#FFC7CE".into() }],
+        validations: vec![
+            SheetValidation { area: area.clone(), list: vec!["yes".into(), "no".into()], min: None, max: None },
+            SheetValidation { area: CellArea { row: 0, column: 1, rows: 10, columns: 1 }, list: vec![], min: Some(0.0), max: Some(100.0) },
+        ],
+    };
+    t.wb.set_sheet_rules(0, rules).unwrap();
+    assert!(t.wb.check_sheet_inputs(0, &[sheet_input(0, 0, "yes")]).is_ok());
+    assert!(t.wb.check_sheet_inputs(0, &[sheet_input(0, 0, "maybe")]).unwrap_err().to_string().contains("allowed values"));
+    assert!(t.wb.check_sheet_inputs(0, &[sheet_input(1, 1, "101")]).is_err());
+    assert!(t.wb.check_sheet_inputs(0, &[sheet_input(1, 1, "abc")]).is_err());
+    assert!(t.wb.check_sheet_inputs(0, &[sheet_input(1, 1, "=A1"), sheet_input(20, 0, "anything")]).is_ok());
+    t.reopen();
+    assert_eq!(t.wb.sheet_rules(0).unwrap().validations.len(), 2);
+    let bad = SheetRules { colors: vec![SheetColorRule { area, condition: "huge".into(), value: String::new(), color: "#000000".into() }], validations: vec![] };
+    assert!(t.wb.set_sheet_rules(0, bad).is_err());
+}

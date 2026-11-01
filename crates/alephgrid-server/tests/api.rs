@@ -328,6 +328,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "EditOutcome" => conforms::<EditOutcome>(op, v),
         "Stats" => conforms::<Stats>(op, v),
         "FindResult" => conforms::<alephgrid_core::FindResult>(op, v),
+        "SheetRules" => conforms::<alephgrid_core::SheetRules>(op, v),
         "CellComment" => conforms::<alephgrid_core::CellComment>(op, v),
         "CellComment[]" => conforms::<Vec<alephgrid_core::CellComment>>(op, v),
         "ColumnValues" => conforms::<alephgrid_core::ColumnValues>(op, v),

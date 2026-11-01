@@ -251,6 +251,9 @@ pub enum Op {
     SheetBorder { sheet: u32, area: alephgrid_core::CellArea, kind: String, weight: String, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Sort the rows of a range by columns of it, keeping a header row (S.06).
     SheetSort { sheet: u32, area: alephgrid_core::CellArea, by: Vec<alephgrid_core::SortBy>, #[serde(default)] #[ts(optional, as = "Option<bool>")] header: bool, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    /// A sheet's conditional colours and validation rules (S.10).
+    SheetRules { sheet: u32 },
+    SetSheetRules { sheet: u32, rules: alephgrid_core::SheetRules },
     /// Move a sheet's tab to where visible sheet `to` is (S.07).
     SheetReorder { sheet: u32, to: u32 },
     /// Hide a sheet's tab, list hidden sheets, show one again (S.07).
@@ -391,7 +394,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | HiddenSheets | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -409,7 +412,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -420,7 +423,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -551,6 +554,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Stats { view_id, column, start, end } => json!(r.stats(view_id, &column, start, end)?),
         Op::Comments { sheet } => json!(r.comments(sheet)?),
         Op::HiddenSheets => json!(r.sheets().hidden_sheets()),
+        Op::SheetRules { sheet } => json!(r.sheet_rules(sheet)?),
         Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
@@ -724,6 +728,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         }
         Op::SheetSet { sheet, inputs, layout } => {
             expect_layout(wb, sheet, layout)?;
+            wb.check_sheet_inputs(sheet, &inputs)?;
             wb.set_sheet_cells(sheet, &inputs)?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
@@ -789,6 +794,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.sort_range(sheet, area, &by, header))?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
+        }
+        Op::SetSheetRules { sheet, rules } => {
+            wb.set_sheet_rules(sheet, rules)?;
+            (Value::Null, sheet_changed(sheet))
         }
         Op::SheetReorder { sheet, to } => {
             wb.with_sheets(|s| s.move_tab(sheet, to))?;
