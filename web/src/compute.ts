@@ -162,6 +162,7 @@ export function computeDialog(workbook: string): void {
   const body = el("div", { class: "panel-body" });
   const box = el("div", { class: "dialog wide" },
     el("h2", {}, "Compute"),
+    el("p", { class: "dialog-lede" }, "Where this workbook runs, how much memory and how many threads it has, and what it is doing now. Sleeping when nobody has it open is normal."),
     body,
     el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
   const modal = openModal(box, () => modal.close());

@@ -128,3 +128,24 @@ test("xlsx import lists sheets and compatibility notes before importing", async 
   await dialog.getByRole("button", { name: "Import sheets" }).click();
   await expect(page.getByRole("tab", { name: /Sheet/ })).toBeVisible();
 });
+
+test("U.19: a table import is reviewed in a side pane: one row per column with its type and samples", async ({ page }) => {
+  await newWorkbook(page, "Side pane");
+  await pick(page, "people.csv", "name,age,joined\nAda,36,2024-01-05\nGrace,45,2023-11-20\nLin,,2025-02-01\n");
+  const pane = page.getByRole("dialog", { name: "Import people.csv" });
+  await expect(pane).toHaveClass(/import-pane/);
+  // Docked at the right edge, full height.
+  const box = (await pane.boundingBox())!;
+  const vw = page.viewportSize()!.width;
+  expect(Math.round(box.x + box.width)).toBe(vw);
+  expect(box.height).toBeGreaterThan(page.viewportSize()!.height - 4);
+  const columns = pane.getByRole("table", { name: "Columns, their types and sample values" });
+  await expect(columns.getByRole("row", { name: /^name/ })).toContainText("Ada · Grace · Lin");
+  await expect(columns.getByRole("row", { name: /^age/ })).toContainText("36 · 45");
+  await expect(pane.getByLabel("Type for column age")).toHaveValue("BIGINT");
+  await expect(pane.getByLabel("Type for column joined")).toHaveValue("DATE");
+  await pane.getByLabel("Type for column age").selectOption("DOUBLE");
+  await expect(columns.getByRole("row", { name: /^age/ })).toContainText("36");
+  await pane.getByRole("button", { name: "Import table" }).click();
+  await expect(page.getByRole("tab", { name: /people/ })).toBeVisible();
+});

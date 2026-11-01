@@ -40,6 +40,7 @@ export function dataToolsDialog(rpc: Rpc, table: string, columns: Column[], open
   const showRules = (counts?: bigint[] | number[]) => rulesList.replaceChildren(...rules.map((r, i) => el("li", {}, `${r.column}: ${r.rule.kind === "one_of" ? `one of ${r.rule.values.join(", ")}` : r.rule.kind === "between" ? `between ${r.rule.min ?? "−∞"} and ${r.rule.max ?? "∞"}` : "required"}${counts ? ` · ${counts[i]} rows break it now` : ""}`)));
   void rpc.call("validations", { table }).then(r => { rules = r; showRules(); }).catch(() => {});
   const panel = el("section", { class: "dialog analysis-dialog" }, el("h2", {}, `Data tools · ${table}`),
+    el("p", { class: "dialog-lede" }, "Check values against rules, and preview transforms before they make a new table. The table itself is never changed here."),
     el("h3", {}, "Validation"), field("Column", column), field("Rule", ruleKind), field("Rule values", ruleValues), rulesList,
     el("div", { class: "dialog-actions" },
       act("Add rule", async () => { const report = await rpc.call("set_validations", { table, rules: [...rules.filter(r => r.column !== column.value || r.rule.kind !== ruleKind.value), { column: column.value, rule: rule() }] }); rules = report.rules; showRules(report.violations); status.textContent = "Rule saved; edits and SQL changes must keep it."; }),

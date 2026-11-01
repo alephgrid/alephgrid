@@ -803,3 +803,13 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .rules-swatch { flex: 0 0 auto; width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--border); display: inline-grid; place-items: center; font-size: 11px; }
 .rules-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .rules-empty { padding: 12px; color: var(--muted); }
+
+/* U.19: importing a table reviews it in a side pane: columns with types and samples, then rows. */
+.backdrop:has(> .import-pane) { justify-content: flex-end; align-items: stretch; padding: 0; }
+.dialog.import-pane { width: min(620px, 100vw); max-width: 100vw; height: 100%; max-height: none; margin: 0; border-radius: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: auto; }
+.import-pane .import-heading { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: none; }
+.import-pane .import-columns { overflow: auto; max-height: 40vh; }
+.import-pane .import-column-table select { max-width: 200px; }
+.import-pane .import-samples { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-pane .import-preview { overflow: auto; max-height: 40vh; }
+.import-pane .dialog-actions { margin-top: auto; padding-top: 12px; position: sticky; bottom: 0; background: var(--surface, var(--bg)); }

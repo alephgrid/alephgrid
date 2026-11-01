@@ -130,7 +130,7 @@ export async function namesDialog(ctx: NamesContext): Promise<() => void> {
     }
   });
   const panel = el("section", { class: "dialog names-dialog", "aria-label": "Named ranges" }, el("h2", {}, "Named ranges"),
-    el("p", { class: "muted" }, "Names refer to cells or ranges and can be used in sheet formulas, e.g. =SUM(Sales). Workbook functions are managed in Functions."),
+    el("p", { class: "dialog-lede" }, "Names refer to cells or ranges and can be used in sheet formulas, e.g. =SUM(Sales). Workbook functions are managed in Functions."),
     table,
     el("h3", {}, "Define or edit"),
     el("label", {}, "Name", name), el("label", {}, "Scope", scope), el("label", {}, "Refers to", refersTo),

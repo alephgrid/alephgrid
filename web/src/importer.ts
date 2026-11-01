@@ -95,6 +95,7 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
     const selects = new Map<string, HTMLSelectElement>();
     let current: FilePreview | null = preview.kind === "table" ? preview.preview : null;
     const table = el("div", { class: "import-preview" });
+    const columnsBox = el("div", { class: "import-columns" });
 
     if (preview.kind === "sheets") {
       body.append(
@@ -111,6 +112,9 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
       body.append(
         el("p", { class: "muted" }, `${p.format} · ${bytes(staged.size_bytes)} · ${p.columns.length} column${p.columns.length === 1 ? "" : "s"}. Tables hold any number of rows; check the column types below.`),
         el("label", { class: "field" }, el("span", {}, "Table name"), nameInput),
+        el("h3", { class: "import-heading" }, "Columns"),
+        columnsBox,
+        el("h3", { class: "import-heading" }, "First rows"),
         table,
       );
       renderTable(p);
@@ -130,8 +134,18 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
           select.value = c.sql_type;
           selects.set(c.name, select);
         }
-        return el("th", { scope: "col" }, el("div", { class: "import-col" }, c.name), select);
+        return el("th", { scope: "col" }, el("div", { class: "import-col" }, c.name));
       }));
+      // U.19: one row per column with its type and a few values as they will be imported.
+      columnsBox.replaceChildren(el("table", { class: "result-table import-column-table" },
+        el("caption", { class: "sr-only" }, "Columns, their types and sample values"),
+        el("thead", {}, el("tr", {}, el("th", { scope: "col" }, "Column"), el("th", { scope: "col" }, "Type"), el("th", { scope: "col" }, "Sample values"))),
+        el("tbody", {}, ...p.columns.map((c, i) => {
+          const kind = kindOf(c.sql_type);
+          const samples = p.rows.map((r) => r[i]).filter((v) => v !== null && v !== "").slice(0, 3).map((v) => formatValue(v, kind));
+          return el("tr", {}, el("th", { scope: "row" }, c.name), el("td", {}, selects.get(c.name)!),
+            el("td", { class: "import-samples" }, samples.length ? samples.join(" · ") : el("span", { class: "muted" }, "(empty)")));
+        }))));
       const rows = p.rows.map((r) => el("tr", {}, ...r.map((v, i) => el("td", { class: kindOf(p.columns[i].sql_type) === "text" ? "" : "num" },
         formatValue(v, kindOf(p.columns[i].sql_type))))));
       table.replaceChildren(el("table", { class: "result-table" },
@@ -241,7 +255,7 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
     }
     cancelBtn.addEventListener("click", cancel);
 
-    const form = el("form", { class: "dialog dialog-wide", onsubmit: submit, "data-testid": "import-dialog" },
+    const form = el("form", { class: preview.kind === "table" ? "dialog import-pane" : "dialog dialog-wide", onsubmit: submit, "data-testid": "import-dialog" },
       el("h2", {}, `Import ${staged.filename}`),
       body,
       error,
