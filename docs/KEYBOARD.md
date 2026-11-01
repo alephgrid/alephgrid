@@ -16,14 +16,15 @@ Ctrl+C still copies when the key types `с`.
 | Command | Keys | Notes |
 |---|---|---|
 | Undo / Redo | Mod+Z / Mod+Shift+Z, Mod+Y | Sheets: the caller's own last step. Tables: the caller's own last table change, and redo of their last undo; refused when someone changed it since ([COLLABORATION.md](COLLABORATION.md)) |
-| Copy | Mod+C | Tables and sheets. Copies displayed values as text to the system clipboard |
+| Copy | Mod+C | Tables and sheets. Copies displayed values as text to the system clipboard; the copied range is outlined until Escape |
 | Cut | Mod+X | Sheets |
 | Paste | Mod+V | System paste event. Text copied from this workbook pastes the cells (formulas translated, formats kept); other text pastes as values |
-| Paste special… | Mod+Shift+V | All / formulas / values / formats, optional transpose. Copied cells only |
+| Paste special… | Mod+Shift+V | A menu at the active cell: all / formulas / values / formats, and all or values transposed. Copied cells only |
 | Fill down / right | Mod+D / Mod+R | Replace the browser's bookmark and reload keys while the grid has focus |
+| Fill handle | Drag the square at the selection's bottom-right corner | Sheets. Down, up, right or left: two or more numbers continue their trend (1, 2 → 3, 4), one text cell ending in a number counts on (Week 1 → Week 2), anything else repeats with formulas shifted. One undo step. Keyboard alternative: Fill down / right |
 | Edit cell | F2, Enter | Handled by the grid |
 | Clear cells | Delete, Backspace | Handled by the grid |
-| Select all | Mod+A | |
+| Select all | Mod+A | Sheets: first the block of filled cells around the active cell, then the whole sheet; from an empty cell, the whole sheet. Tables: everything |
 | Select whole rows / columns | Shift+Space / Ctrl+Space | macOS uses Ctrl+Space for input sources by default; use the palette there |
 | Go to… | Mod+G | Cell, range, other sheet or name |
 | Formula help | Shift+F3 | |

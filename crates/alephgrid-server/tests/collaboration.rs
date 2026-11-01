@@ -217,6 +217,7 @@ async fn sheet_edits_check_values_and_layouts() {
         ("sheet_delete_rows", json!({ "sheet": 0, "at": 0, "count": 1 })),
         ("sheet_insert_columns", json!({ "sheet": 0, "at": 0, "count": 1 })),
         ("sheet_fill", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "direction": "down" })),
+        ("sheet_drag_fill", json!({ "sheet": 0, "source": { "row": 0, "column": 0, "rows": 1, "columns": 1 }, "target": { "row": 0, "column": 0, "rows": 3, "columns": 1 } })),
         ("sheet_move", json!({ "sheet": 0, "source": { "row": 1, "column": 0, "rows": 1, "columns": 1 }, "row": 5, "column": 5 })),
         ("sheet_rename", json!({ "sheet": 0, "name": "Renamed" })),
     ] {
