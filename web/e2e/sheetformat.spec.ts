@@ -154,3 +154,27 @@ test("S.11: comment on a cell, see a collaborator's reply, resolve, and follow a
   expect((await ws.call("comments", { sheet: 0 })).every((c: { row: number }) => c.row === 1)).toBe(true);
   ws.close();
 });
+
+test("S.08: zoom scales the grid, keeps clicks on the right cell, and is remembered", async ({ page }) => {
+  const wb = await server.createWorkbook("Zoom"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  const menus = page.getByRole("navigation", { name: "Workbook menus" });
+  for (let i = 0; i < 5; i++) {
+    await menus.getByRole("button", { name: "View", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Zoom in/ }).click();
+  }
+  // At 150% every grid unit is 1.5 screen pixels: this point is column B, row 2 only if
+  // clicks are mapped back through the zoom (unzoomed it would be about column D, row 3).
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  const rhw = 50, col = 104, header = 32, row = 24;
+  await page.mouse.click(box.x + (rhw + col * 1.3) * 1.5, box.y + (header + row * 1.5) * 1.5);
+  await expect(page.locator(".cell-ref")).toContainText("B2");
+  await page.reload();
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await menus.getByRole("button", { name: "View", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: /^Zoom in/ })).toContainText("150%");
+  ws.close();
+});

@@ -428,30 +428,46 @@ export class Grid {
     };
   }
 
+  /** S.08: drawing scale (0.5–2); layout works in unscaled units, the canvas stays crisp. */
+  private zoom = 1;
+
+  setZoom(z: number): void {
+    this.zoom = Math.max(0.5, Math.min(2, Math.round(z * 100) / 100));
+    this.resize();
+    this.updateSpacer();
+    this.syncScroller();
+    if (this.editing) this.placeEditor();
+  }
+
+  getZoom(): number {
+    return this.zoom;
+  }
+
   private resize(): void {
     const dpr = window.devicePixelRatio || 1;
-    this.width = this.host.clientWidth;
-    this.height = this.host.clientHeight;
-    this.canvas.width = Math.round(this.width * dpr);
-    this.canvas.height = Math.round(this.height * dpr);
-    this.canvas.style.width = `${this.width}px`;
-    this.canvas.style.height = `${this.height}px`;
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pw = this.host.clientWidth, ph = this.host.clientHeight;
+    this.width = pw / this.zoom;
+    this.height = ph / this.zoom;
+    this.canvas.width = Math.round(pw * dpr);
+    this.canvas.height = Math.round(ph * dpr);
+    this.canvas.style.width = `${pw}px`;
+    this.canvas.style.height = `${ph}px`;
+    this.ctx.setTransform(dpr * this.zoom, 0, 0, dpr * this.zoom, 0, 0);
     this.invalidate();
   }
 
   private updateSpacer(): void {
     const h = Math.min(this.contentHeight() + ROW_H, MAX_SCROLL_PX) + HEADER_H;
     const w = this.colX[this.colX.length - 1] + this.rowHeaderWidth() + 80;
-    this.spacer.style.height = `${h}px`;
-    this.spacer.style.width = `${w}px`;
+    this.spacer.style.height = `${h * this.zoom}px`;
+    this.spacer.style.width = `${w * this.zoom}px`;
     this.scrollY = Math.min(this.scrollY, this.maxScrollY());
   }
 
   private syncScroller(): void {
-    const top = Math.round(this.scrollY / this.ratio());
+    const top = Math.round((this.scrollY / this.ratio()) * this.zoom);
     this.scroller.scrollTop = top;
-    this.scroller.scrollLeft = this.scrollX;
+    this.scroller.scrollLeft = this.scrollX * this.zoom;
     this.expectTop = this.scroller.scrollTop;
   }
 
@@ -471,10 +487,10 @@ export class Grid {
 
   private onScroll(): void {
     if (Math.abs(this.scroller.scrollTop - this.expectTop) > 1) {
-      this.scrollY = Math.min(this.maxScrollY(), this.scroller.scrollTop * this.ratio());
+      this.scrollY = Math.min(this.maxScrollY(), (this.scroller.scrollTop / this.zoom) * this.ratio());
     }
     this.expectTop = -1;
-    this.scrollX = this.scroller.scrollLeft;
+    this.scrollX = this.scroller.scrollLeft / this.zoom;
     if (this.editing) this.placeEditor();
     this.invalidate();
   }
@@ -496,7 +512,7 @@ export class Grid {
 
   private point(e: MouseEvent): { x: number; y: number } {
     const r = this.host.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    return { x: (e.clientX - r.left) / this.zoom, y: (e.clientY - r.top) / this.zoom };
   }
 
   private resizeHandleAt(x: number, y: number): number {
@@ -724,8 +740,8 @@ export class Grid {
     if (!this.editing) return;
     const rect = this.cellRect(this.editing);
     Object.assign(this.editor.style, {
-      left: `${rect.x}px`, top: `${rect.y}px`,
-      width: `${Math.max(rect.w, 120)}px`, height: `${rect.h}px`,
+      left: `${rect.x * this.zoom}px`, top: `${rect.y * this.zoom}px`,
+      width: `${Math.max(rect.w, 120) * this.zoom}px`, height: `${rect.h * this.zoom}px`, fontSize: `${13 * this.zoom}px`,
     });
   }
 

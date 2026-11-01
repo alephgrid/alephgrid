@@ -464,6 +464,7 @@ export class WorkbookScreen {
       this.maxMessageBytes = config.max_message_bytes ?? this.maxMessageBytes;
       this.maxEditCells = config.max_edit_cells ?? this.maxEditCells;
     } catch { /* keep default */ }
+    try { const z = Number(localStorage.getItem(`alephgrid-zoom-${this.meta.id}`)); if (z && z !== 1) requestAnimationFrame(() => this.grid.setZoom(z)); } catch { /* private mode */ }
     try {
       await this.rpc.connect();
     } catch (e) {
@@ -624,6 +625,10 @@ export class WorkbookScreen {
         { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
       ]],
       ["View", () => [
+        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
+        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5, action: () => this.setZoom(this.grid.getZoom() - 0.1) },
+        { label: "Actual size (100%)", action: () => this.setZoom(1) },
+        "sep" as const,
         ...(this.isSheet() ? [
           { label: `Freeze columns A–${String.fromCharCode(65 + Math.min(25, this.grid.active.c))}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
           { label: "Unfreeze columns", action: () => void this.freezeColumns(0) },
@@ -2117,6 +2122,13 @@ export class WorkbookScreen {
     const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
     try { await this.rpc.call("sheet_border", { sheet, area, kind, weight: "thin", layout }); await this.refreshSheet(); }
     catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.08: zoom the grid; remembered per workbook in this browser. */
+  private setZoom(z: number): void {
+    this.grid.setZoom(z);
+    try { localStorage.setItem(`alephgrid-zoom-${this.meta.id}`, String(this.grid.getZoom())); } catch { /* private mode */ }
+    toast(`Zoom ${Math.round(this.grid.getZoom() * 100)}%`);
   }
 
   /** S.06: sort the selected rows of the sheet by the first selected column. */
