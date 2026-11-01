@@ -30,6 +30,8 @@ export interface GridModel {
   cell?(r: number, c: number): { text: string; align: Align } | null | undefined;
   /** Sheet mode: the cell's format (S.01), if any. */
   style?(r: number, c: number): CellStyle | undefined;
+  /** Sheet mode: whether the cell has a comment (S.11). */
+  comment?(r: number, c: number): boolean;
   /** Text shown in the editor (formula source for sheets). */
   editText?(r: number, c: number): string;
   /** What an edit of the cell is checked against on the server (the value shown when
@@ -813,6 +815,10 @@ export class Grid {
           const cell = sheetCells(r, c);
           const st = this.model.style?.(r, c);
           if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, ROW_H); }
+          if (this.model.comment?.(r, c)) {
+            ctx.fillStyle = "#D97706";
+            ctx.beginPath(); ctx.moveTo(x + w - 7, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + 7); ctx.closePath(); ctx.fill();
+          }
           if (cell === undefined) {
             if (c === c0) {
               ctx.fillStyle = colors.placeholder;

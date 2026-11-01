@@ -31,6 +31,8 @@ import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
+import { CommentsPane } from "./commentspane";
+import type { CellComment } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
 
@@ -236,6 +238,9 @@ export class WorkbookScreen {
   private closePresentation: (() => void) | null = null;
   private closeReplace: (() => void) | null = null;
   private findBar = new FindBar(() => this.grid.focus());
+  /** S.11: comments of the open sheet (cell keys) and the comments pane. */
+  private commentCells = new Set<string>();
+  private commentsPane: CommentsPane | null = null;
   /** S.01: the sheet format toolbar (hidden for tables). */
   private formatBarEl = formatBar({
     current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
@@ -289,6 +294,7 @@ export class WorkbookScreen {
           return cell ? { text: cell[0], align: cell[1] } : cell;
         },
         style: (r, c) => this.sheetCache.style(r, c),
+        comment: (r, c) => this.commentCells.has(`${r}:${c}`),
         editText: (r, c) => {
           const cell = this.sheetCache.cell(r, c);
           return cell ? cell[2] ?? cell[0] : "";
@@ -1123,6 +1129,7 @@ export class WorkbookScreen {
   }
 
   private async openSheet(index: number): Promise<void> {
+    queueMicrotask(() => void this.loadComments());
     this.gridWrap.querySelector(".empty")?.remove();
     this.closeTableView();
     const info = this.sheets.find((s) => s.index === index);
@@ -2086,6 +2093,41 @@ export class WorkbookScreen {
     }
   }
 
+  /** S.11: the comments pane beside the grid. */
+  private openComments(): void {
+    if (this.commentsPane && !this.commentsPane.closed) { void this.commentsPane.reload(); return; }
+    const body = this.mainEl.parentElement!;
+    this.commentsPane = new CommentsPane(this.rpc, {
+      sheet: () => (this.active?.kind === "sheet" ? this.active.index : null),
+      go: (r, c) => { this.grid.select({ r, c }); this.grid.focus(); },
+      pane: (panel) => { body.append(panel); return { close: () => { panel.remove(); this.grid.focus(); } }; },
+      changed: (list) => this.setComments(list),
+    });
+  }
+
+  private setComments(list: CellComment[]): void {
+    this.commentCells = new Set(list.filter((c) => !c.resolved).map((c) => `${c.row}:${c.column}`));
+    this.grid.invalidate();
+  }
+
+  /** Load the open sheet's comments (for the cell markers), and refresh the pane. */
+  private async loadComments(): Promise<void> {
+    if (this.active?.kind !== "sheet") { this.commentCells.clear(); return; }
+    if (this.commentsPane && !this.commentsPane.closed) { await this.commentsPane.reload(); return; }
+    try { this.setComments(await this.rpc.call("comments", { sheet: this.active.index })); } catch { /* markers only */ }
+  }
+
+  private async addComment(row: number, column: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const v = await formDialog(`Comment on ${columnLetter(column)}${row + 1}`, [{ name: "text", label: "Comment", type: "textarea" }], "Comment");
+    if (!v || !v.text.trim()) return;
+    try {
+      await this.rpc.call("add_comment", { sheet: this.active.index, row, column, text: v.text });
+      this.openComments();
+      await this.loadComments();
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
   /** S.05: keep the first `columns` columns of the sheet in view (0 unfreezes). */
   private async freezeColumns(columns: number): Promise<void> {
     if (this.active?.kind !== "sheet") return;
@@ -2185,6 +2227,9 @@ export class WorkbookScreen {
         { label: cols > 1 ? `Insert ${cols} columns right` : "Insert column right", action: () => this.sheetOp("sheet_insert_columns", { at: sel.c1 + 1, count: cols }) },
         { label: rows > 1 ? `Delete ${rows} rows` : "Delete row", danger: true, action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count: rows }) },
         { label: cols > 1 ? `Delete ${cols} columns` : "Delete column", danger: true, action: () => this.sheetOp("sheet_delete_columns", { at: sel.c0, count: cols }) },
+        "sep",
+        { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
+        { label: "Show comments", action: () => this.openComments() },
         "sep",
         { label: "Clear contents", hint: "Delete", action: () => this.grid.clearSelection() },
         { label: "Clear formatting", action: () => void this.applyStyle(null) },
@@ -2653,6 +2698,7 @@ export class WorkbookScreen {
         this.loadItems().catch(() => {});
         break;
       case "sheet_changed":
+        void this.loadComments();
         if (a?.kind === "sheet" && e.origin !== this.rpc.session && (e.sheet === null || e.sheet === a.index)) {
           await this.refreshSheet();
         }

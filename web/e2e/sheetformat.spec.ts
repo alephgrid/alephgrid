@@ -116,3 +116,33 @@ test("S.04: find and replace in a sheet", async ({ page }) => {
   await expect.poll(() => shown(page, 0, 0)).toBe("south");
   ws.close();
 });
+
+test("S.11: comment on a cell, see a collaborator's reply, resolve, and follow an inserted row", async ({ page }) => {
+  const wb = await server.createWorkbook("Comments"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "total" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("total");
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: /^Add comment/ }).click();
+  await page.getByRole("dialog", { name: "Comment on A1" }).getByRole("textbox", { name: "Comment" }).fill("Is this the final total?");
+  await page.getByRole("dialog", { name: "Comment on A1" }).getByRole("button", { name: "Comment" }).click();
+  const pane = page.getByRole("complementary", { name: "Comments" });
+  const thread = pane.getByRole("region", { name: "Comment on A1" });
+  await expect(thread).toContainText("Is this the final total?");
+  // A collaborator replies; the open pane shows it.
+  const [first] = await ws.call("comments", { sheet: 0 });
+  await ws.call("add_comment", { sheet: 0, row: 0, column: 0, text: "Yes, final.", parent: first.id });
+  await expect(thread).toContainText("Yes, final.");
+  await thread.getByRole("button", { name: "Resolve" }).click();
+  await expect(thread).toContainText("Resolved");
+  // A row inserted above moves the thread to A2.
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: "Insert row above" }).click();
+  await expect(pane.getByRole("region", { name: "Comment on A2" })).toBeVisible();
+  expect((await ws.call("comments", { sheet: 0 })).every((c: { row: number }) => c.row === 1)).toBe(true);
+  ws.close();
+});

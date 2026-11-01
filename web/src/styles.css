@@ -773,3 +773,13 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .fmt-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--border); }
 .tab { position: relative; }
 .tab-color { position: absolute; left: 8px; right: 8px; bottom: 2px; height: 3px; border-radius: 2px; }
+
+/* S.11 comments */
+.comments-list { flex: 1; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.comment-thread { border: 1px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.comment-thread.resolved { opacity: .7; }
+.comment-head { display: flex; align-items: center; gap: 8px; }
+.comment-cell { border: 0; background: var(--control); color: var(--text); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.comment-meta { font-size: 12px; }
+.comment-text { margin: 2px 0 0; font-size: 13px; white-space: pre-wrap; color: var(--text); }
+.comment-actions { display: flex; gap: 6px; }
