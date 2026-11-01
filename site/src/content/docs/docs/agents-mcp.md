@@ -104,3 +104,17 @@ The protocol details — `POST /mcp` takes one JSON-RPC message per request, sup
 protocol versions, session ids — are in the repository's
 [MCP guide](https://github.com/alephgrid/alephgrid/blob/main/docs/MCP.md). Roles and
 service tokens for non-agent integrations are on the [teams](../teams/) page.
+
+## Discovery
+
+Machine-readable descriptions of this MCP interface, for agent tooling and registries:
+
+| URL | What |
+|---|---|
+| `https://alephgrid.dev/.well-known/mcp/server.json` | MCP Registry [`server.json`](https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json) manifest (also served at `/.well-known/mcp.json`) |
+| `https://alephgrid.dev/llms.txt` | [llms.txt](https://llmstxt.org/) index of this documentation |
+| `https://alephgrid.dev/llms-full.txt` | The complete documentation as one file |
+
+The manifest's remote URL is a template — Alephgrid is self-hosted, so the endpoint is
+`<your server origin>/mcp` with your own `agc_…` token; there is no hosted endpoint at
+`alephgrid.dev`.

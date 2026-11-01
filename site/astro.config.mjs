@@ -45,6 +45,12 @@ export default defineConfig({
               url: 'https://github.com/alephgrid/alephgrid',
               description: 'Source code, issues and full in-repo documentation',
             },
+            {
+              label: 'MCP server manifest',
+              url: 'https://alephgrid.dev/.well-known/mcp/server.json',
+              description:
+                'MCP Registry server.json describing read-only agent access to self-hosted Alephgrid workbooks',
+            },
           ],
         }),
         starlightBlog({
