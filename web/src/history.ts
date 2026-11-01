@@ -19,7 +19,7 @@ export function historyDialog(rpc: Rpc, onUndone: () => void): void {
   const body = el("div", { class: "panel-body" });
   const box = el("div", { class: "dialog wide" },
     el("h2", {}, "Change history"),
-    el("p", { class: "muted" }, "Everyone's changes to this workbook. Undo takes a table change back as a new change, unless someone changed the same cells or rows since."),
+    el("p", { class: "dialog-lede" }, "Everyone's changes to this workbook. Undo takes a table change back as a new change, unless someone changed the same cells or rows since."),
     body,
     el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
   const modal = openModal(box, () => modal.close());

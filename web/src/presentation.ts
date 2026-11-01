@@ -81,7 +81,7 @@ export async function presentationDialog(rpc: Rpc, table: string, changed: () =>
     } catch (e) { status.textContent = String(e); } finally { save.disabled = false; }
   } }, "Save presentation");
   const dialog = el("section", { class: "dialog analysis-dialog" }, el("h2", {}, "Table presentation"),
-    el("p", {}, "Display only: raw values remain unchanged; view exports respect hidden columns. DATE values keep their calendar date; timestamps without an offset are treated as UTC. Frozen columns stay on the left while space permits. Conditional rules use safe-range numeric comparisons, at most 16 rules per visible cell."),
+    el("p", { class: "dialog-lede" }, "Display only: raw values remain unchanged; view exports respect hidden columns. DATE values keep their calendar date; timestamps without an offset are treated as UTC. Frozen columns stay on the left while space permits. Conditional rules use safe-range numeric comparisons, at most 16 rules per visible cell."),
     field("Locale", locale), field("Timezone", timezone), field("Decimal places", decimals), field("Freeze first visible columns (0–8)", frozen), ...rows.map(r => r.row),
     el("h3", {}, "Conditional formatting"), field("Column", ruleColumn), field("Condition", condition), field("Threshold", value), field("Color", color),
     el("button", { class: "btn", onclick: () => { if (rules.length >= 16) { status.textContent = "At most 16 rules."; return; } rules.push({ column: ruleColumn.value, condition: condition.value as Condition, value: Number(value.value), color: color.value }); renderRules(); } }, "Add rule"), ruleList,
