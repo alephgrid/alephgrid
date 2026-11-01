@@ -106,6 +106,10 @@ test("S.04: find and replace in a sheet", async ({ page }) => {
   const bar = page.getByRole("search", { name: "Find in S" });
   await bar.getByRole("searchbox", { name: "Find" }).fill("north");
   await expect(bar.getByRole("status")).toHaveText("2 matches");
+  await bar.getByRole("button", { name: "Whole cell" }).click();
+  await expect(bar.getByRole("status")).toHaveText("1 match");
+  await bar.getByRole("button", { name: "Whole cell" }).click();
+  await expect(bar.getByRole("status")).toHaveText("2 matches");
   await bar.getByRole("searchbox", { name: "Find" }).press("Enter");
   await expect(page.locator(".cell-ref")).toContainText("B3");
   await bar.getByRole("button", { name: "Show replace" }).click();

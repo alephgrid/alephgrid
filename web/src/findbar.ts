@@ -11,6 +11,8 @@ export interface FindHit { row: number; columns: number[] }
 
 export interface FindProvider {
   label: string;
+  /** Sheets offer whole-cell and in-formulas matching (S.04). */
+  sheetOptions?: boolean;
   find(text: string, matchCase: boolean, from: number, backwards: boolean, count: boolean): Promise<{ matches?: number; hits: FindHit[] }>;
   active(): { r: number; c: number };
   go(row: number, column: number): void;
@@ -34,6 +36,11 @@ export class FindBar {
   private replacement = el("input", { type: "text", placeholder: "Replace with", "aria-label": "Replace with" }) as HTMLInputElement;
   private applyBtn = el("button", { class: "btn btn-primary", type: "button", disabled: true }, "Replace all");
   private matchCase = false;
+  /** Sheet options, read by the sheet provider. */
+  whole = false;
+  formulas = false;
+  private wholeBtn = el("button", { class: "icon-btn find-case", type: "button", title: "Whole cell", "aria-label": "Whole cell", "aria-pressed": "false", hidden: true }, "[ ]");
+  private formulaBtn = el("button", { class: "icon-btn find-case", type: "button", title: "In formulas", "aria-label": "In formulas", "aria-pressed": "false", hidden: true }, "ƒ");
   private seq = 0;
   private timer = 0;
   private provider: FindProvider | null = null;
@@ -49,7 +56,7 @@ export class FindBar {
     const undo = el("button", { class: "btn btn-ghost", type: "button" }, "Undo replace");
     this.replaceRow.append(this.column, this.replacement, preview, this.applyBtn, undo);
     this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true },
-      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, prev, next, close),
+      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, prev, next, close),
       this.replaceRow);
 
     this.input.addEventListener("input", () => { window.clearTimeout(this.timer); this.timer = window.setTimeout(() => this.refresh(), 200); });
@@ -64,6 +71,8 @@ export class FindBar {
       this.caseBtn.setAttribute("aria-pressed", String(this.matchCase));
       void this.refresh();
     });
+    this.wholeBtn.addEventListener("click", () => { this.whole = !this.whole; this.wholeBtn.setAttribute("aria-pressed", String(this.whole)); void this.refresh(); });
+    this.formulaBtn.addEventListener("click", () => { this.formulas = !this.formulas; this.formulaBtn.setAttribute("aria-pressed", String(this.formulas)); void this.refresh(); });
     prev.addEventListener("click", () => void this.step(true));
     next.addEventListener("click", () => void this.step(false));
     close.addEventListener("click", () => this.close());
@@ -98,6 +107,7 @@ export class FindBar {
     this.provider = provider;
     this.el.setAttribute("aria-label", `Find in ${provider.label}`);
     this.el.hidden = false;
+    this.wholeBtn.hidden = this.formulaBtn.hidden = !provider.sheetOptions;
     this.showReplace(replace && !!provider.replace);
     this.input.focus();
     this.input.select();

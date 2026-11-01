@@ -2033,9 +2033,11 @@ export class WorkbookScreen {
       let last = { text: "", matchCase: false };
       return {
         label: this.active.name,
+        sheetOptions: true,
         find: (text, matchCase, from, backwards, count) => {
           last = { text, matchCase };
-          return this.rpc.call("sheet_find", { sheet, search: { text, match_case: matchCase }, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count });
+          const search = { text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas };
+          return this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count });
         },
         active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
         go: (row, c) => this.grid.select({ r: row, c }),
@@ -2043,7 +2045,7 @@ export class WorkbookScreen {
           preview: async (_column, find) => (await this.rpc.call("sheet_find", { sheet, search: { text: find, match_case: last.matchCase }, count: true })).matches ?? 0,
           apply: async () => {
             const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
-            const n = await this.rpc.call("sheet_replace", { sheet, search: { text: last.text, match_case: last.matchCase }, replacement: input });
+            const n = await this.rpc.call("sheet_replace", { sheet, search: { text: last.text, match_case: last.matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas }, replacement: input });
             await this.refreshSheet();
             return `Replaced in ${formatCount(n)} cells. Undo (⌘Z) takes it back in one step.`;
           },
