@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightBlog from 'starlight-blog';
+import starlightLlmsTxt from 'starlight-llms-txt';
 
 // Cloudflare Workers static hosting: the site serves at the root of
 // https://alephgrid.dev (SITE_URL overrides for previews; SITE_BASE exists
@@ -32,6 +33,20 @@ export default defineConfig({
       },
       lastUpdated: true,
       plugins: [
+        starlightLlmsTxt({
+          projectName: 'Alephgrid',
+          description:
+            'An open-source, self-hosted spreadsheet for data that does not fit in a spreadsheet: hundreds of millions of rows backed by DuckDB, Excel-compatible formulas, optional SQL, teams, and read-only agent access over MCP. Pre-release; install by building from source.',
+          details:
+            'The documentation below describes shipped behavior of the current pre-release. Canonical site: https://alephgrid.dev — source: https://github.com/alephgrid/alephgrid',
+          optionalLinks: [
+            {
+              label: 'GitHub repository',
+              url: 'https://github.com/alephgrid/alephgrid',
+              description: 'Source code, issues and full in-repo documentation',
+            },
+          ],
+        }),
         starlightBlog({
           title: 'Blog',
           authors: {
