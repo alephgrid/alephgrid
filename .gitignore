@@ -10,3 +10,6 @@ web/playwright-report
 
 # Test fixtures written by older versions (migration tests) are data, not build output.
 !crates/alephgrid-core/tests/fixtures/**/*.duckdb
+
+# Agent worktrees created inside the checkout
+.claude/worktrees/
