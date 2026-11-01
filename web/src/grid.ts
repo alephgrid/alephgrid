@@ -481,6 +481,12 @@ export class Grid {
     this.rowCum = [0];
     for (const h of this.rowSize) this.rowCum.push(this.rowCum[this.rowCum.length - 1] + h - ROW_H);
     this.updateSpacer();
+    // The active cell never rests on a row that is now hidden: move it to the next shown row.
+    if (this.rowHeight(this.active.r) === 0) {
+      const last = Math.max(Math.max(0, this.model.rowCount() - 1), this.displayRows() - 1);
+      const r = this.shownLine(this.active.r, 1, last, (i) => this.rowHeight(i) === 0);
+      if (r !== this.active.r) this.select({ r, c: this.active.c });
+    }
     this.invalidate();
   }
 

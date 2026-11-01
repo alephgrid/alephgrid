@@ -124,6 +124,13 @@ pub struct Sheets {
     /// what it must restore beside the cells (comment anchors, S.11) to a step.
     undo_ids: Vec<u64>,
     redo_ids: Vec<u64>,
+    /// Whether each undo and redo step moved rows, columns, cells or sheets (changed a
+    /// layout), parallel to the groups. Taking back a step that moved nothing leaves the
+    /// layouts alone, so positional changes made right after it are not refused.
+    undo_moves: Vec<bool>,
+    redo_moves: Vec<bool>,
+    /// The layouts when the change in progress began (see [`Sheets::begin`]).
+    layouts_at_begin: Vec<u64>,
     next_step: u64,
     step_notes: std::collections::HashMap<u64, String>,
     /// The actor and revision of the change in progress.
@@ -158,6 +165,9 @@ impl Sheets {
             table_cells: Default::default(),
             copied_table_cells: Vec::new(),
             undo_actors: vec![],
+            undo_moves: vec![],
+            redo_moves: vec![],
+            layouts_at_begin: vec![],
             redo_actors: vec![],
             undo_ids: vec![],
             redo_ids: vec![],
@@ -215,12 +225,14 @@ impl Sheets {
         self.sync_history();
         self.actor = actor;
         self.stamp = stamp;
+        self.layouts_at_begin = self.layouts.clone();
     }
 
     /// After a change: attribute new undo steps and give new worksheets a layout.
     pub fn finish(&mut self) {
-        self.sync_history();
+        // Layouts first, so a worksheet added by the change counts as a move of its step.
         self.settle_layouts();
+        self.sync_history();
     }
 
     fn sync_history(&mut self) {
@@ -241,6 +253,16 @@ impl Sheets {
         while self.redo_ids.len() < self.redo_groups.len() {
             self.redo_ids.push(self.next_step);
             self.next_step += 1;
+        }
+        // A new step moved something when the change changed a layout.
+        let moved = self.layouts != self.layouts_at_begin;
+        self.undo_moves.truncate(self.undo_groups.len());
+        while self.undo_moves.len() < self.undo_groups.len() {
+            self.undo_moves.push(moved);
+        }
+        self.redo_moves.truncate(self.redo_groups.len());
+        while self.redo_moves.len() < self.redo_groups.len() {
+            self.redo_moves.push(true);
         }
         if self.step_notes.len() > self.undo_ids.len() + self.redo_ids.len() {
             let live: std::collections::HashSet<u64> = self.undo_ids.iter().chain(&self.redo_ids).copied().collect();
@@ -336,6 +358,9 @@ impl Sheets {
             self.undo_groups.remove(0);
             if !self.undo_actors.is_empty() {
                 self.undo_actors.remove(0);
+            }
+            if !self.undo_moves.is_empty() {
+                self.undo_moves.remove(0);
             }
             if !self.undo_ids.is_empty() {
                 let id = self.undo_ids.remove(0);
@@ -740,6 +765,8 @@ impl Sheets {
         self.undo_groups.pop();
         let owner = self.undo_actors.pop().flatten();
         let id = self.undo_ids.pop();
+        // Unknown counts as moved: the safe answer.
+        let moves = self.undo_moves.pop().unwrap_or(true);
         let m = self.model_mut()?;
         for _ in 0..n {
             m.undo().map_err(|e| anyhow!(e))?;
@@ -748,8 +775,12 @@ impl Sheets {
         self.redo_groups.push(n);
         self.redo_actors.push(owner);
         if let Some(id) = id { self.redo_ids.push(id); }
-        // Undo may restore rows, columns or whole sheets anywhere.
-        self.moved_all();
+        self.redo_moves.push(moves);
+        // Taking back a step that moved rows, columns, cells or sheets moves them again;
+        // one that only changed values or formats leaves every address where it was.
+        if moves {
+            self.moved_all();
+        }
         Ok(true)
     }
 
@@ -760,6 +791,7 @@ impl Sheets {
         self.redo_groups.pop();
         let owner = self.redo_actors.pop().flatten();
         let id = self.redo_ids.pop();
+        let moves = self.redo_moves.pop().unwrap_or(true);
         let m = self.model_mut()?;
         for _ in 0..n {
             m.redo().map_err(|e| anyhow!(e))?;
@@ -768,7 +800,10 @@ impl Sheets {
         self.undo_groups.push(n);
         self.undo_actors.push(owner);
         if let Some(id) = id { self.undo_ids.push(id); }
-        self.moved_all();
+        self.undo_moves.push(moves);
+        if moves {
+            self.moved_all();
+        }
         Ok(true)
     }
 
