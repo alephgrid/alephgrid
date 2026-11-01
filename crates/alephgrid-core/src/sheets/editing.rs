@@ -410,8 +410,8 @@ impl Sheets {
                     continue;
                 }
                 let (row, column) = (area.row + dr, area.column + dc);
-                let value = match &s.input {
-                    Some(i) => self.translate(i, (span.row + sr, span.column + sc), (index, row, column))?,
+                let value = match s.input.clone() {
+                    Some(i) => self.copy_input(&i, (span.row + sr, span.column + sc), (index, row, column))?,
                     None => String::new(),
                 };
                 inputs.push((SheetInput { row, column, value, base: None }, s.is_text));
@@ -503,10 +503,10 @@ impl Sheets {
                         let v = (*number as i64 + k).unsigned_abs();
                         (format!("{prefix}{v:0width$}"), true)
                     }
-                    Plan::Repeat => match &s.input {
+                    Plan::Repeat => match s.input.clone() {
                         Some(i) => {
                             let from = (source.row + sr as u32, source.column + sc as u32);
-                            (self.translate(i, from, (index, row, column))?, s.is_text)
+                            (self.copy_input(&i, from, (index, row, column))?, s.is_text)
                         }
                         None => (String::new(), false),
                     },
@@ -569,7 +569,7 @@ impl Sheets {
                 let (value, text) = match mode {
                     PasteMode::Values => (s.value.clone().unwrap_or_default(), s.value_is_text),
                     _ => match &s.input {
-                        Some(i) => (self.translate(i, (source.row + dr, source.column + dc), (index, row, column))?, s.is_text),
+                        Some(i) => (self.copy_input(i, (source.row + dr, source.column + dc), (index, row, column))?, s.is_text),
                         None => (String::new(), false),
                     },
                 };
