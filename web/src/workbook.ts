@@ -2050,6 +2050,17 @@ export class WorkbookScreen {
             return `Replaced in ${formatCount(n)} cells. Undo (⌘Z) takes it back in one step.`;
           },
           undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
+          one: async (find, replacement, matchCase) => {
+            const { r, c } = this.grid.active;
+            const text = this.sheetCache.cell(r, c)?.[2] ?? this.sheetCache.cell(r, c)?.[0] ?? "";
+            const esc = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const next = text.replace(new RegExp(esc, matchCase ? "g" : "gi"), () => replacement);
+            if (next === text) return;
+            const layout = this.shownLayout(sheet, r, r);
+            if (layout === null) return;
+            await this.rpc.call("sheet_set", { sheet, inputs: [{ row: r, column: c, value: next }], layout });
+            await this.refreshSheet();
+          },
         },
       };
     }

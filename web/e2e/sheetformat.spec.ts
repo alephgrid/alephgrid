@@ -114,6 +114,10 @@ test("S.04: find and replace in a sheet", async ({ page }) => {
   await expect(page.locator(".cell-ref")).toContainText("B3");
   await bar.getByRole("button", { name: "Show replace" }).click();
   await bar.getByRole("textbox", { name: "Replace with" }).fill("south");
+  // Replace one: only the current match (B3) changes.
+  await bar.getByRole("button", { name: "Replace", exact: true }).click();
+  await expect.poll(() => shown(page, 2, 1)).toBe("south sea");
+  await expect.poll(() => shown(page, 0, 0)).toBe("north");
   await bar.getByRole("button", { name: "Preview" }).click();
   await bar.getByRole("button", { name: "Replace all" }).click();
   await expect.poll(() => shown(page, 2, 1)).toBe("south sea");

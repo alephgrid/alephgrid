@@ -23,6 +23,8 @@ export interface FindProvider {
     preview(column: string, find: string, replacement: string): Promise<number>;
     apply(): Promise<string>;
     undo(): Promise<string>;
+    /** Replace in the current match only (sheets). */
+    one?(find: string, replacement: string, matchCase: boolean): Promise<void>;
   };
 }
 
@@ -36,6 +38,7 @@ export class FindBar {
   private replacement = el("input", { type: "text", placeholder: "Replace with", "aria-label": "Replace with" }) as HTMLInputElement;
   private applyBtn = el("button", { class: "btn btn-primary", type: "button", disabled: true }, "Replace all");
   private matchCase = false;
+  private oneBtn: HTMLElement | null = null;
   /** Sheet options, read by the sheet provider. */
   whole = false;
   formulas = false;
@@ -54,7 +57,15 @@ export class FindBar {
     const close = el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", "aria-label": "Close find" }, icon("x", 14));
     const preview = el("button", { class: "btn", type: "button" }, "Preview");
     const undo = el("button", { class: "btn btn-ghost", type: "button" }, "Undo replace");
-    this.replaceRow.append(this.column, this.replacement, preview, this.applyBtn, undo);
+    const one = el("button", { class: "btn", type: "button" }, "Replace");
+    one.addEventListener("click", async () => {
+      const r = this.provider?.replace;
+      if (!r?.one || !this.input.value) return;
+      try { await r.one(this.input.value, this.replacement.value, this.matchCase); await this.step(false); await this.refresh(); }
+      catch (e) { toast((e as Error).message, "error"); }
+    });
+    this.oneBtn = one;
+    this.replaceRow.append(this.column, this.replacement, one, preview, this.applyBtn, undo);
     this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true },
       el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, prev, next, close),
       this.replaceRow);
@@ -127,6 +138,7 @@ export class FindBar {
     this.replaceRow.hidden = !show;
     this.el.querySelector(".find-main .icon-btn")?.setAttribute("aria-expanded", String(show));
     this.column.hidden = !r?.columns;
+    if (this.oneBtn) this.oneBtn.hidden = !r?.one;
     if (show && r && !r.columns) this.count.textContent = "";
     if (show && r && r.columns) {
       const cols = r.columns();
