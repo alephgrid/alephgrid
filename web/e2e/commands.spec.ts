@@ -134,17 +134,13 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   await page.keyboard.press("ControlOrMeta+Home");
   for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ControlOrMeta+Shift+v");
-  const dialog = page.getByRole("dialog", { name: "Paste special" });
-  await expect(dialog).toBeVisible();
-  const axe = await new AxeBuilder({ page }).include(".backdrop .dialog").analyze();
+  const menu = page.getByRole("menu", { name: "Paste special" });
+  await expect(menu).toBeVisible();
+  const axe = await new AxeBuilder({ page }).include(".menu").analyze();
   expect(axe.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
-  await page.keyboard.press("ArrowDown"); await page.keyboard.press("ArrowDown");
-  await expect(dialog.getByLabel("Values only")).toBeChecked();
-  // Safari's Tab reaches only text fields unless "Press Tab to highlight each item" is on;
-  // Option+Tab reaches every control.
-  const tab = page.context().browser()?.browserType().name() === "webkit" ? "Alt+Tab" : "Tab";
-  await page.keyboard.press(tab); await page.keyboard.press("Space");
-  await expect(dialog.getByLabel("Transpose rows and columns")).toBeChecked();
+  // Keyboard only: the last item is "Values only, transposed".
+  await page.keyboard.press("End");
+  await expect(menu.getByRole("menuitem", { name: "Values only, transposed" })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect.poll(() => content(0, 5)).toBe("10");
   expect(await content(0, 4)).toBe("5");

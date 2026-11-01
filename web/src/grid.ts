@@ -53,6 +53,12 @@ export interface GridHandlers {
   headerFilter?(col: number, clientX: number, clientY: number): void;
   rowMenu(row: number, clientX: number, clientY: number): void;
   copy(range: Range): void;
+  /** Sheets: the fill handle was dragged from `source` to `target` (which contains it). */
+  dragFill?(source: Range, target: Range): void;
+  /** Escape dropped the copied (or cut) range. */
+  copyCancelled?(): void;
+  /** Sheets: the block of filled cells around a cell, for Ctrl/Cmd+A. */
+  region?(at: Cell): Promise<Range | null>;
   paste(at: Cell, text: string): void;
   columnResized(col: number, width: number): void;
   /** A row's height was dragged or auto-fitted (sheets, S.05). */
@@ -126,6 +132,10 @@ export class Grid {
   /** The edited cell's value when editing started (see `GridModel.base`). */
   private editingBase: CellValue | undefined;
   private referenceAnchor: Cell | null = null;
+  /** A fill-handle drag in progress. */
+  private fillDrag: { source: Range; target: Range } | null = null;
+  /** The copied range, outlined until Escape, an edit or a cut's paste. */
+  private copied: Range | null = null;
   private referencePicked = false;
   private references: Range[] = [];
   /** Removes every listener this grid added (including window and media-query ones). */
@@ -326,6 +336,37 @@ export class Grid {
 
   focus(): void {
     this.host.focus({ preventScroll: true });
+  }
+
+  /** Outline `range` as copied (or clear the outline with null). */
+  setCopied(range: Range | null): void {
+    this.copied = range;
+    this.invalidate();
+  }
+
+  /** The fill handle: a small square at the selection's bottom-right corner (sheets). */
+  private fillHandleBox(): { x: number; y: number; size: number } | null {
+    if (!this.isSheet() || !this.handlers.dragFill || this.editing) return null;
+    const s = this.selection();
+    const b = this.cellRect({ r: s.r1, c: s.c1 });
+    if (b.w <= 0 || b.h <= 0) return null;
+    return { x: b.x + b.w, y: b.y + b.h, size: 7 };
+  }
+
+  private onFillHandle(x: number, y: number): boolean {
+    const h = this.fillHandleBox();
+    return !!h && Math.abs(x - h.x) <= h.size && Math.abs(y - h.y) <= h.size;
+  }
+
+  /** Ctrl/Cmd+A: in a sheet, first the filled block around the active cell, then (pressed
+   *  again, or from an empty cell) the whole grid. Tables select everything at once. */
+  async contextSelectAll(): Promise<void> {
+    const before = this.selection();
+    const region = this.isSheet() && this.handlers.region ? await this.handlers.region(this.active) : null;
+    if (!sameRange(before, this.selection())) return; // the user moved on meanwhile
+    const single = region && region.r0 === region.r1 && region.c0 === region.c1;
+    if (region && !single && !sameRange(region, before)) this.select({ r: region.r1, c: region.c1 }, { r: region.r0, c: region.c0 }, false);
+    else this.selectAll();
   }
 
   selectAll(): void {
@@ -664,9 +705,10 @@ export class Grid {
   }
 
   private onHover(e: MouseEvent): void {
-    if (this.dragging || this.resizing || this.resizingRow) return;
+    if (this.dragging || this.resizing || this.resizingRow || this.fillDrag) return;
     const { x, y } = this.point(e);
-    this.scroller.style.cursor = this.resizeHandleAt(x, y) >= 0 ? "col-resize" : this.rowResizeHandleAt(x, y) >= 0 ? "row-resize" : "default";
+    this.scroller.style.cursor = this.resizeHandleAt(x, y) >= 0 ? "col-resize" : this.rowResizeHandleAt(x, y) >= 0 ? "row-resize"
+      : this.onFillHandle(x, y) ? "crosshair" : "default";
   }
 
   private onMouseDown(e: MouseEvent): void {
@@ -692,6 +734,11 @@ export class Grid {
     const rowHandle = this.rowResizeHandleAt(x, y);
     if (rowHandle >= 0) {
       this.resizingRow = { row: rowHandle, startY: e.clientY, startH: this.rowHeight(rowHandle) };
+      return;
+    }
+    if (this.onFillHandle(x, y)) {
+      const source = this.selection();
+      this.fillDrag = { source, target: source };
       return;
     }
     const rhw = this.rowHeaderWidth();
@@ -733,6 +780,14 @@ export class Grid {
       if (c >= 0) this.handlers.referencePick?.({ r0: Math.min(r, this.referenceAnchor.r), r1: Math.max(r, this.referenceAnchor.r), c0: Math.min(c, this.referenceAnchor.c), c1: Math.max(c, this.referenceAnchor.c) }, "move");
       return;
     }
+    if (this.fillDrag) {
+      const { x, y } = this.point(e);
+      const c = this.colAt(Math.min(Math.max(x, this.rowHeaderWidth() + 1), this.width - 1));
+      const r = Math.max(0, this.rowAt(Math.min(Math.max(y, HEADER_H + 1), this.height - 1)));
+      this.fillDrag.target = fillTarget(this.fillDrag.source, r, c < 0 ? this.fillDrag.source.c1 : c);
+      this.invalidate();
+      return;
+    }
     if (this.resizingRow) {
       const h = Math.max(8, Math.min(2000, Math.round(this.resizingRow.startH + (e.clientY - this.resizingRow.startY) / this.zoom)));
       this.setRowSize(this.resizingRow.row, h);
@@ -756,6 +811,15 @@ export class Grid {
   }
 
   private onMouseUp(): void {
+    if (this.fillDrag) {
+      const { source, target } = this.fillDrag;
+      this.fillDrag = null;
+      if (!sameRange(source, target)) {
+        this.select({ r: target.r1, c: target.c1 }, { r: target.r0, c: target.c0 }, false);
+        this.handlers.dragFill?.(source, target);
+      }
+      this.invalidate();
+    }
     if (this.referenceAnchor) {
       const a = this.referenceAnchor;
       this.referenceAnchor = null;
@@ -886,7 +950,9 @@ export class Grid {
         move(0, e.shiftKey ? -1 : 1);
         break;
       case "Enter": case "F2": this.startEdit(); break;
-      case "Escape": this.select(this.active); break;
+      case "Escape":
+        if (this.copied) { this.copied = null; this.handlers.copyCancelled?.(); }
+        this.select(this.active); break;
       case "Delete": case "Backspace": this.clearSelection(); break;
       default:
         if (mod && e.key.toLowerCase() === "z") {
@@ -897,7 +963,7 @@ export class Grid {
         } else if (mod && e.key.toLowerCase() === "c") {
           this.handlers.copy(this.selection());
         } else if (mod && e.key.toLowerCase() === "a") {
-          this.select({ r: lastRow, c: lastCol }, { r: 0, c: 0 }, false);
+          void this.contextSelectAll();
         } else if (!mod && !e.altKey && e.key.length === 1) {
           this.startEdit(e.key);
         } else {
@@ -1184,6 +1250,26 @@ export class Grid {
       ctx.restore();
     }
 
+    // Copied range (dashed), fill-drag target (dashed) and the fill handle.
+    if (cols.length) {
+      ctx.save(); ctx.beginPath(); ctx.rect(rhw, HEADER_H, W - rhw, H - HEADER_H); ctx.clip();
+      const outline = (r: Range, dash: number[]) => {
+        if (r.r1 < first || r.r0 > last || r.c0 >= cols.length) return;
+        const a = this.cellRect({ r: r.r0, c: r.c0 }), b = this.cellRect({ r: r.r1, c: Math.min(r.c1, cols.length - 1) });
+        ctx.strokeStyle = colors.selBorder; ctx.lineWidth = 1.5; ctx.setLineDash(dash);
+        ctx.strokeRect(a.x + 1.5, a.y + 1.5, b.x + b.w - a.x - 3, b.y + b.h - a.y - 3);
+      };
+      if (this.copied) outline(this.copied, [4, 3]);
+      if (this.fillDrag && !sameRange(this.fillDrag.source, this.fillDrag.target)) outline(this.fillDrag.target, [3, 2]);
+      ctx.setLineDash([]);
+      const h = this.fillHandleBox();
+      if (h) {
+        ctx.fillStyle = colors.bg; ctx.fillRect(h.x - 4.5, h.y - 4.5, 9, 9);
+        ctx.fillStyle = colors.selBorder; ctx.fillRect(h.x - 3.5, h.y - 3.5, 7, 7);
+      }
+      ctx.restore();
+    }
+
     // Row header
     ctx.fillStyle = colors.headerBg;
     ctx.fillRect(0, HEADER_H, rhw, H - HEADER_H);
@@ -1265,3 +1351,17 @@ export class Grid {
 }
 
 export const DEFAULT_ROW_HEIGHT = ROW_H;
+
+function sameRange(a: Range, b: Range): boolean {
+  return a.r0 === b.r0 && a.r1 === b.r1 && a.c0 === b.c0 && a.c1 === b.c1;
+}
+
+/** Where dragging the fill handle of `s` to cell (r, c) fills: the selection grown along the
+ *  axis the pointer left it furthest on (down/up or right/left), else the selection itself. */
+export function fillTarget(s: Range, r: number, c: number): Range {
+  const rows = r > s.r1 ? r - s.r1 : r < s.r0 ? s.r0 - r : 0;
+  const cols = c > s.c1 ? c - s.c1 : c < s.c0 ? s.c0 - c : 0;
+  if (rows === 0 && cols === 0) return s;
+  if (rows >= cols) return { ...s, r0: Math.min(s.r0, r), r1: Math.max(s.r1, r) };
+  return { ...s, c0: Math.min(s.c0, c), c1: Math.max(s.c1, c) };
+}

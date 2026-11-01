@@ -173,6 +173,32 @@ impl Sheets {
         self.table_cells = formulas;
     }
 
+    /// A copied cell's input at its destination. A table cell (whose formula the sheet engine
+    /// cannot read) becomes a new table cell with its sheet references shifted like any
+    /// copied formula, so a filled `=XLOOKUP(A2, customers[id], …)` reads A3, A4, …; the new
+    /// cell is queued for the workbook to store. Other formulas are translated as usual.
+    pub(crate) fn copy_input(&mut self, input: &str, from: (u32, u32), to: (u32, u32, u32)) -> Result<String> {
+        let Some(slot) = slot_of(input.trim()) else { return self.translate(input, from, to) };
+        if input.contains(SPILL_PREFIX) {
+            anyhow::bail!("copying a table formula that spills into several cells is not supported yet: type it in the destination cell");
+        }
+        let formula = self.table_cells.get(&slot).cloned().ok_or_else(|| anyhow::anyhow!("a copied table formula is missing; reload and try again"))?;
+        let (rows, columns) = (to.1 as i64 - from.0 as i64, to.2 as i64 - from.1 as i64);
+        let shifted = crate::table_formula::shift_cells(&formula, rows, columns)
+            .map_err(|e| anyhow::anyhow!("cannot copy {formula}: {}", e.message))?
+            .unwrap_or(formula);
+        let next = self.table_cells.keys().chain(self.copied_table_cells.iter().map(|(s, _)| s)).max().copied().unwrap_or(0) + 1;
+        self.table_cells.insert(next, shifted.clone());
+        self.copied_table_cells.push((next, shifted));
+        Ok(slot_input(next, false))
+    }
+
+    /// The table cells made by copies since the last call (slot, formula), for the workbook
+    /// to store in the same change.
+    pub(crate) fn take_copied_table_cells(&mut self) -> Vec<(u32, String)> {
+        std::mem::take(&mut self.copied_table_cells)
+    }
+
     /// What a cell's content on sheet `index` is shown as: a table cell's formula instead of
     /// its reference, with cells on that sheet written without the sheet's name.
     pub(crate) fn shown_input(&self, index: u32, content: String) -> String {

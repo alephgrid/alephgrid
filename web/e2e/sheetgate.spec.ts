@@ -100,6 +100,7 @@ for (const theme of ["light", "dark"] as const) {
     for (let i = 0; i < 5; i++) await page.keyboard.press("Shift+ArrowDown");
     await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
     await page.getByRole("menuitem", { name: "Insert chart" }).click();
+    await page.getByRole("region", { name: "Chart preview" }).getByRole("button", { name: "Create chart" }).click();
     const chart = page.getByRole("region", { name: "Chart of A1:B6" });
     await expect(chart.getByRole("table", { name: "Chart values" })).toContainText("East50");
 

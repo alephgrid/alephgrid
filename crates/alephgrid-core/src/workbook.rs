@@ -1596,18 +1596,24 @@ impl Workbook {
     /// model and its history.
     pub fn with_sheets<T>(&mut self, f: impl FnOnce(&mut Sheets) -> Result<T>) -> Result<T> {
         self.mutating("sheets", None, |wb| {
-            let (result, changed) = {
+            let (result, changed, copied) = {
                 let mut sheets = wb.shared.sheets.lock().unwrap_or_else(|e| e.into_inner());
                 let before = sheets.changes();
                 sheets.begin(wb.txn_revision, wb.txn_actor.clone());
                 let result = f(&mut sheets);
                 sheets.finish();
-                (result, sheets.changes() != before)
+                // Table cells made by copying one (fill, drag fill, paste): stored below, in
+                // this change, under the slots their references already name.
+                let copied = sheets.take_copied_table_cells();
+                (result, sheets.changes() != before, copied)
             };
             if changed {
                 wb.sheet_epoch += 1;
             }
             let out = result?;
+            for (slot, formula) in &copied {
+                storage::insert_table_cell(&wb.conn, *slot, formula)?;
+            }
             if changed {
                 // A new sheet model (after deleting all sheets or importing XLSX) must
                 // receive the registry's exact pins. Registry pins take precedence over imported definitions.

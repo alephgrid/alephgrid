@@ -38,7 +38,8 @@ export function toast(message: string, kind: "info" | "error" | "success" = "inf
 }
 
 export type MenuItem =
-  | { label: string; action: () => void; danger?: boolean; disabled?: boolean; hint?: string }
+  /** `disabled` as text disables the item and shows why in place of its shortcut (U.04a). */
+  | { label: string; action: () => void; danger?: boolean; disabled?: boolean | string; hint?: string }
   | "sep";
 
 let openMenu: HTMLElement | null = null;
@@ -102,11 +103,13 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
         {
           class: `menu-item${item.danger ? " danger" : ""}`,
           role: "menuitem",
-          disabled: item.disabled,
+          disabled: !!item.disabled,
+          title: typeof item.disabled === "string" ? item.disabled : false,
           onclick: () => { closeMenu(); item.action(); },
         },
         el("span", {}, item.label),
-        item.hint ? el("span", { class: "menu-hint" }, item.hint) : null,
+        typeof item.disabled === "string" ? el("span", { class: "menu-hint menu-reason" }, item.disabled)
+          : item.hint ? el("span", { class: "menu-hint" }, item.hint) : null,
       ),
     );
   }

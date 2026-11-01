@@ -199,11 +199,27 @@ test("S.09: a chart placed on the sheet follows the cells, moves, changes type a
   const box = (await page.locator(".grid-scroller").boundingBox())!;
   await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
   await page.getByRole("menuitem", { name: "Insert chart" }).click();
+  // U.04b: Insert chart shows an unsaved preview; Escape leaves the sheet unchanged.
+  const preview = page.getByRole("region", { name: "Chart preview" });
+  await expect(preview.getByRole("table", { name: "Chart values" })).toContainText("West125");
+  const count = async () => (await ws.call("sheet_charts", { sheet: 0 })).length;
+  expect(await count()).toBe(0);
+  await page.keyboard.press("Escape");
+  await expect(preview).toHaveCount(0);
+  expect(await count()).toBe(0);
+  // Again, choose a type in the preview, then Create chart stores it.
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: "Insert chart" }).click();
+  await preview.getByRole("combobox", { name: "Chart type" }).selectOption("bar");
+  expect(await count()).toBe(0);
+  await preview.getByRole("button", { name: "Create chart" }).click();
+  await expect(preview).toHaveCount(0);
   const chart = page.getByRole("region", { name: "Chart of A1:B3" });
   await expect(chart.getByRole("img")).toBeVisible();
   const values = chart.getByRole("table", { name: "Chart values" });
   await expect(values).toContainText("West125");
   const stored = async () => (await ws.call("sheet_charts", { sheet: 0 }))[0];
+  await expect.poll(async () => (await stored())?.kind).toBe("bar");
   // Placed right of the data (column D), kept with the workbook.
   await expect.poll(async () => (await stored())?.column).toBe(3);
   // The chart follows a collaborator's edit.
@@ -229,9 +245,14 @@ test("S.09: a chart placed on the sheet follows the cells, moves, changes type a
   await page.reload();
   await page.getByRole("tab", { name: /^S/ }).click();
   await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West200");
-  // Deleting removes it from the workbook.
+  // Deleting removes it from the workbook; Undo in the notice puts it back.
   await page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("button", { name: "Delete chart" }).click();
-  await expect.poll(async () => (await ws.call("sheet_charts", { sheet: 0 })).length).toBe(0);
+  await expect.poll(count).toBe(0);
+  await page.locator(".toast").getByRole("button", { name: "Undo" }).click();
+  await expect.poll(count).toBe(1);
+  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West200");
+  await page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("button", { name: "Delete chart" }).click();
+  await expect.poll(count).toBe(0);
   ws.close();
 });
 

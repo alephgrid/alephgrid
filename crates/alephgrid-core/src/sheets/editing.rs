@@ -410,14 +410,133 @@ impl Sheets {
                     continue;
                 }
                 let (row, column) = (area.row + dr, area.column + dc);
-                let value = match &s.input {
-                    Some(i) => self.translate(i, (span.row + sr, span.column + sc), (index, row, column))?,
+                let value = match s.input.clone() {
+                    Some(i) => self.copy_input(&i, (span.row + sr, span.column + sc), (index, row, column))?,
                     None => String::new(),
                 };
                 inputs.push((SheetInput { row, column, value, base: None }, s.is_text));
             }
         }
         self.write(index, inputs, Some((area, styles)))
+    }
+
+    /// Drag the fill handle: extend `source` to `target`, which contains it and grows it in
+    /// one direction (down, up, right or left). Along each line a run of two or more plain
+    /// numbers continues as a linear trend (1, 2 → 3, 4; 10, 7 → 4, 1), and a single text
+    /// cell ending in a whole number counts on (Item 1 → Item 2). Anything else repeats
+    /// the source pattern, translating formulas as a copy would. Formats repeat too. One
+    /// undo step; the source cells are not rewritten.
+    pub fn drag_fill(&mut self, index: u32, source: CellArea, target: CellArea) -> Result<()> {
+        self.check_index(index)?;
+        source.check("fill source")?;
+        target.check("fill")?;
+        let same_columns = target.column == source.column && target.columns == source.columns;
+        let same_rows = target.row == source.row && target.rows == source.rows;
+        let end = |a: u32, n: u32| a + n;
+        let vertical = same_columns && target.rows > source.rows
+            && (target.row == source.row || end(target.row, target.rows) == end(source.row, source.rows));
+        let horizontal = same_rows && target.columns > source.columns
+            && (target.column == source.column || end(target.column, target.columns) == end(source.column, source.columns));
+        if !vertical && !horizontal {
+            if target == source {
+                return Ok(());
+            }
+            bail!("a fill extends the selected cells in one direction");
+        }
+        let sources = self.read_area(index, &source)?;
+        let source_styles = self.style_grid(index, &source)?;
+        // Position along the fill axis relative to the source's first line; negative when
+        // filling up or left.
+        let (n, offset) = if vertical {
+            (source.rows as i64, target.row as i64 - source.row as i64)
+        } else {
+            (source.columns as i64, target.column as i64 - source.column as i64)
+        };
+        let lines = if vertical { source.columns } else { source.rows };
+        let cell = |line: u32, k: usize| -> &Source { if vertical { &sources[k][line as usize] } else { &sources[line as usize][k] } };
+        enum Plan { Trend(f64, f64), Count(String, u64, usize), Repeat }
+        let mut plans = Vec::with_capacity(lines as usize);
+        for line in 0..lines {
+            let numbers: Option<Vec<f64>> = (0..n as usize).map(|k| plain_number(cell(line, k))).collect();
+            let plan = match numbers {
+                Some(ys) if ys.len() >= 2 => {
+                    // Least-squares line through (0, y0), (1, y1), …: exact for evenly spaced runs.
+                    let m = ys.len() as f64;
+                    let mean_x = (m - 1.0) / 2.0;
+                    let mean_y = ys.iter().sum::<f64>() / m;
+                    let (mut sxy, mut sxx) = (0.0, 0.0);
+                    for (i, y) in ys.iter().enumerate() {
+                        let dx = i as f64 - mean_x;
+                        sxy += dx * (y - mean_y);
+                        sxx += dx * dx;
+                    }
+                    let slope = sxy / sxx;
+                    Plan::Trend(mean_y - slope * mean_x, slope)
+                }
+                _ => match (n, cell(line, 0)) {
+                    (1, s) if s.is_text => match s.input.as_deref().and_then(trailing_number) {
+                        Some((prefix, number, width)) => Plan::Count(prefix, number, width),
+                        None => Plan::Repeat,
+                    },
+                    _ => Plan::Repeat,
+                },
+            };
+            plans.push(plan);
+        }
+        let mut inputs = Vec::new();
+        let mut styles = vec![vec![ironcalc::base::types::Style::default(); target.columns as usize]; target.rows as usize];
+        for dr in 0..target.rows {
+            for dc in 0..target.columns {
+                let (row, column) = (target.row + dr, target.column + dc);
+                let (line, along) = if vertical { (dc, dr as i64) } else { (dr, dc as i64) };
+                let k = along + offset; // index relative to the source's first line
+                let src = k.rem_euclid(n) as usize;
+                let (sr, sc) = if vertical { (src, line as usize) } else { (line as usize, src) };
+                styles[dr as usize][dc as usize] = source_styles[sr][sc].clone();
+                if (0..n).contains(&k) {
+                    continue;
+                }
+                let s = &sources[sr][sc];
+                let (value, text) = match &plans[line as usize] {
+                    Plan::Trend(a, b) => (format_number(a + b * k as f64), false),
+                    Plan::Count(prefix, number, width) => {
+                        let v = (*number as i64 + k).unsigned_abs();
+                        (format!("{prefix}{v:0width$}"), true)
+                    }
+                    Plan::Repeat => match s.input.clone() {
+                        Some(i) => {
+                            let from = (source.row + sr as u32, source.column + sc as u32);
+                            (self.copy_input(&i, from, (index, row, column))?, s.is_text)
+                        }
+                        None => (String::new(), false),
+                    },
+                };
+                inputs.push((SheetInput { row, column, value, base: None }, text));
+            }
+        }
+        self.write(index, inputs, Some((target, styles)))
+    }
+
+    /// The block of filled cells around `(row, column)`, bounded by empty rows and columns
+    /// (what Ctrl+A selects first). A lone empty cell is its own region.
+    pub fn current_region(&self, index: u32, row: u32, column: u32) -> Result<CellArea> {
+        self.check_index(index)?;
+        let m = self.model()?;
+        let ws = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?;
+        let filled = |r: i64, c: i64| -> bool {
+            r >= 0 && c >= 0 && r < MAX_ROWS as i64 && c < MAX_COLUMNS as i64
+                && !matches!(ws.cell(r as i32 + 1, c as i32 + 1).as_deref(), None | Some(Cell::EmptyCell { .. }))
+        };
+        let (mut r0, mut r1, mut c0, mut c1) = (row as i64, row as i64, column as i64, column as i64);
+        loop {
+            let mut grew = false;
+            if (c0 - 1..=c1 + 1).any(|c| filled(r0 - 1, c)) { r0 -= 1; grew = true; }
+            if (c0 - 1..=c1 + 1).any(|c| filled(r1 + 1, c)) { r1 += 1; grew = true; }
+            if (r0 - 1..=r1 + 1).any(|r| filled(r, c0 - 1)) { c0 -= 1; grew = true; }
+            if (r0 - 1..=r1 + 1).any(|r| filled(r, c1 + 1)) { c1 += 1; grew = true; }
+            if !grew { break; }
+        }
+        Ok(CellArea { row: r0 as u32, column: c0 as u32, rows: (r1 - r0 + 1) as u32, columns: (c1 - c0 + 1) as u32 })
     }
 
     /// Paste the `source` area of sheet `from` at `at` on sheet `index`. Formulas are
@@ -450,7 +569,7 @@ impl Sheets {
                 let (value, text) = match mode {
                     PasteMode::Values => (s.value.clone().unwrap_or_default(), s.value_is_text),
                     _ => match &s.input {
-                        Some(i) => (self.translate(i, (source.row + dr, source.column + dc), (index, row, column))?, s.is_text),
+                        Some(i) => (self.copy_input(i, (source.row + dr, source.column + dc), (index, row, column))?, s.is_text),
                         None => (String::new(), false),
                     },
                 };
@@ -490,6 +609,35 @@ impl Sheets {
         self.moved(index);
         Ok(target)
     }
+}
+
+/// A constant number cell (not text, a formula or a boolean), for series fills.
+fn plain_number(s: &Source) -> Option<f64> {
+    let input = s.input.as_deref()?;
+    if s.is_text || s.value_is_text || input.starts_with('=') {
+        return None;
+    }
+    s.value.as_deref()?.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// `"Item 07"` → (`"Item "`, 7, 2): text that ends in a whole number, and its digit width.
+fn trailing_number(text: &str) -> Option<(String, u64, usize)> {
+    let digits = text.bytes().rev().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || digits == text.len() || digits > 15 {
+        return None;
+    }
+    let (prefix, number) = text.split_at(text.len() - digits);
+    Some((prefix.to_string(), number.parse().ok()?, digits))
+}
+
+/// A series value as typed input: whole numbers without a decimal point, others to 12
+/// decimals so that 0.1 steps do not show binary noise.
+fn format_number(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        return format!("{}", v as i64);
+    }
+    let s = format!("{v:.12}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]
@@ -631,6 +779,57 @@ mod tests {
         assert_eq!(display(&s, 0, 3, 2), "x");
         assert!(s.fill(0, CellArea { row: 0, column: 0, rows: MAX_ROWS, columns: 2 }, FillDirection::Down).is_err(), "bounded");
         assert!(s.fill(0, CellArea { row: MAX_ROWS - 1, column: 0, rows: 2, columns: 1 }, FillDirection::Down).is_err());
+    }
+
+    #[test]
+    fn drag_fill_extends_series_counts_text_and_repeats_patterns() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        // Column A: 1, 3 → 5, 7, 9. Column B: one number copies. Column C: Item 9 counts on
+        // and keeps its digit width. Column D: a formula repeats, shifted.
+        s.set(0, &[input(0, 0, "1"), input(1, 0, "3"), input(0, 1, "4"), input(0, 2, "Item 09"), input(0, 3, "=A1*2")]).unwrap();
+        s.drag_fill(0, a(0, 0, 2, 1), a(0, 0, 5, 1)).unwrap();
+        assert_eq!((2..5).map(|r| content(&s, 0, r, 0)).collect::<Vec<_>>(), ["5", "7", "9"]);
+        s.drag_fill(0, a(0, 1, 1, 3), a(0, 1, 3, 3)).unwrap();
+        assert_eq!((content(&s, 0, 1, 1), content(&s, 0, 2, 1)), ("4".into(), "4".into()));
+        assert_eq!((display(&s, 0, 1, 2), display(&s, 0, 2, 2)), ("Item 10".into(), "Item 11".into()));
+        assert_eq!((content(&s, 0, 1, 3), content(&s, 0, 2, 3)), ("=A2*2".into(), "=A3*2".into()));
+        assert_eq!(display(&s, 0, 2, 3), "10", "=A3*2 with A3 = 5");
+        assert!(s.undo().unwrap(), "one undo step per drag");
+        assert!(content(&s, 0, 1, 2).is_empty() && content(&s, 0, 0, 2) == "Item 09");
+
+        // Decreasing run filled right; 0.1 steps without binary noise.
+        s.set(0, &[input(10, 0, "10"), input(10, 1, "7"), input(11, 0, "0.1"), input(11, 1, "0.2")]).unwrap();
+        s.drag_fill(0, a(10, 0, 2, 2), a(10, 0, 2, 5)).unwrap();
+        assert_eq!((2..5).map(|c| content(&s, 0, 10, c)).collect::<Vec<_>>(), ["4", "1", "-2"]);
+        assert_eq!((2..5).map(|c| content(&s, 0, 11, c)).collect::<Vec<_>>(), ["0.3", "0.4", "0.5"]);
+
+        // Up: the trend runs backwards from the first cell; a text pair repeats.
+        s.set(0, &[input(25, 5, "100"), input(26, 5, "110"), input(25, 6, "a"), input(26, 6, "b")]).unwrap();
+        s.drag_fill(0, a(25, 5, 2, 2), a(22, 5, 5, 2)).unwrap();
+        assert_eq!((22..25).map(|r| content(&s, 0, r, 5)).collect::<Vec<_>>(), ["70", "80", "90"]);
+        assert_eq!((22..25).map(|r| display(&s, 0, r, 6)).collect::<Vec<_>>(), ["b", "a", "b"]);
+
+        // Uneven runs follow the least-squares line: 1, 2, 4 → slope 1.5, intercept 0.8333…
+        s.set(0, &[input(40, 0, "1"), input(41, 0, "2"), input(42, 0, "4")]).unwrap();
+        s.drag_fill(0, a(40, 0, 3, 1), a(40, 0, 4, 1)).unwrap();
+        assert_eq!(content(&s, 0, 43, 0), "5.333333333333");
+
+        let e = s.drag_fill(0, a(0, 0, 1, 1), a(0, 0, 2, 2)).unwrap_err().to_string();
+        assert!(e.contains("one direction"), "{e}");
+        assert!(s.drag_fill(0, a(0, 0, 1, 1), a(0, 0, MAX_ROWS, 1)).is_err(), "bounded");
+    }
+
+    #[test]
+    fn current_region_stops_at_empty_rows_and_columns() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        // B2:D4 filled except C3, plus E5 touching it diagonally; G1 is separate.
+        s.set(0, &[input(1, 1, "x"), input(1, 2, "x"), input(1, 3, "x"), input(2, 1, "x"), input(2, 3, "x"),
+            input(3, 1, "x"), input(3, 2, "x"), input(3, 3, "x"), input(4, 4, "x"), input(0, 6, "y")]).unwrap();
+        assert_eq!(s.current_region(0, 2, 2).unwrap(), a(1, 1, 4, 4), "from the empty middle cell");
+        assert_eq!(s.current_region(0, 0, 6).unwrap(), a(0, 6, 1, 1));
+        assert_eq!(s.current_region(0, 20, 20).unwrap(), a(20, 20, 1, 1), "an empty cell alone");
     }
 
     #[test]

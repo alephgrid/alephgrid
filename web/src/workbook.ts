@@ -10,7 +10,7 @@ import { AnalyzePane } from "./analyzepane";
 import { FindBar, type FindProvider } from "./findbar";
 import { dataToolsDialog } from "./tools";
 import type { Validation } from "./protocol";
-import { functionCompletion, functionLibrary } from "./functions";
+import { functionCompletion, functionPanel, type FunctionPanel } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc, RpcError } from "./api";
 import { importFile } from "./importer";
 import { historyDialog } from "./history";
@@ -266,7 +266,7 @@ export class WorkbookScreen {
   /** The server is restarting this workbook's compute (a new size): say so once it is back. */
   private restarting = false;
   private closeFormulaHelp: (() => void) | null = null;
-  private closeFunctions: (() => void) | null = null;
+  private functions: FunctionPanel | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
 
   constructor(meta: WorkbookMeta, private goHome: () => void) {
@@ -317,6 +317,9 @@ export class WorkbookScreen {
         headerFilter: (c, x, y) => self.headerFilter(c, x, y),
         rowMenu: (r, x, y) => self.rowMenu(r, x, y),
         copy: (range) => self.copy(range),
+        dragFill: (source, target) => void self.dragFill(source, target),
+        copyCancelled: () => { self.clip = null; },
+        region: (at) => self.sheetRegion(at),
         paste: (at, text) => self.paste(at, text),
         columnResized: (c, w) => self.columnResized(c, w),
         rowResized: (r, h) => void self.resizeLines("rows", r, 1, h),
@@ -502,11 +505,15 @@ export class WorkbookScreen {
       if (await this.goneToTrash()) return;
       throw e;
     }
-    const demo = Number(new URLSearchParams(location.search).get("demo"));
-    if (demo > 0) history.replaceState(null, "", location.pathname);
+    const params = new URLSearchParams(location.search);
+    const demo = Number(params.get("demo"));
+    // U.03b: "New workbook" in the hub opens straight into a blank sheet (?start=sheet).
+    const blank = params.get("start") === "sheet";
+    if (demo > 0 || blank) history.replaceState(null, "", location.pathname);
     if (this.tables.length) await this.openTable(this.tables[0].name);
     else if (this.sheets.length) await this.openSheet(this.sheets[0].index);
     else if (demo > 0) await this.createDemo(demo);
+    else if (blank) await this.createSheet();
     else this.renderEmpty();
     // Start on the grid, unless the user has already moved focus while it was loading.
     const focused = document.activeElement;
@@ -522,7 +529,7 @@ export class WorkbookScreen {
 
   dispose(): void {
     this.disposed = true;
-    this.closeFunctions?.();
+    this.functions?.close();
     this.closeFormulaHelp?.();
     this.disposeFunctionCompletion?.();
     this.sql?.close();
@@ -600,7 +607,7 @@ export class WorkbookScreen {
       dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
       dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
       sql: () => this.sqlPanel(),
-      functions: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
+      functions: () => this.openFunctions(),
       formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
       commands: () => { commandPalette(this.commands); },
       shortcuts: () => { shortcutHelp(this.commands); },
@@ -630,8 +637,10 @@ export class WorkbookScreen {
       tool("target", "Go to", act.goTo, { title: "Go to a cell, range or name (⌘G)" }),
     ];
 
-    const sheetOnly = () => !this.isSheet();
-    const tableOnly = () => this.active?.kind !== "table";
+    // Disabled items say why (U.04a).
+    const sheetOnly = () => !this.isSheet() && "Sheets only";
+    const tableOnly = () => this.active?.kind !== "table" && "Tables only";
+    const sqlOff = !this.allowSql && "SQL is off on this server";
     const menus: [string, () => MenuItem[]][] = [
       ["File", () => [
         { label: "New sheet", action: () => this.createSheet() },
@@ -648,8 +657,8 @@ export class WorkbookScreen {
         "sep",
         { label: "Paste special…", hint: "⇧⌘V", disabled: sheetOnly(), action: () => this.pasteSpecialDialog() },
         { label: "Go to…", hint: "⌘G", disabled: sheetOnly(), action: act.goTo },
-        { label: "Find…", hint: "⌘F", disabled: tableOnly(), action: act.find },
-        { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
+        { label: "Find…", hint: "⌘F", disabled: !this.active && "Open a table or sheet first", action: act.find },
+        { label: "Find and replace…", hint: "⌘⇧H", disabled: !this.active && "Open a table or sheet first", action: act.findReplace },
       ]],
       ["View", () => [
         { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
@@ -672,7 +681,7 @@ export class WorkbookScreen {
         { label: "Sheet", hint: "Excel formulas", action: () => this.createSheet() },
         { label: "Column…", disabled: tableOnly(), action: act.addColumn },
         { label: "Named range…", disabled: sheetOnly(), action: act.names },
-        { label: "Table from SQL query…", disabled: !this.allowSql, action: act.sql },
+        { label: "Table from SQL query…", disabled: sqlOff, action: act.sql },
         "sep",
         { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       ]],
@@ -707,7 +716,7 @@ export class WorkbookScreen {
         { label: "Data tools…", disabled: tableOnly(), action: act.dataTools },
       ]],
       ["Tools", () => [
-        { label: "SQL workspace", disabled: !this.allowSql, action: act.sql },
+        { label: "SQL workspace", disabled: sqlOff, action: act.sql },
         { label: "Functions…", action: act.functions },
         { label: "Change history…", action: act.history },
         { label: "Compute and size…", action: act.compute },
@@ -861,8 +870,8 @@ export class WorkbookScreen {
         () => this.pickingFormula() ? this.showSheetForPicking(sh.index) : void this.openSheet(sh.index))), "No sheets yet.", ["Add a sheet", () => void this.createSheet()]),
       this.allowSql ? section("Queries", this.savedQueries.map((q) => item("query", q.name, `v${q.version}`, false, () => this.sqlPanel(q.id),
         `${q.name} · ${q.kind} query, version ${q.version}`)), "Saved SQL queries appear here.", ["Write a query", () => this.sqlPanel()]) : null,
-      section("Functions", this.functionsList.map((f) => item("fx", f.name, `v${f.pinned}`, false, () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
-        `${f.name} · version ${f.pinned} in use`)), "Reusable functions appear here.", ["Define a function", () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); }]),
+      section("Functions", this.functionsList.map((f) => item("fx", f.name, `v${f.pinned}`, false, () => this.openFunctions(),
+        `${f.name} · version ${f.pinned} in use`)), "Reusable functions appear here.", ["Define a function", () => this.openFunctions()]),
     ].filter((x): x is HTMLElement => !!x));
   }
 
@@ -1873,6 +1882,7 @@ export class WorkbookScreen {
       const text = data.map((row) => row.slice(range.c0, range.c1 + 1).map(tsvCell).join("\t")).join("\n");
       await navigator.clipboard.writeText(text);
       this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined } : null;
+      this.grid.setCopied({ ...range, r1 });
       toast(`Copied ${formatCount(rows * (range.c1 - range.c0 + 1))} cells`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
@@ -1914,6 +1924,7 @@ export class WorkbookScreen {
         if (layout === null) return;
         area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c, layout }));
         this.clip = null;
+        this.grid.setCopied(null);
       } else {
         const layout = this.shownLayout(sheet, at.r, at.r + (transpose ? source.columns : source.rows) - 1);
         if (layout === null) return;
@@ -1943,27 +1954,24 @@ export class WorkbookScreen {
     return work;
   }
 
+  /** Paste special (⇧⌘V): a small menu at the active cell, not a dialog (F.04d). */
   private pasteSpecialDialog(): void {
     if (!this.clip || this.clip.cut) {
       toast(this.clip ? "Paste special applies to copied cells. Cut cells move as they are." : "Copy cells in this workbook first. Text from other apps pastes as values with ⌘V.");
       return;
     }
     const at = this.grid.active;
-    const modes: [PasteMode, string][] = [["all", "All (values, formulas and formats)"], ["formulas", "Formulas (no formats)"], ["values", "Values only"], ["formats", "Formats only"]];
-    const radios = modes.map(([m, label], i) => el("label", { class: "radio" }, el("input", { type: "radio", name: "paste-mode", value: m, ...(i === 0 ? { checked: true } : {}) }), label));
-    const transpose = el("input", { type: "checkbox" });
-    const go = () => {
-      const mode = (panel.querySelector<HTMLInputElement>('input[name="paste-mode"]:checked')?.value ?? "all") as PasteMode;
-      modal.close();
-      void this.pasteCells(at, mode, transpose.checked);
-    };
-    const panel = el("section", { class: "dialog" }, el("h2", {}, "Paste special"),
-      el("fieldset", {}, el("legend", {}, "Paste"), ...radios),
-      el("label", { class: "radio" }, transpose, "Transpose rows and columns"),
-      el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Cancel"), el("button", { class: "btn btn-primary", onclick: go }, "Paste")));
-    panel.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
-    const modal = openModal(panel, () => modal.close());
-    panel.querySelector<HTMLInputElement>("input")?.focus();
+    const paste = (mode: PasteMode, transpose: boolean) => () => void this.pasteCells(at, mode, transpose);
+    const box = this.grid.cellBox(at.r, at.c), host = this.grid.host.getBoundingClientRect();
+    showMenu([
+      { label: "All (values, formulas and formats)", action: paste("all", false) },
+      { label: "Formulas (no formats)", action: paste("formulas", false) },
+      { label: "Values only", action: paste("values", false) },
+      { label: "Formats only", action: paste("formats", false) },
+      "sep",
+      { label: "All, transposed", action: paste("all", true) },
+      { label: "Values only, transposed", action: paste("values", true) },
+    ], host.left + box.x + 8, host.top + box.y + 28, { label: "Paste special" });
   }
 
   /** Ctrl/Cmd+D and +R: copy the selection's first row (column) over the rest. With a single
@@ -1995,6 +2003,40 @@ export class WorkbookScreen {
     }
   }
 
+  /** The fill handle was dragged: continue series, count on text, or repeat the pattern. */
+  private async dragFill(source: Range, target: Range): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const area = (r: Range) => ({ row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 });
+    const back = () => this.grid.select({ r: source.r1, c: source.c1 }, { r: source.r0, c: source.c0 }, false);
+    const t = area(target);
+    if (t.rows * t.columns > this.maxEditCells) { toast(`That fill is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); back(); return; }
+    try {
+      const sheet = this.active.index;
+      const layout = this.shownLayout(sheet, target.r0, target.r1);
+      if (layout === null) { back(); return; }
+      const info = await this.inSheetOrder(() => this.rpc.call("sheet_drag_fill", { sheet, source: area(source), target: t, layout }));
+      this.sheets = this.sheets.map((x) => (x.index === info.index ? info : x));
+      this.applySheetInfo(info, false);
+      this.sheetCache.refresh();
+      this.grid.invalidate();
+    } catch (e) {
+      back();
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+    }
+  }
+
+  /** Ctrl/Cmd+A in a sheet: the block of filled cells around `at`. */
+  private async sheetRegion(at: Cell): Promise<Range | null> {
+    if (this.active?.kind !== "sheet") return null;
+    try {
+      const a = await this.rpc.call("sheet_region", { sheet: this.active.index, row: at.r, column: at.c });
+      return { r0: a.row, c0: a.column, r1: a.row + a.rows - 1, c1: a.column + a.columns - 1 };
+    } catch {
+      return null;
+    }
+  }
+
   private registerCommands(): void {
     this.commands.register(...workbookCommands({
       isSheet: () => this.isSheet(),
@@ -2005,7 +2047,7 @@ export class WorkbookScreen {
       cut: () => this.cut(),
       pasteSpecial: () => this.pasteSpecialDialog(),
       fill: (d) => this.fill(d),
-      selectAll: () => this.grid.selectAll(),
+      selectAll: () => void this.grid.contextSelectAll(),
       selectEntire: (w) => this.grid.selectEntire(w),
       goTo: () => this.goTo(),
       names: async () => { this.closeNames?.(); this.closeNames = await namesDialog(this.namesContext()); },
@@ -2020,9 +2062,19 @@ export class WorkbookScreen {
     }));
   }
 
+  /** U.06: functions in a side panel beside the grid; it keeps its draft while closed.
+   *  One side panel at a time: opening it closes Analyze, and the other way round. */
+  private openFunctions(): void {
+    if (this.analysis) { this.analysis.close(); this.analysis = null; }
+    this.functions ??= functionPanel(this.rpc, this.allowSql, (panel) => this.mainEl.parentElement!.append(panel), () => undefined);
+    if (this.functions.isOpen) this.functions.close();
+    else this.functions.open();
+  }
+
   /** U.15: Analyze beside the grid; its result docks under the grid. */
   private openAnalyze(): void {
     if (this.analysis) { this.analysis.close(); this.analysis = null; return; }
+    this.functions?.close();
     const body = this.mainEl.parentElement!;
     this.analysis = new AnalyzePane(this.rpc, {
       pane: (panel, onClose) => {
@@ -2211,12 +2263,16 @@ export class WorkbookScreen {
     catch (e) { toast((e as Error).message, "error"); }
   }
 
-  /** S.09: place a chart of the selected range on the sheet, kept with the workbook. */
+  /** S.09 / U.04b: preview a chart of the selected range; it is stored with the workbook only
+   *  when the user chooses Create chart, and Cancel or Escape leaves the sheet unchanged. */
   private insertChart(): void {
     if (this.active?.kind !== "sheet") return;
     const sel = this.grid.selection();
     if (sel.r1 - sel.r0 > 1000 || sel.c1 - sel.c0 > 20) { toast("A chart reads at most 1,000 rows and 20 series: select a smaller range", "error"); return; }
-    void this.chartsLayer.add({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 });
+    void this.chartsLayer.draft({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 }).then((created) => {
+      if (created) toast("Chart created", "success");
+      this.grid.focus();
+    });
   }
 
   private async loadSheetCharts(): Promise<void> {
@@ -2711,8 +2767,8 @@ export class WorkbookScreen {
     showMenu([
       { label: "Copy", hint: "⌘C", action: () => this.copy(sel) },
       "sep",
-      { label: "Insert row above", disabled: !identity, action: () => run("insert_rows", { at: r, count: 1 }) },
-      { label: "Insert row below", disabled: !identity, action: () => run("insert_rows", { at: r + 1, count: 1 }) },
+      { label: "Insert row above", disabled: !identity && "Clear the sort and filters to insert rows", action: () => run("insert_rows", { at: r, count: 1 }) },
+      { label: "Insert row below", disabled: !identity && "Clear the sort and filters to insert rows", action: () => run("insert_rows", { at: r + 1, count: 1 }) },
       { label: count > 1 ? `Delete ${formatCount(count)} rows` : "Delete row", danger: true,
         disabled: r >= this.view.row_count, action: () => run("delete_rows", { start: sel.r0, count }) },
     ], x, y);
@@ -2810,7 +2866,7 @@ export class WorkbookScreen {
     showMenu([
       { label: "New sheet", hint: "Excel formulas", action: () => this.createSheet() },
       { label: "Import file…", hint: "CSV · Parquet · JSON · XLSX", action: () => this.fileInput.click() },
-      { label: "From SQL query…", disabled: !this.allowSql, action: () => this.sqlPanel() },
+      { label: "From SQL query…", disabled: !this.allowSql && "SQL is off on this server", action: () => this.sqlPanel() },
       "sep",
       { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       { label: "Demo data: 10M rows", action: () => this.createDemo(10_000_000) },

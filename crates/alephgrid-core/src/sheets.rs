@@ -114,6 +114,9 @@ pub struct Sheets {
     /// Formulas of the table cells (F.09), by result slot: shown in place of the
     /// `=_rf_links!$B$n` reference the sheet engine holds for them.
     table_cells: std::collections::HashMap<u32, String>,
+    /// Table cells made by copying one (fill, drag fill, paste) and not yet stored: the
+    /// workbook stores them with these slots in the same change (see `take_copied_table_cells`).
+    copied_table_cells: Vec<(u32, String)>,
     /// Who made each undo and redo step, parallel to the groups (see [`Sheets::begin`]).
     undo_actors: Vec<Option<String>>,
     redo_actors: Vec<Option<String>>,
@@ -153,6 +156,7 @@ impl Sheets {
             redo_groups: vec![],
             changes: 0,
             table_cells: Default::default(),
+            copied_table_cells: Vec::new(),
             undo_actors: vec![],
             redo_actors: vec![],
             undo_ids: vec![],

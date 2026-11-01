@@ -81,8 +81,11 @@ async function route(): Promise<void> {
           el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks"))));
       return;
     }
-    app.replaceChildren(el("div", { class: "fatal" }, el("h2", {}, "Something went wrong"), el("p", {}, (e as Error).message),
-      el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks")));
+    // U.03b: a failed load can be retried in place; filters and search are kept (module state).
+    app.replaceChildren(el("div", { class: "fatal", role: "alert" }, el("h2", {}, "Something went wrong"), el("p", {}, (e as Error).message),
+      el("div", { class: "empty-actions" },
+        el("button", { class: "btn btn-primary", onclick: () => route() }, "Try again"),
+        m ? el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks") : null)));
   }
 }
 
@@ -333,9 +336,9 @@ function renderHome(): void {
     const items = visibleWorkbooks();
     if (!items.length) {
       list.replaceChildren(el("div", { class: "wb-empty" },
-        home.query ? `No workbooks match “${home.query}”.`
-          : home.scope === "starred" ? "Star a workbook to pin it here."
-          : "No workbooks here yet. Drop a file on this page to start."));
+        home.query ? `No workbooks match “${home.query}”. ` : home.scope === "starred" ? "Star a workbook to pin it here."
+          : "No workbooks here yet. Drop a file on this page to start.",
+        home.query ? el("button", { class: "btn btn-small", type: "button", onclick: () => { home.query = ""; renderHome(); } }, "Clear search") : null));
       return;
     }
     const showSpace = ["all", "recent", "starred"].includes(home.scope) && home.spaces.length > 1;
@@ -385,7 +388,7 @@ function renderHome(): void {
   function renderCards(): void {
     const recent = home.scope === "trash" || home.query ? []
       : home.workbooks.filter((w) => inScope(w, home.scope) && w.opened_at)
-        .sort((a, b) => (b.opened_at ?? 0) - (a.opened_at ?? 0)).slice(0, 4);
+        .sort((a, b) => (b.opened_at ?? 0) - (a.opened_at ?? 0)).slice(0, 3);
     cards.hidden = recent.length < 2;
     cards.replaceChildren(...recent.map((w) => el("a", { class: "wb-card", href: `/w/${seg(w.id)}`, title: `Open ${w.name}`,
       onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${seg(w.id)}`); } },
@@ -415,14 +418,11 @@ function renderHome(): void {
       el("div", { class: "spacer" }),
       home.me ? accountButton(home.me, navigate) : null,
     ),
-    home.workbooks.length === 0
-      ? el("section", { class: "hero" },
-        el("h1", {}, "A spreadsheet for data that doesn't fit in a spreadsheet."),
-        el("p", {}, "Open billion-row CSV and Parquet files, sort, filter, add formulas, build Excel-style sheets and query with SQL. Runs on your own machine or server — your data never leaves it."),
-        el("div", { class: "hero-actions" },
-          el("button", { class: "btn btn-primary", onclick: () => fileInput.click() }, icon("upload"), "Open a file"),
-          el("button", { class: "btn", onclick: () => createDemo(10_000_000) }, "Try 10M demo rows"),
-          el("button", { class: "btn", onclick: newWorkbook }, "New blank workbook")))
+    // U.03a: an empty account gets one short line and a sample, not a marketing banner.
+    home.workbooks.length === 0 && home.scope !== "trash"
+      ? el("section", { class: "home-welcome", "aria-label": "Get started" },
+        el("p", {}, "Open a CSV, Parquet, JSON or Excel file of any size, or start a blank workbook. Files stay on this server."),
+        el("button", { class: "btn", onclick: () => createDemo(10_000_000) }, "Try sample data (10M rows)"))
       : null,
     el("div", { class: "home-head" },
       el("div", {},
@@ -468,7 +468,7 @@ async function newWorkbook(): Promise<void> {
   ], "Create");
   if (!v) return;
   try {
-    navigate(`/w/${seg((await api.create(v.name, v.space ?? targetSpace())).id)}`);
+    navigate(`/w/${seg((await api.create(v.name, v.space ?? targetSpace())).id)}?start=sheet`);
   } catch (e) {
     // Refused (a quota, a role): say why.
     toast((e as Error).message, "error");
@@ -501,7 +501,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       if (!v) return;
       try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
     } },
-    { label: "New workbook here", disabled: sp.role === "viewer", action: async () => navigate(`/w/${seg((await api.create("Untitled workbook", sp.id)).id)}`) },
+    { label: "New workbook here", disabled: sp.role === "viewer" && "Viewers cannot add workbooks", action: async () => navigate(`/w/${seg((await api.create("Untitled workbook", sp.id)).id)}?start=sheet`) },
     { label: "Library…", action: () => libraryDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, role: w.role ?? undefined })),
       home.me ?? { kind: "local", instance_admin: true, orgs: [] }) },
   ];

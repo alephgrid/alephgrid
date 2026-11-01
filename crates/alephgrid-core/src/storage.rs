@@ -524,6 +524,12 @@ pub fn add_table_cell(conn: &Connection, formula: &str) -> Result<u32> {
     Ok(slot as u32)
 }
 
+/// A table cell under a slot chosen by the sheet engine (a copied table cell).
+pub fn insert_table_cell(conn: &Connection, slot: u32, formula: &str) -> Result<()> {
+    conn.execute("INSERT INTO _rf_table_cells (slot, formula) VALUES (?, ?)", duckdb::params![slot as i32, formula])?;
+    Ok(())
+}
+
 pub fn set_table_cell_formula(conn: &Connection, slot: u32, formula: &str) -> Result<()> {
     conn.execute("UPDATE _rf_table_cells SET formula = ? WHERE slot = ?", duckdb::params![formula, slot as i32])?;
     Ok(())
