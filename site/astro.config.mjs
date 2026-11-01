@@ -48,20 +48,40 @@ export default defineConfig({
           label: 'Getting started',
           items: [
             { label: 'Install and first workbook', slug: 'docs/getting-started' },
+            { label: 'Importing and exporting', slug: 'docs/importing-data' },
           ],
         },
         {
-          label: 'Guides',
+          label: 'Spreadsheets',
           items: [
             { label: 'Spreadsheets and formulas', slug: 'docs/spreadsheets' },
+            { label: 'Table formulas', slug: 'docs/table-formulas' },
+            { label: 'Your own functions', slug: 'docs/functions' },
+          ],
+        },
+        {
+          label: 'Data',
+          items: [
             { label: 'Big tables', slug: 'docs/big-tables' },
+            { label: 'Analyze without SQL', slug: 'docs/analyze' },
+            { label: 'The SQL workspace', slug: 'docs/sql-workspace' },
+          ],
+        },
+        {
+          label: 'Running Alephgrid',
+          items: [
             { label: 'Self-hosting', slug: 'docs/self-hosting' },
+            { label: 'Collaboration and teams', slug: 'docs/teams' },
+            { label: 'Operations', slug: 'docs/operations' },
+            { label: 'Agents over MCP', slug: 'docs/agents-mcp' },
           ],
         },
         {
           label: 'Reference',
           items: [
             { label: 'CLI and configuration', slug: 'docs/reference/cli' },
+            { label: 'Formula compatibility', slug: 'docs/reference/formulas' },
+            { label: 'Keyboard shortcuts', slug: 'docs/reference/keyboard' },
             { label: 'File compatibility', slug: 'docs/reference/files' },
             { label: 'Versioning policy', slug: 'docs/reference/versioning' },
           ],

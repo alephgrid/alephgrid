@@ -56,6 +56,8 @@ hold).
 
 ## Next
 
+- [Importing and exporting data](../importing-data/)
 - [Spreadsheets and formulas](../spreadsheets/)
+- [Table formulas](../table-formulas/)
 - [Big tables](../big-tables/)
 - [Self-hosting](../self-hosting/)
