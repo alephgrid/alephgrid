@@ -199,3 +199,18 @@ fn borders_apply_and_round_trip() {
     assert!(s.undo().unwrap());
     assert!(st(&s).border.top.is_none());
 }
+
+/// S.07: hiding and showing sheets; the last visible sheet stays; the link sheet is never listed.
+#[test]
+fn sheets_hide_and_unhide() {
+    let mut s = sheet();
+    assert!(s.hide_sheet(0).is_err(), "the last visible sheet stays");
+    s.create("T").unwrap();
+    s.hide_sheet(0).unwrap();
+    assert_eq!(s.list().iter().map(|x| x.name.clone()).collect::<Vec<_>>(), vec!["T"]);
+    assert_eq!(s.hidden_sheets(), vec!["S".to_string()]);
+    assert!(s.unhide_sheet(crate::sheets::LINK_SHEET).is_err());
+    s.unhide_sheet("S").unwrap();
+    assert_eq!(s.list().len(), 2);
+    assert!(s.hidden_sheets().is_empty());
+}

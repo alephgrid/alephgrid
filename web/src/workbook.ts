@@ -2324,6 +2324,18 @@ export class WorkbookScreen {
         try { const copy = await this.rpc.call("sheet_duplicate", { sheet: s.index }); await this.loadItems(); await this.openSheet(copy.index); }
         catch (e) { toast((e as Error).message, "error"); }
       } },
+      { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
+        try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      { label: "Unhide sheet…", action: async () => {
+        const hidden = await this.rpc.call("hidden_sheets", {});
+        if (!hidden.length) { toast("No sheet is hidden"); return; }
+        const v = await formDialog("Unhide a sheet", [{ name: "name", label: "Sheet", type: "select", options: hidden.map((n) => ({ value: n, label: n })) }], "Unhide");
+        if (!v) return;
+        try { await this.rpc.call("sheet_unhide", { name: v.name }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
       { label: "Tab colour…", action: async () => {
         const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply");
         if (!v) return;

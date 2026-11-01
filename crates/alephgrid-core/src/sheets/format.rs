@@ -265,6 +265,36 @@ impl Sheets {
         Ok(())
     }
 
+    /// Hide a sheet's tab (S.07); the last visible sheet stays. One undo step.
+    pub fn hide_sheet(&mut self, index: u32) -> Result<()> {
+        self.check_index(index)?;
+        if self.list().len() < 2 {
+            bail!("a workbook keeps at least one visible sheet");
+        }
+        let m = self.model_mut()?;
+        m.hide_sheet(index).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
+    /// The names of hidden sheets (Alephgrid's own are not listed).
+    pub fn hidden_sheets(&self) -> Vec<String> {
+        let Ok(m) = self.model() else { return vec![] };
+        m.get_worksheets_properties().into_iter().filter(|p| p.state != "visible" && p.name != super::LINK_SHEET).map(|p| p.name).collect()
+    }
+
+    /// Show a hidden sheet again, by name. One undo step.
+    pub fn unhide_sheet(&mut self, name: &str) -> Result<()> {
+        if name == super::LINK_SHEET || !self.hidden_sheets().iter().any(|n| n == name) {
+            bail!("no hidden sheet {name:?}");
+        }
+        let index = self.model()?.get_worksheets_properties().iter().position(|p| p.name == name).ok_or_else(|| anyhow!("no sheet {name:?}"))? as u32;
+        let m = self.model_mut()?;
+        m.unhide_sheet(index).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
     /// The engine's full style of a cell (for tests of what the engine stores).
     pub fn engine_style(&self, index: u32, row: u32, column: u32) -> Result<ironcalc::base::types::Style> {
         self.model()?.get_cell_style(index, row as i32 + 1, column as i32 + 1).map_err(|e| anyhow!(e))
