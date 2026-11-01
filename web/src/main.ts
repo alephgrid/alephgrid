@@ -1,6 +1,6 @@
 import "./styles.css";
 import "./theme";
-import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog } from "./account";
+import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog, usageDialog } from "./account";
 import { api, isRuntimeFailure, seg, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
 import { formatCount } from "./format";
@@ -11,6 +11,8 @@ import { waitForCompute } from "./compute";
 import { brandMark, icon, type IconName } from "./icons";
 import { themeButton } from "./theme";
 import { agentsDialog } from "./agents";
+import { adminDialog } from "./admin";
+import { spaceSettingsDialog } from "./share";
 
 const app = document.getElementById("app")!;
 let current: WorkbookScreen | null = null;
@@ -266,7 +268,10 @@ function renderHome(): void {
       home.spaces.length ? null : el("p", { class: "nav-empty" }, "You have no spaces yet. Ask an admin to add you to one."),
     ),
     el("nav", { class: "nav nav-bottom", "aria-label": "Trash" }, navItem("trash", "Trash", "trash")),
-    el("div", { class: "sidebar-foot" }, themeButton(), el("span", { class: "muted" }, `v${home.version} · data stays on this server`)),
+    el("div", { class: "sidebar-foot" }, themeButton(),
+      home.me && (home.me.kind === "local" || home.me.instance_admin)
+        ? el("button", { class: "btn btn-ghost btn-small", type: "button", onclick: () => adminDialog() }, "Administration") : null,
+      el("span", { class: "muted" }, `v${home.version} · data stays on this server`)),
   );
 
   const spaceName = (id?: string | null) => home.spaces.find((s) => s.id === id)?.name;
@@ -481,6 +486,12 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       ...(owner ? [{ label: "Service tokens…", action: () => tokensDialog(sp) }] : []));
   }
   if (owner) items.push("sep", { label: "Agent connections…", hint: "MCP, read-only", action: () => agentsDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name }))) });
+  {
+    const admin = home.me?.kind === "local" || home.me?.instance_admin || (home.me?.orgs ?? []).some((o) => o.org.id === sp.org_id && o.role === "admin");
+    items.push({ label: "Settings…", action: () => spaceSettingsDialog(sp, home.me ?? null,
+      home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, size_bytes: w.size_bytes })),
+      { members: () => membersDialog(sp, () => {}), usage: admin && home.me?.kind !== "local" ? () => usageDialog(sp.org_id) : null }) });
+  }
   items.push("sep", { label: "Delete space", danger: true, disabled: !owner, action: async () => {
     const n = home.workbooks.filter((w) => w.space === sp.id).length;
     if (n) {

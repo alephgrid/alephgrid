@@ -63,7 +63,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
 Reproduce with `alephgrid --demo-rows 20000000` and the script in `docs/bench.mjs`.
 
-## Features (v0.1)
+## Features
 
 | | |
 |---|---|
@@ -74,6 +74,11 @@ Reproduce with `alephgrid --demo-rows 20000000` and the script in `docs/bench.mj
 | Views | Multi-column sort, filters (equals, contains, greater than, empty, …) applied to the whole dataset |
 | Analysis | Live sum, avg, count, min and max of the selection; column summary; **SQL workspace** (schema browser, autocomplete, `$parameters`, cancellable previews, complete exports, saved and live queries with versions, refreshable query tables, INSERT/UPDATE/DELETE that keep history); SQL reads the workbook's own tables only |
 | **Sheets** | Excel-style formula grids on [IronCalc](https://github.com/ironcalc/IronCalc): `=SUM`, `XLOOKUP`, cross-sheet references, undo/redo, insert/delete rows and columns with reference shifting. Stored in the same workbook file |
+| Sheet formatting | Bold, italic, underline, strikethrough, font size, text and fill colours, alignment, wrap, borders, number formats (number, percent, currency, date, scientific), merged cells; all kept through XLSX |
+| Sheet layout | Frozen rows and columns, row heights and column widths (drag, set, auto-fit), hide and unhide rows and columns (kept with the workbook and through XLSX); zoom 50–200% (remembered in each browser) |
+| Sheet data | Find and replace (this sheet or all sheets, in values or formulas), sort a range by several columns (formulas move with their rows), range filters that hide rows, colour rules and colour scales, allowed-value lists and number ranges, charts placed on the sheet that follow the cells, comments with replies and resolve that follow their cells. Charts, colour and allowed-value rules and comments stay in the workbook: XLSX files do not get them, and the export says so |
+| Tabs | Add, rename, duplicate, colour, hide and unhide, reorder by drag; references follow |
+| Agents (MCP) | Read-only agent connections per space or workbook: an MCP endpoint (`/mcp`, Streamable HTTP, and stdio through `alephgrid mcp`) with schema cards, catalog search, table and sheet reads, read-only SQL, saved queries and analyses; every result pinned to a content-hashed receipt; activity per connection; see [docs/MCP.md](docs/MCP.md) |
 | Bridges | SQL result → sheet, sheet → columnar table (types sniffed), all sheets → .xlsx |
 | Export | CSV, Parquet or JSON lines for any table or the current filtered and sorted view; .xlsx for sheets. Free |
 | Spaces | Organizations own spaces of workbooks; owner, editor and viewer roles (also for identity-provider groups), invitations, service tokens; star, recent, search, sort by size or date, rename, duplicate, move, delete |
@@ -122,6 +127,7 @@ machine), there is no sign-in and the server only listens on 127.0.0.1.
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
 | `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL allowed; when set, every operation that runs user-written SQL is refused (console, saved queries, tables from queries, SQL formula columns, SQL functions) |
 | `--demo-rows N` | | generate a demo workbook |
+| `alephgrid mcp --url URL --token agc_…` | `ALEPHGRID_URL`, `ALEPHGRID_AGENT_TOKEN` | connect an MCP client over stdio to a running server ([docs/MCP.md](docs/MCP.md)) |
 
 ## Formulas
 
