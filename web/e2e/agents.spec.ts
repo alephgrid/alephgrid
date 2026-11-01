@@ -45,6 +45,18 @@ test("M.07: create an agent connection, see what the agent did, revoke it", asyn
   const q = await call("run_query", { workbook: wb, sql: "SELECT sum(n) AS s FROM t" });
   expect(q.body.result.structuredContent.rows).toEqual([[3]]);
 
+  // M.06: the agent proposes a saved query; nothing is saved until the owner approves.
+  const proposed = await call("propose_saved_query", { workbook: wb, name: "Total n", sql: "SELECT sum(n) AS s FROM t" });
+  expect(proposed.body.result.structuredContent.status).toBe("pending");
+  expect(await ws.call("saved_queries", {})).toEqual([]);
+  await dialog.getByRole("button", { name: "Proposals of Laptop agent" }).click();
+  const proposals = page.getByRole("dialog", { name: "Proposals of “Laptop agent”" });
+  await expect(proposals.getByRole("region", { name: "Proposal Total n" })).toContainText("SELECT sum(n) AS s FROM t");
+  await proposals.getByRole("button", { name: "Approve Total n" }).click();
+  await expect(proposals.getByRole("region", { name: "Proposal Total n" })).toContainText("approved");
+  expect((await ws.call("saved_queries", {})).map((q: { name: string }) => q.name)).toEqual(["Total n"]);
+  await proposals.getByRole("button", { name: "Close" }).click();
+
   // The activity shows the query; revoking ends access.
   await dialog.getByRole("button", { name: "Activity of Laptop agent" }).click();
   const activity = page.getByRole("dialog", { name: "Activity of “Laptop agent”" });

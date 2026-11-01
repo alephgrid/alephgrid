@@ -2,7 +2,7 @@
 
 Alephgrid lets an AI agent read workbooks through the [Model Context Protocol](https://modelcontextprotocol.io).
 Agents use the same services as people, under the same authorization; there is no separate
-execution path. In this release agent access is **read-only**.
+execution path. In this release agents only read; the one change they can ask for, saving a query, waits for a person to approve it.
 
 ## Connect an agent
 
@@ -54,6 +54,7 @@ only the workbooks it needs.
 | `fetch_result` | More rows of a result, by handle |
 | `verify_result` | Recompute a result and compare it with its receipt |
 | `job_status`, `cancel_job` | Requests still running after `wait_seconds` (default 20) |
+| `propose_saved_query`, `proposal_status` | Ask to save a query; it is saved only when a person approves it (Agent connections → Proposals), as their change noted as proposed by the agent. `operation_id` makes retries safe |
 
 Resources: `alephgrid://guide` and `alephgrid://workbooks/{id}` (the schema cards).
 
@@ -81,7 +82,7 @@ the result was issued.
 
 ## Limits and safety
 
-- Connections are read-only (viewer). Changing statements, file access and network access in SQL
+- Connections read as a viewer. The only change an agent can ask for is a saved query, written when a person with edit rights approves it. Changing statements, file access and network access in SQL
   are refused by the server's SQL policy. `--disable-sql` turns `run_query` off.
 - Agent tokens work only at `/mcp`. Session cookies and service tokens are refused there. Pages
   from other sites cannot post to it.

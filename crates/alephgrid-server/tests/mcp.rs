@@ -96,7 +96,10 @@ async fn agents_read_only_their_workbooks_with_pinned_results() {
     for want in ["list_workbooks", "describe_workbook", "search_catalog", "preview_table", "read_sheet", "run_query", "fetch_result", "verify_result", "job_status", "cancel_job"] {
         assert!(names.contains(&want), "{want} missing from {names:?}");
     }
-    assert!(tools["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+    // Every tool only reads, except proposing a change for a person to approve.
+    for t in tools["result"]["tools"].as_array().unwrap() {
+        assert_eq!(t["annotations"]["readOnlyHint"], t["name"] != "propose_saved_query", "{t}");
+    }
 
     // Scope: only the given workbook is listed or readable.
     let list = mcp.tool("list_workbooks", json!({})).await;
@@ -333,5 +336,63 @@ async fn stdio_bridge_forwards_to_the_server() {
     assert_eq!(second["result"]["structuredContent"]["rows"], json!([[311250]]), "{second}");
     drop(stdin);
     let _ = child.wait().await;
+    server.stop().await;
+}
+
+
+/// M.09 gate (local scope): an agent discovers a workbook, analyzes it, and leaves an
+/// inspectable saved query, which a person approves; nothing is written before approval,
+/// retries do not duplicate, and the saved query is in the workbook's history.
+#[tokio::test(flavor = "multi_thread")]
+async fn gate_an_agent_discovers_analyzes_and_saves_with_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let (a, _b, mut mcp) = setup(&server).await;
+    // Discover and analyze.
+    let list = mcp.tool("list_workbooks", json!({})).await;
+    assert_eq!(list["workbooks"][0]["id"], a.as_str());
+    let card = mcp.tool("describe_workbook", json!({ "workbook": a })).await;
+    assert_eq!(card["tables"][0]["name"], "orders");
+    let sql = "SELECT region, sum(amount) AS total FROM orders GROUP BY region ORDER BY region";
+    let q = mcp.tool("run_query", json!({ "workbook": a, "sql": sql })).await;
+    // east: 10 × (0 + 2 + … + 248) = 10 × 15,500; west: 10 × (1 + 3 + … + 249) = 10 × 15,625.
+    assert_eq!(q["rows"], json!([["east", 155000], ["west", 156250]]));
+    // Propose saving it; a retry with the same operation id is the same proposal.
+    let p1 = mcp.tool("propose_saved_query", json!({ "workbook": a, "name": "Sales by region", "sql": sql, "operation_id": "op-1" })).await;
+    let p2 = mcp.tool("propose_saved_query", json!({ "workbook": a, "name": "Sales by region", "sql": sql, "operation_id": "op-1" })).await;
+    assert_eq!(p1["proposal"], p2["proposal"]);
+    assert_eq!(p1["status"], "pending");
+    let pid = p1["proposal"].as_str().unwrap().to_string();
+    // A broken query is refused at once; nothing is written before approval.
+    assert!(!mcp.tool_error("propose_saved_query", json!({ "workbook": a, "name": "Bad", "sql": "SELECT nope FROM orders" })).await.is_empty());
+    let mut ws = server.ws(&a).await;
+    assert_eq!(ws.ok("saved_queries", json!({})).await.as_array().unwrap().len(), 0);
+    // The owner sees and approves it.
+    let (_, conns) = server.get("/api/agents").await;
+    let cid = conns[0]["id"].as_str().unwrap().to_string();
+    let (_, props) = server.get(&format!("/api/agents/{cid}/proposals")).await;
+    assert_eq!(props.as_array().unwrap().len(), 1);
+    assert_eq!(props[0]["payload"]["sql"], sql);
+    let (status, decided) = server.send(reqwest::Method::POST, &format!("/api/agents/{cid}/proposals/{pid}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(status, 200, "{decided}");
+    assert_eq!(decided["status"], "approved");
+    let (status, _) = server.send(reqwest::Method::POST, &format!("/api/agents/{cid}/proposals/{pid}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(status, 409, "approving twice is refused");
+    // It is in the workbook, in its history naming the agent, and runnable by the agent.
+    let saved = ws.ok("saved_queries", json!({})).await;
+    assert_eq!(saved[0]["name"], "Sales by region");
+    assert_eq!(saved[0]["sql"], sql);
+    let history = ws.ok("history", json!({})).await;
+    assert!(history.to_string().contains("save query \\\"Sales by region\\\" proposed by agent \\\"Test agent\\\""), "{history}");
+    let st = mcp.tool("proposal_status", json!({ "proposal": pid })).await;
+    assert_eq!(st["status"], "approved");
+    let again = mcp.tool("run_saved_query", json!({ "workbook": a, "query": "Sales by region" })).await;
+    assert_eq!(again["rows"], q["rows"]);
+    // A rejected proposal writes nothing.
+    let p3 = mcp.tool("propose_saved_query", json!({ "workbook": a, "name": "Count", "sql": "SELECT count(*) FROM orders" })).await;
+    let pid3 = p3["proposal"].as_str().unwrap();
+    let (status, r) = server.send(reqwest::Method::POST, &format!("/api/agents/{cid}/proposals/{pid3}"), Some(json!({ "approve": false }))).await;
+    assert_eq!((status, r["status"].as_str()), (200, Some("rejected")));
+    assert_eq!(ws.ok("saved_queries", json!({})).await.as_array().unwrap().len(), 1);
     server.stop().await;
 }
