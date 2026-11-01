@@ -17,16 +17,41 @@ import { spaceSettingsDialog } from "./share";
 const app = document.getElementById("app")!;
 let current: WorkbookScreen | null = null;
 
-function navigate(path: string): void {
-  history.pushState(null, "", path);
-  route();
+/** U.02: leaving a workbook with changes the server has not acknowledged asks first; they
+ *  are kept and resent while the workbook stays open, and would be lost by leaving. */
+async function mayLeave(): Promise<boolean> {
+  if (!current?.hasUnsaved()) return true;
+  return confirmDialog("Leave with unsaved changes?",
+    "Some changes have not reached the server yet. Stay and they are sent when the connection is back; leave and they are lost.", "Leave anyway");
 }
 
-window.addEventListener("popstate", () => route());
+function navigate(path: string): void {
+  void mayLeave().then((ok) => {
+    if (!ok) return;
+    history.pushState(null, "", path);
+    route();
+  });
+}
+
+let shownPath = location.pathname + location.search;
+window.addEventListener("popstate", () => {
+  if (current?.hasUnsaved()) {
+    // Stay on the workbook (put its address back), then ask.
+    const target = location.pathname + location.search;
+    history.pushState(null, "", shownPath);
+    void mayLeave().then((ok) => { if (ok) { history.pushState(null, "", target); route(); } });
+    return;
+  }
+  route();
+});
+window.addEventListener("beforeunload", (e) => {
+  if (current?.hasUnsaved()) { e.preventDefault(); e.returnValue = ""; }
+});
 
 let config: Awaited<ReturnType<typeof api.config>> | null = null;
 
 async function route(): Promise<void> {
+  shownPath = location.pathname + location.search;
   current?.dispose();
   current = null;
   const m = location.pathname.match(/^\/w\/([A-Za-z0-9_-]+)/);

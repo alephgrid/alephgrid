@@ -514,6 +514,12 @@ export class WorkbookScreen {
   }
 
   /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
+  /** Changes the server has not acknowledged yet (they would be lost by leaving, U.02). */
+  hasUnsaved(): boolean {
+    const st = this.rpc.saveState;
+    return st === "unsaved" || st === "saving";
+  }
+
   dispose(): void {
     this.disposed = true;
     this.closeFunctions?.();

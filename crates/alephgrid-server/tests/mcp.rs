@@ -400,3 +400,29 @@ async fn gate_an_agent_discovers_analyzes_and_saves_with_approval() {
     assert_eq!(ws.ok("saved_queries", json!({})).await.as_array().unwrap().len(), 1);
     server.stop().await;
 }
+
+/// M.T01 restarts: after the server restarts, the connection still works, a result issued
+/// before is still fetched and verified from its stored artifact, and a client that restarts
+/// needs no session to carry on. (Jobs live in the server process and end with it; within one
+/// test process that cannot be shown, so it is stated in docs/MCP.md.)
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_and_results_survive_a_server_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let (a, _b, mut mcp) = setup(&server).await;
+    let q = mcp.tool("run_query", json!({ "workbook": a, "sql": "SELECT id FROM orders WHERE id < 3 ORDER BY id" })).await;
+    let handle = q["handle"].as_str().unwrap().to_string();
+    let token = mcp.token.clone();
+    server.stop().await;
+
+    let server = TestServer::start(dir.path()).await;
+    // A fresh client (no initialize, no session id) carries on with the same token.
+    let mut mcp = Mcp { url: server.url("/mcp"), token, http: reqwest::Client::new(), next: 100 };
+    let page = mcp.tool("fetch_result", json!({ "handle": handle })).await;
+    assert_eq!(page["rows"], json!([[0], [1], [2]]));
+    let v = mcp.tool("verify_result", json!({ "handle": handle })).await;
+    assert_eq!(v["verified"], true, "{v}");
+    let again = mcp.tool("run_query", json!({ "workbook": a, "sql": "SELECT count(*) AS n FROM orders" })).await;
+    assert_eq!(again["rows"], json!([[250]]));
+    server.stop().await;
+}
