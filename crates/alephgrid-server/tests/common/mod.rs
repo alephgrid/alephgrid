@@ -427,6 +427,7 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("edit_comment", json!({ "sheet": 0, "comment": "COMMENT", "text": "Checked" })),
         ("resolve_comment", json!({ "sheet": 0, "comment": "COMMENT", "resolved": true })),
         ("delete_comment", json!({ "sheet": 0, "comment": "COMMENT" })),
+        ("sheet_border", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 2, "columns": 2 }, "kind": "outer", "weight": "thin" })),
         ("sheet_sort", json!({ "sheet": 0, "area": { "row": 40, "column": 20, "rows": 2, "columns": 1 }, "by": [{ "column": 0, "desc": true }] })),
         ("sheet_color", json!({ "sheet": 0, "color": "#2E75B6" })),
         ("sheet_freeze", json!({ "sheet": 0, "columns": 1 })),

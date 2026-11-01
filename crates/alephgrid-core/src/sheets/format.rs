@@ -55,6 +55,10 @@ pub struct CellStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub num_fmt: Option<String>,
+    /// Borders drawn on the cell: any of `t`, `r`, `b`, `l`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub borders: Option<String>,
 }
 
 /// An `#RRGGBB` colour from the engine's colour, if it is a plain RGB one.
@@ -85,6 +89,11 @@ impl CellStyle {
             v: align.map(|a| format!("{:?}", a.vertical).to_lowercase()).filter(|v| v != "bottom" && !v.is_empty()),
             wrap: align.is_some_and(|a| a.wrap_text),
             num_fmt: text(s.num_fmt.clone()),
+            borders: {
+                let b = &s.border;
+                let f: String = [(b.top.is_some(), 't'), (b.right.is_some(), 'r'), (b.bottom.is_some(), 'b'), (b.left.is_some(), 'l')].iter().filter(|x| x.0).map(|x| x.1).collect();
+                (!f.is_empty()).then_some(f)
+            },
         }
     }
 
@@ -233,6 +242,32 @@ impl Sheets {
         m.set_sheet_color(index, &c).map_err(|e| anyhow!(e))?;
         self.record(1);
         Ok(())
+    }
+
+    /// Draw borders on an area (S.01): `kind` is all, outer, inner, top, bottom, left, right
+    /// or none; `weight` thin, medium or thick. One undo step.
+    pub fn set_border(&mut self, index: u32, a: CellArea, kind: &str, weight: &str) -> Result<()> {
+        self.check_index(index)?;
+        a.check("format")?;
+        let kind = match kind {
+            "all" => "All", "outer" => "Outer", "inner" => "Inner", "top" => "Top", "bottom" => "Bottom",
+            "left" => "Left", "right" => "Right", "none" => "None",
+            other => bail!("unknown border {other:?}"),
+        };
+        if !["thin", "medium", "thick"].contains(&weight) {
+            bail!("borders are thin, medium or thick");
+        }
+        let border: ironcalc::base::BorderArea =
+            serde_json::from_value(serde_json::json!({ "item": { "style": weight }, "type": kind })).map_err(|e| anyhow!("border: {e}"))?;
+        let m = self.model_mut()?;
+        m.set_area_with_border(&area(index, &a), &border).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
+    /// The engine's full style of a cell (for tests of what the engine stores).
+    pub fn engine_style(&self, index: u32, row: u32, column: u32) -> Result<ironcalc::base::types::Style> {
+        self.model()?.get_cell_style(index, row as i32 + 1, column as i32 + 1).map_err(|e| anyhow!(e))
     }
 
     /// The engine's stable id of a sheet (kept through renames and moves).

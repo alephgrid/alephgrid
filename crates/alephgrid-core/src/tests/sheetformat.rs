@@ -93,7 +93,7 @@ fn styles_and_formats_survive_an_xlsx_round_trip() {
         Ok(t)
     }).unwrap();
     let st = back.cell_style(0, 0, 0).unwrap();
-    assert_eq!(st, CellStyle { b: true, u: true, s: true, color: Some("#1F4E79".into()), fill: Some("#DDEBF7".into()), size: Some(16), h: Some("right".into()), v: Some("top".into()), wrap: true, num_fmt: Some("0.0".into()), i: false });
+    assert_eq!(st, CellStyle { b: true, u: true, s: true, color: Some("#1F4E79".into()), fill: Some("#DDEBF7".into()), size: Some(16), h: Some("right".into()), v: Some("top".into()), wrap: true, num_fmt: Some("0.0".into()), i: false, borders: None });
     assert_eq!(shown(&back, 0, 0), "3.1");
 }
 
@@ -180,4 +180,22 @@ fn ranges_sort_by_columns() {
     assert_eq!(col(&s, 0), vec!["name", "b", "a", "c", "a"]);
     s.set(0, &[sheet_input(1, 1, "=1+1")]).unwrap();
     assert!(s.sort_range(0, area(0, 0, 5, 2), &[SortBy { column: 1, desc: false }], true).is_err());
+}
+
+/// S.01: borders on an area, one undo step, kept through XLSX.
+#[test]
+fn borders_apply_and_round_trip() {
+    let mut s = sheet();
+    s.set_border(0, area(0, 0, 2, 2), "outer", "thin").unwrap();
+    let st = |s: &Sheets| s.engine_style(0, 0, 0).unwrap();
+    assert!(st(&s).border.top.is_some() && st(&s).border.left.is_some());
+    assert!(s.set_border(0, area(0, 0, 1, 1), "diagonal", "thin").is_err());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("b.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    assert!(st(&t).border.top.is_some());
+    assert!(s.undo().unwrap());
+    assert!(st(&s).border.top.is_none());
 }

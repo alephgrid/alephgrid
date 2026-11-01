@@ -131,6 +131,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("edit_comment", "null"),
     ("resolve_comment", "null"),
     ("delete_comment", "null"),
+    ("sheet_border", "SheetInfo"),
     ("sheet_sort", "SheetInfo"),
     ("sheet_duplicate", "SheetInfo"),
     ("sheet_color", "SheetInfo"),

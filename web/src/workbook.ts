@@ -246,6 +246,7 @@ export class WorkbookScreen {
     current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
     apply: (patch) => this.applyStyle(patch),
     clear: () => this.applyStyle(null),
+    border: (kind) => this.applyBorder(kind),
   }) as HTMLElement & { sync?: () => void };
   private replaceRevision = 0;
   /** Tables made from a query, and the saved queries they may name. */
@@ -2091,6 +2092,18 @@ export class WorkbookScreen {
       this.reportConflict(e);
       if ((e as RpcError).code === "conflict") await this.refreshSheet();
     }
+  }
+
+  /** S.01: borders on the selected cells. */
+  private async applyBorder(kind: string): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try { await this.rpc.call("sheet_border", { sheet, area, kind, weight: "thin", layout }); await this.refreshSheet(); }
+    catch (e) { toast((e as Error).message, "error"); }
   }
 
   /** S.06: sort the selected rows of the sheet by the first selected column. */

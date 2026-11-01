@@ -247,6 +247,8 @@ pub enum Op {
     EditComment { sheet: u32, comment: String, text: String },
     ResolveComment { sheet: u32, comment: String, resolved: bool },
     DeleteComment { sheet: u32, comment: String },
+    /// Borders on an area (S.01): kind all/outer/inner/top/bottom/left/right/none, weight thin/medium/thick.
+    SheetBorder { sheet: u32, area: alephgrid_core::CellArea, kind: String, weight: String, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Sort the rows of a range by columns of it, keeping a header row (S.06).
     SheetSort { sheet: u32, area: alephgrid_core::CellArea, by: Vec<alephgrid_core::SortBy>, #[serde(default)] #[ts(optional, as = "Option<bool>")] header: bool, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Copy a sheet into a new one after it (S.07).
@@ -401,7 +403,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetSort { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -771,6 +773,11 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::EditComment { sheet, comment, text } => { wb.edit_comment(&comment, &text)?; (Value::Null, sheet_changed(sheet)) }
         Op::ResolveComment { sheet, comment, resolved } => { wb.resolve_comment(&comment, resolved)?; (Value::Null, sheet_changed(sheet)) }
         Op::DeleteComment { sheet, comment } => { wb.delete_comment(&comment)?; (Value::Null, sheet_changed(sheet)) }
+        Op::SheetBorder { sheet, area, kind, weight, layout } => {
+            expect_layout(wb, sheet, layout)?;
+            wb.with_sheets(|s| s.set_border(sheet, area, &kind, &weight))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
+        }
         Op::SheetSort { sheet, area, by, header, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.sort_range(sheet, area, &by, header))?;

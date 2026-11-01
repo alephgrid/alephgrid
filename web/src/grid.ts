@@ -815,6 +815,13 @@ export class Grid {
           const cell = sheetCells(r, c);
           const st = this.model.style?.(r, c);
           if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, ROW_H); }
+          if (st?.borders) {
+            ctx.fillStyle = colors.text;
+            if (st.borders.includes("t")) ctx.fillRect(x, y, w, 1);
+            if (st.borders.includes("b")) ctx.fillRect(x, y + ROW_H - 1, w, 1);
+            if (st.borders.includes("l")) ctx.fillRect(x, y, 1, ROW_H);
+            if (st.borders.includes("r")) ctx.fillRect(x + w - 1, y, 1, ROW_H);
+          }
           if (this.model.comment?.(r, c)) {
             ctx.fillStyle = "#D97706";
             ctx.beginPath(); ctx.moveTo(x + w - 7, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + 7); ctx.closePath(); ctx.fill();
