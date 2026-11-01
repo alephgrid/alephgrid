@@ -13,6 +13,8 @@ async function shown(page: Page, r: number, c: number): Promise<string> {
   await page.keyboard.press("ControlOrMeta+Home");
   for (let i = 0; i < r; i++) await page.keyboard.press("ArrowDown");
   for (let i = 0; i < c; i++) await page.keyboard.press("ArrowRight");
+  // The screen-reader cell follows the active cell on the next frame.
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   const id = await page.locator(".grid-host").getAttribute("aria-activedescendant");
   return (await page.locator(`#${id}`).textContent()) ?? "";
 }

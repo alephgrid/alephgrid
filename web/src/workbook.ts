@@ -1230,7 +1230,8 @@ export class WorkbookScreen {
   }
 
   private applyView(info: ViewInfo, reset: boolean): void {
-    if (reset) this.chartsLayer.clear();
+    // Sheet-only layout (row sizes, merges, charts) does not carry over to a table.
+    if (reset) { this.chartsLayer.clear(); this.grid.setRowSizes([]); this.grid.setMerges([]); }
     this.view = info;
     this.cache.viewGeneration = info.generation;
     this.updateToolbar();
@@ -2222,7 +2223,14 @@ export class WorkbookScreen {
   private async chartValues(a: { row: number; column: number; rows: number; columns: number }): Promise<string[][]> {
     if (this.active?.kind !== "sheet") return [];
     const block = await this.rpc.call("sheet_fetch", { sheet: this.active.index, row_start: a.row, row_count: a.rows, column_count: a.column + a.columns });
-    return Array.from({ length: a.rows }, (_, i) => Array.from({ length: a.columns }, (_, j) => block.rows[i]?.[a.column + j]?.[0] ?? ""));
+    // Labels (first row and column) as shown; values as stored, so number formats
+    // ($1,234.50, 12%) do not hide them from the chart. Formulas chart what they show.
+    return Array.from({ length: a.rows }, (_, i) => Array.from({ length: a.columns }, (_, j) => {
+      const cell = block.rows[i]?.[a.column + j];
+      if (!cell) return "";
+      const input = cell[2];
+      return i > 0 && j > 0 && input !== undefined && input !== "" && !input.startsWith("=") && Number.isFinite(Number(input)) ? input : cell[0];
+    }));
   }
 
   /** S.08: zoom the grid; remembered per workbook in this browser. */
@@ -2507,14 +2515,14 @@ export class WorkbookScreen {
   }
 
   /** S.06: filter the selected range by the values of the active cell's column. */
-  private rangeFilterPopup(header: boolean, x: number, y: number): void {
+  private rangeFilterPopup(header: boolean, x: number, y: number, clicked?: number): void {
     if (this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
     const sel = this.grid.selection();
     const prev = this.rangeFilter?.sheet === sheet ? this.rangeFilter : null;
     const area = prev && sel.r0 === sel.r1 && sel.c0 === sel.c1 ? prev.area : { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
     header = prev && area === prev.area ? prev.header : header;
-    const column = Math.min(Math.max(this.grid.active.c, area.column), area.column + area.columns - 1);
+    const column = Math.min(Math.max(clicked ?? this.grid.active.c, area.column), area.column + area.columns - 1);
     const col = this.sheetCols[column];
     const kept = prev && prev.column === column && prev.keep ? [{ column: col.name, op: "in" as const, value: prev.keep.map((k) => (k === "" ? null : k)) as unknown as string }] : [];
     const spec = { table: "", sort: [], filters: kept, hidden: [] } as unknown as ViewSpec;
@@ -2667,7 +2675,7 @@ export class WorkbookScreen {
         { label: "Row height…", action: () => void this.sizeDialog("rows") },
         { label: "Auto-fit row height", action: () => this.grid.autoFitRow(sel.r0) },
         ...(rows > 1 || (this.active?.kind === "sheet" && this.rangeFilter?.sheet === this.active.index) ? [
-          { label: `Filter by column ${columnLetter(this.grid.active.c)}…`, hint: "first row is the header", action: () => this.rangeFilterPopup(true, x, y) },
+          { label: `Filter by column ${columnLetter(this.grid.cellAtPoint(x, y)?.c ?? this.grid.active.c)}…`, hint: "first row is the header", action: () => this.rangeFilterPopup(true, x, y, this.grid.cellAtPoint(x, y)?.c) },
         ] : []),
         "sep",
         { label: "Clear contents", hint: "Delete", action: () => this.grid.clearSelection() },
