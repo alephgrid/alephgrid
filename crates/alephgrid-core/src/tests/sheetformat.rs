@@ -143,3 +143,21 @@ fn frozen_columns_persist_and_undo() {
     assert_eq!(s.info(0).unwrap().frozen_columns, 0);
     assert!(s.freeze_columns(0, 51).is_err());
 }
+
+/// S.07: duplicating a sheet copies its cells and formats; tab colours are kept and undo.
+#[test]
+fn sheets_duplicate_and_take_tab_colours() {
+    let mut s = sheet();
+    s.set_style(0, area(0, 0, 1, 1), &StylePatch { b: Some(true), ..Default::default() }).unwrap();
+    let copy = s.duplicate(0).unwrap();
+    assert_ne!(copy.name, "S");
+    assert_eq!(shown(&s, 0, 0), "3.14159");
+    let b = s.fetch(copy.index, 0, 1, 2).unwrap();
+    assert_eq!(b.rows[0][0].clone().map(|c| c.0).as_deref(), Some("3.14159"));
+    assert!(b.styles.iter().any(|x| x.row == 0 && x.column == 0 && x.style.b));
+    s.set_tab_color(0, "#2e75b6").unwrap();
+    assert_eq!(s.info(0).unwrap().color.as_deref(), Some("#2E75B6"));
+    assert!(s.set_tab_color(0, "blue").is_err());
+    assert!(s.undo().unwrap());
+    assert_eq!(s.info(0).unwrap().color, None);
+}

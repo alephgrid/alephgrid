@@ -48,6 +48,10 @@ pub struct SheetInfo {
     /// Columns kept in view while scrolling sideways (S.05).
     #[serde(default)]
     pub frozen_columns: u32,
+    /// The tab's colour, `#RRGGBB` (S.07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
@@ -406,8 +410,10 @@ impl Sheets {
             .filter(|(_, p)| p.state == "visible")
             .map(|(i, p)| {
                 let (rows, columns) = used_size(m, i as u32);
-                let frozen_columns = m.get_model().workbook.worksheet(i as u32).map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
-                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns }
+                let ws = m.get_model().workbook.worksheet(i as u32).ok();
+                let frozen_columns = ws.map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
+                let color = ws.and_then(|w| format::rgb(&w.color));
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, color }
             })
             .collect()
     }

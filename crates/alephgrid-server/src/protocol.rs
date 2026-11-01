@@ -126,6 +126,8 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_style", "SheetInfo"),
     ("sheet_find", "FindResult"),
     ("sheet_replace", "number"),
+    ("sheet_duplicate", "SheetInfo"),
+    ("sheet_color", "SheetInfo"),
     ("sheet_freeze", "SheetInfo"),
     ("sheet_clear_format", "SheetInfo"),
     ("sheet_paste", "CellArea"),

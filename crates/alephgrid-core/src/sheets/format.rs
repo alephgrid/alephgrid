@@ -58,7 +58,7 @@ pub struct CellStyle {
 }
 
 /// An `#RRGGBB` colour from the engine's colour, if it is a plain RGB one.
-fn rgb(c: &ironcalc::base::types::Color) -> Option<String> {
+pub(crate) fn rgb(c: &ironcalc::base::types::Color) -> Option<String> {
     match c {
         ironcalc::base::types::Color::Rgb(v) => {
             let hex = v.trim_start_matches('#');
@@ -210,6 +210,27 @@ impl Sheets {
         }
         let m = self.model_mut()?;
         m.set_frozen_columns_count(index, columns as i32).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        Ok(())
+    }
+
+    /// Copy a sheet (cells, formats, layout) into a new sheet after it, as one undo step (S.07).
+    pub fn duplicate(&mut self, index: u32) -> Result<super::SheetInfo> {
+        self.check_index(index)?;
+        let before: Vec<String> = self.list().into_iter().map(|s| s.name).collect();
+        let m = self.model_mut()?;
+        m.duplicate_sheet(index).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        self.list().into_iter().find(|s| !before.contains(&s.name)).ok_or_else(|| anyhow!("the copy did not appear"))
+    }
+
+    /// Colour a sheet's tab (`#RRGGBB`, or empty for none), as one undo step (S.07).
+    pub fn set_tab_color(&mut self, index: u32, value: &str) -> Result<()> {
+        self.check_index(index)?;
+        let c = color(value)?;
+        let c = if c.is_empty() { ironcalc::base::types::Color::None } else { ironcalc::base::types::Color::Rgb(c) };
+        let m = self.model_mut()?;
+        m.set_sheet_color(index, &c).map_err(|e| anyhow!(e))?;
         self.record(1);
         Ok(())
     }

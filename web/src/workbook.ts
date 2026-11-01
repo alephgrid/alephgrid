@@ -1063,7 +1063,8 @@ export class WorkbookScreen {
         onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
         onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
-      }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name);
+      }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name,
+        s.color ? el("span", { class: "tab-color", "aria-hidden": "true", style: `background:${s.color}` }) : null);
     });
     const tabsHadFocus = this.tabsEl.contains(document.activeElement);
     this.tabsEl.replaceChildren(...tableTabs, ...sheetTabs);
@@ -2241,6 +2242,17 @@ export class WorkbookScreen {
 
   private sheetTabMenu(s: SheetInfo, x: number, y: number): void {
     showMenu([
+      { label: "Duplicate", action: async () => {
+        try { const copy = await this.rpc.call("sheet_duplicate", { sheet: s.index }); await this.loadItems(); await this.openSheet(copy.index); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      { label: "Tab colour…", action: async () => {
+        const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply");
+        if (!v) return;
+        try { await this.rpc.call("sheet_color", { sheet: s.index, color: v.color.trim() }); await this.loadItems(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      } },
+      "sep",
       { label: "Rename…", action: async () => {
         const v = await formDialog("Rename sheet", [{ name: "name", label: "Name", value: s.name }], "Rename");
         if (!v) return;

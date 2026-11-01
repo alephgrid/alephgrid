@@ -240,6 +240,10 @@ pub enum Op {
     SheetFind { sheet: u32, search: alephgrid_core::SheetSearch, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
     /// Replace in every matching cell of a sheet, as one undo step; replies how many changed.
     SheetReplace { sheet: u32, search: alephgrid_core::SheetSearch, replacement: String },
+    /// Copy a sheet into a new one after it (S.07).
+    SheetDuplicate { sheet: u32 },
+    /// Colour a sheet's tab, `#RRGGBB` or empty (S.07).
+    SheetColor { sheet: u32, color: String },
     /// Freeze the first columns of a sheet (S.05; 0 unfreezes).
     SheetFreeze { sheet: u32, columns: u32 },
     /// Clear every format of an area; values stay.
@@ -388,7 +392,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetDuplicate { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -748,6 +752,14 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetDeleteName { name, scope } => {
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetDuplicate { sheet } => {
+            let info = wb.with_sheets(|s| s.duplicate(sheet))?;
+            (json!(info), Some(Event::Resync { revision: None }))
+        }
+        Op::SheetColor { sheet, color } => {
+            wb.with_sheets(|s| s.set_tab_color(sheet, &color))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetFreeze { sheet, columns } => {
             wb.with_sheets(|s| s.freeze_columns(sheet, columns))?;
