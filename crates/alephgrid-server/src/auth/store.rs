@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS library_versions(
     published_by VARCHAR NOT NULL, published_at BIGINT NOT NULL, PRIMARY KEY(entry_id, version));
 CREATE TABLE IF NOT EXISTS space_members(space_id VARCHAR NOT NULL, kind VARCHAR NOT NULL, principal VARCHAR NOT NULL, role VARCHAR NOT NULL, PRIMARY KEY(space_id, kind, principal));
 CREATE TABLE IF NOT EXISTS sessions(hash VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, via VARCHAR NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_connections(
+    id VARCHAR PRIMARY KEY, hash VARCHAR NOT NULL, name VARCHAR NOT NULL, space_id VARCHAR NOT NULL, workbooks VARCHAR,
+    created_by VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, revoked_at BIGINT, last_used BIGINT);
+CREATE TABLE IF NOT EXISTS agent_activity(
+    connection_id VARCHAR NOT NULL, at_ms BIGINT NOT NULL, tool VARCHAR NOT NULL, workbook VARCHAR, ok BOOLEAN NOT NULL, detail VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS tokens(
     id VARCHAR PRIMARY KEY, hash VARCHAR NOT NULL, name VARCHAR NOT NULL, space_id VARCHAR NOT NULL, role VARCHAR NOT NULL,
     created_by VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, revoked_at BIGINT, last_used BIGINT);
@@ -1000,6 +1005,123 @@ impl Store {
                     outcome: r.get(7)?,
                     detail: serde_json::from_str(&detail).unwrap_or(serde_json::Value::Null),
                 })
+            })?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+}
+
+/// L.04 / M.07: an agent connection: a read-only credential for the MCP endpoint, scoped to
+/// one space and optionally to some of its workbooks. Its secret is shown once.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct AgentConnection {
+    pub id: String,
+    pub name: String,
+    pub space_id: String,
+    /// Workbooks it may read; absent: every workbook of the space.
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workbooks: Option<Vec<String>>,
+    pub created_by: String,
+    pub created_at: u64,
+    pub expires_at: u64,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<u64>,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
+}
+
+/// One tool call of an agent connection (M.07 activity, M.08 inspectable work).
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct AgentActivity {
+    pub at_ms: u64,
+    pub tool: String,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workbook: Option<String>,
+    pub ok: bool,
+    /// What it did: SQL, rows, result handle, or the error.
+    #[ts(type = "Record<string, unknown>")]
+    pub detail: serde_json::Value,
+}
+
+const AGENT_COLS: &str = "id, name, space_id, workbooks, created_by, created_at, expires_at, revoked_at, last_used";
+
+fn agent_row(r: &duckdb::Row) -> duckdb::Result<AgentConnection> {
+    let workbooks: Option<String> = r.get(3)?;
+    Ok(AgentConnection {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        space_id: r.get(2)?,
+        workbooks: workbooks.and_then(|w| serde_json::from_str(&w).ok()),
+        created_by: r.get(4)?,
+        created_at: r.get::<_, i64>(5)? as u64,
+        expires_at: r.get::<_, i64>(6)? as u64,
+        revoked_at: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        last_used: r.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+    })
+}
+
+/// Activity rows kept per connection (oldest dropped).
+pub const AGENT_ACTIVITY_KEPT: i64 = 2_000;
+
+impl Store {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_agent(&self, id: &str, hash: &str, name: &str, space: &str, workbooks: Option<&[String]>, by: &str, expires_at: u64) -> Result<AgentConnection> {
+        let w = workbooks.map(serde_json::to_string).transpose()?;
+        self.txn(|c| {
+            c.execute(
+                "INSERT INTO agent_connections (id, hash, name, space_id, workbooks, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![id, hash, name, space, w, by, super::now_ms() as i64, expires_at as i64],
+            )?;
+            Ok(c.query_row(&format!("SELECT {AGENT_COLS} FROM agent_connections WHERE id = ?"), params![id], agent_row)?)
+        })
+    }
+
+    pub fn agent(&self, id: &str) -> Result<Option<(AgentConnection, String)>> {
+        self.read(|c| {
+            Ok(c.query_row(&format!("SELECT {AGENT_COLS}, hash FROM agent_connections WHERE id = ?"), params![id], |r| Ok((agent_row(r)?, r.get::<_, String>(9)?)))
+                .optional()?)
+        })
+    }
+
+    pub fn agents(&self) -> Result<Vec<AgentConnection>> {
+        self.read(|c| {
+            let mut s = c.prepare(&format!("SELECT {AGENT_COLS} FROM agent_connections ORDER BY created_at DESC"))?;
+            let rows = s.query_map([], agent_row)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn revoke_agent(&self, id: &str) -> Result<()> {
+        self.txn(|c| {
+            c.execute("UPDATE agent_connections SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", params![super::now_ms() as i64, id])?;
+            Ok(())
+        })
+    }
+
+    /// Record one tool call (and that the connection was used).
+    pub fn log_agent(&self, id: &str, tool: &str, workbook: Option<&str>, ok: bool, detail: &serde_json::Value) -> Result<()> {
+        self.txn(|c| {
+            let now = super::now_ms() as i64;
+            c.execute("UPDATE agent_connections SET last_used = ? WHERE id = ?", params![now, id])?;
+            c.execute("INSERT INTO agent_activity VALUES (?, ?, ?, ?, ?, ?)", params![id, now, tool, workbook, ok, detail.to_string()])?;
+            c.execute(
+                "DELETE FROM agent_activity WHERE connection_id = ? AND at_ms < (SELECT min(at_ms) FROM (SELECT at_ms FROM agent_activity WHERE connection_id = ? ORDER BY at_ms DESC LIMIT ?))",
+                params![id, id, AGENT_ACTIVITY_KEPT],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn agent_activity(&self, id: &str, limit: usize) -> Result<Vec<AgentActivity>> {
+        self.read(|c| {
+            let mut s = c.prepare("SELECT at_ms, tool, workbook, ok, detail FROM agent_activity WHERE connection_id = ? ORDER BY at_ms DESC LIMIT ?")?;
+            let rows = s.query_map(params![id, limit as i64], |r| {
+                let detail: String = r.get(4)?;
+                Ok(AgentActivity { at_ms: r.get::<_, i64>(0)? as u64, tool: r.get(1)?, workbook: r.get(2)?, ok: r.get(3)?, detail: serde_json::from_str(&detail).unwrap_or_default() })
             })?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })

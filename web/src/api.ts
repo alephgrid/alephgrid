@@ -1,6 +1,7 @@
 import { RevisionTracker } from "./revisions";
 import type { ComputeProfile, ErrorCode, ProfileChoice, RuntimeRequest, RuntimeStatus } from "./protocol";
 import type {
+  AgentActivity, AgentConnection,
   AuditEvent, AuthMode, ImportProblem, ImportRequest, Imported, Invite, JobStatus, MemberKind, Org, OrgMember, OrgRole, OpName, Params,
   PublicUser, Results, ServerEvent, SheetInfo, Space, SpaceMember, SpaceRole, TableInfo, Token, UploadCreated, UploadPreview,
   WorkbookListing, WorkbookMeta, WorkbookPatch, QuotaLimits, SpaceUsage, LibraryEntry, LibraryKind, SavedQuery, SavedView, WorkbookFunction,
@@ -108,6 +109,11 @@ export const api = {
   createToken: (space: string, name: string, role: SpaceRole, days: number) =>
     http<{ token: Token; secret: string }>("POST", `/api/spaces/${seg(space)}/tokens`, { name, role, days }),
   revokeToken: (space: string, token: string) => http<void>("DELETE", `/api/spaces/${seg(space)}/tokens/${seg(token)}`),
+  agents: () => http<AgentConnection[]>("GET", "/api/agents"),
+  createAgent: (name: string, space: string, workbooks: string[] | null, days: number) =>
+    http<{ connection: AgentConnection; secret: string }>("POST", "/api/agents", { name, space, days, ...(workbooks ? { workbooks } : {}) }),
+  revokeAgent: (id: string) => http<void>("DELETE", `/api/agents/${seg(id)}`),
+  agentActivity: (id: string) => http<AgentActivity[]>("GET", `/api/agents/${seg(id)}/activity`),
   orgMembers: (org: string) => http<OrgMember[]>("GET", `/api/orgs/${seg(org)}/members`),
   setOrgRole: (org: string, user: string, role: OrgRole) => http<void>("PATCH", `/api/orgs/${seg(org)}/members/${seg(user)}`, { role }),
   removeOrgMember: (org: string, user: string) => http<void>("DELETE", `/api/orgs/${seg(org)}/members/${seg(user)}`),

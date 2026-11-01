@@ -221,6 +221,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        return mcp_command().await;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "alephgrid=info,tower_http=warn".into()))
         .init();
@@ -475,4 +478,22 @@ fn python_runtime_command() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `alephgrid mcp [--url URL] [--token TOKEN]`: MCP over stdio for local agent clients.
+#[derive(Parser, Debug)]
+#[command(name = "alephgrid mcp", about = "Connect an MCP client over stdio to a running Alephgrid server (read-only agent connection).")]
+struct McpCli {
+    /// The server's address.
+    #[arg(long, env = "ALEPHGRID_URL", default_value = "http://127.0.0.1:7878")]
+    url: String,
+    /// An agent connection token (agc_…), made under Agent connections.
+    #[arg(long, env = "ALEPHGRID_AGENT_TOKEN", hide_env_values = true)]
+    token: String,
+}
+
+async fn mcp_command() -> Result<()> {
+    let args = std::iter::once("alephgrid mcp".to_string()).chain(std::env::args().skip(2));
+    let cli = McpCli::parse_from(args);
+    alephgrid_server::mcp::stdio_bridge(&cli.url, &cli.token).await
 }

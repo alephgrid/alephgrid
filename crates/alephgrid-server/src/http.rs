@@ -245,6 +245,9 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/admin/backups", post(create_backup).get(list_backups))
         .route("/api/admin/backups/{name}", axum::routing::delete(delete_backup))
         .route("/api/admin/audit", get(crate::auth::routes::instance_audit))
+        .route("/api/agents", get(crate::mcp::list).post(crate::mcp::create))
+        .route("/api/agents/{id}", axum::routing::delete(crate::mcp::revoke))
+        .route("/api/agents/{id}/activity", get(crate::mcp::activity))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
@@ -257,7 +260,9 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/auth/oidc/start", get(crate::auth::routes::oidc_start))
         .route("/api/auth/oidc/callback", get(crate::auth::routes::oidc_callback))
         .route("/api/invites/lookup", post(crate::auth::routes::lookup_invite))
-        .route("/api/invites/accept", post(crate::auth::routes::accept_invite));
+        .route("/api/invites/accept", post(crate::auth::routes::accept_invite))
+        // L.04: agents authenticate with their own connection token, in every auth mode.
+        .route("/mcp", post(crate::mcp::post).get(crate::mcp::get).delete(crate::mcp::delete));
 
     let app = public.merge(api);
     let app = match web_dir {
