@@ -20,8 +20,8 @@ const url = (p: string) => `${base}${p}`;
 
     <section class="ag-section" style="padding-top:1rem">
       <div class="ag-container">
-        <div class="ag-grid">
-          <div class="ag-card">
+        <div class="ag-cols">
+          <div class="ag-col">
             <h3>Start here</h3>
             <p>
               Read the <a href="https://github.com/alephgrid/alephgrid/blob/main/CONTRIBUTING.md">contributing guide</a>
@@ -29,7 +29,7 @@ const url = (p: string) => `${base}${p}`;
               then build from source with the <a href={url('/docs/getting-started/')}>getting-started guide</a>.
             </p>
           </div>
-          <div class="ag-card">
+          <div class="ag-col">
             <h3>Find work</h3>
             <p>
               Browse <a href="https://github.com/alephgrid/alephgrid/issues">open issues</a>. Bug
@@ -38,7 +38,7 @@ const url = (p: string) => `${base}${p}`;
               shows what is shipped, partial or not planned.
             </p>
           </div>
-          <div class="ag-card">
+          <div class="ag-col">
             <h3>Quality bar</h3>
             <p>
               Changes come with tests. The test strategy and CI setup are documented in the
@@ -46,7 +46,7 @@ const url = (p: string) => `${base}${p}`;
               <a href="https://github.com/alephgrid/alephgrid/blob/main/docs/CI.md">CI.md</a>).
             </p>
           </div>
-          <div class="ag-card">
+          <div class="ag-col">
             <h3>Security</h3>
             <p>
               Report vulnerabilities privately per

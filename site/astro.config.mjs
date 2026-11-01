@@ -19,7 +19,7 @@ export default defineConfig({
         'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Hundreds of millions of rows, real Excel formulas, SQL when you want it. Runs on your machine; your data never leaves it.',
       logo: {
         light: './src/assets/alephgrid-horizontal-primary.svg',
-        dark: './src/assets/alephgrid-horizontal-white.svg',
+        dark: './src/assets/alephgrid-horizontal-inverse.svg',
         replacesTitle: true,
       },
       favicon: '/favicon.svg',

@@ -2,7 +2,7 @@
 import '../styles/custom.css';
 import { Image } from 'astro:assets';
 import logoLight from '../assets/alephgrid-horizontal-primary.svg';
-import logoDark from '../assets/alephgrid-horizontal-white.svg';
+import logoDark from '../assets/alephgrid-horizontal-inverse.svg';
 
 interface Props {
   title: string;
@@ -19,7 +19,7 @@ const url = (p: string) => `${base}${p}`;
 const ogImage = new URL(url('/opengraph.png'), Astro.site);
 
 const nav = [
-  { href: url('/#features'), label: 'Product' },
+  { href: url('/#product'), label: 'Product' },
   { href: url('/docs/getting-started/'), label: 'Docs' },
   { href: url('/install/'), label: 'Install' },
   { href: url('/releases/'), label: 'Releases' },
@@ -36,7 +36,7 @@ const nav = [
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="icon" href={url('/favicon.svg')} type="image/svg+xml" />
-    <link rel="icon" href={url('/favicon.ico')} sizes="32x32" />
+    <link rel="icon" href={url('/favicon-32.png')} sizes="32x32" />
     <link rel="apple-touch-icon" href={url('/apple-touch-icon.png')} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -64,7 +64,7 @@ const nav = [
         <nav class="ag-nav" aria-label="Main">
           {nav.map((item) => <a href={item.href}>{item.label}</a>)}
           <a href="https://github.com/alephgrid/alephgrid">GitHub</a>
-          <button class="ag-theme-toggle" data-theme-toggle aria-live="polite">Theme: auto</button>
+          <button class="ag-theme-toggle" data-theme-toggle aria-live="polite">theme:auto</button>
         </nav>
       </div>
     </header>
@@ -73,17 +73,19 @@ const nav = [
 
     <footer class="ag-footer">
       <div class="ag-container">
-        <span>Apache-2.0 · © {new Date().getFullYear()} the Alephgrid contributors</span>
-        <nav aria-label="Footer">
-          <a href="https://github.com/alephgrid/alephgrid">Source code</a>
+        <nav class="ag-tabs" aria-label="Footer">
+          <a href="https://github.com/alephgrid/alephgrid">Source</a>
           <a href={url('/docs/getting-started/')}>Docs</a>
           <a href={url('/releases/')}>Releases</a>
           <a href={url('/contribute/')}>Contribute</a>
           <a href={url('/support/')}>Support</a>
-          <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">Report a vulnerability</a>
+          <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">Security</a>
           <a href="https://github.com/alephgrid/alephgrid/blob/main/LICENSE">License</a>
         </nav>
-        <span>No analytics, no trackers. The product and this site keep your data on your machine.</span>
+        <div class="ag-meta">
+          <span>Apache-2.0 · © {new Date().getFullYear()} the Alephgrid contributors</span>
+          <span>No analytics, no trackers. Your data stays on your machine — so does your visit.</span>
+        </div>
       </div>
     </footer>
 
@@ -101,7 +103,7 @@ const nav = [
           const dark = matchMedia('(prefers-color-scheme: dark)').matches;
           const resolved = t === 'auto' ? (dark ? 'dark' : 'light') : t;
           document.documentElement.dataset.theme = resolved;
-          if (toggle) toggle.textContent = 'Theme: ' + t;
+          if (toggle) toggle.textContent = 'theme:' + t;
           if (logoL && logoD) {
             logoL.style.display = resolved === 'dark' ? 'none' : '';
             logoD.style.display = resolved === 'dark' ? '' : 'none';
@@ -121,11 +123,11 @@ const nav = [
             if (!pre) return;
             try {
               await navigator.clipboard.writeText(pre.innerText);
-              btn.textContent = 'Copied';
+              btn.textContent = 'copied';
             } catch {
-              btn.textContent = 'Select and copy manually';
+              btn.textContent = 'select + copy manually';
             }
-            setTimeout(() => (btn.textContent = 'Copy'), 2000);
+            setTimeout(() => (btn.textContent = 'copy'), 2000);
           });
         });
       })();
