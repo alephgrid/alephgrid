@@ -13,3 +13,7 @@ web/playwright-report
 
 # Agent worktrees created inside the checkout
 .claude/worktrees/
+
+# Private keys and credentials never belong in the repository
+*.pem
+*.key
