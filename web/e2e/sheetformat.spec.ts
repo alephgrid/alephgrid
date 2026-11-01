@@ -178,3 +178,30 @@ test("S.08: zoom scales the grid, keeps clicks on the right cell, and is remembe
   await expect(page.getByRole("menuitem", { name: /^Zoom in/ })).toContainText("150%");
   ws.close();
 });
+
+test("S.09: a chart of a selected range follows the cells", async ({ page }) => {
+  const wb = await server.createWorkbook("Range chart"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [
+    { row: 0, column: 0, value: "region" }, { row: 0, column: 1, value: "sales" },
+    { row: 1, column: 0, value: "East" }, { row: 1, column: 1, value: "50" },
+    { row: 2, column: 0, value: "West" }, { row: 2, column: 1, value: "125" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("region");
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: "Chart from selection" }).click();
+  const chart = page.getByRole("region", { name: "Range chart" });
+  await expect(chart.getByRole("img")).toBeVisible();
+  const values = chart.getByRole("table", { name: "Chart values" });
+  await expect(values).toContainText("West125");
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 2, column: 1, value: "200" }] });
+  await expect(values).toContainText("West200");
+  ws.close();
+});

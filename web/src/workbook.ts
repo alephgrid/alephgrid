@@ -32,6 +32,7 @@ import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
+import { renderChart, type ChartType } from "./charts";
 import type { CellComment } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
@@ -241,6 +242,8 @@ export class WorkbookScreen {
   /** S.11: comments of the open sheet (cell keys) and the comments pane. */
   private commentCells = new Set<string>();
   private commentsPane: CommentsPane | null = null;
+  /** S.09: the open range chart, redrawn when the sheet changes. */
+  private rangeChart: { close: () => void; draw: () => void } | null = null;
   /** S.01: the sheet format toolbar (hidden for tables). */
   private formatBarEl = formatBar({
     current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
@@ -274,7 +277,7 @@ export class WorkbookScreen {
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
-    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) this.formatBarEl.sync?.(); }, onError);
+    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) { this.formatBarEl.sync?.(); this.rangeChart?.draw(); } }, onError);
     const self = this;
     this.grid = new Grid(
       {
@@ -2124,6 +2127,32 @@ export class WorkbookScreen {
     catch (e) { toast((e as Error).message, "error"); }
   }
 
+  /** S.09: a chart of the selected range, docked under the grid and redrawn as the cells
+   *  change. The first column gives the categories, the first row the series names. */
+  private chartFromSelection(): void {
+    if (this.active?.kind !== "sheet") return;
+    const sel = this.grid.selection();
+    const sheet = this.active.index;
+    const kind = el("select", { "aria-label": "Chart type" }, ...["column", "bar", "line", "area", "scatter", "pie"].map((k) => el("option", { value: k }, k))) as HTMLSelectElement;
+    const box = el("div", { class: "chart-box" });
+    const draw = () => {
+      if (this.active?.kind !== "sheet" || this.active.index !== sheet) return;
+      const text = (r: number, c: number) => this.sheetCache.cell(r, c)?.[0] ?? "";
+      const series = [];
+      for (let c = sel.c0 + 1; c <= sel.c1; c++) {
+        series.push({ name: text(sel.r0, c) || `Column ${c - sel.c0}`, values: Array.from({ length: sel.r1 - sel.r0 }, (_, i) => { const v = Number(text(sel.r0 + 1 + i, c).replace(/,/g, "")); return text(sel.r0 + 1 + i, c) === "" || Number.isNaN(v) ? null : v; }) });
+      }
+      const labels = Array.from({ length: sel.r1 - sel.r0 }, (_, i) => text(sel.r0 + 1 + i, sel.c0));
+      renderChart(box, { labels, series, title: "Chart of the selection" }, kind.value as ChartType);
+    };
+    kind.addEventListener("change", draw);
+    const panel = el("section", { class: "analyze-results", "aria-label": "Range chart" }, el("h2", {}, "Chart"), el("label", { class: "analyze-field" }, el("span", {}, "Type"), kind), box);
+    this.rangeChart?.close();
+    const handle = dockPanel(this.mainEl, panel, "Chart", () => { this.rangeChart = null; });
+    this.rangeChart = { close: handle.close, draw };
+    draw();
+  }
+
   /** S.08: zoom the grid; remembered per workbook in this browser. */
   private setZoom(z: number): void {
     this.grid.setZoom(z);
@@ -2286,6 +2315,7 @@ export class WorkbookScreen {
           { label: `Sort below the header row by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, true) },
           "sep" as const,
         ] : []),
+        ...(rows > 1 ? [{ label: "Chart from selection", action: () => this.chartFromSelection() }] : []),
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
         "sep",
