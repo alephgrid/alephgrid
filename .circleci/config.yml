@@ -98,7 +98,32 @@ jobs:
           paths:
             - web/dist
 
-  rust:
+  # Compiles everything once: the server binary for the browser tests, and the test and clippy
+  # artifacts kept in the cargo cache for the jobs that follow.
+  rust-build:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: always
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          name: Server binary and the tests (DuckDB compiles here on a cold cache)
+          command: |
+            cargo build -p alephgrid-server --locked
+            cargo test --workspace --locked --no-run
+          no_output_timeout: 40m
+      - rust-save
+      - persist_to_workspace:
+          root: .
+          paths:
+            - target/debug/alephgrid
+
+  rust-test:
     executor: vm
     environment:
       CARGO_INCREMENTAL: "0"
@@ -117,29 +142,28 @@ jobs:
             sudo mount -t tmpfs -o size=64m tmpfs /mnt/rfsmall
             sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
       - run:
-          name: Build the tests (DuckDB compiles here on a cold cache)
-          command: cargo test --workspace --locked --no-run
-          no_output_timeout: 40m
-      # Saved before the tests run, so a failing test does not throw the build away.
-      - rust-save
-      - run:
           name: Tests (includes the protocol drift check)
-          command: cargo test --workspace --locked
+          command: cargo test --workspace --locked --no-fail-fast
           no_output_timeout: 40m
           environment:
             PROPTEST_CASES: "96"
             ALEPHGRID_SMALL_FS: /mnt/rfsmall
+
+  clippy:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: always
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
       - run:
           name: Clippy
           command: cargo clippy --workspace --all-targets --locked -- -D warnings
           no_output_timeout: 40m
-      - run:
-          name: Server binary for the browser tests
-          command: cargo build -p alephgrid-server --locked
-      - persist_to_workspace:
-          root: .
-          paths:
-            - target/debug/alephgrid
 
   e2e:
     executor: vm
@@ -207,24 +231,32 @@ workflows:
         - not: << pipeline.parameters.run_full >>
     jobs:
       - web
-      - rust:
+      - rust-build:
           requires: [web]
+      - rust-test:
+          requires: [rust-build]
+      - clippy:
+          requires: [rust-build]
       - e2e:
           name: e2e-chromium
           browser: chromium
-          requires: [rust]
+          requires: [rust-build]
 
   full:
     when: << pipeline.parameters.run_full >>
     jobs:
       - web
-      - rust:
+      - rust-build:
           requires: [web]
+      - rust-test:
+          requires: [rust-build]
+      - clippy:
+          requires: [rust-build]
       - e2e:
           name: e2e-<< matrix.browser >>
           matrix:
             parameters:
               browser: [chromium, firefox, webkit]
-          requires: [rust]
+          requires: [rust-build]
       - long-runs:
           requires: [web]
