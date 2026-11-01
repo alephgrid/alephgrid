@@ -1080,6 +1080,17 @@ export class WorkbookScreen {
         onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
         onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
+        // S.07: drag a sheet tab onto another to move it there.
+        draggable: "true",
+        ondragstart: (e: DragEvent) => { e.dataTransfer?.setData("application/x-alephgrid-sheet", String(s.index)); },
+        ondragover: (e: DragEvent) => { if (e.dataTransfer?.types.includes("application/x-alephgrid-sheet")) e.preventDefault(); },
+        ondrop: async (e: DragEvent) => {
+          const from = Number(e.dataTransfer?.getData("application/x-alephgrid-sheet"));
+          if (!Number.isInteger(from) || from === s.index) return;
+          e.preventDefault();
+          try { await this.rpc.call("sheet_reorder", { sheet: from, to: s.index }); await this.loadItems(); }
+          catch (err) { toast((err as Error).message, "error"); }
+        },
       }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name,
         s.color ? el("span", { class: "tab-color", "aria-hidden": "true", style: `background:${s.color}` }) : null);
     });
