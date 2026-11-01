@@ -137,6 +137,8 @@ pub struct Controller {
     pub drain_grace: Duration,
     /// Where worker (Python) functions run (phase 8).
     pub function_runtime: Option<Arc<dyn alephgrid_core::external::FunctionRuntime>>,
+    /// Disk kept back for a full disk (3.T03); given back when a record cannot be written.
+    pub disk_reserve: Arc<crate::reserve::DiskReserve>,
 }
 
 fn new_id(prefix: &str) -> String {
@@ -181,6 +183,7 @@ impl Controller {
             hook,
             drain_grace: Duration::from_secs(30),
             function_runtime: None,
+            disk_reserve: crate::reserve::DiskReserve::disabled(),
         })
     }
 
@@ -201,8 +204,15 @@ impl Controller {
     }
 
     fn persist(&self, record: &RuntimeAllocation) -> std::result::Result<(), RuntimeFailure> {
-        super::write_durably(&self.record_path(&record.workbook), &serde_json::to_vec_pretty(record).unwrap())
-            .map_err(|e| RuntimeFailure::new(FailureKind::StartupFailed, format!("could not record the allocation: {e:#}")))
+        let path = self.record_path(&record.workbook);
+        let bytes = serde_json::to_vec_pretty(record).unwrap();
+        let mut written = super::write_durably(&path, &bytes);
+        // A full disk: give the reserve back and try once more, so records (and so starts,
+        // stops and restarts) keep working while an administrator frees space.
+        if written.as_ref().is_err_and(crate::reserve::is_disk_full) && self.disk_reserve.release() {
+            written = super::write_durably(&path, &bytes);
+        }
+        written.map_err(|e| RuntimeFailure::new(FailureKind::StartupFailed, format!("could not record the allocation: {e:#}")))
     }
 
     /// After a restart, no allocation of the previous process is live. Mark their records
@@ -988,6 +998,9 @@ impl Controller {
             upload_bytes: ledger.uploads(),
             upload_budget: self.budget.upload_bytes(),
             workbook_size_limit: None,
+            disk_free_bytes: crate::backup::free_bytes(&self.data),
+            disk_reserve_bytes: self.disk_reserve.bytes(),
+            disk_reserve_held: self.disk_reserve.held(),
         }
     }
 

@@ -33,6 +33,8 @@ impl TestServer {
         config.memory_budget = Some(1 << 30);
         config.threads = Some(2);
         config.temp_budget = Some(4 << 30);
+        // No disk reserve unless a test asks: most tests would only spend time writing it.
+        config.disk_reserve = 0;
         // Tests take backups back to back.
         config.backup_interval = std::time::Duration::ZERO;
         configure(&mut config);

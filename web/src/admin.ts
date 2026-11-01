@@ -46,6 +46,11 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
         el("dt", {}, "Threads"), el("dd", {}, String(r.budget.threads)),
         el("dt", {}, "Temporary disk"), el("dd", {}, bytes(r.budget.temp_disk_bytes)),
         el("dt", {}, "Workbook size limit"), el("dd", {}, r.workbook_size_limit ? bytes(r.workbook_size_limit) : "none"),
+        el("dt", {}, "Free disk"), el("dd", {}, r.disk_free_bytes == null ? "unknown" : bytes(r.disk_free_bytes)),
+        el("dt", {}, "Disk reserve"), el("dd", { class: r.disk_reserve_bytes && !r.disk_reserve_held ? "admin-warning" : "" },
+          !r.disk_reserve_bytes ? "off"
+            : r.disk_reserve_held ? `${bytes(r.disk_reserve_bytes)} kept for a full disk`
+            : `released: the disk filled up. Free space; the ${bytes(r.disk_reserve_bytes)} reserve comes back by itself`),
         el("dt", {}, "Open workbooks"), el("dd", {}, String(r.allocations.length))));
       break;
     }

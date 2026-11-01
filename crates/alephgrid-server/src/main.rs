@@ -120,6 +120,12 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_TEMP_BUDGET", value_parser = parse_size, default_value = "64GiB")]
     temp_budget: u64,
 
+    /// Disk kept back so the server can still record state and restart when the disk fills;
+    /// given back the moment a write runs out of space, and recreated once there is room.
+    /// "0" turns it off.
+    #[arg(long, env = "ALEPHGRID_DISK_RESERVE", value_parser = parse_size, default_value = "32MiB")]
+    disk_reserve: u64,
+
     /// Smallest memory share one open workbook may get; below it, idle workbooks are closed
     /// or new ones refused.
     #[arg(long, env = "ALEPHGRID_MIN_WORKBOOK_MEMORY", value_parser = parse_size, default_value = "256MiB")]
@@ -315,6 +321,7 @@ async fn main() -> Result<()> {
     config.memory_budget = cli.memory_budget;
     config.threads = cli.threads;
     config.temp_budget = Some(cli.temp_budget);
+    config.disk_reserve = cli.disk_reserve;
     config.min_workbook_memory = cli.min_workbook_memory;
     config.idle_timeout = Duration::from_secs(cli.idle_timeout);
     config.profiles = cli.profiles.clone();
