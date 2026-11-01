@@ -66,3 +66,13 @@ fn sheet_validation_refuses_bad_inputs() {
     let bad = SheetRules { colors: vec![SheetColorRule { area, condition: "huge".into(), value: String::new(), color: "#000000".into() }], validations: vec![] };
     assert!(t.wb.set_sheet_rules(0, bad).is_err());
 }
+
+/// S.11: adding a comment is a change in the workbook's history.
+#[test]
+fn comments_are_in_the_history() {
+    let mut t = TempWb::new();
+    t.wb.with_sheets(|s| s.create("S").map(|_| ())).unwrap();
+    let before = t.wb.revision().unwrap();
+    t.wb.add_comment(0, 0, 0, "note", None).unwrap();
+    assert!(t.wb.revision().unwrap() > before);
+}
