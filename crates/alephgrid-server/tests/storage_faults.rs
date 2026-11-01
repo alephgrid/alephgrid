@@ -34,7 +34,14 @@ fn is_root() -> bool {
 async fn a_full_disk_fails_the_change_and_keeps_everything_acknowledged() {
     let Some(fs) = small_fs() else { return };
     let dir = tempfile::tempdir_in(&fs).unwrap();
-    let server = TestServer::start_with(dir.path(), |c| c.temp_budget = Some(8 << 20)).await;
+    // A 4 MiB disk reserve (3.T03): given back when the disk fills, so the restart below
+    // can still record its allocations.
+    let server = TestServer::start_with(dir.path(), |c| {
+        c.temp_budget = Some(8 << 20);
+        c.disk_reserve = 4 << 20;
+    })
+    .await;
+    assert!(dir.path().join(".control/reserve").exists(), "the reserve is kept while there is room");
     let wb = server.create_workbook("full").await;
     let mut ws = server.ws(&wb).await;
     ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT i AS n FROM range(1000) r(i)" })).await;
@@ -49,6 +56,7 @@ async fn a_full_disk_fails_the_change_and_keeps_everything_acknowledged() {
         .await
         .unwrap_err();
     eprintln!("disk full error: {err}");
+    assert!(!dir.path().join(".control/reserve").exists(), "the full disk released the reserve");
     let tables: Vec<String> = ws.ok("tables", json!({})).await.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
     assert_eq!(tables, ["t"], "the failed change left nothing");
     let history = ws.ok("history", json!({ "after": 0, "limit": 1000 })).await;
@@ -61,8 +69,9 @@ async fn a_full_disk_fails_the_change_and_keeps_everything_acknowledged() {
     assert!(files_under(&dir.path().join(".uploads")).is_empty());
     ws.close().await;
     server.stop().await;
-    // After a restart the acknowledged state is intact.
-    let server = TestServer::start(dir.path()).await;
+    // After a restart the acknowledged state is intact, though the disk is still nearly full
+    // (the rolled-back table's blocks stay in the file).
+    let server = TestServer::start_with(dir.path(), |c| c.disk_reserve = 4 << 20).await;
     let mut ws = server.ws(&wb).await;
     assert_eq!(ws.hello["revision"], revision);
     let v = ws.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();

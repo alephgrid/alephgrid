@@ -847,6 +847,8 @@ pub struct Config {
     pub threads: Option<usize>,
     /// Temporary disk for spills and staged uploads. Defaults to 64 GiB.
     pub temp_budget: Option<u64>,
+    /// Disk kept back for a full disk (3.T03); 0 turns it off.
+    pub disk_reserve: u64,
     /// Smallest memory share a workbook may run with.
     pub min_workbook_memory: u64,
     /// Close workbooks without meaningful activity (requests, running work) after this long;
@@ -900,6 +902,7 @@ impl Config {
             memory_budget: None,
             threads: None,
             temp_budget: None,
+            disk_reserve: 32 << 20,
             min_workbook_memory: 256 << 20,
             idle_timeout: Duration::from_secs(600),
             profiles: Vec::new(),
@@ -1174,7 +1177,15 @@ impl AppState {
         let mut controller = Controller::with_spec(&config.data_dir, budget, policy, config.stage_hook.clone(), crate::runtime::RuntimeSpec::current().with_python(python_id.as_deref()))?;
         controller.function_runtime = python.clone().map(|p| p as Arc<dyn alephgrid_core::external::FunctionRuntime>);
         controller.drain_grace = config.shutdown_grace;
+        // Before reconciling, which writes records: on a full disk the reserve is given back.
+        controller.disk_reserve = crate::reserve::DiskReserve::new(&control, config.disk_reserve);
         let fixed = controller.reconcile()?;
+        if config.disk_reserve > 0 && !controller.disk_reserve.ensure() {
+            tracing::warn!(
+                "too little free disk to keep the {} MiB reserve for a full disk; it is created once there is room",
+                config.disk_reserve >> 20
+            );
+        }
         if !fixed.is_empty() {
             tracing::info!("marked {} allocation(s) from a previous run as lost", fixed.len());
         }
@@ -1809,6 +1820,7 @@ pub fn start_janitor(state: &Shared) -> tokio::task::JoinHandle<()> {
                     tracing::info!("closed {} idle workbook(s)", evicted.len());
                 }
                 s.controller.expire_views(ttl);
+                s.controller.disk_reserve.ensure();
                 s.controller.refresh_sheet_estimates();
                 s.downloads.expire(DOWNLOAD_TTL);
             })

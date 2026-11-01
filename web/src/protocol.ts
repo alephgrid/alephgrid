@@ -1012,7 +1012,16 @@ export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationU
 /**
  * Largest a workbook's database may grow, if limited (SEC.11).
  */
-workbook_size_limit: number | null, };
+workbook_size_limit: number | null, 
+/**
+ * Free bytes on the data directory's disk, when the platform says.
+ */
+disk_free_bytes: number | null, 
+/**
+ * The disk reserve (3.T03): its size (0 when off) and whether it is held. Not held while
+ * it is on means the disk filled up and the reserve was given back.
+ */
+disk_reserve_bytes: number, disk_reserve_held: boolean, };
 
 export type BackupEntry = { id: string, name: string, 
 /**
