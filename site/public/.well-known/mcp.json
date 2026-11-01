@@ -1,32 +1,45 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "dev.alephgrid/alephgrid",
   "description": "Read-only MCP access to Alephgrid workbooks: schema cards, reads, SQL, saved queries, receipts.",
   "version": "0.1.0",
-  "status": "active",
   "repository": {
     "url": "https://github.com/alephgrid/alephgrid",
     "source": "github"
   },
-  "website_url": "https://alephgrid.dev/docs/agents-mcp/",
+  "websiteUrl": "https://alephgrid.dev/docs/agents-mcp/",
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "{alephgrid_server_origin}/mcp",
+      "url": "https://{alephgrid_host}/mcp",
       "headers": [
         {
           "name": "Authorization",
           "description": "Bearer token for an agent connection, created in Alephgrid under a space or workbook (shown once, prefixed agc_)",
-          "is_required": true,
-          "is_secret": true,
+          "isRequired": true,
+          "isSecret": true,
           "value": "Bearer {agent_token}"
         }
-      ]
+      ],
+      "variables": {
+        "alephgrid_host": {
+          "description": "Hostname of your self-hosted Alephgrid server, e.g. grid.example.com — there is no hosted endpoint at alephgrid.dev",
+          "isRequired": true,
+          "format": "string",
+          "placeholder": "grid.example.com"
+        },
+        "agent_token": {
+          "description": "Agent connection token from your Alephgrid server (Agent connections, shown once, prefixed agc_)",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      }
     }
   ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
-      "notes": "Alephgrid is a self-hosted, open-source spreadsheet (Apache-2.0). There is no hosted endpoint at alephgrid.dev: every Alephgrid server exposes its own Streamable HTTP endpoint at <server origin>/mcp, and ships a stdio bridge: `alephgrid mcp --url <server origin> --token agc_...`. Connections are read-only and scoped to one space or workbook; every result carries a content-hashed receipt. Setup guide: https://alephgrid.dev/docs/agents-mcp/ — machine-readable docs: https://alephgrid.dev/llms.txt",
+      "notes": "Alephgrid is a self-hosted, open-source spreadsheet (Apache-2.0). Every Alephgrid server exposes its own Streamable HTTP endpoint at <server origin>/mcp, and ships a stdio bridge: `alephgrid mcp --url <server origin> --token agc_...`. Connections are read-only and scoped to one space or workbook; every result carries a content-hashed receipt. Setup guide: https://alephgrid.dev/docs/agents-mcp/ — machine-readable docs: https://alephgrid.dev/llms.txt",
       "transports": ["streamable-http", "stdio"],
       "documentation": "https://alephgrid.dev/docs/agents-mcp/",
       "llms_txt": "https://alephgrid.dev/llms.txt"
