@@ -1,0 +1,134 @@
+---
+import '../styles/custom.css';
+import { Image } from 'astro:assets';
+import logoLight from '../assets/alephgrid-horizontal-primary.svg';
+import logoDark from '../assets/alephgrid-horizontal-white.svg';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const {
+  title,
+  description = 'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Runs on your machine; your data never leaves it.',
+} = Astro.props;
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const url = (p: string) => `${base}${p}`;
+const ogImage = new URL(url('/opengraph.png'), Astro.site);
+
+const nav = [
+  { href: url('/#features'), label: 'Product' },
+  { href: url('/docs/getting-started/'), label: 'Docs' },
+  { href: url('/install/'), label: 'Install' },
+  { href: url('/releases/'), label: 'Releases' },
+  { href: url('/blog/'), label: 'Blog' },
+  { href: url('/contribute/'), label: 'Contribute' },
+  { href: url('/support/'), label: 'Support' },
+];
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href={url('/favicon.svg')} type="image/svg+xml" />
+    <link rel="icon" href={url('/favicon.ico')} sizes="32x32" />
+    <link rel="apple-touch-icon" href={url('/apple-touch-icon.png')} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      /* Shares Starlight's theme storage so the choice follows the reader into /docs. */
+      (() => {
+        let t = 'auto';
+        try { t = localStorage.getItem('starlight-theme') || 'auto'; } catch {}
+        const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.dataset.theme =
+          t === 'auto' ? (dark ? 'dark' : 'light') : t;
+      })();
+    </script>
+  </head>
+  <body class="ag-page">
+    <header class="ag-header">
+      <div class="ag-container">
+        <a href={url('/')} aria-label="Alephgrid home">
+          <Image src={logoLight} alt="Alephgrid" class="ag-logo" data-logo="light" />
+          <Image src={logoDark} alt="" class="ag-logo" data-logo="dark" style="display:none" />
+        </a>
+        <nav class="ag-nav" aria-label="Main">
+          {nav.map((item) => <a href={item.href}>{item.label}</a>)}
+          <a href="https://github.com/alephgrid/alephgrid">GitHub</a>
+          <button class="ag-theme-toggle" data-theme-toggle aria-live="polite">Theme: auto</button>
+        </nav>
+      </div>
+    </header>
+
+    <slot />
+
+    <footer class="ag-footer">
+      <div class="ag-container">
+        <span>Apache-2.0 · © {new Date().getFullYear()} the Alephgrid contributors</span>
+        <nav aria-label="Footer">
+          <a href="https://github.com/alephgrid/alephgrid">Source code</a>
+          <a href={url('/docs/getting-started/')}>Docs</a>
+          <a href={url('/releases/')}>Releases</a>
+          <a href={url('/contribute/')}>Contribute</a>
+          <a href={url('/support/')}>Support</a>
+          <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">Report a vulnerability</a>
+          <a href="https://github.com/alephgrid/alephgrid/blob/main/LICENSE">License</a>
+        </nav>
+        <span>No analytics, no trackers. The product and this site keep your data on your machine.</span>
+      </div>
+    </footer>
+
+    <script is:inline>
+      (() => {
+        const KEY = 'starlight-theme';
+        const toggle = document.querySelector('[data-theme-toggle]');
+        const logoL = document.querySelector('[data-logo="light"]');
+        const logoD = document.querySelector('[data-logo="dark"]');
+        const order = ['auto', 'light', 'dark'];
+        const stored = () => {
+          try { return localStorage.getItem(KEY) || 'auto'; } catch { return 'auto'; }
+        };
+        const apply = (t) => {
+          const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+          const resolved = t === 'auto' ? (dark ? 'dark' : 'light') : t;
+          document.documentElement.dataset.theme = resolved;
+          if (toggle) toggle.textContent = 'Theme: ' + t;
+          if (logoL && logoD) {
+            logoL.style.display = resolved === 'dark' ? 'none' : '';
+            logoD.style.display = resolved === 'dark' ? '' : 'none';
+          }
+        };
+        apply(stored());
+        toggle?.addEventListener('click', () => {
+          const next = order[(order.indexOf(stored()) + 1) % order.length];
+          try { localStorage.setItem(KEY, next); } catch {}
+          apply(next);
+        });
+        matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => apply(stored()));
+
+        document.querySelectorAll('[data-copy]').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const pre = btn.closest('.ag-code-wrap')?.querySelector('pre');
+            if (!pre) return;
+            try {
+              await navigator.clipboard.writeText(pre.innerText);
+              btn.textContent = 'Copied';
+            } catch {
+              btn.textContent = 'Select and copy manually';
+            }
+            setTimeout(() => (btn.textContent = 'Copy'), 2000);
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

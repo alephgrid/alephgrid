@@ -1,0 +1,56 @@
+---
+import SiteLayout from '../components/SiteLayout.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const url = (p: string) => `${base}${p}`;
+---
+
+<SiteLayout title="Support Alephgrid" description="How to help keep Alephgrid maintained.">
+  <main>
+    <section class="ag-hero" style="padding-bottom:1rem">
+      <div class="ag-container">
+        <h1>Help keep Alephgrid maintained</h1>
+        <p class="ag-sub">
+          Alephgrid is open source. Contributions fund maintenance, release infrastructure,
+          compatibility testing and documentation. Funding never unlocks features: export,
+          sign-in, teams and everything else stay free for everyone.
+        </p>
+      </div>
+    </section>
+
+    <section class="ag-section" style="padding-top:1rem">
+      <div class="ag-container">
+        <div class="ag-grid">
+          <div class="ag-card">
+            <span class="ag-soon">Being set up</span>
+            <h3>Sponsorship</h3>
+            <p>
+              A GitHub Sponsors profile is being set up; this page will link it once the recipient
+              is verified. Until then, there is deliberately no payment link here — we would
+              rather you wait than guess.
+            </p>
+          </div>
+          <div class="ag-card">
+            <h3>Help without money</h3>
+            <p>
+              Bug reports with reproducible files, documentation fixes, tests and design review
+              are direct contributions to the project's health.
+              <a href={url('/contribute/')}>How to contribute</a>.
+            </p>
+          </div>
+          <div class="ag-card">
+            <h3>Spread it</h3>
+            <p>
+              Star the <a href="https://github.com/alephgrid/alephgrid">repository</a>, show a
+              colleague, or write about a workflow Alephgrid replaced for you.
+            </p>
+          </div>
+        </div>
+        <p class="ag-caption" style="text-align:left; margin-top:1.5rem">
+          When sponsorship goes live, this page will state who receives the funds and publish
+          periodic summaries of how they are used. Contributions are not tax-deductible donations.
+        </p>
+      </div>
+    </section>
+  </main>
+</SiteLayout>

@@ -1,0 +1,158 @@
+---
+import SiteLayout from '../components/SiteLayout.astro';
+import { Image } from 'astro:assets';
+import workbook from '../assets/workbook-light.png';
+import functions from '../assets/functions-light.png';
+import sqlDark from '../assets/sql-dark.png';
+import hub from '../assets/hub-light.png';
+import releases from '../data/releases.json';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const url = (p: string) => `${base}${p}`;
+---
+
+<SiteLayout title="Alephgrid — room for every row">
+  <main>
+    <section class="ag-hero">
+      <div class="ag-container">
+        <span class="ag-badge"><strong>{releases.current.label}</strong> · build from source today</span>
+        <h1>Room for every row.</h1>
+        <p class="ag-sub">
+          An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Hundreds of
+          millions of rows, real Excel formulas, SQL when you want it — on your laptop or your
+          own server. Your data never leaves it.
+        </p>
+        <div class="ag-cta">
+          <a class="ag-button" href={url('/install/')}>Install Alephgrid</a>
+          <a class="ag-button ag-secondary" href="https://github.com/alephgrid/alephgrid">View on GitHub</a>
+        </div>
+        <figure class="ag-shot">
+          <Image
+            src={workbook}
+            alt="A sheet totalling a 20,000-row orders table with SUMIFS, formatted as currency and percentages, with a column chart of revenue by region"
+            widths={[640, 1080, 1600]}
+            sizes="(max-width: 68rem) 100vw, 68rem"
+            loading="eager"
+          />
+        </figure>
+        <p class="ag-caption">
+          A sheet pointing <code>SUMIFS</code> at a 20,000-row table, with formatting, a chart and the fill handle.
+        </p>
+      </div>
+    </section>
+
+    <section class="ag-section" id="features">
+      <div class="ag-container">
+        <h2>Familiar spreadsheet work</h2>
+        <p class="ag-lead">
+          Cells, Excel-syntax formulas, copy and paste with formula translation, fill handle,
+          merged cells, frozen panes, charts, colour rules, comments — and XLSX import and
+          export. Powered by an Excel-compatible engine, so <code>XLOOKUP</code>,
+          <code>SUMIFS</code>, <code>LET</code> and <code>LAMBDA</code> behave the way you expect.
+        </p>
+        <div class="ag-grid">
+          <div class="ag-card">
+            <Image src={functions} alt="The Functions side panel beside a sheet: a MARGIN function's code, its passing test result and the Publish version button" widths={[480, 960]} sizes="(max-width: 640px) 100vw, 33vw" />
+            <h3>Your own functions</h3>
+            <p>Define reusable functions as sheet formulas, SQL expressions or sandboxed Python — with tests, published versions, pinning and rollback.</p>
+          </div>
+          <div class="ag-card">
+            <Image src={sqlDark} alt="Dark theme: a 200,000-row flights table with the SQL workspace docked under the grid, showing a GROUP BY query and its results" widths={[480, 960]} sizes="(max-width: 640px) 100vw, 33vw" />
+            <h3>SQL when you want it</h3>
+            <p>A schema browser, autocomplete and cancellable previews, docked under the grid. It stays closed until you open it, and a server can turn it off.</p>
+          </div>
+          <div class="ag-card">
+            <Image src={hub} alt="The hub: search, three recently opened workbooks and the workbook list with contents, size and compute state" widths={[480, 960]} sizes="(max-width: 640px) 100vw, 33vw" />
+            <h3>The hub</h3>
+            <p>Every workbook, its size and whether its compute is running — with live collaboration, history and revision restore inside each one.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ag-section">
+      <div class="ag-container">
+        <h2>Big tables stay fast</h2>
+        <p class="ag-lead">
+          Opening a workbook reads nothing into memory: the grid asks only for the rows on
+          screen, sorts build a permutation instead of a copy, and calculated columns compute
+          only what you look at. Spreadsheet formulas can read whole tables —
+          <code>=SUMIFS(orders[amount], orders[region], A2)</code> runs as one query, not one
+          lookup per row. Everything runs on a DuckDB file on your machine.
+        </p>
+        <div class="ag-grid">
+          <div class="ag-card">
+            <h3>Import anything tabular</h3>
+            <p>CSV/TSV, Parquet, JSON/JSONL and gzip as tables; XLSX as editable sheets. Drag and drop or CLI, streamed, with types and samples reviewed before commit.</p>
+          </div>
+          <div class="ag-card">
+            <h3>Analyze without SQL</h3>
+            <p>Summaries, pivots, joins, charts and column profiles from the Analyze pane; live sum, average and count of any selection.</p>
+          </div>
+          <div class="ag-card">
+            <h3>Export on your terms</h3>
+            <p>CSV, Parquet or JSON lines for any table or filtered view; XLSX for sheets, with a report of anything XLSX cannot hold.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ag-section">
+      <div class="ag-container">
+        <h2>Quick install</h2>
+        <p class="ag-lead">
+          Alephgrid is pre-release: today you build it from source. Native binaries, package
+          managers and published container images arrive with v0.1.0 — the
+          <a href={url('/releases/')}>releases page</a> tracks exactly what is ready.
+        </p>
+        <div class="ag-code-wrap">
+          <pre class="ag-code">git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
+(cd web &amp;&amp; npm install &amp;&amp; npm run build)
+cargo build --release
+./target/release/alephgrid --demo-rows 10000000</pre>
+          <button class="ag-copy" data-copy>Copy</button>
+        </div>
+        <p class="ag-caption" style="text-align:left">
+          Requires Rust 1.88+ and Node 20+. The first build compiles DuckDB from source and takes
+          several minutes. Full guide: <a href={url('/docs/getting-started/')}>getting started</a>.
+        </p>
+      </div>
+    </section>
+
+    <section class="ag-section">
+      <div class="ag-container">
+        <h2>Run it where your data lives</h2>
+        <div class="ag-grid">
+          <div class="ag-card">
+            <h3>On your computer</h3>
+            <p>One binary with the UI embedded, data in a plain directory, listening on 127.0.0.1 with no sign-in needed. The easiest way to start.</p>
+          </div>
+          <div class="ag-card">
+            <h3>On your server</h3>
+            <p>The same binary with accounts: spaces, owner/editor/viewer roles, password or OpenID Connect sign-in, quotas, audit log and backups.</p>
+          </div>
+          <div class="ag-card">
+            <span class="ag-soon">Planned</span>
+            <h3>Packaged deployments</h3>
+            <p>Published container images and a Helm chart are planned after the first release. Until then, self-hosting builds from source.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="ag-section">
+      <div class="ag-container">
+        <h2>Open development</h2>
+        <p class="ag-lead">
+          Alephgrid is Apache-2.0, developed in the open. There are no seats, tiers or paywalls:
+          export, sign-in, teams and every other feature are free.
+        </p>
+        <div class="ag-cta" style="display:flex;gap:0.8rem;flex-wrap:wrap">
+          <a class="ag-button ag-secondary" href={url('/contribute/')}>Contribute</a>
+          <a class="ag-button ag-secondary" href={url('/releases/')}>Release notes</a>
+          <a class="ag-button ag-secondary" href={url('/support/')}>Help keep Alephgrid maintained</a>
+        </div>
+      </div>
+    </section>
+  </main>
+</SiteLayout>
