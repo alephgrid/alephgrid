@@ -19,6 +19,7 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Paste special: all / formulas / values / formats, transpose | Shipped | F.04d, a menu at the active cell |
 | Fill down / right (Mod+D / Mod+R) | Shipped | F.04 |
 | Fill handle drag: series, counting text, repeated patterns, any direction | Shipped | F.04c, one undo step |
+| Copy, fill or drag a formula that reads a table (`=XLOOKUP(A2, customers[id], …)`) | Shipped | References shift like any formula; `$` parts stay. Pasted onto another sheet, its cell references keep naming the original sheet. A table formula that spills into several cells cannot be copied yet (refused with a message) |
 | Fill a date or weekday series by name (Mon → Tue, Jan → Feb) | Planned | Dates stored as numbers continue as numbers |
 | Move cells to another sheet | Planned | Refused with an explanation |
 | Undo / redo (own last step) | Shipped | [COLLABORATION.md](COLLABORATION.md) |

@@ -1360,6 +1360,28 @@ pub fn rewrite_cells(formula: &str, map: impl Fn(&CellRef) -> Option<Option<Cell
     Ok((!edits.is_empty()).then(|| splice(formula, edits)))
 }
 
+/// Shift relative sheet cell references by `rows` and `columns`, as copying or filling a
+/// formula does; a `$` keeps its part. A reference pushed off the grid becomes `#REF!`.
+/// `None` when nothing changes.
+pub fn shift_cells(formula: &str, rows: i64, columns: i64) -> Result<Option<String>, FormulaError> {
+    use super::parse::{MAX_SHEET_COLUMN, MAX_SHEET_ROW};
+    let edits: Vec<(Span, String)> = references(formula)?.into_iter().filter_map(|r| match r {
+        Reference::Cell { cell, fixed, span } => {
+            let row = if fixed.1 { cell.row as i64 } else { cell.row as i64 + rows };
+            let column = if fixed.0 { cell.column as i64 } else { cell.column as i64 + columns };
+            if row == cell.row as i64 && column == cell.column as i64 {
+                return None;
+            }
+            if row < 1 || column < 1 || row > MAX_SHEET_ROW as i64 || column > MAX_SHEET_COLUMN as i64 {
+                return Some((span, "#REF!".to_string()));
+            }
+            Some((span, CellRef { sheet: cell.sheet, row: row as u32, column: column as u32 }.text(fixed)))
+        }
+        _ => None,
+    }).collect();
+    Ok((!edits.is_empty()).then(|| splice(formula, edits)))
+}
+
 /// Rewrite references to column `old` as `new`, keeping the rest of the formula as typed.
 /// `None` when the formula does not refer to `old`.
 pub fn rename_column(formula: &str, old: &str, new: &str) -> Result<Option<String>, FormulaError> {

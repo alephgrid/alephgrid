@@ -306,3 +306,39 @@ fn named_ranges_feed_dynamic_arrays() {
     t.reopen();
     assert_eq!(cell_text(&t.wb, s, 0, 6).as_deref(), Some("20"));
 }
+
+/// Fill, drag fill and paste copy a table cell as a new table cell whose sheet references
+/// moved with it (`$` parts stay), not as a second pointer to the original's result.
+#[test]
+fn copied_table_cells_read_their_own_rows() {
+    use crate::sheets::{CellArea, FillDirection, PasteMode};
+    let (mut t, r) = report();
+    // Customer ids 1, 2, 1 in A1:A3; B1 looks the first one up, C1 totals West with $A$1.
+    t.wb.set_sheet_cells(r, &[
+        sheet_input(0, 0, "1"), sheet_input(1, 0, "2"), sheet_input(2, 0, "1"),
+        sheet_input(0, 1, "=XLOOKUP(A1, customers[id], customers[name])"),
+        sheet_input(0, 3, "West"),
+        sheet_input(0, 2, "=SUMIFS(orders[amount], orders[region], $D$1)"),
+    ]).unwrap();
+    assert_eq!(value(&t.wb, r, 0, 1), "Ann");
+    // Fill down B1:B3 (Ctrl+D): Ann, Bob, Ann, each reading its own row.
+    t.wb.with_sheets(|s| s.fill(r, CellArea { row: 0, column: 1, rows: 3, columns: 1 }, FillDirection::Down)).unwrap();
+    assert_eq!((value(&t.wb, r, 1, 1), value(&t.wb, r, 2, 1)), ("Bob".into(), "Ann".into()));
+    assert_eq!(t.wb.sheets().cell_detail(r, 2, 1).unwrap().input, "=XLOOKUP(A3, customers[id], customers[name])");
+    // One undo step takes the copies back.
+    t.wb.with_sheets(|s| s.undo()).unwrap();
+    assert_eq!(value(&t.wb, r, 1, 1), "");
+    assert_eq!(value(&t.wb, r, 0, 1), "Ann");
+    // Drag fill C1 down to C3: $D$1 stays, so each is 100 + 25.5.
+    t.wb.with_sheets(|s| s.drag_fill(r, CellArea { row: 0, column: 2, rows: 1, columns: 1 }, CellArea { row: 0, column: 2, rows: 3, columns: 1 })).unwrap();
+    assert_eq!(value(&t.wb, r, 2, 2), "125.5");
+    assert_eq!(t.wb.sheets().cell_detail(r, 2, 2).unwrap().input, "=SUMIFS(orders[amount], orders[region], $D$1)");
+    // Paste B1 at F2: A1 becomes E2 (empty): no match.
+    t.wb.with_sheets(|s| s.paste(r, CellArea { row: 0, column: 1, rows: 1, columns: 1 }, r, (1, 5), PasteMode::All, false)).unwrap();
+    assert_eq!(t.wb.sheets().cell_detail(r, 1, 5).unwrap().input, "=XLOOKUP(E2, customers[id], customers[name])");
+    assert_eq!(value(&t.wb, r, 1, 5), "#N/A");
+    // The copies survive a reopen.
+    t.reopen();
+    assert_eq!(value(&t.wb, r, 2, 2), "125.5");
+    assert_eq!(value(&t.wb, r, 1, 5), "#N/A");
+}
