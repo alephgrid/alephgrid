@@ -623,8 +623,11 @@ async fn heartbeats_alone_do_not_keep_compute_open() {
     let server = TestServer::start_with(dir.path(), |c| c.idle_timeout = Duration::from_millis(400)).await;
     let wb = server.create_workbook("watched").await;
     let mut ws = server.ws(&wb).await;
-    ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT 7 AS x" })).await;
+    // The last real activity cannot come before this request is sent, so this is a lower bound
+    // on it. (Reading the clock after the reply adds its delivery time, unbounded on a loaded
+    // machine.) Had heartbeats counted as activity, the workbook would never close at all.
     let last_op = alephgrid_core::storage::now_ms();
+    ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT 7 AS x" })).await;
     // The connection stays open and pings, and does nothing else.
     let deadline = Instant::now() + Duration::from_secs(20);
     while server.state.controller.handle(&wb).is_some() {
