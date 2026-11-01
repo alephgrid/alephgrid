@@ -514,6 +514,7 @@ fn tools() -> Vec<Value> {
             obj(json!({ "workbook": wb, "sheet": { "type": "string" }, "range": { "type": "string", "description": "A1-style range, e.g. A1:F40" } }), &["workbook", "sheet", "range"])),
         tool("run_query", "Run a read-only SQL query", "DuckDB SQL over the workbook's tables (read-only; up to 10,000 rows kept behind the handle). Long queries return a job id.",
             obj(json!({ "workbook": wb, "sql": { "type": "string" }, "params": { "type": "array", "items": { "type": "object" } }, "wait_seconds": wait }), &["workbook", "sql"])),
+        tool("explain_query", "Explain a query", "The engine's plan for a read-only SQL query, without running it.", obj(json!({ "workbook": wb, "sql": { "type": "string" } }), &["workbook", "sql"])),
         tool("run_saved_query", "Run a saved query", "Run a query saved in the workbook, by name or id.", obj(json!({ "workbook": wb, "query": { "type": "string" }, "wait_seconds": wait }), &["workbook", "query"])),
         tool("run_analysis", "Run a saved analysis", "Run an analysis saved in the workbook (a pivot, summary or join), by name or id.", obj(json!({ "workbook": wb, "analysis": { "type": "string" }, "wait_seconds": wait }), &["workbook", "analysis"])),
         tool("fetch_result", "Fetch result rows", "Rows of a result from its handle, from an offset (at most 500).", obj(json!({ "handle": { "type": "string" }, "offset": { "type": "integer", "minimum": 0 }, "limit": { "type": "integer", "minimum": 1, "maximum": 500 } }), &["handle"])),
@@ -668,6 +669,18 @@ async fn call(state: &Shared, agent: &Agent, name: &str, args: &Value) -> std::r
                 params: serde_json::from_value(args.get("params").cloned().unwrap_or(json!([]))).map_err(|e| tool_err(format!("params: {e}"), "each parameter is {name, type, value}"))?,
             };
             run_job(&s, &a, req, wait_of(args)).await
+        }
+        "explain_query" => {
+            let (wb, sql) = (arg(args, "workbook")?.to_string(), arg(args, "sql")?.to_string());
+            on(Box::new(move |s, a| {
+                if !s.config.allow_sql {
+                    return Err(tool_err("SQL is disabled on this server", "use preview_table, run_saved_query or run_analysis"));
+                }
+                a.workbook(s, &wb)?;
+                let plan = s.get(&wb)?.with_reader(|r| r.explain_query(&sql))?;
+                Ok(json!({ "plan": plan, "note": "The query was not run." }))
+            }))
+            .await
         }
         "run_saved_query" => {
             let (wb, q) = (arg(args, "workbook")?.to_string(), arg(args, "query")?.to_string());

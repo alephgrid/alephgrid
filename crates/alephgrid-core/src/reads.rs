@@ -1225,6 +1225,20 @@ impl Db<'_> {
 
     /// Run a user query in one snapshot: at most `limit` rows (see [`Db::run_preview`]), with
     /// the time it took, the revision it read and the tables it read.
+    /// The engine's plan of a checked user query, as text (M.01). The query is not run.
+    pub fn explain_query(&self, sql: &str) -> Result<String> {
+        let checked = self.check(sql)?;
+        if !checked.params.is_empty() {
+            anyhow::bail!("explain takes a query without $parameters: write their values in");
+        }
+        self.snapshot(|| {
+            let q = self.expand_query(&checked)?;
+            let mut stmt = self.conn.prepare(&format!("EXPLAIN {}", q.sql))?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?.join("\n"))
+        })
+    }
+
     pub fn run_query(&self, sql: &str, params: &[QueryParam], limit: usize) -> Result<QueryResult> {
         let checked = self.check(sql)?;
         sqlpolicy::validate_params(&checked.params, params)?;
