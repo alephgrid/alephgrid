@@ -165,7 +165,7 @@ Start with one clear funding route; adding several payment buttons before a comm
 
 ## 7. Implementation checklist and order
 
-- [x] **W.01 (partial)** Repo (`alephgrid/alephgrid`) and binary naming (`alephgrid`) confirmed. Open: domain, package publisher identity, funding recipient. Record decisions; no guessed IDs.
+- [x] **W.01 (mostly done)** Repo (`alephgrid/alephgrid`), binary naming (`alephgrid`) and domain (**alephgrid.dev**, live 1 Nov 2026 on the Cloudflare Worker; `conduct@alephgrid.dev` routes to the maintainer) confirmed. Open: package publisher identity, funding recipient. Record decisions; no guessed IDs.
 - [ ] **W.02** Audit shipped claims, README prerequisites and documentation gaps against the release; classify platform/channel readiness.
 - [x] **W.03** Done (1 Nov 2026): `site/` Astro + Starlight foundation, brand assets with OFL font license, neutral charcoal dark tokens, routing, static build. Hosting decision (owner, 1 Nov 2026): **Cloudflare Workers static assets** (`site/wrangler.jsonc`), connected to the GitHub repo with build watch paths on `site/**`; application CI stays on CircleCI. Custom domain later via Cloudflare Registrar + `SITE_URL` build variable.
 - [x] **W.04** Done (1 Nov 2026): responsive homepage; install page shows the source channel and explicit Planned states driven by `site/src/data/releases.json`; copy buttons with manual-copy fallback.
