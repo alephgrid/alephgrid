@@ -633,8 +633,10 @@ export class WorkbookScreen {
       tool("target", "Go to", act.goTo, { title: "Go to a cell, range or name (⌘G)" }),
     ];
 
-    const sheetOnly = () => !this.isSheet();
-    const tableOnly = () => this.active?.kind !== "table";
+    // Disabled items say why (U.04a).
+    const sheetOnly = () => !this.isSheet() && "Sheets only";
+    const tableOnly = () => this.active?.kind !== "table" && "Tables only";
+    const sqlOff = !this.allowSql && "SQL is off on this server";
     const menus: [string, () => MenuItem[]][] = [
       ["File", () => [
         { label: "New sheet", action: () => this.createSheet() },
@@ -651,8 +653,8 @@ export class WorkbookScreen {
         "sep",
         { label: "Paste special…", hint: "⇧⌘V", disabled: sheetOnly(), action: () => this.pasteSpecialDialog() },
         { label: "Go to…", hint: "⌘G", disabled: sheetOnly(), action: act.goTo },
-        { label: "Find…", hint: "⌘F", disabled: tableOnly(), action: act.find },
-        { label: "Find and replace…", hint: "⌘⇧H", disabled: tableOnly(), action: act.findReplace },
+        { label: "Find…", hint: "⌘F", disabled: !this.active && "Open a table or sheet first", action: act.find },
+        { label: "Find and replace…", hint: "⌘⇧H", disabled: !this.active && "Open a table or sheet first", action: act.findReplace },
       ]],
       ["View", () => [
         { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
@@ -675,7 +677,7 @@ export class WorkbookScreen {
         { label: "Sheet", hint: "Excel formulas", action: () => this.createSheet() },
         { label: "Column…", disabled: tableOnly(), action: act.addColumn },
         { label: "Named range…", disabled: sheetOnly(), action: act.names },
-        { label: "Table from SQL query…", disabled: !this.allowSql, action: act.sql },
+        { label: "Table from SQL query…", disabled: sqlOff, action: act.sql },
         "sep",
         { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       ]],
@@ -710,7 +712,7 @@ export class WorkbookScreen {
         { label: "Data tools…", disabled: tableOnly(), action: act.dataTools },
       ]],
       ["Tools", () => [
-        { label: "SQL workspace", disabled: !this.allowSql, action: act.sql },
+        { label: "SQL workspace", disabled: sqlOff, action: act.sql },
         { label: "Functions…", action: act.functions },
         { label: "Change history…", action: act.history },
         { label: "Compute and size…", action: act.compute },
@@ -2257,12 +2259,16 @@ export class WorkbookScreen {
     catch (e) { toast((e as Error).message, "error"); }
   }
 
-  /** S.09: place a chart of the selected range on the sheet, kept with the workbook. */
+  /** S.09 / U.04b: preview a chart of the selected range; it is stored with the workbook only
+   *  when the user chooses Create chart, and Cancel or Escape leaves the sheet unchanged. */
   private insertChart(): void {
     if (this.active?.kind !== "sheet") return;
     const sel = this.grid.selection();
     if (sel.r1 - sel.r0 > 1000 || sel.c1 - sel.c0 > 20) { toast("A chart reads at most 1,000 rows and 20 series: select a smaller range", "error"); return; }
-    void this.chartsLayer.add({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 });
+    void this.chartsLayer.draft({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 }).then((created) => {
+      if (created) toast("Chart created", "success");
+      this.grid.focus();
+    });
   }
 
   private async loadSheetCharts(): Promise<void> {
@@ -2757,8 +2763,8 @@ export class WorkbookScreen {
     showMenu([
       { label: "Copy", hint: "⌘C", action: () => this.copy(sel) },
       "sep",
-      { label: "Insert row above", disabled: !identity, action: () => run("insert_rows", { at: r, count: 1 }) },
-      { label: "Insert row below", disabled: !identity, action: () => run("insert_rows", { at: r + 1, count: 1 }) },
+      { label: "Insert row above", disabled: !identity && "Clear the sort and filters to insert rows", action: () => run("insert_rows", { at: r, count: 1 }) },
+      { label: "Insert row below", disabled: !identity && "Clear the sort and filters to insert rows", action: () => run("insert_rows", { at: r + 1, count: 1 }) },
       { label: count > 1 ? `Delete ${formatCount(count)} rows` : "Delete row", danger: true,
         disabled: r >= this.view.row_count, action: () => run("delete_rows", { start: sel.r0, count }) },
     ], x, y);
@@ -2856,7 +2862,7 @@ export class WorkbookScreen {
     showMenu([
       { label: "New sheet", hint: "Excel formulas", action: () => this.createSheet() },
       { label: "Import file…", hint: "CSV · Parquet · JSON · XLSX", action: () => this.fileInput.click() },
-      { label: "From SQL query…", disabled: !this.allowSql, action: () => this.sqlPanel() },
+      { label: "From SQL query…", disabled: !this.allowSql && "SQL is off on this server", action: () => this.sqlPanel() },
       "sep",
       { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       { label: "Demo data: 10M rows", action: () => this.createDemo(10_000_000) },
