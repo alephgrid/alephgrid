@@ -67,7 +67,7 @@ The server keeps a small **disk reserve** (`.control/reserve`, 32 MiB by default
 `--disk-reserve`). When a change runs out of space it is rolled back, and the server deletes the
 reserve at once: a rolled-back change's blocks stay inside the workbook file, so without the
 reserve the disk would stay full and the server could not record state or restart. With it, the
-server keeps working well enough for you to free space. Administration → Server shows the free
+server keeps working well enough for you to free space. Administration → Overview shows the free
 disk and whether the reserve is held; "released" means the disk filled up. The reserve comes back
 by itself once there is room for it and twice as much again.
 
