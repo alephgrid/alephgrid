@@ -81,6 +81,61 @@
   --sl-color-bg-sidebar: #18181b;
 }
 
+/* ---------------- Starlight (docs + blog) refinements ---------------- */
+
+:root {
+  /* calmer type scale than Starlight's default */
+  --sl-text-h1: 2.1rem;
+  --sl-text-h2: 1.5rem;
+  --sl-text-h3: 1.15rem;
+  --sl-text-h4: 1rem;
+  --sl-text-code: 0.85rem;
+  --sl-font-mono: var(--mono, ui-monospace, monospace);
+}
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+h1[data-page-title] {
+  letter-spacing: -0.02em;
+  font-weight: 800;
+}
+.sl-markdown-content h2 {
+  border-top: 1px solid var(--sl-color-gray-5);
+  padding-top: 1.4rem;
+}
+
+/* current page in the sidebar: quiet accent rail, not a filled pill */
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+  background: transparent;
+  color: var(--sl-color-accent, #047857);
+  font-weight: 700;
+  border-radius: 0;
+  border-inline-start: 2px solid var(--sl-color-accent, #047857);
+}
+:root[data-theme='dark'] .sidebar-content a[aria-current='page'],
+:root[data-theme='dark'] .sidebar-content a[aria-current='page']:hover,
+:root[data-theme='dark'] .sidebar-content a[aria-current='page']:focus {
+  color: var(--ag-mint);
+  border-inline-start-color: var(--ag-mint);
+}
+
+/* code frames: hairline border, thin scrollbars */
+.expressive-code .frame {
+  --code-background: var(--sl-color-gray-7, var(--panel));
+  box-shadow: none;
+}
+.expressive-code .frame pre {
+  border: 1px solid var(--sl-color-gray-5);
+  scrollbar-width: thin;
+}
+.expressive-code .frame pre::-webkit-scrollbar { height: 6px; }
+.expressive-code .frame pre::-webkit-scrollbar-thumb {
+  background: var(--sl-color-gray-5);
+  border-radius: 3px;
+}
+
 /* ---------------- landing chrome ---------------- */
 
 .ag-page {

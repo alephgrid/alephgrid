@@ -13,7 +13,7 @@ Requires **Rust 1.88+** and **Node 20+**.
 
 ```bash
 git clone https://github.com/alephgrid/alephgrid && cd alephgrid
-(cd web && npm install && npm run build)       # build the UI (embedded into the binary)
+(cd web && npm install && npm run build)   # build the UI
 cargo build --release
 ./target/release/alephgrid
 ```
@@ -23,8 +23,8 @@ The first build compiles DuckDB from source, which takes several minutes.
 ## Launch
 
 ```bash
-./target/release/alephgrid flights.parquet     # opens http://127.0.0.1:7878 with the file loaded
-./target/release/alephgrid --demo-rows 10000000  # or try it on 10M generated rows
+./target/release/alephgrid flights.parquet   # opens http://127.0.0.1:7878
+./target/release/alephgrid --demo-rows 10000000   # or 10M generated rows
 ```
 
 On your own machine there is no sign-in and the server listens on `127.0.0.1` only. Data lives
