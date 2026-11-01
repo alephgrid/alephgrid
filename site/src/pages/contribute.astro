@@ -1,0 +1,61 @@
+---
+import SiteLayout from '../components/SiteLayout.astro';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const url = (p: string) => `${base}${p}`;
+---
+
+<SiteLayout title="Contribute to Alephgrid" description="Code, docs, tests and design contributions to the open-source Alephgrid spreadsheet.">
+  <main>
+    <section class="ag-hero" style="padding-bottom:1rem">
+      <div class="ag-container">
+        <h1>Contribute</h1>
+        <p class="ag-sub">
+          Alephgrid is Apache-2.0 and developed in the open: a Rust server embedding DuckDB, an
+          Excel-compatible formula engine, and a TypeScript canvas client. Every kind of
+          contribution counts — code, documentation, tests, bug reports and design.
+        </p>
+      </div>
+    </section>
+
+    <section class="ag-section" style="padding-top:1rem">
+      <div class="ag-container">
+        <div class="ag-cols">
+          <div class="ag-col">
+            <h3>Start here</h3>
+            <p>
+              Read the <a href="https://github.com/alephgrid/alephgrid/blob/main/CONTRIBUTING.md">contributing guide</a>
+              and the <a href="https://github.com/alephgrid/alephgrid/blob/main/CODE_OF_CONDUCT.md">code of conduct</a>,
+              then build from source with the <a href={url('/docs/getting-started/')}>getting-started guide</a>.
+            </p>
+          </div>
+          <div class="ag-col">
+            <h3>Find work</h3>
+            <p>
+              Browse <a href="https://github.com/alephgrid/alephgrid/issues">open issues</a>. Bug
+              reports with a reproducible workbook or file are as valuable as fixes. The
+              <a href="https://github.com/alephgrid/alephgrid/blob/main/docs/SPREADSHEET_FEATURES.md">feature inventory</a>
+              shows what is shipped, partial or not planned.
+            </p>
+          </div>
+          <div class="ag-col">
+            <h3>Quality bar</h3>
+            <p>
+              Changes come with tests. The test strategy and CI setup are documented in the
+              repository (<a href="https://github.com/alephgrid/alephgrid/blob/main/docs/TEST_STRATEGY.md">TEST_STRATEGY.md</a>,
+              <a href="https://github.com/alephgrid/alephgrid/blob/main/docs/CI.md">CI.md</a>).
+            </p>
+          </div>
+          <div class="ag-col">
+            <h3>Security</h3>
+            <p>
+              Report vulnerabilities privately per
+              <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">SECURITY.md</a> —
+              never in a public issue.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</SiteLayout>
