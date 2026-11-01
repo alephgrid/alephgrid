@@ -38,7 +38,8 @@ function workbookId(page: Page): string {
 
 test("table journey: import, edit, reject bad input, filter, export, restart, reopen", async ({ page }) => {
   await page.goto(server.url);
-  await expect(page.getByRole("heading", { name: /doesn't fit in a spreadsheet/ })).toBeVisible();
+  // U.03a: an empty hub says what to do in one line and offers sample data.
+  await expect(page.getByRole("region", { name: "Get started" })).toContainText("Open a CSV, Parquet, JSON or Excel file");
 
   // Import through the file picker.
   await page.locator('input[type="file"]').setInputFiles({ name: "people.csv", mimeType: "text/csv", buffer: Buffer.from(CSV) });
@@ -117,12 +118,11 @@ test("sheet journey: formulas, undo, crash, reopen", async ({ page }) => {
   await page.goto(server.url);
   await page.getByRole("button", { name: "New workbook" }).click();
   await page.locator("form.dialog").getByRole("button", { name: "Create" }).click();
-  await expect(page).toHaveURL(/\/w\//);
+  await expect(page).toHaveURL(/\/w\/[^?]+$/);
   const wb = workbookId(page);
 
-  await page.getByRole("button", { name: "New table or sheet" }).click();
-  await page.locator(".menu-item", { hasText: "New sheet" }).click();
-  await expect(page.getByRole("tab", { name: /Sheet/ })).toBeVisible();
+  // U.03b: a new workbook opens straight into a blank sheet.
+  await expect(page.getByRole("tab", { name: /Sheet 1/ })).toHaveAttribute("aria-selected", "true");
 
   await typeInto(page, 0, 0, "2");
   await typeInto(page, 1, 0, "=A1*21");
