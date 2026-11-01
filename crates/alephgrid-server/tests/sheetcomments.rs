@@ -64,3 +64,32 @@ async fn comments_follow_moves_and_undo_of_structural_changes() {
     assert_eq!(anchors(&mut ws).await, vec![a("on A5", 4, 0), a("on B2", 1, 1)]);
     server.stop().await;
 }
+
+/// S.T01: two editors format and lay out the same sheet at once; each change is announced
+/// to the other and both land.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_editors_format_and_lay_out_one_sheet() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("together").await;
+    let mut a = server.ws(&wb).await;
+    let mut b = server.ws(&wb).await;
+    a.ok("sheet_create", json!({ "name": "S" })).await;
+    a.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": "1.5" }, { "row": 0, "column": 1, "value": "x" }] })).await;
+    a.ok("sheet_style", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 1, "columns": 1 }, "style": { "b": true, "num_fmt": "0.00" } })).await;
+    b.ok("sheet_style", json!({ "sheet": 0, "area": { "row": 0, "column": 1, "rows": 1, "columns": 1 }, "style": { "fill": "#FFEB9C" } })).await;
+    a.ok("sheet_resize", json!({ "sheet": 0, "axis": "columns", "start": 0, "count": 1, "size": 150 })).await;
+    b.ok("sheet_set_hidden", json!({ "sheet": 0, "axis": "rows", "start": 5, "count": 2, "hidden": true })).await;
+    // Each sees the other's changes as sheet events.
+    let ev = b.event("sheet_changed").await.expect("B hears of A's change");
+    assert_eq!(ev["sheet"], 0);
+    let block = b.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await;
+    assert_eq!(block["rows"][0][0][0], "1.50", "A's number format is shown to B");
+    let styles = block["styles"].as_array().unwrap();
+    assert!(styles.iter().any(|s| s["column"] == 0 && s["style"]["b"] == true));
+    assert!(styles.iter().any(|s| s["column"] == 1 && s["style"]["fill"] == "#FFEB9C"));
+    let layout = a.ok("sheet_layout", json!({ "sheet": 0 })).await;
+    assert_eq!(layout["columns"], json!([{ "index": 0, "size": 150, "hidden": false }]));
+    assert_eq!(layout["rows"].as_array().unwrap().iter().filter(|r| r["hidden"] == true).count(), 2);
+    server.stop().await;
+}

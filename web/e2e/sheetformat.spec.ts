@@ -250,6 +250,16 @@ test("S.10: a validation rule refuses a value; a colour rule fills matching cell
   const cells = await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 });
   expect(JSON.stringify(cells.rows)).not.toContain("maybe");
   expect((await ws.call("sheet_rules", { sheet: 0 })).colors.length).toBe(1);
+  // S.T02: the colour rule, checked on the drawn grid itself: A1 (10 > 5) is filled
+  // #FFC7CE, A2 (2) is not. Pixels are read just inside each cell's left edge.
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "10" }, { row: 1, column: 0, value: "2" }] });
+  const pixel = (x: number, y: number) => page.evaluate(([px, py]) => {
+    const c = document.querySelector<HTMLCanvasElement>(".grid-canvas")!;
+    const k = c.width / c.getBoundingClientRect().width;
+    return [...c.getContext("2d")!.getImageData(Math.round(px * k), Math.round(py * k), 1, 1).data.slice(0, 3)];
+  }, [x, y]);
+  await expect.poll(() => pixel(54 + 3, 32 + 4)).toEqual([255, 199, 206]);
+  expect(await pixel(54 + 3, 32 + 24 + 4)).not.toEqual([255, 199, 206]);
   // The rules list shows both rules; deleting one removes it from the workbook.
   const menus = page.getByRole("navigation", { name: "Workbook menus" });
   await menus.getByRole("button", { name: "Format", exact: true }).click();

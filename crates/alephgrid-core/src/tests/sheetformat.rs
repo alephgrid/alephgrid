@@ -394,3 +394,44 @@ fn find_and_replace_in_all_sheets() {
     assert_eq!(shown(&s, 0, 0), "red apple");
     assert_eq!(s.fetch(2, 5, 1, 1).unwrap().rows[0][0].clone().unwrap().0, "apple red", "one undo step covers every sheet");
 }
+
+/// The text of one part of an XLSX file.
+fn xlsx_part(path: &std::path::Path, name: &str) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut out = String::new();
+    zip.by_name(name).unwrap().read_to_string(&mut out).unwrap();
+    out
+}
+
+/// S.T01: what the XLSX file says, read from its XML rather than through the sheet engine:
+/// every supported style, the number format, merged cells, sizes, hidden lines and frozen
+/// panes are written as Excel expects them (ECMA-376 element and attribute names).
+#[test]
+fn xlsx_file_carries_styles_and_layout() {
+    use crate::sheets::{Axis, MergeMode};
+    let mut s = sheet();
+    let patch = StylePatch { b: Some(true), i: Some(true), u: Some(true), s: Some(true), color: Some("#1F4E79".into()), fill: Some("#DDEBF7".into()), size: Some(16), h: Some("right".into()), v: Some("top".into()), wrap: Some(true), num_fmt: Some("0.0".into()) };
+    s.set_style(0, area(0, 0, 1, 1), &patch).unwrap();
+    s.set_border(0, area(1, 1, 1, 1), "all", "thin").unwrap();
+    s.merge(0, &area(5, 0, 1, 3), MergeMode::Merge).unwrap();
+    s.resize(0, Axis::Columns, 1, 1, 208).unwrap();
+    s.resize(0, Axis::Rows, 2, 1, 48).unwrap();
+    s.set_hidden(0, Axis::Rows, 3, 1, true).unwrap();
+    s.freeze(0, 1, 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let styles = xlsx_part(&path, "xl/styles.xml");
+    for want in ["<b/>", "<i/>", "<u/>", "<strike/>", "rgb=\"FF1F4E79\"", "rgb=\"FFDDEBF7\"", "<sz val=\"16\"/>", "formatCode=\"0.0\"", "horizontal=\"right\"", "vertical=\"top\"", "wrapText=\"1\"", "style=\"thin\""] {
+        assert!(styles.contains(want), "styles.xml lacks {want}");
+    }
+    let sheet = xlsx_part(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<mergeCell ref=\"A6:C6\"/>"), "merged cells");
+    // Column B is 208 grid pixels = 180 engine pixels = 20 Excel character widths.
+    assert!(sheet.contains("min=\"2\" max=\"2\" width=\"20\""), "column width: {}", &sheet[..sheet.len().min(800)]);
+    // Row 3 is 48 grid pixels = 50 engine pixels = 32 points.
+    assert!(sheet.contains("r=\"3\"") && sheet.contains("ht=\"32\""), "row height");
+    assert!(sheet.contains("hidden=\"1\""), "hidden row");
+    assert!(sheet.contains("xSplit=\"1\"") && sheet.contains("ySplit=\"1\""), "frozen panes");
+}
