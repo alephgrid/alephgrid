@@ -13,3 +13,8 @@ web/playwright-report
 
 # Agent worktrees created inside the checkout
 .claude/worktrees/
+
+# MCP registry publishing scratch (the real key lives in ~/.config/mcp-publisher/)
+/mcp-registry-key.pem
+/*.pem
+/server.json
