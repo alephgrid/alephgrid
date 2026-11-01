@@ -236,6 +236,10 @@ pub enum Op {
     SheetFill { sheet: u32, area: alephgrid_core::CellArea, direction: alephgrid_core::FillDirection, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Format an area (S.01, S.02): only the properties given change; one undo step.
     SheetStyle { sheet: u32, area: alephgrid_core::CellArea, style: alephgrid_core::StylePatch, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    /// Find text in a sheet (S.04), as `find_in_view` does for tables.
+    SheetFind { sheet: u32, search: alephgrid_core::SheetSearch, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
+    /// Replace in every matching cell of a sheet, as one undo step; replies how many changed.
+    SheetReplace { sheet: u32, search: alephgrid_core::SheetSearch, replacement: String },
     /// Clear every format of an area; values stay.
     SheetClearFormat { sheet: u32, area: alephgrid_core::CellArea, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
@@ -364,7 +368,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -382,7 +386,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -395,7 +399,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
     match op {
         Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
-        Analyze { .. } | ColumnValues { .. } | FindInView { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
+        Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
@@ -522,6 +526,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
             json!(r.fetch(view_id, row_start, row_count, column_start, column_count)?)
         }
         Op::Stats { view_id, column, start, end } => json!(r.stats(view_id, &column, start, end)?),
+        Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
         Op::Query { sql, params, limit } => {
@@ -741,6 +746,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetDeleteName { name, scope } => {
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetReplace { sheet, search, replacement } => {
+            let n = wb.with_sheets(|s| s.replace_all(sheet, &search, &replacement))?;
+            (json!(n), sheet_changed(sheet))
         }
         Op::SheetStyle { sheet, area, style, layout } => {
             expect_layout(wb, sheet, layout)?;

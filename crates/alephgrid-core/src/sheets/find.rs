@@ -1,0 +1,135 @@
+//! S.04: find and replace in sheets. Matches are cells whose shown value (or formula, when
+//! asked) contains the text, or equals it with `whole`; found in row then column order.
+//! Replacing writes every changed cell in one edit, so it is one undo step.
+
+use anyhow::{anyhow, bail, Result};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+use super::{SheetInput, Sheets, MAX_BULK_CELLS};
+use crate::{FindHit, FindResult};
+
+/// What to look for in a sheet.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, TS)]
+pub struct SheetSearch {
+    pub text: String,
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub match_case: bool,
+    /// The whole cell must equal the text.
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub whole: bool,
+    /// Look in formulas (the cell's input) instead of shown values.
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub formulas: bool,
+}
+
+impl SheetSearch {
+    fn hits(&self, cell: &str) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        let (c, t) = if self.match_case { (cell.to_string(), self.text.clone()) } else { (cell.to_lowercase(), self.text.to_lowercase()) };
+        if self.whole { c == t } else { c.contains(&t) }
+    }
+}
+
+impl Sheets {
+    /// Every matching cell of a sheet, in row then column order (0-based).
+    fn matches(&self, index: u32, search: &SheetSearch) -> Result<Vec<(u32, u32, String)>> {
+        self.check_index(index)?;
+        let m = self.model()?;
+        let ws = m.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?;
+        let mut out = Vec::new();
+        for (row, col, _) in ws.sheet_data.cells() {
+            let input = m.get_cell_content(index, row, col).unwrap_or_default();
+            let probe = if search.formulas { input.clone() } else { m.get_formatted_cell_value(index, row, col).unwrap_or_default() };
+            if search.hits(&probe) {
+                out.push(((row - 1) as u32, (col - 1) as u32, input));
+            }
+        }
+        out.sort_by_key(|(r, c, _)| (*r, *c));
+        Ok(out)
+    }
+
+    /// Matches of `search` from row `from` on (or, `backwards`, up to it): at most two rows
+    /// of hits, and the total count when `count` is set (as [`FindResult`] for tables).
+    pub fn find(&self, index: u32, search: &SheetSearch, from: u64, backwards: bool, count: bool) -> Result<FindResult> {
+        let all = self.matches(index, search)?;
+        let mut rows: Vec<FindHit> = Vec::new();
+        let ordered: Vec<&(u32, u32, String)> = if backwards {
+            all.iter().rev().filter(|(r, _, _)| (*r as u64) <= from).collect()
+        } else {
+            all.iter().filter(|(r, _, _)| (*r as u64) >= from).collect()
+        };
+        for (r, c, _) in ordered {
+            let row = *r as u64;
+            if rows.last().is_some_and(|h| h.row == row) {
+                rows.last_mut().unwrap().columns.push(*c);
+            } else if rows.len() == 2 {
+                break;
+            } else {
+                rows.push(FindHit { row, columns: vec![*c] });
+            }
+        }
+        for h in &mut rows {
+            h.columns.sort_unstable();
+        }
+        Ok(FindResult { matches: count.then_some(all.len() as u64), hits: rows })
+    }
+
+    /// Replace `search.text` with `replacement` in every matching cell's input (formulas
+    /// included when `search.formulas`), as one undo step. Returns how many cells changed.
+    pub fn replace_all(&mut self, index: u32, search: &SheetSearch, replacement: &str) -> Result<usize> {
+        if search.text.is_empty() {
+            bail!("say what to replace");
+        }
+        let all = self.matches(index, search)?;
+        if all.len() > MAX_BULK_CELLS {
+            bail!(crate::limits::TooLarge(format!("{} cells match; at most {MAX_BULK_CELLS} can be replaced at once", all.len())));
+        }
+        let mut inputs = Vec::new();
+        for (r, c, input) in all {
+            // A formula is changed only when formulas were searched; otherwise its value is.
+            if input.starts_with('=') && !search.formulas {
+                continue;
+            }
+            let next = if search.whole {
+                replacement.to_string()
+            } else if search.match_case {
+                input.replace(&search.text, replacement)
+            } else {
+                replace_any_case(&input, &search.text, replacement)
+            };
+            if next != input {
+                inputs.push(SheetInput { row: r, column: c, value: next, base: None });
+            }
+        }
+        let n = inputs.len();
+        if n > 0 {
+            self.set(index, &inputs)?;
+        }
+        Ok(n)
+    }
+}
+
+/// `text` with every case-insensitive occurrence of `find` replaced.
+fn replace_any_case(text: &str, find: &str, with: &str) -> String {
+    let lower = text.to_lowercase();
+    let needle = find.to_lowercase();
+    if needle.is_empty() || lower.len() != text.len() {
+        // Lowercasing changed byte lengths (rare scripts): fall back to exact replacement.
+        return text.replace(find, with);
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while let Some(p) = lower[i..].find(&needle) {
+        out.push_str(&text[i..i + p]);
+        out.push_str(with);
+        i += p + needle.len();
+    }
+    out.push_str(&text[i..]);
+    out
+}

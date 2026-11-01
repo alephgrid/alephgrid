@@ -16,7 +16,8 @@ export interface FindProvider {
   go(row: number, column: number): void;
   columnName?(c: number): string;
   replace?: {
-    columns(): string[];
+    /** Tables replace in one column; sheets in every matching cell (no column). */
+    columns?(): string[];
     preview(column: string, find: string, replacement: string): Promise<number>;
     apply(): Promise<string>;
     undo(): Promise<string>;
@@ -115,7 +116,9 @@ export class FindBar {
     const show = on && !!r;
     this.replaceRow.hidden = !show;
     this.el.querySelector(".find-main .icon-btn")?.setAttribute("aria-expanded", String(show));
-    if (show && r) {
+    this.column.hidden = !r?.columns;
+    if (show && r && !r.columns) this.count.textContent = "";
+    if (show && r && r.columns) {
       const cols = r.columns();
       this.column.replaceChildren(...cols.map((c) => el("option", { value: c }, c)));
       const a = this.provider!.active();

@@ -2014,6 +2014,29 @@ export class WorkbookScreen {
         },
       };
     }
+    if (this.active?.kind === "sheet") {
+      const sheet = this.active.index;
+      let last = { text: "", matchCase: false };
+      return {
+        label: this.active.name,
+        find: (text, matchCase, from, backwards, count) => {
+          last = { text, matchCase };
+          return this.rpc.call("sheet_find", { sheet, search: { text, match_case: matchCase }, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count });
+        },
+        active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
+        go: (row, c) => this.grid.select({ r: row, c }),
+        replace: {
+          preview: async (_column, find) => (await this.rpc.call("sheet_find", { sheet, search: { text: find, match_case: last.matchCase }, count: true })).matches ?? 0,
+          apply: async () => {
+            const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
+            const n = await this.rpc.call("sheet_replace", { sheet, search: { text: last.text, match_case: last.matchCase }, replacement: input });
+            await this.refreshSheet();
+            return `Replaced in ${formatCount(n)} cells. Undo (⌘Z) takes it back in one step.`;
+          },
+          undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
+        },
+      };
+    }
     return null;
   }
 

@@ -96,3 +96,31 @@ fn styles_and_formats_survive_an_xlsx_round_trip() {
     assert_eq!(st, CellStyle { b: true, u: true, s: true, color: Some("#1F4E79".into()), fill: Some("#DDEBF7".into()), size: Some(16), h: Some("right".into()), v: Some("top".into()), wrap: true, num_fmt: Some("0.0".into()), i: false });
     assert_eq!(shown(&back, 0, 0), "3.1");
 }
+
+/// S.04: find in values or formulas, case and whole-cell options, and replace as one step.
+#[test]
+fn sheet_find_and_replace() {
+    use crate::sheets::SheetSearch;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    s.set(0, &[sheet_input(0, 0, "North"), sheet_input(0, 2, "north pole"), sheet_input(2, 1, "=\"nor\"&\"th\""), sheet_input(3, 0, "south")]).unwrap();
+    let q = |text: &str, match_case: bool, whole: bool, formulas: bool| SheetSearch { text: text.into(), match_case, whole, formulas };
+    let r = s.find(0, &q("north", false, false, false), 0, false, true).unwrap();
+    // Values: A1, C1 and B3's result.
+    assert_eq!(r.matches, Some(3));
+    assert_eq!(r.hits, vec![crate::FindHit { row: 0, columns: vec![0, 2] }, crate::FindHit { row: 2, columns: vec![1] }]);
+    assert_eq!(s.find(0, &q("North", true, false, false), 0, false, true).unwrap().matches, Some(1));
+    assert_eq!(s.find(0, &q("north", false, true, false), 0, false, true).unwrap().matches, Some(2));
+    // In formulas the formula's text is searched instead.
+    assert_eq!(s.find(0, &q("nor\"", false, false, true), 0, false, true).unwrap().matches, Some(1));
+    assert_eq!(s.find(0, &q("north", false, false, false), 1, true, false).unwrap().hits[0].row, 0);
+    // Replace in values: formulas are left alone; one undo step takes it all back.
+    let n = s.replace_all(0, &q("north", false, false, false), "east").unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(shown(&s, 0, 0), "east");
+    assert_eq!(shown(&s, 0, 2), "east pole");
+    assert_eq!(shown(&s, 2, 1), "north");
+    assert!(s.undo().unwrap());
+    assert_eq!(shown(&s, 0, 0), "North");
+    assert_eq!(shown(&s, 0, 2), "north pole");
+}

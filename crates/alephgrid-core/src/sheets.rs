@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod editing;
+mod find;
 mod format;
+pub use find::SheetSearch;
 mod links;
 pub use format::{CellStyle, StyledCell, StylePatch};
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};

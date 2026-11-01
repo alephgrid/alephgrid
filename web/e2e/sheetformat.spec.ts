@@ -93,3 +93,26 @@ test("S.03: the cell menu inserts, deletes, clears and formats", async ({ page }
   await expect.poll(() => shown(page, 0, 0)).toBe("");
   ws.close();
 });
+
+test("S.04: find and replace in a sheet", async ({ page }) => {
+  const wb = await server.createWorkbook("Sheet find"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "north" }, { row: 2, column: 1, value: "North sea" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("north");
+  await page.keyboard.press("ControlOrMeta+f");
+  const bar = page.getByRole("search", { name: "Find in S" });
+  await bar.getByRole("searchbox", { name: "Find" }).fill("north");
+  await expect(bar.getByRole("status")).toHaveText("2 matches");
+  await bar.getByRole("searchbox", { name: "Find" }).press("Enter");
+  await expect(page.locator(".cell-ref")).toContainText("B3");
+  await bar.getByRole("button", { name: "Show replace" }).click();
+  await bar.getByRole("textbox", { name: "Replace with" }).fill("south");
+  await bar.getByRole("button", { name: "Preview" }).click();
+  await bar.getByRole("button", { name: "Replace all" }).click();
+  await expect.poll(() => shown(page, 2, 1)).toBe("south sea");
+  await expect.poll(() => shown(page, 0, 0)).toBe("south");
+  ws.close();
+});
