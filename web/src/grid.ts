@@ -12,6 +12,8 @@ export interface Range { r0: number; c0: number; r1: number; c1: number }
 export interface GridModel {
   rowCount(): number;
   frozen?(): number;
+  /** Rows kept in view while scrolling down (sheets, S.05). */
+  frozenRows?(): number;
   format?(value: CellValue, column: Column): string;
   color?(value: CellValue, column: Column): string | undefined;
   columns(): Column[];
@@ -53,6 +55,10 @@ export interface GridHandlers {
   copy(range: Range): void;
   paste(at: Cell, text: string): void;
   columnResized(col: number, width: number): void;
+  /** A row's height was dragged or auto-fitted (sheets, S.05). */
+  rowResized?(row: number, height: number): void;
+  /** Auto-fit a column from all of its cells (double-click on its edge); true when handled. */
+  autoFit?(col: number): boolean;
   undo?(): void;
   redo?(): void;
   /** The command registry gets each grid key first; true when it used the key. */
@@ -106,6 +112,12 @@ export class Grid {
   private anchor: Cell = { r: 0, c: 0 };
   private dragging: "cells" | "cols" | "rows" | null = null;
   private resizing: { col: number; startX: number; startW: number } | null = null;
+  private resizingRow: { row: number; startY: number; startH: number } | null = null;
+  /** S.05: rows whose height differs from ROW_H (0 = hidden), sorted, with the running
+   *  height difference before each, so positions stay O(log n) for a million rows. */
+  private rowIdx: number[] = [];
+  private rowSize: number[] = [];
+  private rowCum: number[] = [0];
   private editing: Cell | null = null;
   /** The edited cell's value when editing started (see `GridModel.base`). */
   private editingBase: CellValue | undefined;
@@ -375,7 +387,77 @@ export class Grid {
   }
 
   private contentHeight(): number {
-    return this.displayRows() * ROW_H;
+    return this.rowTop(this.displayRows());
+  }
+
+  /** S.05: set the rows whose height differs from the default (size 0 hides a row). */
+  setRowSizes(list: { index: number; size: number }[]): void {
+    const sorted = list.filter((x) => x.size !== ROW_H).sort((a, b) => a.index - b.index);
+    this.rowIdx = sorted.map((x) => x.index);
+    this.rowSize = sorted.map((x) => Math.max(0, x.size));
+    this.rowCum = [0];
+    for (const h of this.rowSize) this.rowCum.push(this.rowCum[this.rowCum.length - 1] + h - ROW_H);
+    this.updateSpacer();
+    this.invalidate();
+  }
+
+  rowSizes(): { index: number; size: number }[] {
+    return this.rowIdx.map((index, i) => ({ index, size: this.rowSize[i] }));
+  }
+
+  private setRowSize(row: number, size: number): void {
+    const list = this.rowSizes().filter((x) => x.index !== row);
+    list.push({ index: row, size });
+    this.setRowSizes(list);
+  }
+
+  /** Number of size overrides before row `r`. */
+  private before(r: number): number {
+    let lo = 0, hi = this.rowIdx.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (this.rowIdx[m] < r) lo = m + 1; else hi = m; }
+    return lo;
+  }
+
+  /** Top of row `r` in content coordinates (unscrolled). */
+  private rowTop(r: number): number {
+    return r * ROW_H + this.rowCum[this.before(r)];
+  }
+
+  rowHeight(r: number): number {
+    const k = this.before(r);
+    return this.rowIdx[k] === r ? this.rowSize[k] : ROW_H;
+  }
+
+  /** The row at content `y`: the last row whose top is at or above it (hidden rows are skipped). */
+  private rowAtContent(y: number): number {
+    if (!this.rowIdx.length || y < 0) return Math.floor(y / ROW_H);
+    let lo = 0, hi = this.displayRows();
+    while (lo < hi) { const m = (lo + hi + 1) >> 1; if (this.rowTop(m) <= y) lo = m; else hi = m - 1; }
+    return lo;
+  }
+
+  private frozenRowCount(): number {
+    const requested = Math.min(this.model.frozenRows?.() ?? 0, this.displayRows(), 100);
+    let n = 0;
+    while (n < requested && this.rowTop(n + 1) < this.bodyHeight() - 80) n++;
+    return n;
+  }
+
+  private frozenHeight(): number { return this.rowTop(this.frozenRowCount()); }
+
+  private rowY(r: number): number {
+    return HEADER_H + this.rowTop(r) - (r < this.frozenRowCount() ? 0 : this.scrollY);
+  }
+
+  /** The nearest shown row or column from `i` in direction `dir` (then the other way). */
+  private shownLine(i: number, dir: number, last: number, hidden: (i: number) => boolean): number {
+    i = Math.max(0, Math.min(last, i));
+    for (const d of [dir || 1, -(dir || 1)]) {
+      let j = i;
+      while (j >= 0 && j <= last && hidden(j)) j += d;
+      if (j >= 0 && j <= last) return j;
+    }
+    return i;
   }
 
   private maxScrollY(): number {
@@ -416,15 +498,17 @@ export class Grid {
   }
 
   private rowAt(y: number): number {
-    return Math.floor((y - HEADER_H + this.scrollY) / ROW_H);
+    const fh = this.frozenHeight();
+    if (fh && y >= HEADER_H && y < HEADER_H + fh) return this.rowAtContent(y - HEADER_H);
+    return this.rowAtContent(y - HEADER_H + this.scrollY);
   }
 
   private cellRect(cell: Cell): { x: number; y: number; w: number; h: number } {
     return {
       x: this.columnX(cell.c),
-      y: HEADER_H + cell.r * ROW_H - this.scrollY,
+      y: this.rowY(cell.r),
       w: this.widths[cell.c] ?? 0,
-      h: ROW_H,
+      h: this.rowHeight(cell.r),
     };
   }
 
@@ -474,8 +558,9 @@ export class Grid {
   private scrollIntoView(cell: Cell): void {
     const rect = this.cellRect(cell);
     const rhw = this.rowHeaderWidth();
-    if (rect.y < HEADER_H) this.scrollY = cell.r * ROW_H;
-    else if (rect.y + ROW_H > this.height) this.scrollY = (cell.r + 1) * ROW_H - this.bodyHeight();
+    if (cell.r < this.frozenRowCount()) { /* Frozen rows need no vertical scrolling. */ }
+    else if (rect.y < HEADER_H + this.frozenHeight()) this.scrollY = this.rowTop(cell.r) - this.frozenHeight();
+    else if (rect.y + rect.h > this.height) this.scrollY = this.rowTop(cell.r) + rect.h - this.bodyHeight();
     if (cell.c < this.frozenCount()) { /* Frozen cells need no horizontal scrolling. */ }
     else if (rect.x < rhw + this.frozenWidth()) this.scrollX = this.colX[cell.c] - this.frozenWidth();
     else if (rect.x + rect.w > this.width) this.scrollX = Math.max(0, this.colX[cell.c + 1] - (this.width - rhw));
@@ -525,10 +610,21 @@ export class Grid {
     return -1;
   }
 
+  /** The row whose bottom edge is under (x, y) in the row header, or -1. */
+  private rowResizeHandleAt(x: number, y: number): number {
+    if (!this.isSheet() || x >= this.rowHeaderWidth() || y < HEADER_H) return -1;
+    const r = this.rowAt(y);
+    if (r < 0) return -1;
+    const top = this.rowY(r), bottom = top + this.rowHeight(r);
+    if (Math.abs(bottom - y) <= 3) return r;
+    if (Math.abs(y - top) <= 3 && r > 0) return this.shownLine(r - 1, -1, r - 1, (i) => this.rowHeight(i) === 0);
+    return -1;
+  }
+
   private onHover(e: MouseEvent): void {
-    if (this.dragging || this.resizing) return;
+    if (this.dragging || this.resizing || this.resizingRow) return;
     const { x, y } = this.point(e);
-    this.scroller.style.cursor = this.resizeHandleAt(x, y) >= 0 ? "col-resize" : "default";
+    this.scroller.style.cursor = this.resizeHandleAt(x, y) >= 0 ? "col-resize" : this.rowResizeHandleAt(x, y) >= 0 ? "row-resize" : "default";
   }
 
   private onMouseDown(e: MouseEvent): void {
@@ -549,6 +645,11 @@ export class Grid {
     const handle = this.resizeHandleAt(x, y);
     if (handle >= 0) {
       this.resizing = { col: handle, startX: e.clientX, startW: this.widths[handle] };
+      return;
+    }
+    const rowHandle = this.rowResizeHandleAt(x, y);
+    if (rowHandle >= 0) {
+      this.resizingRow = { row: rowHandle, startY: e.clientY, startH: this.rowHeight(rowHandle) };
       return;
     }
     const rhw = this.rowHeaderWidth();
@@ -590,8 +691,13 @@ export class Grid {
       if (c >= 0) this.handlers.referencePick?.({ r0: Math.min(r, this.referenceAnchor.r), r1: Math.max(r, this.referenceAnchor.r), c0: Math.min(c, this.referenceAnchor.c), c1: Math.max(c, this.referenceAnchor.c) }, "move");
       return;
     }
+    if (this.resizingRow) {
+      const h = Math.max(8, Math.min(2000, Math.round(this.resizingRow.startH + (e.clientY - this.resizingRow.startY) / this.zoom)));
+      this.setRowSize(this.resizingRow.row, h);
+      return;
+    }
     if (this.resizing) {
-      const w = Math.max(40, this.resizing.startW + e.clientX - this.resizing.startX);
+      const w = Math.max(40, this.resizing.startW + (e.clientX - this.resizing.startX) / this.zoom);
       this.widths[this.resizing.col] = w;
       this.layoutColumns();
       this.invalidate();
@@ -617,6 +723,10 @@ export class Grid {
       this.handlers.columnResized(this.resizing.col, this.widths[this.resizing.col]);
       this.resizing = null;
     }
+    if (this.resizingRow) {
+      this.handlers.rowResized?.(this.resizingRow.row, this.rowHeight(this.resizingRow.row));
+      this.resizingRow = null;
+    }
     this.dragging = null;
   }
 
@@ -625,7 +735,12 @@ export class Grid {
     const { x, y } = this.point(e);
     const handle = this.resizeHandleAt(x, y);
     if (handle >= 0) {
-      this.autoFit(handle);
+      if (!this.handlers.autoFit?.(handle)) this.autoFit(handle);
+      return;
+    }
+    const rowHandle = this.rowResizeHandleAt(x, y);
+    if (rowHandle >= 0) {
+      this.autoFitRow(rowHandle);
       return;
     }
     if (y < HEADER_H || x < this.rowHeaderWidth()) return;
@@ -646,10 +761,32 @@ export class Grid {
     }
   }
 
+  /** Fit a column to texts measured in the grid font (S.05: the server sends the longest). */
+  fitColumn(col: number, texts: string[]): void {
+    if (col < 0 || col >= this.widths.length) return;
+    this.ctx.font = `13px ${this.colors.ui}`;
+    let w = 48;
+    for (const t of texts) w = Math.max(w, this.ctx.measureText(t).width + 20);
+    this.widths[col] = Math.min(600, Math.ceil(w));
+    this.layoutColumns();
+    this.updateSpacer();
+    this.handlers.columnResized(col, this.widths[col]);
+    this.invalidate();
+  }
+
+  /** Fit a row to the largest font among its loaded cells (S.05). */
+  autoFitRow(row: number): void {
+    let size = 13;
+    for (let c = 0; c < this.widths.length && c < 200; c++) size = Math.max(size, Math.min(this.model.style?.(row, c)?.size ?? 13, 72));
+    const h = Math.max(ROW_H, Math.ceil(size * 1.5 + 4));
+    this.setRowSize(row, h);
+    this.handlers.rowResized?.(row, h);
+  }
+
   private autoFit(col: number): void {
     const cols = this.model.columns();
-    const first = Math.max(0, Math.floor(this.scrollY / ROW_H));
-    const last = Math.min(this.model.rowCount() - 1, first + Math.ceil(this.bodyHeight() / ROW_H));
+    const first = Math.max(0, this.rowAtContent(this.scrollY));
+    const last = Math.min(this.model.rowCount() - 1, this.rowAtContent(this.scrollY + this.bodyHeight()));
     this.ctx.font = `600 13px ${this.colors.ui}`;
     let w = this.ctx.measureText(cols[col].name).width + 48;
     this.ctx.font = `13px ${this.colors.ui}`;
@@ -686,6 +823,8 @@ export class Grid {
       let c = this.active.c + dc;
       if (mod && dr) r = dr > 0 ? lastRow : 0;
       if (mod && dc) c = dc > 0 ? lastCol : 0;
+      if (dr) r = this.shownLine(r, Math.sign(dr), Math.max(lastRow, this.displayRows() - 1), (i) => this.rowHeight(i) === 0);
+      if (dc) c = this.shownLine(c, Math.sign(dc), lastCol, (i) => this.widths[i] === 0);
       this.select({ r, c }, e.shiftKey ? this.anchor : { r, c });
     };
     switch (e.key) {
@@ -790,18 +929,24 @@ export class Grid {
     const rhw = this.rowHeaderWidth();
     const rowCount = this.model.rowCount();
     const display = this.displayRows();
-    const first = Math.max(0, Math.floor(this.scrollY / ROW_H));
-    const last = Math.min(display - 1, Math.floor((this.scrollY + this.bodyHeight()) / ROW_H));
+    const fr = this.frozenRowCount(), fh = this.frozenHeight();
+    const first = Math.max(fr, this.rowAtContent(this.scrollY + fh));
+    const last = Math.min(display - 1, this.rowAtContent(this.scrollY + this.bodyHeight()));
+    // Scrolled rows first, then the frozen rows over them (S.05).
+    const rowList: number[] = [];
+    for (let r = first; r <= last; r++) if (this.rowHeight(r) > 0) rowList.push(r);
+    for (let r = 0; r < fr; r++) if (this.rowHeight(r) > 0) rowList.push(r);
 
     let c0 = Math.max(this.frozenCount(), this.colAt(rhw + this.frozenWidth() + 1));
     let c1 = this.colAt(W - 1);
     if (c1 < 0) c1 = cols.length - 1;
     if (!cols.length) { c0 = 0; c1 = -1; }
     if (rowCount > 0) this.model.ensure(first, Math.min(last, rowCount - 1), c0, Math.max(c0, c1));
+    if (rowCount > 0 && fr) this.model.ensure(0, Math.min(fr, rowCount) - 1, c0, Math.max(c0, c1));
 
     const frozen = this.frozenCount();
     if (rowCount > 0 && frozen) this.model.ensure(first, Math.min(last, rowCount - 1), 0, frozen - 1);
-    const visible = [...Array.from({ length: Math.max(0, c1 - c0 + 1) }, (_, i) => c0 + i), ...Array.from({ length: frozen }, (_, i) => i)];
+    const visible = [...Array.from({ length: Math.max(0, c1 - c0 + 1) }, (_, i) => c0 + i), ...Array.from({ length: frozen }, (_, i) => i)].filter((c) => (this.widths[c] ?? 0) > 0);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, W, H);
     const sel = this.selection();
@@ -824,19 +969,20 @@ export class Grid {
         ctx.fillStyle = colors.formulaBg;
         ctx.fillRect(x, HEADER_H, w, H - HEADER_H);
       }
-      for (let r = first; r <= last; r++) {
-        const y = HEADER_H + r * ROW_H - this.scrollY;
+      for (const r of rowList) {
+        const y = this.rowY(r), rh = this.rowHeight(r);
+        if (r < fr) { ctx.fillStyle = col.formula ? colors.formulaBg : colors.bg; ctx.fillRect(x, y, w, rh); }
         if (r >= rowCount) continue;
         if (sheetCells) {
           const cell = sheetCells(r, c);
           const st = this.model.style?.(r, c);
-          if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, ROW_H); }
+          if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, rh); }
           if (st?.borders) {
             ctx.fillStyle = colors.text;
             if (st.borders.includes("t")) ctx.fillRect(x, y, w, 1);
-            if (st.borders.includes("b")) ctx.fillRect(x, y + ROW_H - 1, w, 1);
-            if (st.borders.includes("l")) ctx.fillRect(x, y, 1, ROW_H);
-            if (st.borders.includes("r")) ctx.fillRect(x + w - 1, y, 1, ROW_H);
+            if (st.borders.includes("b")) ctx.fillRect(x, y + rh - 1, w, 1);
+            if (st.borders.includes("l")) ctx.fillRect(x, y, 1, rh);
+            if (st.borders.includes("r")) ctx.fillRect(x + w - 1, y, 1, rh);
           }
           if (this.model.comment?.(r, c)) {
             ctx.fillStyle = "#D97706";
@@ -855,7 +1001,7 @@ export class Grid {
           ctx.textAlign = align;
           if (st) ctx.font = `${st.i ? "italic " : ""}${st.b ? "700 " : ""}${Math.min(st.size ?? 13, 20)}px ${colors.ui}`;
           const tx = align === "right" ? x + w - 8 : align === "center" ? x + w / 2 : x + 8;
-          const ty = st?.v === "top" ? y + 9 : y + ROW_H / 2 + 1;
+          const ty = st?.v === "top" ? y + 9 : y + rh / 2 + 1;
           ctx.fillText(cell.text, tx, ty);
           if (st?.u || st?.s) {
             const tw = Math.min(ctx.measureText(cell.text).width, w - 16);
@@ -873,16 +1019,16 @@ export class Grid {
           continue;
         }
         const background = this.model.color?.(v, col);
-        if (background) { ctx.fillStyle = background; ctx.fillRect(x, y, w, ROW_H); }
+        if (background) { ctx.fillStyle = background; ctx.fillRect(x, y, w, rh); }
         const text = this.format(v, col);
         if (!text) continue;
         ctx.fillStyle = colors.text;
         if (numeric || col.kind === "bool") {
           ctx.textAlign = "right";
-          ctx.fillText(text, x + w - 8, y + ROW_H / 2 + 1);
+          ctx.fillText(text, x + w - 8, y + rh / 2 + 1);
         } else {
           ctx.textAlign = "left";
-          ctx.fillText(text, x + 8, y + ROW_H / 2 + 1);
+          ctx.fillText(text, x + 8, y + rh / 2 + 1);
         }
       }
       ctx.restore();
@@ -892,8 +1038,9 @@ export class Grid {
     ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    for (let r = first; r <= last + 1; r++) {
-      const y = Math.round(HEADER_H + r * ROW_H - this.scrollY) + 0.5;
+    for (const r of rowList) {
+      const y = Math.round(this.rowY(r) + this.rowHeight(r)) + 0.5;
+      if (r >= fr && y < HEADER_H + fh) continue;
       ctx.moveTo(rhw, y);
       ctx.lineTo(W, y);
     }
@@ -903,17 +1050,22 @@ export class Grid {
       ctx.lineTo(x, H);
     }
     ctx.stroke();
+    if (fr) {
+      ctx.fillStyle = colors.grid;
+      ctx.fillRect(0, HEADER_H + fh - 1, W, 2);
+    }
+    const selTop = (r: number) => (r < fr ? HEADER_H : HEADER_H + fh);
 
     // Clip selection to each pane so scrolling cells cannot highlight frozen cells.
     if (cols.length && frozen) {
-      const y = HEADER_H + sel.r0 * ROW_H - this.scrollY;
-      const h = (sel.r1 - sel.r0 + 1) * ROW_H;
+      const y = this.rowY(sel.r0);
+      const h = Math.max(0, this.rowY(sel.r1) + this.rowHeight(sel.r1) - y);
       for (const c of visible) {
         if (c < sel.c0 || c > sel.c1) continue;
         const x = this.columnX(c), w = this.widths[c];
         ctx.save(); ctx.beginPath();
         const left = c < frozen ? rhw : rhw + this.frozenWidth();
-        ctx.rect(left, HEADER_H, W - left, H - HEADER_H); ctx.clip();
+        ctx.rect(left, selTop(sel.r0), W - left, H - selTop(sel.r0)); ctx.clip();
         if (sel.r0 !== sel.r1 || sel.c0 !== sel.c1) { ctx.fillStyle = colors.selFill; ctx.fillRect(x, y, w, h); }
         ctx.strokeStyle = colors.selBorder; ctx.lineWidth = 2; ctx.beginPath();
         ctx.moveTo(x, y + 1); ctx.lineTo(x + w, y + 1); ctx.moveTo(x, y + h - 1); ctx.lineTo(x + w, y + h - 1);
@@ -922,16 +1074,16 @@ export class Grid {
         ctx.stroke(); ctx.restore();
       }
       const active = this.cellRect(this.active), left = this.active.c < frozen ? rhw : rhw + this.frozenWidth();
-      ctx.save(); ctx.beginPath(); ctx.rect(left, HEADER_H, W - left, H - HEADER_H); ctx.clip();
+      ctx.save(); ctx.beginPath(); ctx.rect(left, selTop(this.active.r), W - left, H - selTop(this.active.r)); ctx.clip();
       ctx.strokeStyle = colors.selBorder; ctx.lineWidth = 2; ctx.strokeRect(active.x + 1, active.y + 1, active.w - 2, active.h - 2); ctx.restore();
     }
     if (cols.length && !frozen) {
       const a = this.cellRect({ r: sel.r0, c: sel.c0 });
       const b = this.cellRect({ r: sel.r1, c: sel.c1 });
-      const sx = a.x, sy = a.y, sw = b.x + b.w - a.x, sh = b.y + b.h - a.y;
+      const sx = a.x, sy = a.y, sw = b.x + b.w - a.x, sh = Math.max(0, b.y + b.h - a.y);
       ctx.save();
       ctx.beginPath();
-      ctx.rect(rhw, HEADER_H, W - rhw, H - HEADER_H);
+      ctx.rect(rhw, selTop(sel.r0), W - rhw, H - selTop(sel.r0));
       ctx.clip();
       if (sel.r0 !== sel.r1 || sel.c0 !== sel.c1) {
         ctx.fillStyle = colors.selFill;
@@ -965,14 +1117,15 @@ export class Grid {
     ctx.fillRect(0, HEADER_H, rhw, H - HEADER_H);
     ctx.font = `12px ${colors.mono}`;
     ctx.textAlign = "right";
-    for (let r = first; r <= last; r++) {
-      const y = HEADER_H + r * ROW_H - this.scrollY;
+    for (const r of rowList) {
+      const y = this.rowY(r), rh = this.rowHeight(r);
+      if (r < fr) { ctx.fillStyle = colors.headerBg; ctx.fillRect(0, y, rhw, rh); }
       if (r >= sel.r0 && r <= sel.r1) {
         ctx.fillStyle = colors.activeHeader;
-        ctx.fillRect(0, y, rhw, ROW_H);
+        ctx.fillRect(0, y, rhw, rh);
       }
       ctx.fillStyle = r < rowCount ? colors.muted : colors.placeholder;
-      ctx.fillText(String(r + 1), rhw - 8, y + ROW_H / 2 + 1);
+      ctx.fillText(String(r + 1), rhw - 8, y + rh / 2 + 1);
     }
     ctx.strokeStyle = colors.grid;
     ctx.beginPath();

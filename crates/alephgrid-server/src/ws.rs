@@ -264,8 +264,24 @@ pub enum Op {
     SheetDuplicate { sheet: u32 },
     /// Colour a sheet's tab, `#RRGGBB` or empty (S.07).
     SheetColor { sheet: u32, color: String },
-    /// Freeze the first columns of a sheet (S.05; 0 unfreezes).
-    SheetFreeze { sheet: u32, columns: u32 },
+    /// Freeze the first columns of a sheet (S.05; 0 unfreezes), and the first `rows` rows
+    /// when given (frozen rows stay otherwise).
+    SheetFreeze { sheet: u32, columns: u32, #[serde(default)] #[ts(optional, as = "Option<u32>")] rows: Option<u32> },
+    /// A sheet's frozen panes and the rows and columns that differ from the default (S.05).
+    SheetLayout { sheet: u32 },
+    /// Set the width or height (grid pixels) of `count` columns or rows from `start` (S.05).
+    SheetResize { sheet: u32, axis: alephgrid_core::Axis, start: u32, count: u32, size: u32 },
+    /// Hide or show `count` columns or rows from `start` (S.05).
+    SheetSetHidden { sheet: u32, axis: alephgrid_core::Axis, start: u32, count: u32, hidden: bool },
+    /// Merge an area (or unmerge the merges in it) (S.05).
+    SheetMerge { sheet: u32, area: alephgrid_core::CellArea, mode: alephgrid_core::MergeMode },
+    /// The longest shown texts of a column, for auto-fit (S.05).
+    SheetColumnTexts { sheet: u32, column: u32 },
+    /// The distinct shown values of a range's column below its header row (S.06).
+    SheetRangeValues { sheet: u32, area: alephgrid_core::CellArea, header: bool, column: u32 },
+    /// Show the data rows of a range whose `column` shows one of `keep`, hide the others;
+    /// no `keep` shows them all again (S.06). Returns the number of rows hidden.
+    SheetFilter { sheet: u32, area: alephgrid_core::CellArea, header: bool, column: u32, #[serde(default)] #[ts(optional, as = "Option<Vec<String>>")] keep: Option<Vec<String>> },
     /// Clear every format of an area; values stay.
     SheetClearFormat { sheet: u32, area: alephgrid_core::CellArea, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
@@ -394,7 +410,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -412,7 +428,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetResize { .. } | SheetSetHidden { .. } | SheetMerge { .. } | SheetFilter { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -423,7 +439,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -555,6 +571,9 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Comments { sheet } => json!(r.comments(sheet)?),
         Op::HiddenSheets => json!(r.sheets().hidden_sheets()),
         Op::SheetRules { sheet } => json!(r.sheet_rules(sheet)?),
+        Op::SheetLayout { sheet } => json!(r.sheets().layout(sheet)?),
+        Op::SheetColumnTexts { sheet, column } => json!(r.sheets().column_texts(sheet, column)?),
+        Op::SheetRangeValues { sheet, area, header, column } => json!(r.sheets().range_values(sheet, &area, header, column)?),
         Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
@@ -795,6 +814,22 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             wb.with_sheets(|s| s.sort_range(sheet, area, &by, header))?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
+        Op::SheetResize { sheet, axis, start, count, size } => {
+            wb.with_sheets(|s| s.resize(sheet, axis, start, count, size))?;
+            (Value::Null, sheet_changed(sheet))
+        }
+        Op::SheetSetHidden { sheet, axis, start, count, hidden } => {
+            wb.with_sheets(|s| s.set_hidden(sheet, axis, start, count, hidden))?;
+            (Value::Null, sheet_changed(sheet))
+        }
+        Op::SheetMerge { sheet, area, mode } => {
+            wb.with_sheets(|s| s.merge(sheet, &area, mode))?;
+            (Value::Null, sheet_changed(sheet))
+        }
+        Op::SheetFilter { sheet, area, header, column, keep } => {
+            let n = wb.with_sheets(|s| s.filter_range(sheet, &area, header, column, keep.as_deref()))?;
+            (json!(n), sheet_changed(sheet))
+        }
         Op::SetSheetRules { sheet, rules } => {
             wb.set_sheet_rules(sheet, rules)?;
             (Value::Null, sheet_changed(sheet))
@@ -819,8 +854,11 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             wb.with_sheets(|s| s.set_tab_color(sheet, &color))?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
-        Op::SheetFreeze { sheet, columns } => {
-            wb.with_sheets(|s| s.freeze_columns(sheet, columns))?;
+        Op::SheetFreeze { sheet, columns, rows } => {
+            wb.with_sheets(|s| match rows {
+                Some(rows) => s.freeze(sheet, rows, columns),
+                None => s.freeze_columns(sheet, columns),
+            })?;
             (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetReplace { sheet, search, replacement } => {

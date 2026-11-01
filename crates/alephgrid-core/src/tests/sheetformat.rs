@@ -228,3 +228,116 @@ fn tabs_move_and_references_follow() {
     let v = s.fetch(t, 0, 1, 1).unwrap().rows[0][0].clone().map(|c| c.0);
     assert_eq!(v.as_deref(), Some("6.28318"));
 }
+
+/// S.05: frozen rows, sizes and hidden lines are kept by the sheet, through bytes and
+/// XLSX, each change one undo step; sizes are in grid pixels.
+#[test]
+fn layout_sizes_hiding_and_frozen_rows() {
+    use crate::sheets::{Axis, LineSize};
+    let mut s = sheet();
+    s.freeze(0, 2, 1).unwrap();
+    assert_eq!((s.info(0).unwrap().frozen_rows, s.info(0).unwrap().frozen_columns), (2, 1));
+    s.freeze_columns(0, 3).unwrap();
+    assert_eq!((s.info(0).unwrap().frozen_rows, s.info(0).unwrap().frozen_columns), (2, 3));
+    s.resize(0, Axis::Columns, 1, 2, 150).unwrap();
+    s.resize(0, Axis::Rows, 4, 1, 48).unwrap();
+    s.set_hidden(0, Axis::Rows, 6, 2, true).unwrap();
+    s.set_hidden(0, Axis::Columns, 5, 1, true).unwrap();
+    let l = s.layout(0).unwrap();
+    assert_eq!((l.frozen_rows, l.frozen_columns), (2, 3));
+    assert_eq!(l.columns.iter().filter(|c| !c.hidden).cloned().collect::<Vec<_>>(), vec![LineSize { index: 1, size: 150, hidden: false }, LineSize { index: 2, size: 150, hidden: false }]);
+    assert!(l.columns.iter().any(|c| c.index == 5 && c.hidden));
+    assert!(l.rows.contains(&LineSize { index: 4, size: 48, hidden: false }));
+    assert_eq!(l.rows.iter().filter(|r| r.hidden).map(|r| r.index).collect::<Vec<_>>(), vec![6, 7]);
+    let back = Sheets::from_bytes(Some(s.to_bytes().unwrap())).unwrap();
+    assert_eq!(back.layout(0).unwrap(), l);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("l.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    let x = t.layout(0).unwrap();
+    assert_eq!((x.frozen_rows, x.frozen_columns), (2, 3));
+    assert!(x.columns.iter().any(|c| c.index == 1 && c.size == 150));
+    assert!(x.rows.iter().any(|r| r.index == 4 && r.size == 48));
+    assert!(x.rows.iter().any(|r| r.index == 6 && r.hidden));
+    // Each change is one undo step: the hidden column comes back first.
+    assert!(s.undo().unwrap());
+    assert!(!s.layout(0).unwrap().columns.iter().any(|c| c.hidden));
+    assert!(s.undo().unwrap());
+    assert!(!s.layout(0).unwrap().rows.iter().any(|r| r.hidden));
+    // Values are untouched by hiding.
+    assert_eq!(shown(&s, 0, 0), "3.14159");
+    assert!(s.resize(0, Axis::Rows, 0, 1, 3).is_err());
+    assert!(s.resize(0, Axis::Columns, 16_383, 2, 50).is_err());
+    assert!(s.set_hidden(0, Axis::Rows, 0, 100_001, true).is_err());
+    assert!(s.freeze(0, 101, 0).is_err());
+}
+
+/// S.05: auto-fit reads the longest shown texts of a column.
+#[test]
+fn column_texts_longest_first() {
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("T").unwrap();
+    let inputs: Vec<SheetInput> = ["a", "abcdef", "", "abc", "=REPT(\"x\",9)"].iter().enumerate()
+        .map(|(i, v)| SheetInput { row: i as u32, column: 0, value: v.to_string(), base: None }).collect();
+    s.set(0, &inputs).unwrap();
+    assert_eq!(s.column_texts(0, 0).unwrap(), vec!["xxxxxxxxx", "abcdef", "abc", "a"]);
+    assert!(s.column_texts(0, 1).unwrap().is_empty());
+}
+
+/// S.06: a range filter hides the data rows whose value is not kept, as one undo step,
+/// without deleting them; clearing shows them again.
+#[test]
+fn range_filter_hides_rows() {
+    use crate::sheets::CellArea;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("F").unwrap();
+    let rows = ["Fruit", "apple", "pear", "apple", "fig", "pear"];
+    let inputs: Vec<SheetInput> = rows.iter().enumerate().map(|(i, v)| SheetInput { row: i as u32, column: 0, value: v.to_string(), base: None }).collect();
+    s.set(0, &inputs).unwrap();
+    let a = CellArea { row: 0, column: 0, rows: 6, columns: 1 };
+    let values = s.range_values(0, &a, true, 0).unwrap();
+    let pairs: Vec<(Option<String>, u64)> = values.iter().map(|v| (v.value.clone(), v.count)).collect();
+    assert_eq!(pairs, vec![(Some("apple".into()), 2), (Some("pear".into()), 2), (Some("fig".into()), 1)]);
+    let hidden = s.filter_range(0, &a, true, 0, Some(&["apple".to_string()])).unwrap();
+    assert_eq!(hidden, 3);
+    let h: Vec<u32> = s.layout(0).unwrap().rows.iter().filter(|r| r.hidden).map(|r| r.index).collect();
+    assert_eq!(h, vec![2, 4, 5]);
+    assert_eq!(s.fetch(0, 0, 6, 1).unwrap().rows.len(), 6, "filtered rows keep their cells");
+    assert!(s.undo().unwrap());
+    assert!(s.layout(0).unwrap().rows.iter().all(|r| !r.hidden));
+    assert!(s.redo().unwrap());
+    assert_eq!(s.filter_range(0, &a, true, 0, None).unwrap(), 0);
+    assert!(s.layout(0).unwrap().rows.iter().all(|r| !r.hidden));
+    assert!(s.filter_range(0, &a, true, 1, None).is_err(), "the column must be in the range");
+}
+
+/// S.05: merging keeps the one value at the top-left, refuses areas with two values, is
+/// one undo step and is kept through XLSX.
+#[test]
+fn cells_merge_and_unmerge() {
+    use crate::sheets::MergeMode;
+    let mut s = sheet();
+    s.set(0, &[SheetInput { row: 4, column: 1, value: "solo".into(), base: None }]).unwrap();
+    let a = area(3, 0, 2, 3);
+    s.merge(0, &a, MergeMode::Center).unwrap();
+    assert_eq!(s.layout(0).unwrap().merged, vec![a]);
+    assert_eq!(shown(&s, 3, 0), "solo", "the one value moves to the top-left cell");
+    assert_eq!(shown(&s, 4, 1), "");
+    assert!(s.set(0, &[SheetInput { row: 4, column: 1, value: "x".into(), base: None }]).is_err(), "covered cells cannot be edited");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    assert_eq!(t.layout(0).unwrap().merged, vec![a]);
+    assert!(s.undo().unwrap());
+    assert!(s.layout(0).unwrap().merged.is_empty());
+    assert_eq!(shown(&s, 4, 1), "solo");
+    assert!(s.merge(0, &area(0, 0, 1, 2), MergeMode::Merge).is_err(), "two values are never merged away");
+    s.merge(0, &area(6, 0, 2, 2), MergeMode::Across).unwrap();
+    assert_eq!(s.layout(0).unwrap().merged.len(), 2);
+    s.merge(0, &area(6, 0, 2, 2), MergeMode::Unmerge).unwrap();
+    assert!(s.layout(0).unwrap().merged.is_empty());
+}

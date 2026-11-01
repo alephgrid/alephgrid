@@ -53,7 +53,7 @@ pub struct FormulaProblem {
 }
 
 /// A rectangle of cells, 0-based.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
 pub struct CellArea {
     pub row: u32,
     pub column: u32,

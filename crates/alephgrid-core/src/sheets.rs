@@ -17,6 +17,8 @@ use ts_rs::TS;
 mod editing;
 mod find;
 mod format;
+mod layout;
+pub use layout::{Axis, LineSize, MergeMode, SheetLayout, GRID_COLUMN_WIDTH, GRID_ROW_HEIGHT};
 pub use find::{SheetSearch, SortBy};
 mod links;
 pub use format::{CellStyle, StyledCell, StylePatch};
@@ -48,6 +50,9 @@ pub struct SheetInfo {
     /// Columns kept in view while scrolling sideways (S.05).
     #[serde(default)]
     pub frozen_columns: u32,
+    /// Rows kept in view while scrolling down (S.05).
+    #[serde(default)]
+    pub frozen_rows: u32,
     /// The tab's colour, `#RRGGBB` (S.07).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -412,8 +417,9 @@ impl Sheets {
                 let (rows, columns) = used_size(m, i as u32);
                 let ws = m.get_model().workbook.worksheet(i as u32).ok();
                 let frozen_columns = ws.map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
+                let frozen_rows = ws.map(|w| w.frozen_rows.max(0) as u32).unwrap_or(0);
                 let color = ws.and_then(|w| format::rgb(&w.color));
-                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, color }
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, frozen_rows, color }
             })
             .collect()
     }

@@ -33,7 +33,7 @@ import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
 import { renderChart, type ChartType } from "./charts";
-import type { CellComment, SheetRules } from "./protocol";
+import type { CellComment, SheetLayout, SheetRules } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
 
@@ -284,6 +284,7 @@ export class WorkbookScreen {
     this.grid = new Grid(
       {
         frozen: () => this.isSheet() ? (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.frozen_columns ?? 0) : this.presentation.frozen,
+        frozenRows: () => this.isSheet() ? (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.frozen_rows ?? 0) : 0,
         format: (value, column) => displayValue(value, column, this.presentation.formats[column.name]),
         color: (value, column) => cellColor(value, column.name, this.presentation.rules),
         rowCount: () => (this.isSheet() ? this.sheetDims.rows : this.view?.row_count ?? 0),
@@ -316,7 +317,9 @@ export class WorkbookScreen {
         rowMenu: (r, x, y) => self.rowMenu(r, x, y),
         copy: (range) => self.copy(range),
         paste: (at, text) => self.paste(at, text),
-        columnResized: () => self.saveWidths(),
+        columnResized: (c, w) => self.columnResized(c, w),
+        rowResized: (r, h) => void self.resizeLines("rows", r, 1, h),
+        autoFit: (c) => self.autoFitSheetColumn(c),
         undo: () => self.undo(false),
         redo: () => self.undo(true),
         command: (e) => self.commands.handle(e, "grid", (m) => toast(m)),
@@ -637,6 +640,8 @@ export class WorkbookScreen {
         ...(this.isSheet() ? [
           { label: `Freeze columns A–${String.fromCharCode(65 + Math.min(25, this.grid.active.c))}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
           { label: "Unfreeze columns", action: () => void this.freezeColumns(0) },
+          { label: `Freeze rows 1–${this.grid.active.r + 1}`, action: () => void this.freezeRows(Math.min(100, this.grid.active.r + 1)) },
+          { label: "Unfreeze rows", action: () => void this.freezeRows(0) },
           "sep" as const,
         ] : []),
         { label: `${this.explorerOpen ? "✓ " : ""}Explorer`, action: () => this.toggleExplorer() },
@@ -1177,9 +1182,10 @@ export class WorkbookScreen {
       this.sheetCols = sheetColumns(cols);
       if (reset) this.sheetCache.reset(info.index, cols);
       else { this.sheetCache.columns = cols; this.sheetCache.refresh(); }
-      const saved = this.loadWidths();
-      this.grid.setColumns(this.sheetCols.map((c) => saved[c.name] ?? SHEET_COL_WIDTH));
+      this.grid.setColumns(this.sheetWidths());
     }
+    if (reset) { this.sheetLayout = null; this.grid.setRowSizes([]); }
+    void this.loadSheetLayout();
     this.rowsEl.textContent = info.rows ? `Used ${columnLetter(Math.max(0, info.columns - 1))}${info.rows}` : "Empty sheet";
     this.setKind("sheet");
     this.grid.invalidate();
@@ -1776,8 +1782,7 @@ export class WorkbookScreen {
       if (cols !== this.sheetCols.length) {
         this.sheetCols = sheetColumns(cols);
         this.sheetCache.columns = cols;
-        const saved = this.loadWidths();
-        this.grid.setColumns(this.sheetCols.map((c) => saved[c.name] ?? SHEET_COL_WIDTH));
+        this.grid.setColumns(this.sheetWidths());
       }
     }
     this.grid.select({ r: t.r0, c: t.c0 }, { r: t.r1, c: t.c1 });
@@ -2295,6 +2300,127 @@ export class WorkbookScreen {
     } catch (e) { toast((e as Error).message, "error"); }
   }
 
+  /** S.05: the sheet's sizes, hidden lines and frozen panes, kept in the workbook. */
+  private sheetLayout: SheetLayout | null = null;
+  /** S.06: the last range filter of this sheet, so its popup shows what is kept. */
+  private rangeFilter: { sheet: number; area: { row: number; column: number; rows: number; columns: number }; header: boolean; column: number; keep: string[] | null } | null = null;
+
+  private sheetWidths(): number[] {
+    const sized = new Map((this.sheetLayout?.columns ?? []).map((c) => [c.index, c.hidden ? 0 : c.size]));
+    return this.sheetCols.map((_, i) => sized.get(i) ?? SHEET_COL_WIDTH);
+  }
+
+  private async loadSheetLayout(): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    try {
+      const l = await this.rpc.call("sheet_layout", { sheet });
+      if (this.active?.kind !== "sheet" || this.active.index !== sheet) return;
+      this.sheetLayout = l;
+      const widths = this.sheetWidths();
+      if (widths.join() !== this.grid.columnWidths().join()) this.grid.setColumns(widths);
+      this.grid.setRowSizes(l.rows.map((x) => ({ index: x.index, size: x.hidden ? 0 : x.size })));
+    } catch { /* the grid keeps default sizes */ }
+  }
+
+  private columnResized(c: number, width: number): void {
+    if (!this.isSheet()) { this.saveWidths(); return; }
+    // Dragging the edge of a selected column sizes every selected column.
+    const sel = this.grid.selection();
+    const whole = sel.r0 === 0 && sel.r1 >= this.sheetDims.rows - 1 && c >= sel.c0 && c <= sel.c1;
+    void this.resizeLines("columns", whole ? sel.c0 : c, whole ? sel.c1 - sel.c0 + 1 : 1, width);
+  }
+
+  /** S.05: set the size of lines, kept with the sheet (one undo step). */
+  private async resizeLines(axis: "rows" | "columns", start: number, count: number, size: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    try {
+      await this.rpc.call("sheet_resize", { sheet: this.active.index, axis, start, count, size: Math.max(4, Math.min(2000, Math.round(size))) });
+    } catch (e) { toast((e as Error).message, "error"); }
+    await this.loadSheetLayout();
+  }
+
+  /** S.05: hide or show lines; values and formulas stay. */
+  private async hideLines(axis: "rows" | "columns", start: number, count: number, hidden: boolean): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    start = Math.max(0, start);
+    try {
+      await this.rpc.call("sheet_set_hidden", { sheet: this.active.index, axis, start, count: Math.max(1, count), hidden });
+      if (hidden) {
+        const sel = this.grid.selection();
+        if (axis === "rows") this.grid.select({ r: Math.min(this.sheetDims.rows - 1, start + count), c: sel.c0 });
+        else this.grid.select({ r: sel.r0, c: Math.min(this.sheetCols.length - 1, start + count) });
+      }
+    } catch (e) { toast((e as Error).message, "error"); }
+    await this.loadSheetLayout();
+  }
+
+  private async sizeDialog(axis: "rows" | "columns"): Promise<void> {
+    const sel = this.grid.selection();
+    const [start, count] = axis === "rows" ? [sel.r0, sel.r1 - sel.r0 + 1] : [sel.c0, sel.c1 - sel.c0 + 1];
+    const current = axis === "rows" ? this.grid.rowHeight(start) : this.grid.columnWidths()[start];
+    const v = await formDialog(axis === "rows" ? "Row height" : "Column width", [{ name: "size", label: "Pixels (4–2000)", type: "number", value: String(current || (axis === "rows" ? 24 : SHEET_COL_WIDTH)) }], "Apply",
+      (x) => (Number(x.size) >= 4 && Number(x.size) <= 2000 ? null : "Enter a size from 4 to 2000 pixels"));
+    if (v) await this.resizeLines(axis, start, count, Number(v.size));
+  }
+
+  /** S.05: fit a column to its longest shown value (read from all of its cells). */
+  private autoFitSheetColumn(c: number): boolean {
+    if (this.active?.kind !== "sheet") return false;
+    const sheet = this.active.index;
+    this.rpc.call("sheet_column_texts", { sheet, column: c })
+      .then((texts) => { if (this.active?.kind === "sheet" && this.active.index === sheet) this.grid.fitColumn(c, texts); })
+      .catch((e) => toast((e as Error).message, "error"));
+    return true;
+  }
+
+  private async freezeRows(rows: number): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const columns = this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.frozen_columns ?? 0;
+    try {
+      await this.rpc.call("sheet_freeze", { sheet: this.active.index, columns, rows });
+      await this.loadItems();
+      this.grid.invalidate();
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
+  /** S.06: filter the selected range by the values of the active cell's column. */
+  private rangeFilterPopup(header: boolean, x: number, y: number): void {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const prev = this.rangeFilter?.sheet === sheet ? this.rangeFilter : null;
+    const area = prev && sel.r0 === sel.r1 && sel.c0 === sel.c1 ? prev.area : { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    header = prev && area === prev.area ? prev.header : header;
+    const column = Math.min(Math.max(this.grid.active.c, area.column), area.column + area.columns - 1);
+    const col = this.sheetCols[column];
+    const kept = prev && prev.column === column && prev.keep ? [{ column: col.name, op: "in" as const, value: prev.keep.map((k) => (k === "" ? null : k)) as unknown as string }] : [];
+    const spec = { table: "", sort: [], filters: kept, hidden: [] } as unknown as ViewSpec;
+    filterPopup(col, spec, x, y, {
+      values: async (_s, _c, search) => {
+        const all = await this.rpc.call("sheet_range_values", { sheet, area, header, column });
+        const values = all.filter((v) => !search || (v.value ?? "").toLowerCase().includes(search.toLowerCase()));
+        return { values, distinct: values.length, rows: all.reduce((n, v) => n + v.count, 0), truncated: false };
+      },
+      apply: async (next) => {
+        const sort = next.sort[0];
+        if (sort) {
+          this.grid.select({ r: area.row, c: column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
+          await this.sortRange(sort.desc, header);
+          return;
+        }
+        const f = next.filters.find((x) => x.column === col.name && x.op === "in");
+        const keep = f ? (f.value as unknown as (string | null)[]).map((v) => v ?? "") : null;
+        try {
+          const hidden = await this.rpc.call("sheet_filter", { sheet, area, header, column, ...(keep ? { keep } : {}) });
+          this.rangeFilter = keep ? { sheet, area, header, column, keep } : null;
+          toast(keep ? `${hidden.toLocaleString()} rows hidden by the filter` : "Filter cleared; every row is shown");
+        } catch (e) { toast((e as Error).message, "error"); }
+        await this.loadSheetLayout();
+      },
+    }, this.grid);
+  }
+
   /** S.05: keep the first `columns` columns of the sheet in view (0 unfreezes). */
   private async freezeColumns(columns: number): Promise<void> {
     if (this.active?.kind !== "sheet") return;
@@ -2330,6 +2456,11 @@ export class WorkbookScreen {
         "sep",
         { label: count > 1 ? `Delete ${count} columns` : "Delete column", danger: true,
           action: () => this.sheetOp("sheet_delete_columns", { at: sel.c0, count }) },
+        "sep",
+        { label: count > 1 ? `Hide ${count} columns` : "Hide column", action: () => void this.hideLines("columns", sel.c0, count, true) },
+        { label: "Unhide columns", hint: "next to the selection", action: () => void this.hideLines("columns", sel.c0 - 1, count + (sel.c0 > 0 ? 2 : 1), false) },
+        { label: "Column width…", action: () => void this.sizeDialog("columns") },
+        { label: "Auto-fit width", action: () => { this.autoFitSheetColumn(c); } },
       ], x, y);
       return;
     }
@@ -2407,6 +2538,14 @@ export class WorkbookScreen {
         { label: "Clear colour and value rules here", action: () => void this.clearRules() },
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
+        "sep",
+        { label: rows > 1 ? `Hide ${rows} rows` : "Hide row", action: () => void this.hideLines("rows", sel.r0, rows, true) },
+        { label: "Unhide rows", hint: "next to the selection", action: () => void this.hideLines("rows", sel.r0 - 1, rows + (sel.r0 > 0 ? 2 : 1), false) },
+        { label: "Row height…", action: () => void this.sizeDialog("rows") },
+        { label: "Auto-fit row height", action: () => this.grid.autoFitRow(sel.r0) },
+        ...(rows > 1 || (this.active?.kind === "sheet" && this.rangeFilter?.sheet === this.active.index) ? [
+          { label: `Filter by column ${columnLetter(this.grid.active.c)}…`, hint: "first row is the header", action: () => this.rangeFilterPopup(true, x, y) },
+        ] : []),
         "sep",
         { label: "Clear contents", hint: "Delete", action: () => this.grid.clearSelection() },
         { label: "Clear formatting", action: () => void this.applyStyle(null) },

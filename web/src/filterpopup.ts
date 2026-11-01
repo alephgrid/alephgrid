@@ -10,7 +10,8 @@ import { formatCount } from "./format";
 export interface FilterPopupHost {
   values(spec: ViewSpec, column: string, search: string): Promise<ColumnValues>;
   apply(spec: ViewSpec): Promise<void>;
-  condition(): void;
+  /** Condition filters ("greater than", …); the button is left out without it. */
+  condition?(): void;
 }
 
 const EMPTY = "\u0000empty";
@@ -117,7 +118,8 @@ export function filterPopup(column: Column, spec: ViewSpec, x: number, y: number
   sortAsc.addEventListener("click", () => finish({ ...spec, sort: [{ column: column.name, desc: false }] }));
   sortDesc.addEventListener("click", () => finish({ ...spec, sort: [{ column: column.name, desc: true }] }));
   clear.addEventListener("click", () => finish({ ...spec, filters: spec.filters.filter((f) => f.column !== column.name) }));
-  condition.addEventListener("click", () => { close(); host.condition(); });
+  condition.addEventListener("click", () => { close(); host.condition?.(); });
+  if (!host.condition) condition.hidden = true;
   apply.addEventListener("click", () => {
     if (allChosen && !search.value) return finish({ ...spec, filters: others });
     const keys = allChosen ? (loaded?.values ?? []).map((v) => (v.value === null ? EMPTY : v.value)) : [...chosen];

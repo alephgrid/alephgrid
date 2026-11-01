@@ -225,3 +225,92 @@ test("S.10: a validation rule refuses a value; a colour rule fills matching cell
   expect((await ws.call("sheet_rules", { sheet: 0 })).colors.length).toBe(1);
   ws.close();
 });
+
+test("S.05: rows and columns resize by dragging, hide and unhide, freeze, and are kept with the sheet", async ({ page }) => {
+  const wb = await server.createWorkbook("Layout"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [0, 1, 2, 3].map((r) => ({ row: r, column: 0, value: `r${r + 1}` })) });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("r1");
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  // 1000 shown rows: the row header is 54 px wide; columns are 104, rows 24, the header 32.
+  const rhw = 54, header = 32, row = 24, col = 104;
+  // Drag the bottom edge of row 1 down by 24 px and the right edge of column A by 46 px.
+  await page.mouse.move(box.x + 20, box.y + header + row);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 20, box.y + header + row + 24, { steps: 4 });
+  await page.mouse.up();
+  await page.mouse.move(box.x + rhw + col, box.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(box.x + rhw + col + 46, box.y + 16, { steps: 4 });
+  await page.mouse.up();
+  const line = async (axis: "rows" | "columns", index: number) => ((await ws.call("sheet_layout", { sheet: 0 }))[axis] as { index: number; size: number; hidden: boolean }[]).find((l) => l.index === index);
+  await expect.poll(() => line("rows", 0)).toEqual({ index: 0, size: 48, hidden: false });
+  await expect.poll(() => line("columns", 0)).toEqual({ index: 0, size: 150, hidden: false });
+  // Row 2 is now 48 px lower: a click in it lands on A2.
+  await page.mouse.click(box.x + rhw + 30, box.y + header + 48 + 12);
+  await expect(page.locator(".cell-ref")).toContainText("A2");
+  // Hide row 2 from the cell menu: the keyboard skips it.
+  await page.mouse.click(box.x + rhw + 30, box.y + header + 48 + 12, { button: "right" });
+  await page.getByRole("menuitem", { name: "Hide row", exact: true }).click();
+  await expect.poll(() => line("rows", 1)).toEqual({ index: 1, size: 24, hidden: true });
+  await expect.poll(() => shown(page, 1, 0)).toBe("r3");
+  // Freeze two rows from the View menu.
+  const menus = page.getByRole("navigation", { name: "Workbook menus" });
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowDown");
+  await menus.getByRole("button", { name: "View", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^Freeze rows 1–3/ }).click();
+  await expect.poll(async () => (await ws.call("sheet_layout", { sheet: 0 })).frozen_rows).toBe(3);
+  // Everything is kept with the workbook: reload and the sizes are back.
+  await page.reload();
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("r1");
+  await page.mouse.click(box.x + rhw + col + 30, box.y + header + 10);
+  await expect(page.locator(".cell-ref")).toContainText("A1");
+  // Unhide around the selection brings row 2 back.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.mouse.click(box.x + rhw + 30, box.y + header + 10, { button: "right" });
+  await page.getByRole("menuitem", { name: /^Unhide rows/ }).click();
+  await expect.poll(async () => (await ws.call("sheet_layout", { sheet: 0 })).rows.some((r: { hidden: boolean }) => r.hidden)).toBe(false);
+  ws.close();
+});
+
+test("S.06: a range filter hides the rows whose value is not kept, and clears", async ({ page }) => {
+  const wb = await server.createWorkbook("Range filter"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  const fruit = ["Fruit", "apple", "pear", "apple", "fig", "pear"];
+  await ws.call("sheet_set", { sheet: 0, inputs: fruit.map((value, row) => ({ row, column: 0, value })) });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("Fruit");
+  await page.keyboard.press("ControlOrMeta+Home");
+  for (let i = 0; i < 5; i++) await page.keyboard.press("Shift+ArrowDown");
+  const box = (await page.locator(".grid-scroller").boundingBox())!;
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: /^Filter by column A/ }).click();
+  const pear = page.locator(".fp-item", { hasText: "pear" }).locator("input");
+  await expect(pear).toBeChecked();
+  await pear.uncheck();
+  await page.locator(".fp-item", { hasText: "fig" }).locator("input").uncheck();
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByText("3 rows hidden by the filter")).toBeVisible();
+  const hidden = async () => (await ws.call("sheet_layout", { sheet: 0 })).rows.filter((r: { hidden: boolean }) => r.hidden).map((r: { index: number }) => r.index);
+  await expect.poll(hidden).toEqual([2, 4, 5]);
+  // Values are kept: the hidden cells are still there.
+  const cells = await ws.call("sheet_fetch", { sheet: 0, row_start: 2, row_count: 1, column_count: 1 });
+  expect(JSON.stringify(cells.rows)).toContain("pear");
+  // The keyboard walks only the kept rows.
+  expect(await shown(page, 2, 0)).toBe("apple");
+  await page.mouse.click(box.x + 90, box.y + 44, { button: "right" });
+  await page.getByRole("menuitem", { name: /^Filter by column A/ }).click();
+  await expect(page.locator(".fp-item", { hasText: "pear" }).locator("input")).not.toBeChecked();
+  await page.getByRole("button", { name: "Clear", exact: true }).click();
+  await expect.poll(hidden).toEqual([]);
+  ws.close();
+});
