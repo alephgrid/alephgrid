@@ -2324,6 +2324,17 @@ export class WorkbookScreen {
         try { const copy = await this.rpc.call("sheet_duplicate", { sheet: s.index }); await this.loadItems(); await this.openSheet(copy.index); }
         catch (e) { toast((e as Error).message, "error"); }
       } },
+      ...(() => {
+        const pos = this.sheets.findIndex((x) => x.index === s.index);
+        const move = async (to: number) => {
+          try { await this.rpc.call("sheet_reorder", { sheet: s.index, to }); await this.loadItems(); }
+          catch (e) { toast((e as Error).message, "error"); }
+        };
+        return [
+          { label: "Move left", disabled: pos <= 0, action: () => void move(this.sheets[pos - 1].index) },
+          { label: "Move right", disabled: pos < 0 || pos >= this.sheets.length - 1, action: () => void move(this.sheets[pos + 1].index) },
+        ];
+      })(),
       { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
         try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
         catch (e) { toast((e as Error).message, "error"); }

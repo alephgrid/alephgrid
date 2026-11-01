@@ -277,6 +277,21 @@ impl Sheets {
         Ok(())
     }
 
+    /// Move a sheet's tab to the place of the visible sheet `to` (S.07). Formulas keep
+    /// pointing at the same sheets (they refer by name). One undo step.
+    pub fn move_tab(&mut self, index: u32, to: u32) -> Result<()> {
+        self.check_index(index)?;
+        self.check_index(to)?;
+        if index == to {
+            return Ok(());
+        }
+        let m = self.model_mut()?;
+        m.move_sheet(index, to).map_err(|e| anyhow!(e))?;
+        self.record(1);
+        self.moved_all();
+        Ok(())
+    }
+
     /// The names of hidden sheets (Alephgrid's own are not listed).
     pub fn hidden_sheets(&self) -> Vec<String> {
         let Ok(m) = self.model() else { return vec![] };

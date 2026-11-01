@@ -133,6 +133,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("delete_comment", "null"),
     ("sheet_border", "SheetInfo"),
     ("sheet_sort", "SheetInfo"),
+    ("sheet_reorder", "null"),
     ("sheet_hide", "null"),
     ("hidden_sheets", "string[]"),
     ("sheet_unhide", "null"),

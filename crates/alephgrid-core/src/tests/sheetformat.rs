@@ -214,3 +214,17 @@ fn sheets_hide_and_unhide() {
     assert_eq!(s.list().len(), 2);
     assert!(s.hidden_sheets().is_empty());
 }
+
+/// S.07: moving a tab keeps formulas pointing at the same sheets.
+#[test]
+fn tabs_move_and_references_follow() {
+    let mut s = sheet();
+    s.create("T").unwrap();
+    s.set(1, &[sheet_input(0, 0, "=S!A1*2")]).unwrap();
+    s.move_tab(1, 0).unwrap();
+    let names: Vec<String> = s.list().into_iter().map(|x| x.name).collect();
+    assert_eq!(names, vec!["T", "S"]);
+    let t = s.list().into_iter().find(|x| x.name == "T").unwrap().index;
+    let v = s.fetch(t, 0, 1, 1).unwrap().rows[0][0].clone().map(|c| c.0);
+    assert_eq!(v.as_deref(), Some("6.28318"));
+}

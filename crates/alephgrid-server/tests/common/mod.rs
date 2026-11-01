@@ -491,6 +491,7 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("recalculate", json!({ "table": "t" })),
         ("cancel_recalculation", json!({ "table": "t" })),
         ("sheet_duplicate", json!({ "sheet": 0 })),
+        ("sheet_reorder", json!({ "sheet": 1, "to": 0 })),
         ("sheet_hide", json!({ "sheet": 1 })),
         ("hidden_sheets", json!({})),
         ("sheet_unhide", json!({ "name": "HIDDEN" })),
