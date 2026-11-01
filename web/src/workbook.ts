@@ -2530,13 +2530,18 @@ export class WorkbookScreen {
     start = Math.max(0, start);
     try {
       await this.rpc.call("sheet_set_hidden", { sheet: this.active.index, axis, start, count: Math.max(1, count), hidden });
+      // The grid learns the new sizes first, then the selection moves past what was hidden:
+      // moving it earlier left a moment in which the keyboard still saw the hidden lines.
+      await this.loadSheetLayout();
       if (hidden) {
         const sel = this.grid.selection();
         if (axis === "rows") this.grid.select({ r: Math.min(this.sheetDims.rows - 1, start + count), c: sel.c0 });
         else this.grid.select({ r: sel.r0, c: Math.min(this.sheetCols.length - 1, start + count) });
       }
-    } catch (e) { toast((e as Error).message, "error"); }
-    await this.loadSheetLayout();
+    } catch (e) {
+      toast((e as Error).message, "error");
+      await this.loadSheetLayout();
+    }
   }
 
   private async sizeDialog(axis: "rows" | "columns"): Promise<void> {
