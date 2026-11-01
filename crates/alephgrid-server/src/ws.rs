@@ -764,7 +764,13 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetUndo | Op::SheetRedo => {
             let before: Vec<String> = wb.sheets().list().into_iter().map(|s| s.name).collect();
             let undo = matches!(op, Op::SheetUndo);
+            let step = { let s = wb.sheets(); if undo { s.undo_step() } else { s.redo_step() } };
             let changed = wb.with_sheets(|s| if undo { s.undo() } else { s.redo() })?;
+            // Comments moved by the step move back (or again) with it (S.11).
+            let note = step.filter(|_| changed).and_then(|id| wb.sheets().step_note(id).cloned());
+            if let Some(note) = note {
+                wb.restore_comment_step(&note, undo)?;
+            }
             let after: Vec<String> = wb.sheets().list().into_iter().map(|s| s.name).collect();
             // Undoing a sheet creation, rename or deletion changes the tab list too.
             let event = if before != after {
@@ -776,26 +782,34 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         }
         Op::SheetInsertRows { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
+            let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, count as i64)?;
+            wb.note_comment_step(sheet, before)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteRows { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
+            let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.delete_rows(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, -(count as i64))?;
+            wb.note_comment_step(sheet, before)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetInsertColumns { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
+            let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.insert_columns(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, count as i64)?;
+            wb.note_comment_step(sheet, before)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteColumns { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
+            let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.delete_columns(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, -(count as i64))?;
+            wb.note_comment_step(sheet, before)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDefineName { name, scope, refers_to } => {
@@ -906,7 +920,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         }
         Op::SheetMove { sheet, source, row, column, layout } => {
             expect_layout(wb, sheet, layout)?;
+            let before = wb.comments(sheet)?;
             let area = wb.with_sheets(|s| s.move_cells(sheet, source, (row, column)))?;
+            wb.move_comments(sheet, source, (row, column))?;
+            wb.note_comment_step(sheet, before)?;
             (json!(area), sheet_changed(sheet))
         }
         Op::CreateSheetFromQuery { name, sql, params, allow_truncation } => {

@@ -250,6 +250,18 @@ test("S.10: a validation rule refuses a value; a colour rule fills matching cell
   const cells = await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 });
   expect(JSON.stringify(cells.rows)).not.toContain("maybe");
   expect((await ws.call("sheet_rules", { sheet: 0 })).colors.length).toBe(1);
+  // The rules list shows both rules; deleting one removes it from the workbook.
+  const menus = page.getByRole("navigation", { name: "Workbook menus" });
+  await menus.getByRole("button", { name: "Format", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Rules on this sheet…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Rules on S" });
+  await expect(dialog.getByRole("listitem")).toHaveCount(2);
+  await expect(dialog).toContainText("A1:A5 greater than 5 → fill #FFC7CE");
+  await expect(dialog).toContainText("B1:B5 allows yes, no");
+  await dialog.getByRole("button", { name: "Delete rule on A1:A5" }).click();
+  await expect(dialog.getByRole("listitem")).toHaveCount(1);
+  await expect.poll(async () => (await ws.call("sheet_rules", { sheet: 0 })).colors.length).toBe(0);
+  await dialog.getByRole("button", { name: "Done" }).click();
   ws.close();
 });
 

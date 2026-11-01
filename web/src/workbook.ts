@@ -32,7 +32,7 @@ import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
-import { SheetChartsLayer } from "./sheetcharts";
+import { SheetChartsLayer, rangeText } from "./sheetcharts";
 import type { CellComment, SheetLayout, SheetRules } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
@@ -684,6 +684,10 @@ export class WorkbookScreen {
         { label: "Merge and centre", action: () => void this.mergeCells("center") },
         { label: "Merge each row", action: () => void this.mergeCells("across") },
         { label: "Unmerge cells", action: () => void this.mergeCells("unmerge") },
+        "sep",
+        { label: "Conditional colour…", action: () => void this.editRules("color") },
+        { label: "Allowed values…", action: () => void this.editRules("list") },
+        { label: "Rules on this sheet…", action: () => void this.rulesDialog() },
         "sep",
         { label: "Clear formatting", action: () => void this.applyStyle(null) },
       ] : [
@@ -2295,9 +2299,20 @@ export class WorkbookScreen {
       if (!v) return;
       rules.colors.push({ area, condition: v.condition, value: v.value, color: v.color.trim().toUpperCase() });
     } else {
-      const v = await formDialog("Allowed values", [{ name: "list", label: "Values, separated by commas", placeholder: "yes, no" }], "Save");
+      const v = await formDialog("Allowed values", [
+        { name: "kind", label: "Allow", type: "select", options: [{ value: "list", label: "one of a list" }, { value: "range", label: "a number between" }] },
+        { name: "list", label: "List: values separated by commas, or range: low, high", placeholder: "yes, no" }], "Save",
+        (x) => {
+          if (x.kind === "list") return x.list.split(",").some((t) => t.trim()) ? null : "Write at least one value";
+          const [lo, hi] = x.list.split(",").map((t) => t.trim());
+          return (lo === "" || !Number.isNaN(Number(lo))) && (hi === undefined || hi === "" || !Number.isNaN(Number(hi))) && (lo || hi) ? null : "Write the range as low, high (either may be left out)";
+        });
       if (!v) return;
-      rules.validations.push({ area, list: v.list.split(",").map((x) => x.trim()).filter(Boolean) });
+      if (v.kind === "list") rules.validations.push({ area, list: v.list.split(",").map((x) => x.trim()).filter(Boolean) });
+      else {
+        const [lo, hi] = v.list.split(",").map((t) => t.trim());
+        rules.validations.push({ area, ...(lo ? { min: Number(lo) } : {}), ...(hi ? { max: Number(hi) } : {}) });
+      }
     }
     try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
     catch (e) { toast((e as Error).message, "error"); }
@@ -2309,6 +2324,47 @@ export class WorkbookScreen {
     return this.sheetRules.validations
       .filter((v) => r >= v.area.row && r < v.area.row + v.area.rows && c >= v.area.column && c < v.area.column + v.area.columns)
       .flatMap((v) => v.list ?? []);
+  }
+
+  /** S.10: every colour and allowed-value rule of the sheet, to review, visit or delete. */
+  private async rulesDialog(): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index, name = this.active.name;
+    let rules = await this.rpc.call("sheet_rules", { sheet });
+    const CONDITION: Record<string, string> = { greater: "greater than", less: "less than", equal: "equal to", contains: "contains", empty: "is empty", not_empty: "is not empty", scale: "shade by value" };
+    const list = el("ul", { class: "rules-list", "aria-label": "Rules" });
+    const done = el("button", { class: "btn btn-primary", type: "button" }, "Done");
+    const dialog = el("div", { class: "dialog rules-dialog" }, el("h2", {}, `Rules on ${name}`),
+      el("p", { class: "dialog-hint" }, "Colour rules fill matching cells; allowed-value rules refuse other values. Neither is written to XLSX files."), list,
+      el("div", { class: "dialog-actions" }, done));
+    const save = async (next: typeof rules) => {
+      try { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); rules = next; this.sheetRules = next; this.grid.invalidate(); render(); }
+      catch (e) { toast((e as Error).message, "error"); }
+    };
+    const goTo = (a: { row: number; column: number; rows: number; columns: number }) => {
+      modal.close();
+      this.grid.select({ r: a.row, c: a.column }, { r: a.row + a.rows - 1, c: a.column + a.columns - 1 });
+      this.grid.focus();
+    };
+    const item = (label: string, swatch: string | null, area: { row: number; column: number; rows: number; columns: number }, remove: () => void) =>
+      el("li", { class: "rules-item" },
+        swatch ? el("span", { class: "rules-swatch", style: `background:${swatch}`, "aria-hidden": "true" }) : el("span", { class: "rules-swatch rules-swatch-none", "aria-hidden": "true" }, "✓"),
+        el("span", { class: "rules-text" }, el("strong", {}, rangeText(area)), ` ${label}`),
+        el("button", { class: "btn btn-ghost btn-small", type: "button", "aria-label": `Go to ${rangeText(area)}`, onclick: () => goTo(area) }, "Go to"),
+        el("button", { class: "btn btn-ghost btn-small", type: "button", "aria-label": `Delete rule on ${rangeText(area)}`, onclick: remove }, "Delete"));
+    const render = () => {
+      const items = [
+        ...rules.colors.map((r, i) => item(r.condition === "scale" ? `shade by value from ${r.value || "low"}` : `${CONDITION[r.condition] ?? r.condition}${r.value ? ` ${r.value}` : ""} → fill ${r.color}`, r.color, r.area,
+          () => void save({ ...rules, colors: rules.colors.filter((_, j) => j !== i) }))),
+        ...rules.validations.map((v, i) => item(v.list?.length ? `allows ${v.list.join(", ")}` : `allows numbers${v.min !== undefined ? ` from ${v.min}` : ""}${v.max !== undefined ? ` to ${v.max}` : ""}`, null, v.area,
+          () => void save({ ...rules, validations: rules.validations.filter((_, j) => j !== i) }))),
+      ];
+      list.replaceChildren(...(items.length ? items : [el("li", { class: "rules-empty" }, "No rules yet: select cells, then use Conditional colour… or Allowed values… in the cell menu.")]));
+    };
+    render();
+    const modal = openModal(dialog, () => modal.close());
+    done.addEventListener("click", () => modal.close());
+    done.focus();
   }
 
   /** S.10: remove the rules that touch the selection. */
@@ -2602,6 +2658,7 @@ export class WorkbookScreen {
         { label: "Conditional colour…", action: () => void this.editRules("color") },
         { label: "Allowed values…", action: () => void this.editRules("list") },
         { label: "Clear colour and value rules here", action: () => void this.clearRules() },
+        { label: "Rules on this sheet…", action: () => void this.rulesDialog() },
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
         "sep",
