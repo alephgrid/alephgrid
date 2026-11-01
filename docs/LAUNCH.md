@@ -108,7 +108,7 @@ binaries ship unsigned until an Apple Developer ID exists. How it runs: [RELEASI
   (macOS 11+), UI embedded; `SHA256SUMS`.
 * Image `ghcr.io/alephgrid/alephgrid:X.Y.Z` and `:latest`, amd64 and arm64, from the tested
   binaries (`Dockerfile.release`; `/data` owned by the server's user).
-* npm `alephgrid` plus `@alephgrid/cli-<platform>-<arch>`.
+* npm `alephgrid` plus `alephgrid-<platform>-<arch>` (unscoped, so no npm organization is needed).
 * Nothing is public before a maintainer approves the pipeline's `approve-publish` step.
 * **Owner:** npm organization and token, GitHub token, the CircleCI `release` context
   (RELEASING.md "Once"). Still open: signatures and an SBOM.
