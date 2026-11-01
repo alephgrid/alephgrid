@@ -964,6 +964,105 @@ impl Db<'_> {
         })
     }
 
+    /// The distinct values of `column` in `spec`'s table with their counts, over the rows the
+    /// spec's filters on other columns keep (U.16). `search` keeps values containing it
+    /// (any case). At most `limit` values (≤ [`crate::limits::MAX_COLUMN_VALUES`]), in the
+    /// column's own order, empty first.
+    pub fn column_values(&self, spec: &ViewSpec, column: &str, search: &str, limit: usize) -> Result<ColumnValues> {
+        let all = self.validate_spec(spec)?;
+        let col = all.iter().find(|c| c.name == column).ok_or_else(|| anyhow!("unknown column {column:?}"))?;
+        let by_name: HashMap<&str, &Column> = all.iter().map(|c| (c.name.as_str(), c)).collect();
+        let mut conditions = Vec::new();
+        for f in spec.filters.iter().filter(|f| f.column != column) {
+            conditions.push(filter_sql(by_name[f.column.as_str()], f)?);
+        }
+        let limit = limit.clamp(1, crate::limits::MAX_COLUMN_VALUES);
+        let c = ident(column);
+        let where_sql = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
+        let search_sql = if search.is_empty() {
+            "TRUE".to_string()
+        } else {
+            format!("contains(lower(CAST({c} AS VARCHAR)), lower({}))", lit(search))
+        };
+        self.snapshot(|| {
+            let base = self.base_select(&spec.table)?;
+            let kept = format!("SELECT {c} FROM ({base}) AS _b {where_sql}");
+            let (rows, distinct): (i64, i64) = self.conn.query_row(
+                &format!("SELECT (SELECT count(*) FROM ({kept})), (SELECT count(*) FROM (SELECT DISTINCT {c} FROM ({kept}) WHERE {search_sql}))"),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let sql = format!(
+                "SELECT CAST({c} AS VARCHAR), count(*) FROM ({kept}) WHERE {search_sql} GROUP BY {c} ORDER BY {c} NULLS FIRST LIMIT {}",
+                limit
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let values: Vec<ValueCount> = stmt
+                .query_map([], |r| Ok(ValueCount { value: r.get(0)?, count: r.get::<_, i64>(1)? as u64 }))?
+                .collect::<Result<_, _>>()?;
+            let _ = col;
+            Ok(ColumnValues { truncated: (values.len() as i64) < distinct, values, distinct: distinct as u64, rows: rows as u64 })
+        })
+    }
+
+    /// Find `text` in the visible cells of view `id` as text (U.17), from view row `from`
+    /// (inclusive) forwards or, `backwards`, down to it. Returns up to two rows with
+    /// matches and, when `count` is set, how many cells match in the whole view.
+    pub fn find_in_view(&self, id: u64, text: &str, match_case: bool, from: u64, backwards: bool, count: bool) -> Result<FindResult> {
+        if text.is_empty() {
+            return Ok(FindResult { matches: count.then_some(0), hits: vec![] });
+        }
+        self.with_view(id, |m| {
+            let base = self.view_base(m, false)?;
+            let cols: Vec<String> = m.columns.iter().map(|c| format!("b.{}", ident(&c.name))).collect();
+            let src = match &m.perm {
+                None => format!("SELECT row_number() OVER (ORDER BY b.{ORD}) - 1 AS _p, {} FROM ({base}) b", cols.join(", ")),
+                Some(p) => format!("SELECT p._rf_pos AS _p, {} FROM ({base}) b JOIN {} p USING ({ID})", cols.join(", "), p.qualified()),
+            };
+            let needle = if match_case { lit(text) } else { format!("lower({})", lit(text)) };
+            let tests: Vec<String> = m
+                .columns
+                .iter()
+                .map(|c| {
+                    let v = format!("CAST(s.{} AS VARCHAR)", ident(&c.name));
+                    let v = if match_case { v } else { format!("lower({v})") };
+                    format!("coalesce(contains({v}, {needle}), false)")
+                })
+                .collect();
+            if tests.is_empty() {
+                return Ok(FindResult::default());
+            }
+            let matches = if count {
+                let sum = tests.iter().map(|t| format!("({t})::BIGINT")).collect::<Vec<_>>().join(" + ");
+                let n: Option<i64> = self.conn.query_row(&format!("SELECT sum({sum}) FROM ({src}) s"), [], |r| r.get(0))?;
+                Some(n.unwrap_or(0) as u64)
+            } else {
+                None
+            };
+            let (cmp, order) = if backwards { ("<=", "DESC") } else { (">=", "ASC") };
+            let sql = format!(
+                "SELECT s._p, {} FROM ({src}) s WHERE ({}) AND s._p {cmp} {from} ORDER BY s._p {order} LIMIT 2",
+                tests.join(", "),
+                tests.join(" OR ")
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let n = tests.len();
+            let hits = stmt
+                .query_map([], |r| {
+                    let row: i64 = r.get(0)?;
+                    let mut columns = Vec::new();
+                    for i in 0..n {
+                        if r.get::<_, bool>(i + 1)? {
+                            columns.push(i as u32);
+                        }
+                    }
+                    Ok(FindHit { row: row as u64, columns })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(FindResult { matches, hits })
+        })
+    }
+
     pub fn stats(&self, id: u64, column: &str, start: u64, end: u64) -> Result<Stats> {
         self.with_view(id, |m| {
             let col = m.columns.iter().find(|c| c.name == column).ok_or_else(|| anyhow!("unknown column {column:?}"))?;
@@ -1394,5 +1493,28 @@ pub(crate) fn filter_sql(col: &Column, f: &Filter) -> Result<String> {
         FilterOp::StartsWith => format!("starts_with(lower(CAST({c} AS VARCHAR)), lower({}))", lit(&text())),
         FilterOp::IsEmpty => format!("({c} IS NULL OR CAST({c} AS VARCHAR) = '')"),
         FilterOp::NotEmpty => format!("({c} IS NOT NULL AND CAST({c} AS VARCHAR) <> '')"),
+        FilterOp::In => {
+            let Value::Array(items) = &f.value else { bail!("a list filter needs a list of values") };
+            if items.len() > crate::limits::MAX_FILTER_VALUES {
+                bail!(crate::limits::TooLarge(format!("a list filter takes at most {} values", crate::limits::MAX_FILTER_VALUES)));
+            }
+            let mut texts = Vec::new();
+            let mut null = false;
+            for v in items {
+                match v {
+                    Value::Null => null = true,
+                    Value::String(s) => texts.push(lit(s)),
+                    other => texts.push(lit(&other.to_string())),
+                }
+            }
+            let mut parts = Vec::new();
+            if !texts.is_empty() {
+                parts.push(format!("CAST({c} AS VARCHAR) IN ({})", texts.join(", ")));
+            }
+            if null {
+                parts.push(format!("{c} IS NULL"));
+            }
+            if parts.is_empty() { "FALSE".to_string() } else { format!("({})", parts.join(" OR ")) }
+        }
     })
 }

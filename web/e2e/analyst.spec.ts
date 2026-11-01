@@ -45,27 +45,31 @@ test("F.15: the analyst workflow runs end to end without SQL", async ({ page }) 
   await expect.poll(() => shown(page, 0, 3)).toContain("125");
   // A report by region with totals and a line chart: East 50, West 135, total 185.
   await page.getByRole("button", { name: "Analyze", exact: true }).click();
-  const d = page.getByRole("dialog", { name: "Analyze data" });
-  await d.getByRole("combobox", { name: "Analysis kind", exact: true }).selectOption("report");
+  const d = page.getByRole("complementary", { name: "Analyze" });
   await d.getByRole("combobox", { name: "Source table", exact: true }).selectOption("orders");
-  await d.getByRole("listbox", { name: "Group columns" }).selectOption("region");
-  await d.getByRole("textbox", { name: "Measures", exact: true }).fill("revenue = sum(amount)");
+  const rowChips = d.getByRole("region", { name: "Rows" }).getByRole("button", { name: /^Remove / });
+  while (await rowChips.count()) await rowChips.first().click();
+  await d.getByRole("combobox", { name: "Add field to Rows" }).selectOption("region");
+  await d.getByRole("combobox", { name: "Aggregate of value 1" }).selectOption("sum");
+  await d.getByRole("combobox", { name: "Column of value 1" }).selectOption("amount");
+  await d.getByRole("textbox", { name: "Name of value 1" }).fill("revenue");
   await d.getByRole("combobox", { name: "Chart kind", exact: true }).selectOption("line");
-  await d.getByRole("button", { name: "Run / refresh", exact: true }).click();
-  await expect(d.getByRole("list", { name: "Chart values" })).toContainText("West: 135");
-  await expect(d.locator("table.result-table").last()).toContainText("185");
+  await d.getByRole("button", { name: "Run", exact: true }).click();
+  const res = page.getByRole("region", { name: "Analysis result" });
+  await expect(res.getByRole("table", { name: "Chart values" })).toContainText("135");
+  await expect(res.locator("table.result-table").last()).toContainText("185");
   await d.getByRole("textbox", { name: "Analysis name" }).fill("Revenue by region");
-  await d.getByRole("button", { name: "Save analysis", exact: true }).click();
-  await expect(d.getByRole("status")).toContainText("Analysis saved");
-  await d.getByRole("button", { name: "Close", exact: true }).click();
+  await d.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(d.getByRole("status")).toContainText("Saved");
+  await d.getByRole("button", { name: "Close Analyze" }).click();
   // Filtered: a dashboard sliced to East.
   await menuCommand(page, "Data", "Dashboards…");
   const b = page.getByRole("dialog", { name: "Dashboards" });
-  await b.getByRole("listbox", { name: "Analyses on the dashboard" }).selectOption({ label: "Revenue by region" });
-  await b.getByRole("textbox", { name: "Slicer table" }).fill("orders");
-  await b.getByRole("textbox", { name: "Slicer column" }).fill("region");
-  await b.getByRole("textbox", { name: "Slicer values" }).fill("East");
-  await b.getByRole("button", { name: "Save dashboard", exact: true }).click();
+  await b.getByRole("group", { name: "Analyses on the dashboard" }).getByRole("checkbox", { name: "Revenue by region" }).check();
+  await b.getByRole("combobox", { name: "Slicer table" }).selectOption("orders");
+  await b.getByRole("combobox", { name: "Slicer column" }).selectOption("region");
+  await b.getByRole("group", { name: "Slicer values" }).getByRole("checkbox", { name: /East/ }).check();
+  await b.getByRole("button", { name: "Save", exact: true }).click();
   await expect(b.getByRole("region", { name: "Revenue by region" })).not.toContainText("West");
   await b.getByRole("button", { name: "Close", exact: true }).click();
   // Changed data, from another session: Cy moves East; the open orders view follows.

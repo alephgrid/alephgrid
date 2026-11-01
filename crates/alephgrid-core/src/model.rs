@@ -106,6 +106,9 @@ pub enum FilterOp {
     StartsWith,
     IsEmpty,
     NotEmpty,
+    /// One of a list of values (`value` is an array; `null` stands for an empty cell). Each
+    /// value is compared as the text the cell shows (see [`ColumnValues`]).
+    In,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -260,6 +263,43 @@ pub struct EditOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub first_appended: Option<i64>,
+}
+
+/// A row of a view holding matches of a find, with the matching visible columns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct FindHit {
+    pub row: u64,
+    pub columns: Vec<u32>,
+}
+
+/// What a find over a view found (U.17): the total number of matching cells (when asked),
+/// and the first rows with matches from the starting row on, in the direction asked.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct FindResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub matches: Option<u64>,
+    pub hits: Vec<FindHit>,
+}
+
+/// One distinct value of a column and how many rows hold it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct ValueCount {
+    /// The value as text; `None` for empty cells.
+    pub value: Option<String>,
+    pub count: u64,
+}
+
+/// The distinct values of a column (for a header filter), counted over the rows the view's
+/// other filters keep, in the column's order. At most `limit` are listed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+pub struct ColumnValues {
+    pub values: Vec<ValueCount>,
+    /// Distinct values matching the search, listed or not.
+    pub distinct: u64,
+    /// Rows the other filters keep.
+    pub rows: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

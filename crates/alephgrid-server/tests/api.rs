@@ -327,6 +327,8 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "RowBlock" => conforms::<RowBlock>(op, v),
         "EditOutcome" => conforms::<EditOutcome>(op, v),
         "Stats" => conforms::<Stats>(op, v),
+        "FindResult" => conforms::<alephgrid_core::FindResult>(op, v),
+        "ColumnValues" => conforms::<alephgrid_core::ColumnValues>(op, v),
         "QueryPreview" => conforms::<QueryPreview>(op, v),
         "SheetInfo[]" => conforms::<Vec<SheetInfo>>(op, v),
         "SheetInfo" => conforms::<SheetInfo>(op, v),

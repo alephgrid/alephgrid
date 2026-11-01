@@ -42,6 +42,8 @@ export interface GridHandlers {
   selectionChanged(range: Range, active: Cell): void;
   commitEdits(edits: GridEdit[]): Promise<boolean>;
   headerMenu(col: number, clientX: number, clientY: number): void;
+  /** The filter popup of a table column (its header's dropdown, or Alt+↓); x < 0 from the keyboard. */
+  headerFilter?(col: number, clientX: number, clientY: number): void;
   rowMenu(row: number, clientX: number, clientY: number): void;
   copy(range: Range): void;
   paste(at: Cell, text: string): void;
@@ -535,7 +537,8 @@ export class Grid {
     if (y < HEADER_H && x >= rhw && c >= 0) {
       const cell = this.cellRect({ r: 0, c });
       if (!this.isSheet() && x > cell.x + cell.w - 22) {
-        this.handlers.headerMenu(c, e.clientX, e.clientY);
+        if (this.handlers.headerFilter) this.handlers.headerFilter(c, e.clientX, e.clientY);
+        else this.handlers.headerMenu(c, e.clientX, e.clientY);
         return;
       }
       this.dragging = "cols";
@@ -648,6 +651,12 @@ export class Grid {
     if (this.editing) return;
     if (this.handlers.command?.(e)) { e.preventDefault(); return; }
     const mod = e.metaKey || e.ctrlKey;
+    // Alt+↓ opens the column's filter, as in other spreadsheets.
+    if (e.altKey && e.key === "ArrowDown" && !this.isSheet() && this.handlers.headerFilter) {
+      e.preventDefault();
+      this.handlers.headerFilter(this.active.c, -1, -1);
+      return;
+    }
     const pageRows = Math.max(1, Math.floor(this.bodyHeight() / ROW_H) - 1);
     const lastRow = Math.max(0, this.model.rowCount() - 1);
     const lastCol = this.widths.length - 1;

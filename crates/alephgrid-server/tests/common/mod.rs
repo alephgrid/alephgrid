@@ -389,6 +389,8 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("undo", json!({})),
         ("undo", json!({ "redo": true })),
         ("stats", json!({ "view_id": 1, "column": "n", "start": 0, "end": 3 })),
+        ("find_in_view", json!({ "view_id": 1, "text": "1", "count": true })),
+        ("column_values", json!({ "spec": { "table": "t" }, "column": "n" })),
         ("add_column", json!({ "table": "t", "name": "extra", "sql_type": "INTEGER" })),
         ("add_formula_column", json!({ "table": "t", "name": "twice", "formula": "[n] * 2" })),
         ("update_formula", json!({ "table": "t", "name": "twice", "formula": "[n] * 3" })),

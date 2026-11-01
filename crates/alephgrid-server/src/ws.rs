@@ -174,6 +174,10 @@ pub enum Op {
         #[serde(default)] #[ts(optional, as = "Option<bool>")] redo: bool,
     },
     Stats { view_id: u64, column: String, start: u64, end: u64 },
+    /// Find text in a view's visible cells (U.17).
+    FindInView { view_id: u64, text: String, #[serde(default)] #[ts(optional, as = "Option<bool>")] match_case: bool, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
+    /// Distinct values of a column with counts, for a header filter (U.16).
+    ColumnValues { spec: ViewSpec, column: String, #[serde(default)] #[ts(optional, as = "Option<String>")] search: String, #[serde(default = "default_value_limit")] #[ts(optional, as = "Option<usize>")] limit: usize },
     AddColumn { table: String, name: String, sql_type: String },
     /// `language` is `sql` (a DuckDB expression, the default) or `sheet` (spreadsheet syntax).
     AddFormulaColumn { table: String, name: String, formula: String, #[serde(default)] #[ts(optional, as = "Option<alephgrid_core::FormulaLanguage>")] language: alephgrid_core::FormulaLanguage },
@@ -333,6 +337,10 @@ fn default_paste_mode() -> alephgrid_core::PasteMode {
     alephgrid_core::PasteMode::All
 }
 
+fn default_value_limit() -> usize {
+    500
+}
+
 fn default_export_format() -> ExportFormat {
     ExportFormat::Csv
 }
@@ -352,7 +360,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -383,7 +391,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
     match op {
         Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
-        Analyze { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
+        Analyze { .. } | ColumnValues { .. } | FindInView { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
@@ -510,6 +518,8 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
             json!(r.fetch(view_id, row_start, row_count, column_start, column_count)?)
         }
         Op::Stats { view_id, column, start, end } => json!(r.stats(view_id, &column, start, end)?),
+        Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
+        Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
         Op::Query { sql, params, limit } => {
             require_sql(ctx)?;
             json!(r.run_query(&sql, &params, limit)?)

@@ -55,6 +55,10 @@ pub enum ChartKind {
     Bar,
     Line,
     Scatter,
+    /// Vertical bars (U.18).
+    Column,
+    Area,
+    Pie,
 }
 
 /// A dashboard filter: rows of `table` whose `column` is one of `values` (None: blank).
