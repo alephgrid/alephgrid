@@ -1,0 +1,67 @@
+// S.01 / S.02 / S.T01: the sheet format toolbar and shortcuts: styles and number formats
+// reach the server as one step each and show in the grid; tables do not offer them.
+
+import { expect, test, type Page } from "@playwright/test";
+import { Server } from "./server";
+
+const server = new Server();
+test.beforeAll(async () => server.start());
+test.afterAll(async () => server.dispose());
+
+async function shown(page: Page, r: number, c: number): Promise<string> {
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  for (let i = 0; i < r; i++) await page.keyboard.press("ArrowDown");
+  for (let i = 0; i < c; i++) await page.keyboard.press("ArrowRight");
+  const id = await page.locator(".grid-host").getAttribute("aria-activedescendant");
+  return (await page.locator(`#${id}`).textContent()) ?? "";
+}
+
+test("format a sheet range from the toolbar and the keyboard", async ({ page }) => {
+  const wb = await server.createWorkbook("Formats"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "0.25" }, { row: 0, column: 1, value: "1234.5" }] });
+  await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  const bar = page.getByRole("toolbar", { name: "Cell format" });
+  await expect(bar).toBeVisible();
+  await expect.poll(() => shown(page, 0, 0)).toBe("0.25");
+  // A1:B1 bold, from the toolbar.
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("Shift+ArrowRight");
+  await bar.getByRole("button", { name: "Bold" }).click();
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 })).styles?.filter((s: { style: { b?: boolean } }) => s.style.b).length ?? 0).toBe(2);
+  await expect(bar.getByRole("button", { name: "Bold" })).toHaveAttribute("aria-pressed", "true");
+  // Percent on A1: the display changes, the value does not.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await bar.getByRole("combobox", { name: "Number format" }).selectOption({ label: "Percent (12.35%)" });
+  await expect.poll(() => shown(page, 0, 0)).toBe("25.00%");
+  await page.keyboard.press("ControlOrMeta+Home");
+  await bar.getByRole("button", { name: "Fewer decimals" }).click();
+  await expect.poll(() => shown(page, 0, 0)).toBe("25.0%");
+  const raw = await ws.call("sheet_cell_detail", { sheet: 0, row: 0, column: 0 });
+  expect(JSON.stringify(raw)).toContain("0.25");
+  // Italic with the keyboard, on B1.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ControlOrMeta+i");
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 })).styles?.find((s: { column: number }) => s.column === 1)?.style.i ?? false).toBe(true);
+  // Undo takes back the italic only.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 })).styles?.find((s: { column: number }) => s.column === 1)?.style.i ?? false).toBe(false);
+  // Clear formatting on A1:B1 keeps the values.
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("Shift+ArrowRight");
+  await bar.getByRole("button", { name: "Clear formatting" }).click();
+  await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 1, column_count: 2 })).styles?.length ?? 0).toBe(0);
+  await expect.poll(() => shown(page, 0, 0)).toBe("0.25");
+  // Tables have no cell format toolbar.
+  await ws.call("create_table_from_query", { name: "t", sql: "SELECT 1 AS x" });
+  await page.reload();
+  await page.getByRole("tab", { name: /^t/ }).click();
+  await expect(page.getByRole("toolbar", { name: "Cell format" })).toBeHidden();
+  ws.close();
+});

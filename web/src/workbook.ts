@@ -30,6 +30,8 @@ import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuIte
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { filterPopup } from "./filterpopup";
+import { formatBar } from "./formatbar";
+import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
 
 /** "1.2M rows" for the explorer. */
@@ -234,6 +236,12 @@ export class WorkbookScreen {
   private closePresentation: (() => void) | null = null;
   private closeReplace: (() => void) | null = null;
   private findBar = new FindBar(() => this.grid.focus());
+  /** S.01: the sheet format toolbar (hidden for tables). */
+  private formatBarEl = formatBar({
+    current: () => this.sheetCache.style(this.grid.active.r, this.grid.active.c),
+    apply: (patch) => this.applyStyle(patch),
+    clear: () => this.applyStyle(null),
+  }) as HTMLElement & { sync?: () => void };
   private replaceRevision = 0;
   /** Tables made from a query, and the saved queries they may name. */
   private materialized: MaterializedTable[] = [];
@@ -260,7 +268,7 @@ export class WorkbookScreen {
     };
     const onError = (e: Error) => toast(e.message, "error");
     this.cache = new RowCache(this.rpc, onLoaded, onError);
-    this.sheetCache = new SheetCache(this.rpc, onLoaded, onError);
+    this.sheetCache = new SheetCache(this.rpc, () => { onLoaded(); if (this.isSheet()) this.formatBarEl.sync?.(); }, onError);
     const self = this;
     this.grid = new Grid(
       {
@@ -280,6 +288,7 @@ export class WorkbookScreen {
           const cell = this.sheetCache.cell(r, c);
           return cell ? { text: cell[0], align: cell[1] } : cell;
         },
+        style: (r, c) => this.sheetCache.style(r, c),
         editText: (r, c) => {
           const cell = this.sheetCache.cell(r, c);
           return cell ? cell[2] ?? cell[0] : "";
@@ -701,6 +710,7 @@ export class WorkbookScreen {
         this.exportBtn = tool("download", "Export", (e) => this.exportMenu(anchor(e)), { text: "Export", menu: true, title: "Download this table or the sheets" }),
         this.fileInput,
       ),
+      this.formatBarEl,
       this.chips,
       this.snapshotEl,
       this.welcome(),
@@ -932,6 +942,8 @@ export class WorkbookScreen {
 
   private updateToolbar(): void {
     const sheet = this.isSheet();
+    this.formatBarEl.hidden = !sheet;
+    if (sheet) this.formatBarEl.sync?.();
     for (const b of this.tableButtons) {
       b.hidden = sheet || !this.active;
       b.disabled = !this.view;
@@ -1271,6 +1283,7 @@ export class WorkbookScreen {
   // -------------------------------------------------------------- selection
 
   private onSelection(range: Range, active: Cell): void {
+    if (this.isSheet()) this.formatBarEl.sync?.();
     clearTimeout(this.statsTimer);
     this.statsEl.textContent = "";
     if (this.isSheet()) {
@@ -1919,6 +1932,7 @@ export class WorkbookScreen {
       history: () => historyDialog(this.rpc, () => void this.resync()),
       compute: () => computeDialog(this.meta.id),
       find: (replace) => this.openFind(replace),
+      toggleStyle: (key) => void this.applyStyle({ [key]: !(this.sheetCache.style(this.grid.active.r, this.grid.active.c)?.[key] ?? false) }),
     }));
   }
 
@@ -2006,6 +2020,25 @@ export class WorkbookScreen {
     try {
       await this.rpc.call(op, { sheet, ...params, layout });
       await this.refreshSheet();
+    } catch (e) {
+      this.reportConflict(e);
+      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+    }
+  }
+
+  /** S.01: format the selected cells of the current sheet (null clears their formats). */
+  private async applyStyle(patch: StylePatch | null): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try {
+      if (patch) await this.rpc.call("sheet_style", { sheet, area, style: patch, layout });
+      else await this.rpc.call("sheet_clear_format", { sheet, area, layout });
+      await this.refreshSheet();
+      this.formatBarEl.sync?.();
     } catch (e) {
       this.reportConflict(e);
       if ((e as RpcError).code === "conflict") await this.refreshSheet();

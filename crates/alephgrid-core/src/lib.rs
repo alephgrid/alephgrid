@@ -36,7 +36,7 @@ pub mod wire;
 mod workbook;
 
 pub use model::*;
-pub use sheets::{Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
+pub use sheets::{CellStyle, StyledCell, StylePatch, Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
 pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
 pub use queries::SchemaChanged;
 pub use results::{ResultsActivity, RESULTS_MIN_ROWS};

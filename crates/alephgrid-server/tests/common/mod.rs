@@ -419,6 +419,8 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("sheet_cell_detail", json!({ "sheet": 0, "row": 1, "column": 0 })),
         ("sheet_check_formula", json!({ "sheet": 0, "row": 0, "column": 1, "formula": "=SUM(1,,"})),
         ("sheet_fill", json!({ "sheet": 0, "area": { "row": 1, "column": 0, "rows": 3, "columns": 1 }, "direction": "down" })),
+        ("sheet_style", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 2, "columns": 2 }, "style": { "b": true, "fill": "#FFEEAA", "num_fmt": "0.00" } })),
+        ("sheet_clear_format", json!({ "sheet": 0, "area": { "row": 1, "column": 1, "rows": 1, "columns": 1 } })),
         ("sheet_paste", json!({ "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "sheet": 0, "row": 0, "column": 2, "mode": "values", "transpose": true })),
         ("sheet_move", json!({ "sheet": 0, "source": { "row": 0, "column": 2, "rows": 1, "columns": 2 }, "row": 5, "column": 2 })),
         ("create_sheet_from_query", json!({ "name": "Q", "sql": "SELECT * FROM t" })),

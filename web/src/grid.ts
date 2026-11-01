@@ -4,6 +4,7 @@
 import { formatValue, isNumericKind, rawText } from "./format";
 import { applyReferenceLock } from "./references";
 import type { Align, CellValue, Column, Filter, SortKey } from "./types";
+import type { CellStyle } from "./protocol";
 
 export interface Cell { r: number; c: number }
 export interface Range { r0: number; c0: number; r1: number; c1: number }
@@ -27,6 +28,8 @@ export interface GridModel {
   mode?(): "table" | "sheet";
   /** Sheet mode: rendered cell, null when empty, undefined while loading. */
   cell?(r: number, c: number): { text: string; align: Align } | null | undefined;
+  /** Sheet mode: the cell's format (S.01), if any. */
+  style?(r: number, c: number): CellStyle | undefined;
   /** Text shown in the editor (formula source for sheets). */
   editText?(r: number, c: number): string;
   /** What an edit of the cell is checked against on the server (the value shown when
@@ -807,6 +810,8 @@ export class Grid {
         if (r >= rowCount) continue;
         if (sheetCells) {
           const cell = sheetCells(r, c);
+          const st = this.model.style?.(r, c);
+          if (st?.fill) { ctx.fillStyle = st.fill; ctx.fillRect(x, y, w, ROW_H); }
           if (cell === undefined) {
             if (c === c0) {
               ctx.fillStyle = colors.placeholder;
@@ -815,10 +820,20 @@ export class Grid {
             continue;
           }
           if (!cell || !cell.text) continue;
-          ctx.fillStyle = cell.text.startsWith("#") && cell.align === "center" ? colors.danger : colors.text;
-          ctx.textAlign = cell.align;
-          const tx = cell.align === "right" ? x + w - 8 : cell.align === "center" ? x + w / 2 : x + 8;
-          ctx.fillText(cell.text, tx, y + ROW_H / 2 + 1);
+          ctx.fillStyle = st?.color ?? (cell.text.startsWith("#") && cell.align === "center" ? colors.danger : colors.text);
+          const align: CanvasTextAlign = st?.h === "left" || st?.h === "center" || st?.h === "right" ? st.h : cell.align;
+          ctx.textAlign = align;
+          if (st) ctx.font = `${st.i ? "italic " : ""}${st.b ? "700 " : ""}${Math.min(st.size ?? 13, 20)}px ${colors.ui}`;
+          const tx = align === "right" ? x + w - 8 : align === "center" ? x + w / 2 : x + 8;
+          const ty = st?.v === "top" ? y + 9 : y + ROW_H / 2 + 1;
+          ctx.fillText(cell.text, tx, ty);
+          if (st?.u || st?.s) {
+            const tw = Math.min(ctx.measureText(cell.text).width, w - 16);
+            const lx = align === "right" ? tx - tw : align === "center" ? tx - tw / 2 : tx;
+            ctx.fillRect(lx, st.u ? ty + 7 : ty, tw, 1);
+            if (st.u && st.s) ctx.fillRect(lx, ty, tw, 1);
+          }
+          if (st) ctx.font = `13px ${colors.ui}`;
           continue;
         }
         const v = this.model.value(r, c);

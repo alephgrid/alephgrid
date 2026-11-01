@@ -234,6 +234,10 @@ pub enum Op {
     SheetCheckFormula { sheet: u32, row: u32, column: u32, formula: String },
     /// Copy the first row (down) or column (right) of `area` over the rest of it.
     SheetFill { sheet: u32, area: alephgrid_core::CellArea, direction: alephgrid_core::FillDirection, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    /// Format an area (S.01, S.02): only the properties given change; one undo step.
+    SheetStyle { sheet: u32, area: alephgrid_core::CellArea, style: alephgrid_core::StylePatch, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    /// Clear every format of an area; values stay.
+    SheetClearFormat { sheet: u32, area: alephgrid_core::CellArea, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Paste `source` of `from_sheet` at (`row`, `column`) of `sheet`, translating formulas.
     SheetPaste {
         from_sheet: u32,
@@ -378,7 +382,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -737,6 +741,16 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetDeleteName { name, scope } => {
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
+        }
+        Op::SheetStyle { sheet, area, style, layout } => {
+            expect_layout(wb, sheet, layout)?;
+            wb.with_sheets(|s| s.set_style(sheet, area, &style))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
+        }
+        Op::SheetClearFormat { sheet, area, layout } => {
+            expect_layout(wb, sheet, layout)?;
+            wb.with_sheets(|s| s.clear_format(sheet, area))?;
+            (json!(wb.sheets().info(sheet)?), sheet_changed(sheet))
         }
         Op::SheetFill { sheet, area, direction, layout } => {
             expect_layout(wb, sheet, layout)?;

@@ -92,7 +92,7 @@ impl CellArea {
         self.rows as u64 * self.columns as u64
     }
 
-    fn check(&self, what: &str) -> Result<()> {
+    pub(crate) fn check(&self, what: &str) -> Result<()> {
         if self.rows == 0 || self.columns == 0 {
             bail!("the {what} area is empty");
         }

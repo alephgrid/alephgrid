@@ -7,7 +7,7 @@ use alephgrid_core::{
     Align, CellEdit, CellErrorMark, Column, ColumnType, FormulaLanguage, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
     HistoryEntry, Kind, MaterializedSource, MaterializedTable, ParamType, PreviewColumn, QueryKind, QueryParam, QueryPreview, QueryResult,
     QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
-    Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec, ColumnValues, ValueCount, FindHit, FindResult,
+    Stats, TableInfo, TableSchema, UploadPreview, ViewInfo, ViewSpec, ColumnValues, ValueCount, FindHit, FindResult, CellStyle, StyledCell, StylePatch,
 };
 use alephgrid_core::analysis::*;
 use alephgrid_core::tools::{FormulaInspection, Rule, Transform, TransformPreview, Validation, ValidationReport};
@@ -123,6 +123,8 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_cell_detail", "CellDetail"),
     ("sheet_check_formula", "FormulaProblem | null"),
     ("sheet_fill", "SheetInfo"),
+    ("sheet_style", "SheetInfo"),
+    ("sheet_clear_format", "SheetInfo"),
     ("sheet_paste", "CellArea"),
     ("sheet_move", "CellArea"),
     ("create_sheet_from_query", "SheetCopy"),
@@ -164,7 +166,7 @@ pub fn bindings() -> String {
         alephgrid_core::external::ResultType, alephgrid_core::external::RuntimeIdentity, crate::python::Limits,
         FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
-        Stats, ColumnValues, ValueCount, FindHit, FindResult, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
+        Stats, ColumnValues, ValueCount, FindHit, FindResult, CellStyle, StyledCell, StylePatch, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
         SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
         HistoryEntry, alephgrid_core::UndoState, alephgrid_core::UndoKind, alephgrid_core::UndoOutcome, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
