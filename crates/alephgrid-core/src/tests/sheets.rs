@@ -248,3 +248,35 @@ fn oversized_sheet_fetches_are_clamped_before_allocation() {
     assert_eq!(b.rows.len(), 10);
     assert_eq!(b.rows[3][2].as_ref().map(|c| c.0.as_str()), Some("x"));
 }
+
+/// Undo and redo move addresses (bump the sheet's layout) only when the step they take back
+/// moved rows, columns, cells or sheets. Otherwise a fill or paste right after Ctrl+Z was
+/// refused as "moved" until the client caught up (found on CircleCI, commands.spec.ts).
+#[test]
+fn undo_moves_addresses_only_when_the_step_moved_them() {
+    let mut t = TempWb::new();
+    let sheet = numbered_sheet(&mut t.wb, 3);
+    let layout = |wb: &Workbook| wb.sheets().info(sheet).unwrap().layout;
+    // A value change: layout stays, and so it does through undo and redo.
+    let before = layout(&t.wb);
+    t.wb.with_sheets(|s| s.set(sheet, &[sheet_input(1, 0, "42")])).unwrap();
+    assert_eq!(layout(&t.wb), before, "editing a value moves nothing");
+    assert!(t.wb.with_sheets(|s| s.undo()).unwrap());
+    assert_eq!(layout(&t.wb), before, "taking back a value change moves nothing");
+    assert!(t.wb.with_sheets(|s| s.redo()).unwrap());
+    assert_eq!(layout(&t.wb), before, "redoing it moves nothing");
+    // Inserting rows moves addresses; taking it back and redoing it moves them again.
+    t.wb.with_sheets(|s| s.insert_rows(sheet, 1, 2)).unwrap();
+    let inserted = layout(&t.wb);
+    assert_ne!(inserted, before, "inserting rows moves addresses");
+    assert!(t.wb.with_sheets(|s| s.undo()).unwrap());
+    let undone = layout(&t.wb);
+    assert_ne!(undone, inserted, "taking back an insert moves addresses");
+    assert!(t.wb.with_sheets(|s| s.redo()).unwrap());
+    assert_ne!(layout(&t.wb), undone, "redoing an insert moves addresses");
+    // And a value step taken back after the insert still moves nothing.
+    let now = layout(&t.wb);
+    t.wb.with_sheets(|s| s.set(sheet, &[sheet_input(2, 1, "x")])).unwrap();
+    assert!(t.wb.with_sheets(|s| s.undo()).unwrap());
+    assert_eq!(layout(&t.wb), now);
+}

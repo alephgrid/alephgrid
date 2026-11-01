@@ -159,6 +159,15 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   expect(await display(0, 1)).toBe("15");
   await page.keyboard.press("ControlOrMeta+z");
   await expect.poll(() => content(0, 1)).toBe("=A1+A2");
+  // Undoing the cut moves A1:A2 back, which the grid learns a moment after the server: wait
+  // for the screen to show it, as a person would, before pasting by position. (A paste aimed
+  // at the screen from before the undo is refused as "moved", by design.)
+  await page.keyboard.press("ControlOrMeta+Home");
+  await expect.poll(async () => {
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const id = await page.locator(".grid-host").getAttribute("aria-activedescendant");
+    return id ? (await page.locator(`#${id}`).textContent()) ?? "" : "";
+  }).toContain("5");
   // Text from elsewhere still pastes as values.
   // Text copied in another app.
   await page.evaluate(async () => {
