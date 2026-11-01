@@ -223,6 +223,7 @@ kbd { font: 500 11px var(--font-ui); color: var(--muted); border: 1px solid var(
 .menu-item:disabled { color: var(--muted); opacity: .6; cursor: default; }
 .menu-item.danger { color: var(--danger); }
 .menu-hint { color: var(--muted); font-size: 12px; }
+.menu-reason { font-style: italic; }
 .menu-sep { height: 1px; background: var(--border); margin: 5px 4px; }
 
 .backdrop { position: fixed; inset: 0; z-index: 40; background: rgba(9, 12, 11, 0.45); backdrop-filter: blur(2px); display: flex; align-items: flex-start; justify-content: center; padding: 9vh 16px 16px; overflow: auto; }
@@ -762,6 +763,9 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .sheet-chart-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-bottom: 1px solid var(--border, var(--grid-line)); cursor: move; user-select: none; touch-action: none; }
 .sheet-chart-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
 .sheet-chart-bar select { font-size: 12px; }
+.sheet-chart-draft { border: 1.5px dashed var(--accent); }
+.sheet-chart-draft .sheet-chart-bar { cursor: default; background: var(--accent-soft); }
+.sheet-chart-draft .sheet-chart-title { font-weight: 600; color: var(--accent-strong); }
 .sheet-chart-body { flex: 1 1 auto; min-height: 0; padding: 6px; overflow: hidden; }
 .sheet-chart-body svg { width: 100%; height: 100%; }
 .sheet-chart-grip { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none; background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, var(--muted) 60%, transparent 60%, transparent 70%, var(--muted) 70%, var(--muted) 80%, transparent 80%); }

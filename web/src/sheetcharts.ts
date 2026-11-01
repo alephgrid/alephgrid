@@ -1,8 +1,10 @@
 // S.09: charts placed on a sheet. Each chart floats over the grid at its anchor cell, reads
 // its data range from the server (first column categories, first row series names) and is
 // redrawn whenever the sheet changes. Charts are moved by their title bar, resized from the
-// corner, and edited (type, title, data range) in place; every change is saved with the
-// workbook.
+// corner, and edited (type, title, data range) in place; every change to a placed chart is
+// saved with the workbook at once. U.04b: Insert chart first shows an unsaved preview with
+// Create chart / Cancel; nothing is stored until Create, and Cancel or Escape leaves the sheet
+// as it was. Deleting a chart offers Undo.
 
 import { renderChart, type ChartType } from "./charts";
 import type { SheetChart } from "./protocol";
@@ -33,6 +35,8 @@ export class SheetChartsLayer {
   readonly el = el("div", { class: "sheet-charts" });
   private charts: SheetChart[] = [];
   private nodes = new Map<string, { box: HTMLElement; body: HTMLElement; title: HTMLElement; kind: HTMLSelectElement }>();
+  /** The unsaved preview from Insert chart, if any. */
+  private preview: { chart: SheetChart; box: HTMLElement; body: HTMLElement; title: HTMLElement; kind: HTMLSelectElement } | null = null;
 
   constructor(private host: ChartsHost) {}
 
@@ -50,7 +54,19 @@ export class SheetChartsLayer {
   }
 
   clear(): void {
+    this.discardDraft();
     this.set([]);
+  }
+
+  /** Whether an unsaved preview is showing. */
+  hasDraft(): boolean {
+    return !!this.preview;
+  }
+
+  /** Remove the unsaved preview without storing anything. */
+  discardDraft(): void {
+    this.preview?.box.remove();
+    this.preview = null;
   }
 
   /** Read every chart's values again (after the sheet changed). */
@@ -68,16 +84,54 @@ export class SheetChartsLayer {
       const p = this.host.cellBox(c.row, c.column);
       Object.assign(n.box.style, { left: `${p.x - o.x}px`, top: `${p.y - o.y}px`, width: `${c.width * z}px`, height: `${c.height * z}px` });
     }
+    if (this.preview) {
+      const c = this.preview.chart, p = this.host.cellBox(c.row, c.column);
+      Object.assign(this.preview.box.style, { left: `${p.x - o.x}px`, top: `${p.y - o.y}px`, width: `${c.width * z}px`, height: `${c.height * z}px` });
+    }
   }
 
-  /** Add a chart of `data` at the cell to the right of it. */
-  async add(data: SheetChart["data"], kind: ChartType = "column"): Promise<void> {
+  /** Insert chart: preview a chart of `data` to the right of it, unsaved, with Create chart
+   *  and Cancel. Resolves true when it was created. */
+  draft(data: SheetChart["data"], kind: ChartType = "column"): Promise<boolean> {
+    this.discardDraft();
     const chart: SheetChart = {
       chart: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       kind, title: "", data,
       row: data.row, column: data.column + data.columns + 1, width: 480, height: 300,
     };
-    await this.commit([...this.charts, chart]);
+    const title = el("span", { class: "sheet-chart-title" }, "Chart preview · not saved");
+    const kindSel = el("select", { "aria-label": "Chart type" }, ...KINDS.map((k) => el("option", { value: k }, k))) as HTMLSelectElement;
+    kindSel.value = kind;
+    const create = el("button", { class: "btn btn-primary btn-small", type: "button" }, "Create chart");
+    const cancel = el("button", { class: "btn btn-small", type: "button" }, "Cancel");
+    const body = el("div", { class: "sheet-chart-body" });
+    const box = el("section", { class: "sheet-chart sheet-chart-draft", role: "region", "aria-label": "Chart preview" },
+      el("div", { class: "sheet-chart-bar" }, title, kindSel, cancel, create), body);
+    this.el.append(box);
+    this.preview = { chart, box, body, title, kind: kindSel };
+    this.position();
+    void this.drawInto(chart, body, null);
+    kindSel.addEventListener("change", () => { chart.kind = kindSel.value; void this.drawInto(chart, body, null); });
+    return new Promise((resolve) => {
+      const finish = async (keep: boolean) => {
+        if (this.preview?.box !== box) { resolve(false); return; }
+        if (!keep) { this.discardDraft(); resolve(false); return; }
+        create.disabled = cancel.disabled = true;
+        try {
+          await this.host.save([...this.charts, chart]);
+          this.discardDraft();
+          this.set([...this.charts, chart]);
+          resolve(true);
+        } catch (e) {
+          toast((e as Error).message, "error");
+          create.disabled = cancel.disabled = false;
+        }
+      };
+      create.addEventListener("click", () => void finish(true));
+      cancel.addEventListener("click", () => void finish(false));
+      box.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); void finish(false); } });
+      create.focus();
+    });
   }
 
   private async commit(next: SheetChart[]): Promise<void> {
@@ -99,7 +153,7 @@ export class SheetChartsLayer {
     const kind = el("select", { "aria-label": "Chart type" }, ...KINDS.map((k) => el("option", { value: k }, k))) as HTMLSelectElement;
     const edit = el("button", { class: "icon-btn", type: "button", title: "Edit chart", "aria-label": "Edit chart" }, "✎");
     const del = el("button", { class: "icon-btn", type: "button", title: "Delete chart", "aria-label": "Delete chart" }, "×");
-    const bar = el("div", { class: "sheet-chart-bar", title: "Drag to move" }, title, kind, edit, del);
+    const bar = el("div", { class: "sheet-chart-bar", title: "Drag to move. Changes to this chart are saved at once." }, title, kind, edit, del);
     const body = el("div", { class: "sheet-chart-body" });
     const grip = el("div", { class: "sheet-chart-grip", title: "Drag to resize", "aria-hidden": "true" });
     const box = el("section", { class: "sheet-chart", role: "region", "aria-label": "Sheet chart" }, bar, body, grip);
@@ -108,7 +162,11 @@ export class SheetChartsLayer {
     const id = c.chart;
     const current = () => this.charts.find((x) => x.chart === id)!;
     kind.addEventListener("change", () => void this.update(id, { kind: kind.value }));
-    del.addEventListener("click", () => void this.commit(this.charts.filter((x) => x.chart !== id)));
+    del.addEventListener("click", async () => {
+      const before = this.list();
+      await this.commit(this.charts.filter((x) => x.chart !== id));
+      if (!this.charts.some((x) => x.chart === id)) toast("Chart deleted", "info", 6000, { label: "Undo", run: () => void this.commit(before) });
+    });
     edit.addEventListener("click", async () => {
       const now = current();
       const v = await formDialog("Edit chart", [
@@ -165,8 +223,12 @@ export class SheetChartsLayer {
     n.kind.value = c.kind;
     n.title.textContent = c.title || `Chart of ${rangeText(c.data)}`;
     n.box.setAttribute("aria-label", n.title.textContent);
+    await this.drawInto(c, n.body, n.title.textContent);
+  }
+
+  private async drawInto(c: SheetChart, body: HTMLElement, heading: string | null): Promise<void> {
     let cells: string[][];
-    try { cells = await this.host.values(c.data); } catch (e) { n.body.replaceChildren(el("p", { class: "chart-empty" }, (e as Error).message)); return; }
+    try { cells = await this.host.values(c.data); } catch (e) { body.replaceChildren(el("p", { class: "chart-empty" }, (e as Error).message)); return; }
     const head = cells[0] ?? [];
     const rows = cells.slice(1);
     const series = [];
@@ -176,6 +238,6 @@ export class SheetChartsLayer {
         values: rows.map((r) => { const t = (r[j] ?? "").replace(/,/g, ""); const v = Number(t); return t === "" || Number.isNaN(v) ? null : v; }),
       });
     }
-    renderChart(n.body, { labels: rows.map((r) => r[0] ?? ""), series, title: n.title.textContent }, c.kind as ChartType);
+    renderChart(body, { labels: rows.map((r) => r[0] ?? ""), series, title: heading ?? `Chart of ${rangeText(c.data)}` }, c.kind as ChartType);
   }
 }
