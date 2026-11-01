@@ -36,7 +36,50 @@ impl SheetSearch {
     }
 }
 
+/// How many cells of a sheet match a search (S.04, all sheets).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct SheetMatches {
+    pub sheet: u32,
+    pub name: String,
+    pub matches: u64,
+}
+
 impl Sheets {
+    /// The visible sheets with matching cells, in tab order, with their counts.
+    pub fn find_all_sheets(&self, search: &SheetSearch) -> Result<Vec<SheetMatches>> {
+        let mut out = Vec::new();
+        for s in self.list() {
+            let n = self.matches(s.index, search)?.len() as u64;
+            if n > 0 {
+                out.push(SheetMatches { sheet: s.index, name: s.name, matches: n });
+            }
+        }
+        Ok(out)
+    }
+
+    /// [`Sheets::replace_all`] in every visible sheet, as one undo step. Returns how many
+    /// cells changed.
+    pub fn replace_all_sheets(&mut self, search: &SheetSearch, replacement: &str) -> Result<usize> {
+        let found = self.find_all_sheets(search)?;
+        let total: u64 = found.iter().map(|s| s.matches).sum();
+        if total as usize > MAX_BULK_CELLS {
+            bail!(crate::limits::TooLarge(format!("{total} cells match; at most {MAX_BULK_CELLS} can be replaced at once")));
+        }
+        let before = self.undo_groups.len();
+        let mut n = 0;
+        for s in found {
+            n += self.replace_all(s.sheet, search, replacement)?;
+        }
+        // Every sheet's write forms one user step.
+        while self.undo_groups.len() > before + 1 {
+            let last = self.undo_groups.pop().unwrap_or(0);
+            if let Some(prev) = self.undo_groups.last_mut() {
+                *prev += last;
+            }
+        }
+        Ok(n)
+    }
+
     /// Every matching cell of a sheet, in row then column order (0-based).
     fn matches(&self, index: u32, search: &SheetSearch) -> Result<Vec<(u32, u32, String)>> {
         self.check_index(index)?;
@@ -155,22 +198,24 @@ impl Sheets {
         }
         let m = self.model()?;
         let start = area.row + u32::from(header);
-        let mut rows: Vec<Vec<String>> = Vec::new();
+        // Each row keeps where it came from: formulas move with their row and their
+        // relative references are rewritten as a copy to the new row would (S.06). Keys
+        // are values: a formula sorts by what it shows.
+        let mut rows: Vec<(u32, Vec<String>, Vec<String>)> = Vec::new();
         for r in start..area.row + area.rows {
-            let mut row = Vec::new();
+            let (mut inputs, mut keys) = (Vec::new(), Vec::new());
             for c in area.column..area.column + area.columns {
-                let input = m.get_cell_content(index, r as i32 + 1, c as i32 + 1).unwrap_or_default();
-                if input.starts_with('=') {
-                    bail!("this range holds formulas; sorting them would change what they refer to, so sort a range of values");
-                }
-                row.push(input);
+                let (row, col) = (r as i32 + 1, c as i32 + 1);
+                let input = m.get_cell_content(index, row, col).unwrap_or_default();
+                keys.push(if input.starts_with('=') { m.get_formatted_cell_value(index, row, col).unwrap_or_default().replace(',', "") } else { input.clone() });
+                inputs.push(input);
             }
-            rows.push(row);
+            rows.push((r, inputs, keys));
         }
         #[derive(PartialEq, PartialOrd)]
         enum Key { Num(f64), Text(String), Empty }
         let key = |s: &str| if s.is_empty() { Key::Empty } else if let Ok(n) = s.parse::<f64>() { Key::Num(n) } else { Key::Text(s.to_lowercase()) };
-        rows.sort_by(|a, b| {
+        rows.sort_by(|(_, _, a), (_, _, b)| {
             for k in keys {
                 let (x, y) = (key(&a[k.column as usize]), key(&b[k.column as usize]));
                 let ord = match (&x, &y) {
@@ -187,9 +232,12 @@ impl Sheets {
             std::cmp::Ordering::Equal
         });
         let mut inputs = Vec::new();
-        for (i, row) in rows.into_iter().enumerate() {
+        for (i, (from, row, _)) in rows.into_iter().enumerate() {
+            let to = start + i as u32;
             for (j, v) in row.into_iter().enumerate() {
-                inputs.push(SheetInput { row: start + i as u32, column: area.column + j as u32, value: v, base: None });
+                let column = area.column + j as u32;
+                let value = if v.starts_with('=') && from != to { self.translate(&v, (from, column), (index, to, column))? } else { v };
+                inputs.push(SheetInput { row: to, column, value, base: None });
             }
         }
         self.set(index, &inputs)

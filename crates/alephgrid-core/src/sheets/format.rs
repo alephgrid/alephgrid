@@ -181,7 +181,7 @@ impl StylePatch {
     }
 }
 
-fn area(index: u32, a: &CellArea) -> Area {
+pub(super) fn area(index: u32, a: &CellArea) -> Area {
     Area { sheet: index, row: a.row as i32 + 1, column: a.column as i32 + 1, width: a.columns as i32, height: a.rows as i32 }
 }
 
@@ -211,16 +211,11 @@ impl Sheets {
         Ok(())
     }
 
-    /// Keep the first `columns` columns of a sheet in view while scrolling (S.05; 0 unfreezes).
+    /// Keep the first `columns` columns of a sheet in view while scrolling (S.05; 0 unfreezes);
+    /// frozen rows stay.
     pub fn freeze_columns(&mut self, index: u32, columns: u32) -> Result<()> {
-        self.check_index(index)?;
-        if columns > 50 {
-            bail!("at most 50 columns can be frozen");
-        }
-        let m = self.model_mut()?;
-        m.set_frozen_columns_count(index, columns as i32).map_err(|e| anyhow!(e))?;
-        self.record(1);
-        Ok(())
+        let rows = self.info(index)?.frozen_rows;
+        self.freeze(index, rows, columns)
     }
 
     /// Copy a sheet (cells, formats, layout) into a new sheet after it, as one undo step (S.07).

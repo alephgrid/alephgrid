@@ -17,7 +17,9 @@ use ts_rs::TS;
 mod editing;
 mod find;
 mod format;
-pub use find::{SheetSearch, SortBy};
+mod layout;
+pub use layout::{Axis, LineSize, MergeMode, SheetLayout, GRID_COLUMN_WIDTH, GRID_ROW_HEIGHT};
+pub use find::{SheetMatches, SheetSearch, SortBy};
 mod links;
 pub use format::{CellStyle, StyledCell, StylePatch};
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
@@ -48,6 +50,9 @@ pub struct SheetInfo {
     /// Columns kept in view while scrolling sideways (S.05).
     #[serde(default)]
     pub frozen_columns: u32,
+    /// Rows kept in view while scrolling down (S.05).
+    #[serde(default)]
+    pub frozen_rows: u32,
     /// The tab's colour, `#RRGGBB` (S.07).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -112,6 +117,12 @@ pub struct Sheets {
     /// Who made each undo and redo step, parallel to the groups (see [`Sheets::begin`]).
     undo_actors: Vec<Option<String>>,
     redo_actors: Vec<Option<String>>,
+    /// A stable id per undo and redo step, parallel to the groups, so the workbook can attach
+    /// what it must restore beside the cells (comment anchors, S.11) to a step.
+    undo_ids: Vec<u64>,
+    redo_ids: Vec<u64>,
+    next_step: u64,
+    step_notes: std::collections::HashMap<u64, String>,
     /// The actor and revision of the change in progress.
     actor: Option<String>,
     stamp: u64,
@@ -144,6 +155,10 @@ impl Sheets {
             table_cells: Default::default(),
             undo_actors: vec![],
             redo_actors: vec![],
+            undo_ids: vec![],
+            redo_ids: vec![],
+            next_step: 1,
+            step_notes: Default::default(),
             actor: None,
             stamp: 0,
             layouts: vec![],
@@ -212,6 +227,20 @@ impl Sheets {
         self.redo_actors.truncate(self.redo_groups.len());
         while self.redo_actors.len() < self.redo_groups.len() {
             self.redo_actors.push(self.actor.clone());
+        }
+        self.undo_ids.truncate(self.undo_groups.len());
+        while self.undo_ids.len() < self.undo_groups.len() {
+            self.undo_ids.push(self.next_step);
+            self.next_step += 1;
+        }
+        self.redo_ids.truncate(self.redo_groups.len());
+        while self.redo_ids.len() < self.redo_groups.len() {
+            self.redo_ids.push(self.next_step);
+            self.next_step += 1;
+        }
+        if self.step_notes.len() > self.undo_ids.len() + self.redo_ids.len() {
+            let live: std::collections::HashSet<u64> = self.undo_ids.iter().chain(&self.redo_ids).copied().collect();
+            self.step_notes.retain(|k, _| live.contains(k));
         }
     }
 
@@ -304,6 +333,10 @@ impl Sheets {
             if !self.undo_actors.is_empty() {
                 self.undo_actors.remove(0);
             }
+            if !self.undo_ids.is_empty() {
+                let id = self.undo_ids.remove(0);
+                self.step_notes.remove(&id);
+            }
             dropped = true;
         }
         if dropped {
@@ -348,7 +381,7 @@ impl Sheets {
         model.evaluate();
         // The engine's history would otherwise keep steps no undo group reaches (SEC.12).
         model.clear_history();
-        self.undo_groups.clear(); self.redo_groups.clear();
+        self.undo_groups.clear(); self.undo_ids.clear(); self.redo_ids.clear(); self.redo_groups.clear();
         self.undo_actors.clear(); self.redo_actors.clear();
         Ok(())
     }
@@ -412,8 +445,9 @@ impl Sheets {
                 let (rows, columns) = used_size(m, i as u32);
                 let ws = m.get_model().workbook.worksheet(i as u32).ok();
                 let frozen_columns = ws.map(|w| w.frozen_columns.max(0) as u32).unwrap_or(0);
+                let frozen_rows = ws.map(|w| w.frozen_rows.max(0) as u32).unwrap_or(0);
                 let color = ws.and_then(|w| format::rgb(&w.color));
-                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, color }
+                SheetInfo { index: i as u32, name: p.name, rows, columns, layout: self.layout_of(i as u32), frozen_columns, frozen_rows, color }
             })
             .collect()
     }
@@ -430,7 +464,7 @@ impl Sheets {
             None => {
                 self.model = Some(UserModel::new_empty("workbook", "en", "UTC", LANG).map_err(|e| anyhow!(e))?);
                 self.attach();
-                self.undo_groups.clear();
+                self.undo_groups.clear(); self.undo_ids.clear(); self.redo_ids.clear();
                 self.redo_groups.clear();
                 self.moved_all();
                 0
@@ -498,7 +532,7 @@ impl Sheets {
             // IronCalc needs at least one worksheet; drop the whole model instead.
             self.changes += 1;
             self.model = None;
-            self.undo_groups.clear();
+            self.undo_groups.clear(); self.undo_ids.clear(); self.redo_ids.clear();
             self.redo_groups.clear();
             self.layouts.clear();
             return Ok(());
@@ -669,6 +703,29 @@ impl Sheets {
         !self.undo_groups.is_empty()
     }
 
+    /// The id of the step the next undo takes back (after [`Sheets::finish`]).
+    pub fn undo_step(&self) -> Option<u64> {
+        self.undo_ids.last().copied().filter(|_| self.undo_ids.len() == self.undo_groups.len())
+    }
+
+    /// The id of the step the next redo puts back.
+    pub fn redo_step(&self) -> Option<u64> {
+        self.redo_ids.last().copied().filter(|_| self.redo_ids.len() == self.redo_groups.len())
+    }
+
+    /// Attach what the workbook restores beside the cells to the last step (see
+    /// [`Sheets::undo_step`]).
+    pub fn note_step(&mut self, note: String) {
+        self.sync_history();
+        if let Some(id) = self.undo_ids.last().copied() {
+            self.step_notes.insert(id, note);
+        }
+    }
+
+    pub fn step_note(&self, id: u64) -> Option<&String> {
+        self.step_notes.get(&id)
+    }
+
     /// Take back the last step, if it was the caller's (see [`Sheets::begin`]). Steps are
     /// shared by everyone editing the workbook; someone else's last step blocks undo
     /// until they take it back themselves.
@@ -678,6 +735,7 @@ impl Sheets {
         self.check_owner(self.undo_actors.last(), "undo")?;
         self.undo_groups.pop();
         let owner = self.undo_actors.pop().flatten();
+        let id = self.undo_ids.pop();
         let m = self.model_mut()?;
         for _ in 0..n {
             m.undo().map_err(|e| anyhow!(e))?;
@@ -685,6 +743,7 @@ impl Sheets {
         m.evaluate();
         self.redo_groups.push(n);
         self.redo_actors.push(owner);
+        if let Some(id) = id { self.redo_ids.push(id); }
         // Undo may restore rows, columns or whole sheets anywhere.
         self.moved_all();
         Ok(true)
@@ -696,6 +755,7 @@ impl Sheets {
         self.check_owner(self.redo_actors.last(), "redo")?;
         self.redo_groups.pop();
         let owner = self.redo_actors.pop().flatten();
+        let id = self.redo_ids.pop();
         let m = self.model_mut()?;
         for _ in 0..n {
             m.redo().map_err(|e| anyhow!(e))?;
@@ -703,6 +763,7 @@ impl Sheets {
         m.evaluate();
         self.undo_groups.push(n);
         self.undo_actors.push(owner);
+        if let Some(id) = id { self.undo_ids.push(id); }
         self.moved_all();
         Ok(true)
     }
@@ -780,7 +841,7 @@ impl Sheets {
             self.changes += 1;
             self.model = Some(imported);
             self.attach();
-            self.undo_groups.clear();
+            self.undo_groups.clear(); self.undo_ids.clear(); self.redo_ids.clear();
             self.redo_groups.clear();
             self.moved_all();
             return Ok((self.list(), warnings));

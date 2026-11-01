@@ -17,6 +17,9 @@ export interface FindProvider {
   active(): { r: number; c: number };
   go(row: number, column: number): void;
   columnName?(c: number): string;
+  /** All sheets (S.04): go to the first (or last) match of the next sheet that has one;
+   *  false when no other sheet matches. */
+  nextSheet?(backwards: boolean): Promise<boolean>;
   replace?: {
     /** Tables replace in one column; sheets in every matching cell (no column). */
     columns?(): string[];
@@ -42,6 +45,8 @@ export class FindBar {
   /** Sheet options, read by the sheet provider. */
   whole = false;
   formulas = false;
+  allSheets = false;
+  private allBtn = el("button", { class: "icon-btn find-case", type: "button", title: "All sheets", "aria-label": "All sheets", "aria-pressed": "false", hidden: true }, "⧉");
   private wholeBtn = el("button", { class: "icon-btn find-case", type: "button", title: "Whole cell", "aria-label": "Whole cell", "aria-pressed": "false", hidden: true }, "[ ]");
   private formulaBtn = el("button", { class: "icon-btn find-case", type: "button", title: "In formulas", "aria-label": "In formulas", "aria-pressed": "false", hidden: true }, "ƒ");
   private seq = 0;
@@ -67,7 +72,7 @@ export class FindBar {
     this.oneBtn = one;
     this.replaceRow.append(this.column, this.replacement, one, preview, this.applyBtn, undo);
     this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true },
-      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, prev, next, close),
+      el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, this.allBtn, prev, next, close),
       this.replaceRow);
 
     this.input.addEventListener("input", () => { window.clearTimeout(this.timer); this.timer = window.setTimeout(() => this.refresh(), 200); });
@@ -83,6 +88,7 @@ export class FindBar {
       void this.refresh();
     });
     this.wholeBtn.addEventListener("click", () => { this.whole = !this.whole; this.wholeBtn.setAttribute("aria-pressed", String(this.whole)); void this.refresh(); });
+    this.allBtn.addEventListener("click", () => { this.allSheets = !this.allSheets; this.allBtn.setAttribute("aria-pressed", String(this.allSheets)); void this.refresh(); });
     this.formulaBtn.addEventListener("click", () => { this.formulas = !this.formulas; this.formulaBtn.setAttribute("aria-pressed", String(this.formulas)); void this.refresh(); });
     prev.addEventListener("click", () => void this.step(true));
     next.addEventListener("click", () => void this.step(false));
@@ -119,6 +125,7 @@ export class FindBar {
     this.el.setAttribute("aria-label", `Find in ${provider.label}`);
     this.el.hidden = false;
     this.wholeBtn.hidden = this.formulaBtn.hidden = !provider.sheetOptions;
+    this.allBtn.hidden = !provider.nextSheet;
     this.showReplace(replace && !!provider.replace);
     this.input.focus();
     this.input.select();
@@ -164,6 +171,7 @@ export class FindBar {
       const n = out.matches ?? 0;
       this.count.textContent = n === 0 ? "No matches" : `${formatCount(n)} ${n === 1 ? "match" : "matches"}`;
       const hit = out.hits[0] ?? (await p.find(text, this.matchCase, 0, false, false)).hits[0];
+      if (mine === this.seq && !hit && n > 0 && this.allSheets && p.nextSheet) { await p.nextSheet(false); return; }
       if (mine === this.seq && hit && n > 0) {
         const c = hit.row === a.r && hit.columns.includes(a.c) ? a.c : hit.columns[0];
         p.go(hit.row, c);
@@ -190,6 +198,7 @@ export class FindBar {
     };
     try {
       let target = pick((await p.find(text, this.matchCase, a.r, backwards, false)).hits, false);
+      if (!target && this.allSheets && p.nextSheet && await p.nextSheet(backwards)) return;
       if (!target) {
         const from = backwards ? Number.MAX_SAFE_INTEGER : 0;
         target = pick((await p.find(text, this.matchCase, from, backwards, false)).hits, true);

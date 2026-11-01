@@ -163,7 +163,7 @@ fn sheets_duplicate_and_take_tab_colours() {
 }
 
 /// S.06: a range sorts by its columns as one undo step, with a header row kept; numbers
-/// before text, empty cells last; ranges with formulas are refused.
+/// before text, empty cells last.
 #[test]
 fn ranges_sort_by_columns() {
     use crate::sheets::SortBy;
@@ -178,8 +178,36 @@ fn ranges_sort_by_columns() {
     assert_eq!(col(&s, 1), vec!["n", "9", "2", "10", ""]);
     assert!(s.undo().unwrap());
     assert_eq!(col(&s, 0), vec!["name", "b", "a", "c", "a"]);
-    s.set(0, &[sheet_input(1, 1, "=1+1")]).unwrap();
-    assert!(s.sort_range(0, area(0, 0, 5, 2), &[SortBy { column: 1, desc: false }], true).is_err());
+}
+
+/// S.06: formulas move with their rows; relative references are rewritten as a copy to the
+/// new row would be (so a row keeps referring to itself), absolute ones stay; formula
+/// columns sort by the values they show.
+#[test]
+fn ranges_with_formulas_sort() {
+    use crate::sheets::SortBy;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    let mut inputs = vec![sheet_input(0, 0, "n"), sheet_input(0, 1, "tens"), sheet_input(0, 2, "first")];
+    for (r, v) in [(1, "3"), (2, "1"), (3, "2")] {
+        inputs.push(sheet_input(r, 0, v));
+        inputs.push(sheet_input(r, 1, &format!("=A{}*10", r + 1)));
+        inputs.push(sheet_input(r, 2, "=$A$2"));
+    }
+    s.set(0, &inputs).unwrap();
+    s.sort_range(0, area(0, 0, 4, 3), &[SortBy { column: 0, desc: false }], true).unwrap();
+    let col = |s: &Sheets, c: u32| (0..4).map(|r| shown(s, r, c)).collect::<Vec<_>>();
+    assert_eq!(col(&s, 0), vec!["n", "1", "2", "3"]);
+    assert_eq!(col(&s, 1), vec!["tens", "10", "20", "30"]);
+    assert_eq!(col(&s, 2), vec!["first", "1", "1", "1"]);
+    let b = s.fetch(0, 1, 3, 3).unwrap();
+    let typed: Vec<String> = b.rows.iter().map(|r| r[1].clone().and_then(|c| c.2).unwrap_or_default()).collect();
+    assert_eq!(typed, vec!["=A2*10", "=A3*10", "=A4*10"]);
+    s.sort_range(0, area(0, 0, 4, 3), &[SortBy { column: 1, desc: true }], true).unwrap();
+    assert_eq!(col(&s, 0), vec!["n", "3", "2", "1"]);
+    assert_eq!(col(&s, 1), vec!["tens", "30", "20", "10"]);
+    assert!(s.undo().unwrap());
+    assert_eq!(col(&s, 0), vec!["n", "1", "2", "3"]);
 }
 
 /// S.01: borders on an area, one undo step, kept through XLSX.
@@ -227,4 +255,183 @@ fn tabs_move_and_references_follow() {
     let t = s.list().into_iter().find(|x| x.name == "T").unwrap().index;
     let v = s.fetch(t, 0, 1, 1).unwrap().rows[0][0].clone().map(|c| c.0);
     assert_eq!(v.as_deref(), Some("6.28318"));
+}
+
+/// S.05: frozen rows, sizes and hidden lines are kept by the sheet, through bytes and
+/// XLSX, each change one undo step; sizes are in grid pixels.
+#[test]
+fn layout_sizes_hiding_and_frozen_rows() {
+    use crate::sheets::{Axis, LineSize};
+    let mut s = sheet();
+    s.freeze(0, 2, 1).unwrap();
+    assert_eq!((s.info(0).unwrap().frozen_rows, s.info(0).unwrap().frozen_columns), (2, 1));
+    s.freeze_columns(0, 3).unwrap();
+    assert_eq!((s.info(0).unwrap().frozen_rows, s.info(0).unwrap().frozen_columns), (2, 3));
+    s.resize(0, Axis::Columns, 1, 2, 150).unwrap();
+    s.resize(0, Axis::Rows, 4, 1, 48).unwrap();
+    s.set_hidden(0, Axis::Rows, 6, 2, true).unwrap();
+    s.set_hidden(0, Axis::Columns, 5, 1, true).unwrap();
+    let l = s.layout(0).unwrap();
+    assert_eq!((l.frozen_rows, l.frozen_columns), (2, 3));
+    assert_eq!(l.columns.iter().filter(|c| !c.hidden).cloned().collect::<Vec<_>>(), vec![LineSize { index: 1, size: 150, hidden: false }, LineSize { index: 2, size: 150, hidden: false }]);
+    assert!(l.columns.iter().any(|c| c.index == 5 && c.hidden));
+    assert!(l.rows.contains(&LineSize { index: 4, size: 48, hidden: false }));
+    assert_eq!(l.rows.iter().filter(|r| r.hidden).map(|r| r.index).collect::<Vec<_>>(), vec![6, 7]);
+    let back = Sheets::from_bytes(Some(s.to_bytes().unwrap())).unwrap();
+    assert_eq!(back.layout(0).unwrap(), l);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("l.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    let x = t.layout(0).unwrap();
+    assert_eq!((x.frozen_rows, x.frozen_columns), (2, 3));
+    assert!(x.columns.iter().any(|c| c.index == 1 && c.size == 150));
+    assert!(x.rows.iter().any(|r| r.index == 4 && r.size == 48));
+    assert!(x.rows.iter().any(|r| r.index == 6 && r.hidden));
+    // Each change is one undo step: the hidden column comes back first.
+    assert!(s.undo().unwrap());
+    assert!(!s.layout(0).unwrap().columns.iter().any(|c| c.hidden));
+    assert!(s.undo().unwrap());
+    assert!(!s.layout(0).unwrap().rows.iter().any(|r| r.hidden));
+    // Values are untouched by hiding.
+    assert_eq!(shown(&s, 0, 0), "3.14159");
+    assert!(s.resize(0, Axis::Rows, 0, 1, 3).is_err());
+    assert!(s.resize(0, Axis::Columns, 16_383, 2, 50).is_err());
+    assert!(s.set_hidden(0, Axis::Rows, 0, 100_001, true).is_err());
+    assert!(s.freeze(0, 101, 0).is_err());
+}
+
+/// S.05: auto-fit reads the longest shown texts of a column.
+#[test]
+fn column_texts_longest_first() {
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("T").unwrap();
+    let inputs: Vec<SheetInput> = ["a", "abcdef", "", "abc", "=REPT(\"x\",9)"].iter().enumerate()
+        .map(|(i, v)| SheetInput { row: i as u32, column: 0, value: v.to_string(), base: None }).collect();
+    s.set(0, &inputs).unwrap();
+    assert_eq!(s.column_texts(0, 0).unwrap(), vec!["xxxxxxxxx", "abcdef", "abc", "a"]);
+    assert!(s.column_texts(0, 1).unwrap().is_empty());
+}
+
+/// S.06: a range filter hides the data rows whose value is not kept, as one undo step,
+/// without deleting them; clearing shows them again.
+#[test]
+fn range_filter_hides_rows() {
+    use crate::sheets::CellArea;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("F").unwrap();
+    let rows = ["Fruit", "apple", "pear", "apple", "fig", "pear"];
+    let inputs: Vec<SheetInput> = rows.iter().enumerate().map(|(i, v)| SheetInput { row: i as u32, column: 0, value: v.to_string(), base: None }).collect();
+    s.set(0, &inputs).unwrap();
+    let a = CellArea { row: 0, column: 0, rows: 6, columns: 1 };
+    let values = s.range_values(0, &a, true, 0).unwrap();
+    let pairs: Vec<(Option<String>, u64)> = values.iter().map(|v| (v.value.clone(), v.count)).collect();
+    assert_eq!(pairs, vec![(Some("apple".into()), 2), (Some("pear".into()), 2), (Some("fig".into()), 1)]);
+    let hidden = s.filter_range(0, &a, true, 0, Some(&["apple".to_string()])).unwrap();
+    assert_eq!(hidden, 3);
+    let h: Vec<u32> = s.layout(0).unwrap().rows.iter().filter(|r| r.hidden).map(|r| r.index).collect();
+    assert_eq!(h, vec![2, 4, 5]);
+    assert_eq!(s.fetch(0, 0, 6, 1).unwrap().rows.len(), 6, "filtered rows keep their cells");
+    assert!(s.undo().unwrap());
+    assert!(s.layout(0).unwrap().rows.iter().all(|r| !r.hidden));
+    assert!(s.redo().unwrap());
+    assert_eq!(s.filter_range(0, &a, true, 0, None).unwrap(), 0);
+    assert!(s.layout(0).unwrap().rows.iter().all(|r| !r.hidden));
+    assert!(s.filter_range(0, &a, true, 1, None).is_err(), "the column must be in the range");
+}
+
+/// S.05: merging keeps the one value at the top-left, refuses areas with two values, is
+/// one undo step and is kept through XLSX.
+#[test]
+fn cells_merge_and_unmerge() {
+    use crate::sheets::MergeMode;
+    let mut s = sheet();
+    s.set(0, &[SheetInput { row: 4, column: 1, value: "solo".into(), base: None }]).unwrap();
+    let a = area(3, 0, 2, 3);
+    s.merge(0, &a, MergeMode::Center).unwrap();
+    assert_eq!(s.layout(0).unwrap().merged, vec![a]);
+    assert_eq!(shown(&s, 3, 0), "solo", "the one value moves to the top-left cell");
+    assert_eq!(shown(&s, 4, 1), "");
+    assert!(s.set(0, &[SheetInput { row: 4, column: 1, value: "x".into(), base: None }]).is_err(), "covered cells cannot be edited");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let mut t = Sheets::from_bytes(None).unwrap();
+    t.import_xlsx(&path).unwrap();
+    assert_eq!(t.layout(0).unwrap().merged, vec![a]);
+    assert!(s.undo().unwrap());
+    assert!(s.layout(0).unwrap().merged.is_empty());
+    assert_eq!(shown(&s, 4, 1), "solo");
+    assert!(s.merge(0, &area(0, 0, 1, 2), MergeMode::Merge).is_err(), "two values are never merged away");
+    s.merge(0, &area(6, 0, 2, 2), MergeMode::Across).unwrap();
+    assert_eq!(s.layout(0).unwrap().merged.len(), 2);
+    s.merge(0, &area(6, 0, 2, 2), MergeMode::Unmerge).unwrap();
+    assert!(s.layout(0).unwrap().merged.is_empty());
+}
+
+/// S.04: find counts matches in every visible sheet; replace in all sheets is one undo step.
+#[test]
+fn find_and_replace_in_all_sheets() {
+    use crate::sheets::{SheetMatches, SheetSearch};
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("One").unwrap();
+    s.create("Two").unwrap();
+    s.create("Three").unwrap();
+    s.set(0, &[sheet_input(0, 0, "red apple"), sheet_input(3, 2, "Red")]).unwrap();
+    s.set(2, &[sheet_input(5, 0, "apple red")]).unwrap();
+    s.set(1, &[sheet_input(0, 0, "blue")]).unwrap();
+    let search = SheetSearch { text: "red".into(), ..Default::default() };
+    assert_eq!(s.find_all_sheets(&search).unwrap(), vec![
+        SheetMatches { sheet: 0, name: "One".into(), matches: 2 },
+        SheetMatches { sheet: 2, name: "Three".into(), matches: 1 },
+    ]);
+    assert_eq!(s.replace_all_sheets(&search, "green").unwrap(), 3);
+    assert_eq!(shown(&s, 0, 0), "green apple");
+    assert_eq!(s.fetch(2, 5, 1, 1).unwrap().rows[0][0].clone().unwrap().0, "apple green");
+    assert!(s.find_all_sheets(&search).unwrap().is_empty());
+    assert!(s.undo().unwrap());
+    assert_eq!(shown(&s, 0, 0), "red apple");
+    assert_eq!(s.fetch(2, 5, 1, 1).unwrap().rows[0][0].clone().unwrap().0, "apple red", "one undo step covers every sheet");
+}
+
+/// The text of one part of an XLSX file.
+fn xlsx_part(path: &std::path::Path, name: &str) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut out = String::new();
+    zip.by_name(name).unwrap().read_to_string(&mut out).unwrap();
+    out
+}
+
+/// S.T01: what the XLSX file says, read from its XML rather than through the sheet engine:
+/// every supported style, the number format, merged cells, sizes, hidden lines and frozen
+/// panes are written as Excel expects them (ECMA-376 element and attribute names).
+#[test]
+fn xlsx_file_carries_styles_and_layout() {
+    use crate::sheets::{Axis, MergeMode};
+    let mut s = sheet();
+    let patch = StylePatch { b: Some(true), i: Some(true), u: Some(true), s: Some(true), color: Some("#1F4E79".into()), fill: Some("#DDEBF7".into()), size: Some(16), h: Some("right".into()), v: Some("top".into()), wrap: Some(true), num_fmt: Some("0.0".into()) };
+    s.set_style(0, area(0, 0, 1, 1), &patch).unwrap();
+    s.set_border(0, area(1, 1, 1, 1), "all", "thin").unwrap();
+    s.merge(0, &area(5, 0, 1, 3), MergeMode::Merge).unwrap();
+    s.resize(0, Axis::Columns, 1, 1, 208).unwrap();
+    s.resize(0, Axis::Rows, 2, 1, 48).unwrap();
+    s.set_hidden(0, Axis::Rows, 3, 1, true).unwrap();
+    s.freeze(0, 1, 1).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.xlsx");
+    s.export_xlsx(&path).unwrap();
+    let styles = xlsx_part(&path, "xl/styles.xml");
+    for want in ["<b/>", "<i/>", "<u/>", "<strike/>", "rgb=\"FF1F4E79\"", "rgb=\"FFDDEBF7\"", "<sz val=\"16\"/>", "formatCode=\"0.0\"", "horizontal=\"right\"", "vertical=\"top\"", "wrapText=\"1\"", "style=\"thin\""] {
+        assert!(styles.contains(want), "styles.xml lacks {want}");
+    }
+    let sheet = xlsx_part(&path, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains("<mergeCell ref=\"A6:C6\"/>"), "merged cells");
+    // Column B is 208 grid pixels = 180 engine pixels = 20 Excel character widths.
+    assert!(sheet.contains("min=\"2\" max=\"2\" width=\"20\""), "column width: {}", &sheet[..sheet.len().min(800)]);
+    // Row 3 is 48 grid pixels = 50 engine pixels = 32 points.
+    assert!(sheet.contains("r=\"3\"") && sheet.contains("ht=\"32\""), "row height");
+    assert!(sheet.contains("hidden=\"1\""), "hidden row");
+    assert!(sheet.contains("xSplit=\"1\"") && sheet.contains("ySplit=\"1\""), "frozen panes");
 }
