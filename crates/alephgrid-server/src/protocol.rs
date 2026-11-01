@@ -22,7 +22,7 @@ use crate::runtime::{
     AllocationState, Capability, ComputePolicy, ComputeState, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation,
     RuntimeAllocation, RuntimeFailure, RuntimeSpec, Transition,
 };
-use crate::auth::store::{AgentActivity, AgentConnection, AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
+use crate::auth::store::{AgentActivity, AgentConnection, AgentProposal, AuditEvent, Invite, MemberKind, Org, OrgMember, PublicUser, Space, SpaceMember, Token};
 use crate::auth::{AuthMode, Cap, OrgRole, SpaceRole};
 use crate::auth::routes::SpaceProfiles;
 use crate::library::{LibraryEntry, LibraryKind, LibraryVersion};
@@ -197,7 +197,7 @@ pub fn bindings() -> String {
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, ColumnValues, ValueCount, FindHit, FindResult, CellStyle, StyledCell, StylePatch, SheetSearch, CellComment, SortBy, SheetColorRule, SheetRules, SheetValidation, SheetChart, SheetMatches, Axis, LineSize, MergeMode, SheetLayout, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, Imported,
-        SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, AgentConnection, AgentActivity, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
+        SpaceRole, OrgRole, Cap, AuthMode, Org, Space, PublicUser, OrgMember, MemberKind, SpaceMember, Token, AgentConnection, AgentActivity, AgentProposal, Invite, AuditEvent, QuotaLimits, QuotaKind, SpaceUsage, LibraryKind, LibraryVersion, LibraryEntry,
         HistoryEntry, alephgrid_core::UndoState, alephgrid_core::UndoKind, alephgrid_core::UndoOutcome, Summary, WorkbookMeta, WorkbookListing, WorkbookPatch, Event, Op,
         ColumnType, PreviewColumn, FilePreview, UploadPreview, ImportProblem, UploadCreated, ImportRequest, JobStatus,
         Capability, RuntimeSpec, IsolationClass, ProviderKind, ComputeProfile, ComputePolicy, ProfileChoice, SpaceProfiles, AllocationState, ComputeState, FailureKind, RuntimeFailure,

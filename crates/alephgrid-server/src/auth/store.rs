@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS sessions(hash VARCHAR PRIMARY KEY, user_id VARCHAR NO
 CREATE TABLE IF NOT EXISTS agent_connections(
     id VARCHAR PRIMARY KEY, hash VARCHAR NOT NULL, name VARCHAR NOT NULL, space_id VARCHAR NOT NULL, workbooks VARCHAR,
     created_by VARCHAR NOT NULL, created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL, revoked_at BIGINT, last_used BIGINT);
+CREATE TABLE IF NOT EXISTS agent_proposals(
+    id VARCHAR PRIMARY KEY, connection_id VARCHAR NOT NULL, operation_id VARCHAR, workbook VARCHAR NOT NULL, kind VARCHAR NOT NULL,
+    name VARCHAR NOT NULL, payload VARCHAR NOT NULL, revision BIGINT NOT NULL, created_at BIGINT NOT NULL,
+    status VARCHAR NOT NULL, decided_by VARCHAR, decided_at BIGINT, result VARCHAR);
 CREATE TABLE IF NOT EXISTS agent_activity(
     connection_id VARCHAR NOT NULL, at_ms BIGINT NOT NULL, tool VARCHAR NOT NULL, workbook VARCHAR, ok BOOLEAN NOT NULL, detail VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS tokens(
@@ -1125,5 +1129,112 @@ impl Store {
             })?;
             Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
         })
+    }
+}
+
+/// M.06: a change an agent asked for, waiting for a person to approve it. Nothing is written
+/// to the workbook until then.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct AgentProposal {
+    pub id: String,
+    pub connection_id: String,
+    pub workbook: String,
+    /// What it would do: `saved_query`.
+    pub kind: String,
+    pub name: String,
+    /// The SQL and parameters of a saved query.
+    #[ts(type = "Record<string, unknown>")]
+    pub payload: serde_json::Value,
+    /// Workbook revision the agent read when it asked.
+    pub revision: u64,
+    pub created_at: u64,
+    /// pending, approved, rejected or failed.
+    pub status: String,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_by: Option<String>,
+    #[ts(optional)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<u64>,
+    #[ts(optional, type = "Record<string, unknown>")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+}
+
+const PROPOSAL_COLS: &str = "id, connection_id, workbook, kind, name, payload, revision, created_at, status, decided_by, decided_at, result";
+
+fn proposal_row(r: &duckdb::Row) -> duckdb::Result<AgentProposal> {
+    let payload: String = r.get(5)?;
+    let result: Option<String> = r.get(11)?;
+    Ok(AgentProposal {
+        id: r.get(0)?,
+        connection_id: r.get(1)?,
+        workbook: r.get(2)?,
+        kind: r.get(3)?,
+        name: r.get(4)?,
+        payload: serde_json::from_str(&payload).unwrap_or_default(),
+        revision: r.get::<_, i64>(6)? as u64,
+        created_at: r.get::<_, i64>(7)? as u64,
+        status: r.get(8)?,
+        decided_by: r.get(9)?,
+        decided_at: r.get::<_, Option<i64>>(10)?.map(|v| v as u64),
+        result: result.and_then(|x| serde_json::from_str(&x).ok()),
+    })
+}
+
+/// Pending proposals one connection may hold.
+pub const MAX_PENDING_PROPOSALS: i64 = 50;
+
+impl Store {
+    /// Record a proposal; with `operation_id`, asking again returns the first one (idempotent).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_proposal(&self, id: &str, connection: &str, operation_id: Option<&str>, workbook: &str, kind: &str, name: &str, payload: &serde_json::Value, revision: u64) -> Result<AgentProposal> {
+        self.txn(|c| {
+            if let Some(op) = operation_id {
+                let existing = c
+                    .query_row(&format!("SELECT {PROPOSAL_COLS} FROM agent_proposals WHERE connection_id = ? AND operation_id = ?"), params![connection, op], proposal_row)
+                    .optional()?;
+                if let Some(p) = existing {
+                    return Ok(p);
+                }
+            }
+            let pending: i64 = c.query_row("SELECT count(*) FROM agent_proposals WHERE connection_id = ? AND status = 'pending'", params![connection], |r| r.get(0))?;
+            if pending >= MAX_PENDING_PROPOSALS {
+                bail!("this connection already has {MAX_PENDING_PROPOSALS} proposals waiting for approval");
+            }
+            c.execute(
+                "INSERT INTO agent_proposals (id, connection_id, operation_id, workbook, kind, name, payload, revision, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                params![id, connection, operation_id, workbook, kind, name, payload.to_string(), revision as i64, super::now_ms() as i64],
+            )?;
+            Ok(c.query_row(&format!("SELECT {PROPOSAL_COLS} FROM agent_proposals WHERE id = ?"), params![id], proposal_row)?)
+        })
+    }
+
+    pub fn proposal(&self, id: &str) -> Result<Option<AgentProposal>> {
+        self.read(|c| Ok(c.query_row(&format!("SELECT {PROPOSAL_COLS} FROM agent_proposals WHERE id = ?"), params![id], proposal_row).optional()?))
+    }
+
+    pub fn proposals(&self, connection: &str) -> Result<Vec<AgentProposal>> {
+        self.read(|c| {
+            let mut s = c.prepare(&format!("SELECT {PROPOSAL_COLS} FROM agent_proposals WHERE connection_id = ? ORDER BY created_at DESC LIMIT 200"))?;
+            let rows = s.query_map(params![connection], proposal_row)?;
+            Ok(rows.collect::<duckdb::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Settle a pending proposal; false when it was no longer pending.
+    pub fn decide_proposal(&self, id: &str, status: &str, by: &str, result: Option<&serde_json::Value>) -> Result<bool> {
+        self.txn(|c| {
+            let n = c.execute(
+                "UPDATE agent_proposals SET status = ?, decided_by = ?, decided_at = ?, result = ? WHERE id = ? AND status IN ('pending', 'deciding')",
+                params![status, by, super::now_ms() as i64, result.map(|r| r.to_string()), id],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Claim a pending proposal for deciding (so two approvals cannot both apply it).
+    pub fn claim_proposal(&self, id: &str) -> Result<bool> {
+        self.txn(|c| Ok(c.execute("UPDATE agent_proposals SET status = 'deciding' WHERE id = ? AND status = 'pending'", params![id])? > 0))
     }
 }

@@ -626,6 +626,24 @@ export type AgentActivity = { at_ms: number, tool: string, workbook?: string, ok
  */
 detail: Record<string, unknown>, };
 
+export type AgentProposal = { id: string, connection_id: string, workbook: string, 
+/**
+ * What it would do: `saved_query`.
+ */
+kind: string, name: string, 
+/**
+ * The SQL and parameters of a saved query.
+ */
+payload: Record<string, unknown>, 
+/**
+ * Workbook revision the agent read when it asked.
+ */
+revision: number, created_at: number, 
+/**
+ * pending, approved, rejected or failed.
+ */
+status: string, decided_by?: string, decided_at?: number, result?: Record<string, unknown>, };
+
 export type Invite = { id: string, org_id: string, email: string, org_role: OrgRole, space_id?: string, space_role?: SpaceRole, created_by: string, created_at: number, expires_at: number, accepted_at?: number, revoked_at?: number, };
 
 export type AuditEvent = { seq: number, at: number, 

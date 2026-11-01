@@ -3,7 +3,7 @@
 // setup instructions; connections can be revoked, and each one's tool calls are listed.
 
 import { api, type SpaceListing } from "./api";
-import type { AgentActivity, AgentConnection } from "./types";
+import type { AgentActivity, AgentConnection, AgentProposal } from "./types";
 import { confirmDialog, el, openModal, toast } from "./ui";
 
 function when(ms?: number | null): string {
@@ -61,6 +61,38 @@ function activityDialog(c: AgentConnection): void {
   }).catch((e) => body.replaceChildren(el("p", { class: "dialog-error" }, (e as Error).message)));
 }
 
+/** M.06: changes an agent asked for; a person approves (written as their change) or rejects. */
+function proposalsDialog(c: AgentConnection, workbooks: { id: string; name: string }[], onChange: () => void): void {
+  const body = el("div", {});
+  const close = el("button", { class: "btn", type: "button" }, "Close");
+  const dialog = el("div", { class: "dialog wide" }, el("h2", {}, `Proposals of “${c.name}”`),
+    el("p", { class: "dialog-lede" }, "Queries the agent asked to save. Nothing is saved until you approve; approving saves it in the workbook as your change, noted as proposed by the agent."),
+    body, el("div", { class: "dialog-actions" }, close));
+  const modal = openModal(dialog, () => { modal.close(); onChange(); });
+  close.addEventListener("click", () => { modal.close(); onChange(); });
+  const render = async () => {
+    let list: AgentProposal[] = [];
+    try { list = await api.agentProposals(c.id); } catch (e) { body.replaceChildren(el("p", { class: "dialog-error" }, (e as Error).message)); return; }
+    if (!list.length) { body.replaceChildren(el("p", { class: "muted" }, "No proposals yet.")); return; }
+    body.replaceChildren(...list.map((p) => {
+      const payload = p.payload as { sql?: string };
+      const decide = (approve: boolean) => async () => {
+        try { await api.decideProposal(c.id, p.id, approve); toast(approve ? `Saved “${p.name}”` : "Rejected", approve ? "success" : "info"); await render(); }
+        catch (e) { toast((e as Error).message, "error"); }
+      };
+      return el("section", { class: "proposal", "aria-label": `Proposal ${p.name}` },
+        el("div", { class: "proposal-head" }, el("strong", {}, p.name),
+          el("span", { class: "muted" }, ` · ${workbooks.find((w) => w.id === p.workbook)?.name ?? p.workbook} · ${new Date(p.created_at).toLocaleString()} · ${p.status}`)),
+        el("pre", { class: "mono proposal-sql" }, payload.sql ?? ""),
+        p.status === "pending" ? el("div", { class: "dialog-actions share-actions" },
+          el("button", { class: "btn btn-primary btn-small", type: "button", "aria-label": `Approve ${p.name}`, onclick: decide(true) }, "Approve and save"),
+          el("button", { class: "btn btn-small", type: "button", "aria-label": `Reject ${p.name}`, onclick: decide(false) }, "Reject")) : null);
+    }));
+  };
+  void render();
+  close.focus();
+}
+
 /** The agent connections of one space, with a form for a new one. */
 export function agentsDialog(space: SpaceListing, workbooks: { id: string; name: string }[]): void {
   const list = el("div", { class: "member-table", role: "table", "aria-label": "Agent connections" });
@@ -91,6 +123,7 @@ export function agentsDialog(space: SpaceListing, workbooks: { id: string; name:
       el("span", { role: "cell", class: "muted" }, `last used ${when(c.last_used)}`),
       el("span", { role: "cell", class: "agent-actions" },
         el("button", { class: "btn btn-small", type: "button", "aria-label": `Activity of ${c.name}`, onclick: () => activityDialog(c) }, "Activity"),
+        el("button", { class: "btn btn-small", type: "button", "aria-label": `Proposals of ${c.name}`, onclick: () => proposalsDialog(c, workbooks, () => void render()) }, "Proposals"),
         c.revoked_at ? null : el("button", { class: "btn btn-small", type: "button", "aria-label": `Revoke ${c.name}`, onclick: async () => {
           if (!(await confirmDialog(`Revoke “${c.name}”?`, "The agent loses access at once, its results included.", "Revoke"))) return;
           try { await api.revokeAgent(c.id); await render(); } catch (e) { toast((e as Error).message, "error"); }
@@ -112,7 +145,7 @@ export function agentsDialog(space: SpaceListing, workbooks: { id: string; name:
   const close = el("button", { class: "btn", type: "button" }, "Close");
   const dialog = el("div", { class: "dialog wide agents-dialog" },
     el("h2", {}, `Agent connections · ${space.name}`),
-    el("p", { class: "dialog-lede" }, "Let an AI agent (an MCP client such as Claude) read workbooks here: discover tables, run read-only queries and analyses, with every result pinned to a receipt. Connections cannot change anything. What the agent reads goes to its model provider, under that provider's terms."),
+    el("p", { class: "dialog-lede" }, "Let an AI agent (an MCP client such as Claude) read workbooks here: discover tables, run read-only queries and analyses, with every result pinned to a receipt. Connections cannot change anything themselves: an agent may propose a saved query, which is saved only when you approve it. What the agent reads goes to its model provider, under that provider's terms."),
     fresh, list, el("h3", {}, "New connection"), form, error,
     el("div", { class: "dialog-actions" }, close));
   const modal = openModal(dialog, () => modal.close());

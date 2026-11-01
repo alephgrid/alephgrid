@@ -849,3 +849,5 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .share-btn { margin-right: 4px; }
 .space-settings .settings-section + .settings-section { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
 .space-settings h3 { margin: 4px 0; font-size: 14px; }
+.proposal { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 8px 0; }
+.proposal-sql { margin: 6px 0; white-space: pre-wrap; font-size: 12px; max-height: 160px; overflow: auto; }

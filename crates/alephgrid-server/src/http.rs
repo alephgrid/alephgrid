@@ -248,6 +248,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/agents", get(crate::mcp::list).post(crate::mcp::create))
         .route("/api/agents/{id}", axum::routing::delete(crate::mcp::revoke))
         .route("/api/agents/{id}/activity", get(crate::mcp::activity))
+        .route("/api/agents/{id}/proposals", get(crate::mcp::proposals))
+        .route("/api/agents/{id}/proposals/{proposal}", post(crate::mcp::decide))
         .route("/ws/{id}", get(websocket))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
 
