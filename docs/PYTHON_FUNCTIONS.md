@@ -81,8 +81,11 @@ read only results already computed.
   stored, and cells say why.
 * **Isolated worker processes.** Each job runs one worker process under an OS sandbox: Seatbelt
   (`sandbox-exec`) on macOS, bubblewrap on Linux. The sandbox allows reading only the Python
-  runtime and the worker's private, empty working directory, writing nothing outside it, no
-  network (no sockets, no DNS), and no new processes. The environment is cleared: no
+  runtime and the worker's private, empty working directory, writing nothing, no network (no
+  sockets, no DNS), and no new programs or processes (threads are allowed). On Linux, `/tmp` is
+  empty and read-only, and the worker installs a seccomp filter before it reads the function's
+  code that refuses `execve`, `fork`, `vfork` and any `clone` that is not a thread; a worker that
+  cannot install it refuses to run. The environment is cleared: no
   credentials, tokens or paths of the server are inherited. A plain subprocess is not enough:
   without a sandbox available the server refuses to run Python (fail closed), unless started with
   `--python-isolation none` in `--auth local` mode, for one trusted person, with a warning.

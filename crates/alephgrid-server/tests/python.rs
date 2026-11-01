@@ -239,6 +239,67 @@ async fn workers_cannot_reach_files_network_processes_or_credentials() {
     server.stop().await;
 }
 
+/// 8.03: the Linux process filter, simulated on hand-written system calls (both architectures):
+/// programs and processes refused, threads and ordinary calls allowed, a foreign architecture
+/// killed. Runs on every platform; the escape test above exercises the real filter on Linux.
+#[test]
+fn the_process_filter_refuses_programs_and_processes_but_not_threads() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new(python())
+        .arg("-I")
+        .arg(here.join("tests/seccomp_filter.py"))
+        .arg(here.join("src/python/runner.py"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && text.contains("ALL OK"), "{text}{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// 8.03: where the filter cannot be installed, the worker refuses to run (fail closed) rather
+/// than running the function without it.
+#[test]
+fn a_worker_that_cannot_forbid_processes_refuses_to_run() {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runner = std::fs::read_to_string(here.join("src/python/runner.py")).unwrap();
+    // A machine name the filter has no table for stands in for a host without seccomp.
+    let patched = runner.replace("process_filter(os.uname().machine)", "process_filter(\"pdp11\")");
+    assert_ne!(runner, patched);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("runner.py"), patched).unwrap();
+    let mut child = std::process::Command::new(python())
+        .args(["-I", "-S", "-B"])
+        .arg(dir.path().join("runner.py"))
+        .arg("--forbid-processes")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(br#"{"source": "def f(): return 1", "entry": "f", "returns": "number", "calls": [[]]}"#).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(70));
+    assert!(out.stdout.is_empty(), "no results without the filter");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("could not forbid new processes"));
+}
+
+/// 8.03: threads still work inside a function (the filter allows clone for threads only).
+#[tokio::test(flavor = "multi_thread")]
+async fn functions_can_use_threads() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("threads").await;
+    let mut ws = server.ws(&wb).await;
+    let source = "import threading\ndef threads(n):\n    out = []\n    ts = [threading.Thread(target=out.append, args=(i,)) for i in range(int(n))]\n    for t in ts:\n        t.start()\n    for t in ts:\n        t.join()\n    return sum(out)\n";
+    publish(&mut ws, "THREADS", &["n"], "number", source).await;
+    ws.ok("sheet_create", json!({ "name": "Plan" })).await;
+    set(&mut ws, json!([{ "row": 0, "column": 0, "value": "=THREADS(4)" }])).await;
+    // 0 + 1 + 2 + 3.
+    assert_eq!(computed(&mut ws, 0, 0).await, "6");
+    ws.close().await;
+    server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn limits_stop_runaway_functions_without_hanging_other_workbooks() {
     let dir = tempfile::tempdir().unwrap();
