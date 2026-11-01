@@ -49,9 +49,9 @@ fn sheet_validation_refuses_bad_inputs() {
     t.wb.with_sheets(|s| s.create("S").map(|_| ())).unwrap();
     let area = CellArea { row: 0, column: 0, rows: 10, columns: 1 };
     let rules = SheetRules {
-        colors: vec![SheetColorRule { area: area.clone(), condition: "greater".into(), value: "5".into(), color: "#FFC7CE".into() }],
+        colors: vec![SheetColorRule { area, condition: "greater".into(), value: "5".into(), color: "#FFC7CE".into() }],
         validations: vec![
-            SheetValidation { area: area.clone(), list: vec!["yes".into(), "no".into()], min: None, max: None },
+            SheetValidation { area, list: vec!["yes".into(), "no".into()], min: None, max: None },
             SheetValidation { area: CellArea { row: 0, column: 1, rows: 10, columns: 1 }, list: vec![], min: Some(0.0), max: Some(100.0) },
         ],
     };
