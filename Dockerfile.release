@@ -1,0 +1,20 @@
+# The release image, from the binaries the release pipeline built and tested
+# (docs/RELEASING.md). Build context: a folder holding amd64/alephgrid and arm64/alephgrid.
+#   docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 dist/docker
+# (Dockerfile builds from source instead, for docker compose.)
+FROM debian:bookworm-slim
+ARG TARGETARCH
+# /data is created and owned by the server's user, so a new named volume is writable (9.02).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --uid 10001 alephgrid \
+    && mkdir -p /data && chown alephgrid:alephgrid /data
+COPY --chmod=755 ${TARGETARCH}/alephgrid /usr/local/bin/alephgrid
+USER alephgrid
+WORKDIR /home/alephgrid
+ENV ALEPHGRID_HOST=0.0.0.0 \
+    ALEPHGRID_PORT=7878 \
+    ALEPHGRID_AUTH=accounts \
+    ALEPHGRID_DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 7878
+ENTRYPOINT ["alephgrid"]

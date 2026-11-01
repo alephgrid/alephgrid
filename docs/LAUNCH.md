@@ -70,7 +70,7 @@ spreadsheet-first journey test.
 | `SECURITY.md` | Added 1 Nov: private reporting, response times, supported versions | **Owner:** turn on private vulnerability reporting in repository settings |
 | `.github/ISSUE_TEMPLATE/` | Bug, feature, and a config that routes security reports and questions | — |
 | `.github/pull_request_template.md` | Present | — |
-| `.circleci/config.yml` | Added (on-demand check and full runs) | Release pipeline with 9.11 |
+| `.circleci/config.yml` | On-demand check, full and release runs | — |
 | `docs/README.md` | Added 1 Nov: index of every page | — |
 | `docs/OPERATIONS.md` | Present | Complete with 9.02–9.04 results |
 | `docs/SPREADSHEET_FEATURES.md` | Present | Keep in step with each merged feature |
@@ -100,12 +100,18 @@ steps and how to run it are in [CI.md](CI.md); the configuration is `.circleci/c
 
 ## 5. Release artifacts (9.11)
 
-* Binaries: Linux x86_64 and arm64, macOS arm64 and x86_64, each with the UI embedded.
-* Container image: multi-architecture (amd64, arm64), published to GitHub Container Registry
-  as `ghcr.io/alephgrid/alephgrid:0.1.0` and `:latest`.
-* `SHA256SUMS`, signatures, and an SBOM for the binaries and the image.
-* Built from the tagged commit with the locked toolchain (`rust-toolchain.toml`, `Cargo.lock`,
-  `package-lock.json`).
+Channels for v0.1 (owner decision, 1 November): **GitHub Releases, Docker, npm** (npm also
+serves pnpm, yarn and bun). Homebrew and winget wait (winget needs a Windows port). macOS
+binaries ship unsigned until an Apple Developer ID exists. How it runs: [RELEASING.md](RELEASING.md).
+
+* Binaries: Linux x86_64 and arm64 (built on Debian 11, glibc 2.31+), macOS arm64 and x86_64
+  (macOS 11+), UI embedded; `SHA256SUMS`.
+* Image `ghcr.io/alephgrid/alephgrid:X.Y.Z` and `:latest`, amd64 and arm64, from the tested
+  binaries (`Dockerfile.release`; `/data` owned by the server's user).
+* npm `alephgrid` plus `@alephgrid/cli-<platform>-<arch>`.
+* Nothing is public before a maintainer approves the pipeline's `approve-publish` step.
+* **Owner:** npm organization and token, GitHub token, the CircleCI `release` context
+  (RELEASING.md "Once"). Still open: signatures and an SBOM.
 
 ## 6. GitHub setup (owner)
 
