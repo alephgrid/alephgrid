@@ -2228,6 +2228,21 @@ export class WorkbookScreen {
     catch (e) { toast((e as Error).message, "error"); }
   }
 
+  /** S.10: remove the rules that touch the selection. */
+  private async clearRules(): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const touches = (a: { row: number; column: number; rows: number; columns: number }) =>
+      a.row <= sel.r1 && a.row + a.rows - 1 >= sel.r0 && a.column <= sel.c1 && a.column + a.columns - 1 >= sel.c0;
+    const rules = await this.rpc.call("sheet_rules", { sheet });
+    const next = { colors: rules.colors.filter((r) => !touches(r.area)), validations: rules.validations.filter((r) => !touches(r.area)) };
+    const removed = rules.colors.length + rules.validations.length - next.colors.length - next.validations.length;
+    if (!removed) { toast("No rule covers these cells"); return; }
+    try { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); this.sheetRules = next; this.grid.invalidate(); toast(`Removed ${removed} rule${removed === 1 ? "" : "s"}`); }
+    catch (e) { toast((e as Error).message, "error"); }
+  }
+
   private setComments(list: CellComment[]): void {
     this.commentCells = new Set(list.filter((c) => !c.resolved).map((c) => `${c.row}:${c.column}`));
     this.grid.invalidate();
@@ -2361,6 +2376,7 @@ export class WorkbookScreen {
         ...(rows > 1 ? [{ label: "Chart from selection", action: () => this.chartFromSelection() }] : []),
         { label: "Conditional colour…", action: () => void this.editRules("color") },
         { label: "Allowed values…", action: () => void this.editRules("list") },
+        { label: "Clear colour and value rules here", action: () => void this.clearRules() },
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
         "sep",
