@@ -60,16 +60,14 @@ export function icon(name: IconName, size = 16): SVGSVGElement {
   return svg;
 }
 
-/** The Alephgrid mark, geometry from brand-kit-v1 `icons/favicon.svg` (the open cell and its
- *  fill handle) without the tile; colors come from CSS so it works on both themes. */
+/** Original angular A mark. Theme colors follow the app's explicit theme. */
 export function brandMark(size = 22): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("viewBox", "0 0 64 64");
   svg.setAttribute("width", String(size));
   svg.setAttribute("height", String(size));
   svg.setAttribute("aria-hidden", "true");
   svg.classList.add("brand-mark");
-  svg.innerHTML = '<path class="brand-mark-cell" d="M22 24H9V9h15v12" fill="none" stroke-width="3" stroke-linejoin="round"/>'
-    + '<rect class="brand-mark-handle" x="23" y="23" width="5" height="5"/>';
+  svg.innerHTML = '<g class="brand-mark-strokes"><path d="M4 56 28 8h13L18 51q-3 5-8 5Z"/><path d="m43 12-7 13 13 26q3 5 8 5h5Z"/><path d="m28 40-5 9h19l-5-9Z"/></g>';
   return svg;
 }
