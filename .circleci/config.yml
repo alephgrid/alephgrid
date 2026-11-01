@@ -1,0 +1,219 @@
+# CircleCI runs only when asked (docs/CI.md). Pushes and pull requests start a pipeline whose
+# parameters are all false, so no workflow runs and nothing is billed. Trigger a run from the
+# CircleCI app ("Trigger Pipeline", add a boolean parameter) or with tools/ci.sh:
+#
+#   run_check = true   build, Rust tests, clippy, browser journeys in Chromium   (~ the PR tier)
+#   run_full  = true   the check, plus WebKit and Firefox and the long randomized/repeated runs
+#
+# Tiers follow docs/TEST_STRATEGY.md.
+
+version: 2.1
+
+parameters:
+  run_check:
+    type: boolean
+    default: false
+  run_full:
+    type: boolean
+    default: false
+
+executors:
+  node:
+    docker:
+      - image: cimg/node:22.12
+    resource_class: medium
+  # A full VM: the disk-full tests mount a tmpfs, and Python functions need bubblewrap,
+  # neither of which works inside a container.
+  vm:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large
+
+commands:
+  rust-setup:
+    steps:
+      - run:
+          name: Install Rust (version from rust-toolchain.toml)
+          command: |
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
+            source "$HOME/.cargo/env"
+            rustup toolchain install   # reads rust-toolchain.toml; a no-op once installed
+            rustc --version
+      - restore_cache:
+          keys:
+            - v1-cargo-{{ arch }}-{{ checksum "rust-toolchain.toml" }}-{{ checksum "Cargo.lock" }}
+            - v1-cargo-{{ arch }}-{{ checksum "rust-toolchain.toml" }}-
+  rust-save:
+    steps:
+      - save_cache:
+          key: v1-cargo-{{ arch }}-{{ checksum "rust-toolchain.toml" }}-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - target
+  node-setup:
+    steps:
+      - run:
+          name: Node 22
+          command: |
+            echo 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            nvm install 22 && nvm alias default 22
+            node --version
+
+jobs:
+  web:
+    executor: node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-npm-{{ checksum "web/package-lock.json" }}
+      - run:
+          name: Install
+          working_directory: web
+          command: npm ci
+          environment:
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      - save_cache:
+          key: v1-npm-{{ checksum "web/package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run:
+          name: Type check and bundle
+          working_directory: web
+          command: npm run build
+      - persist_to_workspace:
+          root: .
+          paths:
+            - web/dist
+
+  rust:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_TERM_COLOR: always
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          name: A small filesystem for the disk-full tests (tests/storage_faults.rs)
+          command: |
+            sudo mkdir -p /mnt/rfsmall
+            sudo mount -t tmpfs -o size=64m tmpfs /mnt/rfsmall
+            sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
+      - run:
+          name: Tests (includes the protocol drift check)
+          command: cargo test --workspace --locked
+          no_output_timeout: 40m
+          environment:
+            PROPTEST_CASES: "96"
+            ALEPHGRID_SMALL_FS: /mnt/rfsmall
+      - run:
+          name: Clippy
+          command: cargo clippy --workspace --all-targets --locked -- -D warnings
+          no_output_timeout: 40m
+      - run:
+          name: Server binary for the browser tests
+          command: cargo build -p alephgrid-server --locked
+      - rust-save
+      - persist_to_workspace:
+          root: .
+          paths:
+            - target/debug/alephgrid
+
+  e2e:
+    executor: vm
+    parameters:
+      browser:
+        type: enum
+        enum: [chromium, firefox, webkit]
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - node-setup
+      - run:
+          name: Install the web dependencies and << parameters.browser >>
+          working_directory: web
+          command: |
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
+            npx playwright install --with-deps << parameters.browser >>
+      - run:
+          name: Python sandbox (bubblewrap) for the Python function tests
+          command: |
+            sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap python3-venv
+            # Ubuntu 24.04 blocks unprivileged user namespaces through AppArmor; bwrap needs them.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run:
+          name: Browser journeys (<< parameters.browser >>)
+          working_directory: web
+          command: |
+            chmod +x ../target/debug/alephgrid
+            npx playwright test
+          no_output_timeout: 30m
+          environment:
+            E2E_BROWSER: << parameters.browser >>
+            # Playwright's own Chromium build instead of Google Chrome.
+            E2E_BROWSER_CHANNEL: chromium
+      - store_artifacts:
+          path: web/test-results
+          destination: playwright-<< parameters.browser >>
+
+  long-runs:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          name: Property and state-machine tests, 2000 cases
+          command: cargo test --locked -p alephgrid-core --lib props
+          no_output_timeout: 40m
+          environment:
+            PROPTEST_CASES: "2000"
+      - run:
+          name: Integration and crash suites, five times to surface flakiness
+          command: for i in 1 2 3 4 5; do cargo test --locked -p alephgrid-server || exit 1; done
+          no_output_timeout: 40m
+      - store_artifacts:
+          path: crates/alephgrid-core/proptest-regressions
+          destination: proptest-regressions
+
+workflows:
+  check:
+    when:
+      and:
+        - << pipeline.parameters.run_check >>
+        - not: << pipeline.parameters.run_full >>
+    jobs:
+      - web
+      - rust:
+          requires: [web]
+      - e2e:
+          name: e2e-chromium
+          browser: chromium
+          requires: [rust]
+
+  full:
+    when: << pipeline.parameters.run_full >>
+    jobs:
+      - web
+      - rust:
+          requires: [web]
+      - e2e:
+          name: e2e-<< matrix.browser >>
+          matrix:
+            parameters:
+              browser: [chromium, firefox, webkit]
+          requires: [rust]
+      - long-runs:
+          requires: [web]

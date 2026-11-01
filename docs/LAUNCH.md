@@ -52,7 +52,7 @@ spreadsheet-first journey test.
 * 9.05 / 9.06: release-build benchmarks over varied data shapes and concurrent users; publish
   raw results and supported capacity.
 * 9.08: third-party license review, a `NOTICE` file and dependency notices.
-* 9.10 / 9.14 / 9.16: CI on CircleCI (section 4).
+* 9.10 / 9.14 / 9.16: CI on CircleCI, on demand (section 4); the release pipeline.
 * 9.11: release binaries, container images, checksums, signatures and an SBOM (section 5).
 * 9.13 / 9.15: structured logs and metrics, health versus readiness, runbooks.
 * 9.T01–9.T03 and the 9.12 gate; then L.07 launch review and the L.08 gate on a clean machine.
@@ -65,12 +65,12 @@ spreadsheet-first journey test.
 | `LICENSE` (Apache-2.0) | Present | — |
 | `NOTICE` and third-party notices | Missing | Generate from `Cargo.lock` and `web/package-lock.json` (9.08) |
 | `CHANGELOG.md` | Present, "Unreleased (launch v1)" | Turn into the 0.1.0 entry on release day |
-| `CONTRIBUTING.md` | Present | Mention CircleCI once it runs |
+| `CONTRIBUTING.md` | Present, links CI.md | — |
 | `CODE_OF_CONDUCT.md` | Added 1 Nov (Contributor Covenant 2.1) | **Owner:** set the conduct contact address |
 | `SECURITY.md` | Added 1 Nov: private reporting, response times, supported versions | **Owner:** turn on private vulnerability reporting in repository settings |
 | `.github/ISSUE_TEMPLATE/` | Bug, feature, and a config that routes security reports and questions | — |
 | `.github/pull_request_template.md` | Present | — |
-| `.circleci/config.yml` | Missing | Section 4 |
+| `.circleci/config.yml` | Added (on-demand check and full runs) | Release pipeline with 9.11 |
 | `docs/README.md` | Added 1 Nov: index of every page | — |
 | `docs/OPERATIONS.md` | Present | Complete with 9.02–9.04 results |
 | `docs/SPREADSHEET_FEATURES.md` | Present | Keep in step with each merged feature |
@@ -82,23 +82,21 @@ spreadsheet-first journey test.
 Not for the public repository: competitor research, `reports/` and `research_notes/` should be
 reviewed before the repository is made public (9.07, 9.08).
 
-## 4. CI on CircleCI (9.16 decision, 1 November)
+## 4. CI on CircleCI, on demand (9.16 decision, 1 November)
 
-The owner chose CircleCI. Plan:
+The owner chose CircleCI, run **only when asked**: pushes and pull requests start nothing. Setup
+steps and how to run it are in [CI.md](CI.md); the configuration is `.circleci/config.yml`.
 
-* **Pull requests:** build the web bundle; `cargo test --workspace` and
-  `cargo clippy -- -D warnings` with `~/.cargo` and `target/` cached on `Cargo.lock` (the DuckDB
-  build dominates the cost and then runs once per lock change); protocol drift check; browser
-  journeys in Chromium.
-* **Nightly (scheduled pipeline):** the three browser suites (Chromium, WebKit, Firefox), the
-  2,000-case property tests, the disk-full tests, the security regression pack and the
-  crash-recovery suite repeated.
-* **Release (on a `v*` tag):** build binaries and images (section 5), run the install and
-  restore checks against them, then publish.
-* Replace the GitHub Actions workflows in `.github/workflows/` once CircleCI is green, so tests
-  run in one place.
-* **Owner:** connect the repository to CircleCI and apply for its open-source plan once the
-  repository is public.
+* **check** (`tools/ci.sh check`): web build, Rust tests with the protocol drift and disk-full
+  checks, clippy, Chromium browser journeys.
+* **full** (`tools/ci.sh full`): the check plus Firefox and WebKit, 2,000-case property tests and
+  the server suites five times.
+* **Release:** a tag-triggered release pipeline (binaries, images, checksums) is still to be
+  added with 9.11.
+* The GitHub Actions workflows were removed: they started on every push and the
+  organization's Actions policy blocked them.
+* **Owner:** connect the repository to CircleCI and create an API token (CI.md steps 2–5);
+  apply for the open-source plan once the repository is public.
 
 ## 5. Release artifacts (9.11)
 

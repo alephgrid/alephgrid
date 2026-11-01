@@ -19,6 +19,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p alephgrid-server && (cd web && npm run e2e)   # browser journeys (needs Google Chrome)
 ```
 
+CI on CircleCI runs only when asked (`tools/ci.sh check`); see [docs/CI.md](docs/CI.md).
+
 If you change a type that crosses the wire, regenerate the TypeScript bindings:
 `UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol`.
 
