@@ -235,6 +235,11 @@ impl Sheets {
         Ok(())
     }
 
+    /// The engine's stable id of a sheet (kept through renames and moves).
+    pub fn sheet_id(&self, index: u32) -> Result<u32> {
+        Ok(self.model()?.get_model().workbook.worksheet(index).map_err(|e| anyhow!(e))?.sheet_id)
+    }
+
     /// The style of one cell (row and column 0-based).
     pub fn cell_style(&self, index: u32, row: u32, column: u32) -> Result<CellStyle> {
         let m = self.model()?;

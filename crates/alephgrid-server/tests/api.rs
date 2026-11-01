@@ -328,6 +328,8 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "EditOutcome" => conforms::<EditOutcome>(op, v),
         "Stats" => conforms::<Stats>(op, v),
         "FindResult" => conforms::<alephgrid_core::FindResult>(op, v),
+        "CellComment" => conforms::<alephgrid_core::CellComment>(op, v),
+        "CellComment[]" => conforms::<Vec<alephgrid_core::CellComment>>(op, v),
         "ColumnValues" => conforms::<alephgrid_core::ColumnValues>(op, v),
         "QueryPreview" => conforms::<QueryPreview>(op, v),
         "SheetInfo[]" => conforms::<Vec<SheetInfo>>(op, v),
@@ -384,6 +386,7 @@ async fn every_operation_replies_with_its_declared_type() {
     let mut saved_id = String::new();
     let mut query_id = String::new();
     let mut analysis_id = String::new();
+    let mut comment_id = String::new();
     let mut dashboard_id = String::new();
     let mut preview_revision = Value::Null;
     let mut undo_revision = Value::Null;
@@ -396,12 +399,16 @@ async fn every_operation_replies_with_its_declared_type() {
         if params["saved"] == "PLACEHOLDER" {
             params["saved"] = json!(saved_id);
         }
+        if params["comment"] == "COMMENT" {
+            params["comment"] = json!(comment_id);
+        }
         if params["saved"] == "QUERY" {
             params["saved"] = json!(query_id);
         }
         let v = ws.call(op, params.clone()).await.unwrap_or_else(|e| panic!("{op} {params}: {e}"));
         check_result(op, declared[op], &v);
         if op=="save_analysis" {analysis_id=v["id"].as_str().unwrap().to_string();}
+        if op=="add_comment" {comment_id=v["id"].as_str().unwrap().to_string();}
         if op=="save_dashboard" {dashboard_id=v["id"].as_str().unwrap().to_string();}
         if op=="replace_preview" {preview_revision=v["sample"]["revision"].clone();}
         if op=="replace_apply" {undo_revision=v["undo_revision"].clone();}

@@ -240,6 +240,13 @@ pub enum Op {
     SheetFind { sheet: u32, search: alephgrid_core::SheetSearch, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
     /// Replace in every matching cell of a sheet, as one undo step; replies how many changed.
     SheetReplace { sheet: u32, search: alephgrid_core::SheetSearch, replacement: String },
+    /// The comments of a sheet (S.11).
+    Comments { sheet: u32 },
+    /// Comment on a cell, or reply to a thread (S.11).
+    AddComment { sheet: u32, row: u32, column: u32, text: String, #[serde(default)] #[ts(optional, as = "Option<String>")] parent: String },
+    EditComment { sheet: u32, comment: String, text: String },
+    ResolveComment { sheet: u32, comment: String, resolved: bool },
+    DeleteComment { sheet: u32, comment: String },
     /// Copy a sheet into a new one after it (S.07).
     SheetDuplicate { sheet: u32 },
     /// Colour a sheet's tab, `#RRGGBB` or empty (S.07).
@@ -374,7 +381,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | Comments { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -392,7 +399,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetDuplicate { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetColor { .. } | SheetReplace { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -403,7 +410,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -532,6 +539,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
             json!(r.fetch(view_id, row_start, row_count, column_start, column_count)?)
         }
         Op::Stats { view_id, column, start, end } => json!(r.stats(view_id, &column, start, end)?),
+        Op::Comments { sheet } => json!(r.comments(sheet)?),
         Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
@@ -724,21 +732,25 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetInsertRows { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, (count as i64))?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteRows { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.delete_rows(sheet, at, count))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, -(count as i64))?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetInsertColumns { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_columns(sheet, at, count))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, (count as i64))?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteColumns { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.delete_columns(sheet, at, count))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, -(count as i64))?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDefineName { name, scope, refers_to } => {
@@ -753,6 +765,10 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             wb.with_sheets(|s| s.delete_name(&name, scope))?;
             (json!(wb.sheets().names()), Some(Event::SheetChanged { sheet: None, origin, revision: 0 }))
         }
+        Op::AddComment { sheet, row, column, text, parent } => (json!(wb.add_comment(sheet, row, column, &text, Some(parent.as_str()).filter(|p| !p.is_empty()))?), sheet_changed(sheet)),
+        Op::EditComment { sheet, comment, text } => { wb.edit_comment(&comment, &text)?; (Value::Null, sheet_changed(sheet)) }
+        Op::ResolveComment { sheet, comment, resolved } => { wb.resolve_comment(&comment, resolved)?; (Value::Null, sheet_changed(sheet)) }
+        Op::DeleteComment { sheet, comment } => { wb.delete_comment(&comment)?; (Value::Null, sheet_changed(sheet)) }
         Op::SheetDuplicate { sheet } => {
             let info = wb.with_sheets(|s| s.duplicate(sheet))?;
             (json!(info), Some(Event::Resync { revision: None }))
