@@ -78,12 +78,12 @@ defect: undo history was lost after rejected requests.
 
 | Tier | Runs | Contents |
 |---|---|---|
-| Per change (CI `ci.yml`) | push / PR | web build + type check; `cargo test --workspace` (unit, integration, property with 96 cases, protocol drift, crash); clippy with `-D warnings`; Playwright journeys |
-| Scheduled (`scheduled.yml`) | nightly | Property tests with 2000 cases; server suites repeated 5× to surface flakiness |
+| Per change (CircleCI `check`) | on request, before merging (`tools/ci.sh check`); locally before every PR | web build + type check; `cargo test --workspace` (unit, integration, property with 96 cases, protocol drift, crash, disk-full); clippy with `-D warnings`; Playwright journeys in Chromium |
+| Extended (CircleCI `full`) | on request, before a release or after storage, collaboration or recovery changes (`tools/ci.sh full`) | The check, plus Firefox and WebKit journeys; property tests with 2000 cases; server suites repeated 5× to surface flakiness |
 | Release | manual, before tagging | Everything above, plus a clean install, an upgrade/restore and authorization checks once those exist (phases 3, 7, 9). Not yet defined in automation |
 
 "Test implemented" and "test executed successfully" are recorded separately in the matrix.
-Local runs do not count as scheduled or release checks having passed.
+Local runs do not count as extended or release checks having passed. CI never runs on its own; see [CI.md](CI.md).
 
 ## Commands
 
