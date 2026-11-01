@@ -107,6 +107,12 @@ jobs:
             sudo mount -t tmpfs -o size=64m tmpfs /mnt/rfsmall
             sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
       - run:
+          name: Build the tests (DuckDB compiles here on a cold cache)
+          command: cargo test --workspace --locked --no-run
+          no_output_timeout: 40m
+      # Saved before the tests run, so a failing test does not throw the build away.
+      - rust-save
+      - run:
           name: Tests (includes the protocol drift check)
           command: cargo test --workspace --locked
           no_output_timeout: 40m
@@ -120,7 +126,6 @@ jobs:
       - run:
           name: Server binary for the browser tests
           command: cargo build -p alephgrid-server --locked
-      - rust-save
       - persist_to_workspace:
           root: .
           paths:

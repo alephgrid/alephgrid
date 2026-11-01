@@ -667,15 +667,19 @@ async fn a_long_job_keeps_compute_open_and_idle_time_starts_when_it_ends() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let s = status(&server, &wb).await;
     assert_eq!((state_of(&s), s["allocation"]["epoch"].clone()), ("ready", epoch.clone()), "{s}");
+    // The job cannot end before its cancel is sent, so this is a lower bound on when it ended.
+    // (Reading the clock after the reply instead adds the reply's delivery time, which is not
+    // bounded on a loaded machine.) Had idle time counted from the job's start, the workbook
+    // would close right after the cancel, well before this bound plus the timeout.
+    let cancel_sent = alephgrid_core::storage::now_ms();
     ws.ok("cancel", json!({ "request": slow })).await;
     assert_eq!(ws.reply(slow).await.unwrap()["code"], "cancelled");
-    let ended = alephgrid_core::storage::now_ms();
     let state = server.state.clone();
     let w = wb.clone();
     eventually("closed once idle", move || state.controller.handle(&w).is_none()).await;
     let s = status(&server, &wb).await;
     let draining = s["allocation"]["transitions"].as_array().unwrap().iter().find(|t| t["to"] == "draining").unwrap().clone();
-    assert!(draining["at_ms"].as_u64().unwrap() + 20 >= ended + 300, "idle time counts from the end of the job: {draining}, ended {ended}");
+    assert!(draining["at_ms"].as_u64().unwrap() + 20 >= cancel_sent + 300, "idle time counts from the end of the job: {draining}, cancel sent {cancel_sent}");
     ws.close().await;
     server.stop().await;
 }
