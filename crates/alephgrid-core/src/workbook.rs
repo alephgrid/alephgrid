@@ -1798,6 +1798,11 @@ impl Workbook {
         self.db().run_query(sql, params, limit)
     }
 
+    /// The plan of a read-only user query (M.01).
+    pub fn explain_query(&self, sql: &str) -> Result<String> {
+        self.db().explain_query(sql)
+    }
+
     /// Write a user query's complete result to a file; returns (rows, revision read).
     pub fn export_query(&self, sql: &str, params: &[QueryParam], path: &Path, format: ExportFormat) -> Result<(u64, u64)> {
         self.db().export_query(sql, params, path, format)
@@ -2019,6 +2024,11 @@ impl Reader {
 
     pub fn run_query(&self, sql: &str, params: &[QueryParam], limit: usize) -> Result<QueryResult> {
         self.db().run_query(sql, params, limit)
+    }
+
+    /// The plan of a read-only user query (M.01).
+    pub fn explain_query(&self, sql: &str) -> Result<String> {
+        self.db().explain_query(sql)
     }
 
     pub fn export_query(&self, sql: &str, params: &[QueryParam], path: &Path, format: ExportFormat) -> Result<(u64, u64)> {

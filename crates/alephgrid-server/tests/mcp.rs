@@ -153,6 +153,10 @@ async fn agents_read_only_their_workbooks_with_pinned_results() {
     let tables = mcp.tool("list_workbooks", json!({})).await;
     assert_eq!(tables["workbooks"][0]["tables"][0]["rows"], 250, "nothing acted on the text in the cell");
 
+    // A plan, without running the query; changes cannot be explained either.
+    let plan = mcp.tool("explain_query", json!({ "workbook": a, "sql": "SELECT region, count(*) FROM orders GROUP BY region" })).await;
+    assert!(plan["plan"].as_str().unwrap().to_uppercase().contains("AGGREGATE"), "{plan}");
+    assert!(!mcp.tool_error("explain_query", json!({ "workbook": a, "sql": "DELETE FROM orders" })).await.is_empty());
     // Read-only: changes are refused.
     let e = mcp.tool_error("run_query", json!({ "workbook": a, "sql": "DROP TABLE orders" })).await;
     assert!(!e.is_empty());

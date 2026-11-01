@@ -50,6 +50,7 @@ only the workbooks it needs.
 | `preview_table` | Up to 500 rows of a table from an offset, with chosen columns, filters and sort |
 | `read_sheet` | Shown values of a sheet range (at most 5,000 cells) and its formulas |
 | `run_query` | Read-only DuckDB SQL (up to 10,000 rows kept behind the handle) |
+| `explain_query` | The engine's plan for a read-only query, without running it |
 | `run_saved_query`, `run_analysis` | A saved query or analysis, by name or id |
 | `fetch_result` | More rows of a result, by handle |
 | `verify_result` | Recompute a result and compare it with its receipt |
