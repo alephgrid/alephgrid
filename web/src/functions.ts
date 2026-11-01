@@ -1,189 +1,455 @@
 import { Rpc } from "./api";
 import { builtinFunctions } from "./catalog";
-import { el, openModal } from "./ui";
-import type { FunctionDefinition, FunctionKind, FunctionTest, WorkbookFunction } from "./protocol";
+import { icon } from "./icons";
+import { el, toast } from "./ui";
+import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, WorkbookFunction } from "./protocol";
 
-/** Fields compared to tell whether the editor holds a published version (order-independent). */
+/** U.06a–e: workbook functions in a resizable side panel beside the grid, with Code, Tests,
+ *  Docs and Versions tabs and a compact results strip. Running tests never publishes;
+ *  publishing a version and activating it in this workbook are separate steps. The panel
+ *  keeps its draft while closed. */
+export interface FunctionPanel {
+  /** Show the panel (again), keeping the draft. */
+  open(): void;
+  close(): void;
+  readonly isOpen: boolean;
+}
+
+const WIDTH_KEY = "alephgrid-fn-panel-width";
+const MIN_WIDTH = 360, GRID_MIN = 560, DEFAULT_WIDTH = 480;
+
+interface Draft {
+  name: string; kind: FunctionKind; args: string; source: string; documentation: string;
+  tests: FunctionTest[]; returns: NonNullable<FunctionDefinition["returns"]>; volatile: boolean; dependencies: string;
+}
+
+const EXAMPLE: Draft = {
+  name: "MARGIN", kind: "formula", args: "revenue, cost", source: "IF(revenue=0,0,(revenue-cost)/revenue)",
+  documentation: "Profit as a fraction of revenue.", tests: [{ arguments: ["100", "60"], expected: "0.4" }],
+  returns: "number", volatile: false, dependencies: "{}",
+};
+const EMPTY: Draft = { ...EXAMPLE, name: "", args: "", source: "", documentation: "", tests: [] };
+
+function savedWidth(): number {
+  try { const w = Number(localStorage.getItem(WIDTH_KEY)); return Number.isFinite(w) && w > 0 ? w : DEFAULT_WIDTH; } catch { return DEFAULT_WIDTH; }
+}
+
+/** Fields compared to tell whether the panel holds a published version (order-independent). */
 function normalize(d: FunctionDefinition): string {
   return JSON.stringify({
     name: d.name, kind: d.kind, arguments: d.arguments, source: d.source, documentation: d.documentation,
-    tests: d.tests, returns: d.kind === "python" ? d.returns ?? "number" : null, volatile: d.kind === "python" ? !!d.volatile : null,
+    tests: d.tests.map((t) => ({ arguments: t.arguments, expected: t.expected })),
+    returns: d.kind === "python" ? d.returns ?? "number" : null, volatile: d.kind === "python" ? !!d.volatile : null,
   });
 }
 
-const KIND_LABEL: Record<string, string> = { formula: "Formula", sql: "SQL", python: "Python" };
+function argList(args: string): string[] {
+  return args.split(",").map((x) => x.trim()).filter(Boolean);
+}
 
-/** Workbook-scoped definitions (U.06). Publishing creates an immutable version; pinning is
- *  explicit. The editor says whether it holds a draft, a tested draft or a published version. */
-export function functionLibrary(rpc: Rpc, allowSql: boolean): () => void {
-  const list = el("ul", { class: "fn-list", "aria-label": "Published functions" });
-  const name = el("input", { "aria-label": "Function name", value: "MARGIN", maxlength: 64, spellcheck: false });
-  const kind = el("select", { "aria-label": "Function engine" }, el("option", { value: "formula" }, "Sheet formula (IronCalc)"),
-    allowSql ? el("option", { value: "sql" }, "SQL expression (DuckDB)") : null,
-    el("option", { value: "python" }, "Python (isolated worker)"));
+export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLElement) => void, onClosed: () => void): FunctionPanel {
+  let draft: Draft = { ...EMPTY };
+  let functions: WorkbookFunction[] = [];
+  let selected: WorkbookFunction | undefined;
+
+  /** Results of the last run, for exactly the definition they ran on. */
+  let results: { key: string; list: FunctionTestResult[]; error?: string } | null = null;
+  let running = false, runSeq = 0;
+  let width = savedWidth(), expanded = false, isOpen = false;
+  const log: string[] = [];
+
+  // ---- header -------------------------------------------------------------------------
+  const switcher = el("select", { "aria-label": "Function", class: "fn-switcher" });
+  const newBtn = el("button", { class: "btn small", type: "button" }, "New");
+  const signature = el("code", { class: "fn-signature" });
+  const state = el("span", { class: "fn-state" });
+  const expandBtn = el("button", { class: "icon-btn", type: "button" });
+  const closeBtn = el("button", { class: "icon-btn", type: "button", "aria-label": "Close functions panel", title: "Close (Esc)" }, icon("x"));
+
+  // ---- code tab -----------------------------------------------------------------------
+  const name = el("input", { "aria-label": "Function name", maxlength: 64, spellcheck: false, placeholder: "NAME" });
+  const kind = el("select", { "aria-label": "Function engine" }, el("option", { value: "formula" }, "Formula"),
+    allowSql ? el("option", { value: "sql" }, "SQL") : null, el("option", { value: "python" }, "Python"));
+  const args = el("input", { "aria-label": "Arguments", spellcheck: false, placeholder: "a, b" });
   const returns = el("select", { "aria-label": "Python result type" },
     el("option", { value: "number" }, "Number"), el("option", { value: "text" }, "Text"), el("option", { value: "boolean" }, "Logical"));
   const volatile = el("input", { type: "checkbox", "aria-label": "Volatile: computed again only on Refresh" });
-  const pythonFields = el("div", { class: "fn-row fn-python", hidden: true },
+  const pythonRow = el("div", { class: "fn-row", hidden: true },
     el("label", { class: "function-field" }, "Returns", returns),
-    el("label", { class: "fn-check" }, volatile, el("span", {}, "Volatile: reads the clock or randomness; computed again only on Refresh")));
-  const sourceLabel = el("span", {}, "Expression");
-  const sourceHint = el("small", { class: "muted" });
-  const args = el("input", { "aria-label": "Arguments", value: "revenue, cost", spellcheck: false });
-  const source = el("textarea", { "aria-label": "Function source", rows: 4, spellcheck: false }, "IF(revenue=0,0,(revenue-cost)/revenue)");
-  const documentation = el("textarea", { "aria-label": "Function documentation", rows: 2, class: "prose" }, "Profit as a fraction of revenue.");
-  const tests = el("textarea", { "aria-label": "Function tests", rows: 5, spellcheck: false }, JSON.stringify([{ arguments: ["100", "60"], expected: "0.4" }], null, 2));
-  const dependencies = el("textarea", { "aria-label": "Dependency versions", rows: 1, spellcheck: false }, "{}");
-  const pins = el("textarea", { "aria-label": "Active function versions", rows: 2, spellcheck: false }, "{}");
-  const status = el("pre", { role: "status", class: "function-status" });
-  const versions = el("select", { "aria-label": "Function version" });
-  const signature = el("code", { class: "fn-signature" });
-  const state = el("span", { class: "fn-state" });
-  let selected: WorkbookFunction | undefined;
-  /** The definition (normalized) whose tests last all passed, and whether the last run failed. */
-  let tested: string | null = null;
-  let failed: string | null = null;
+    el("label", { class: "fn-check", title: "Reads the clock or randomness; computed again only when you choose Refresh" }, volatile, el("span", {}, "Volatile")));
+  const gutter = el("pre", { class: "fn-gutter", "aria-hidden": "true" });
+  const source = el("textarea", { "aria-label": "Function source", spellcheck: false, class: "fn-code", wrap: "off" });
+  const sourceHint = el("p", { class: "muted fn-hint" });
+  const codeTab = el("div", { class: "fn-tab-body" },
+    el("div", { class: "fn-row" }, el("label", { class: "function-field grow" }, "Name", name), el("label", { class: "function-field" }, "Language", kind)),
+    el("label", { class: "function-field" }, "Arguments", args),
+    pythonRow,
+    el("div", { class: "fn-editor-box" }, gutter, source),
+    sourceHint);
 
-  const field = (label: string | HTMLElement, input: HTMLElement, hint?: HTMLElement) =>
-    el("label", { class: "function-field" }, label, input, hint ?? null);
+  // ---- tests tab ----------------------------------------------------------------------
+  const testRows = el("tbody");
+  const testHead = el("tr");
+  const testNotice = el("p", { class: "notice", role: "note", hidden: true });
+  const addTest = el("button", { class: "btn small", type: "button" }, "Add test");
+  const testsJson = el("textarea", { "aria-label": "Function tests (JSON)", rows: 5, spellcheck: false, class: "fn-code" });
+  const jsonApply = el("button", { class: "btn small", type: "button" }, "Use this JSON");
+  const jsonError = el("p", { class: "dialog-error", role: "alert" });
+  const testsTab = el("div", { class: "fn-tab-body" },
+    testNotice,
+    el("table", { class: "fn-tests", "aria-label": "Tests" }, el("thead", {}, testHead), testRows),
+    el("div", { class: "fn-row" }, addTest, el("span", { class: "muted" }, "Inputs and expected results are the displayed text. NULL binds SQL NULL.")),
+    el("details", { class: "fn-advanced" }, el("summary", {}, "Advanced: tests as JSON"), testsJson, el("div", { class: "fn-row" }, jsonApply), jsonError));
+
+  // ---- docs tab -----------------------------------------------------------------------
+  const documentation = el("textarea", { "aria-label": "Function documentation", rows: 4, class: "prose" });
+  const example = el("code", { class: "fn-example" });
+  const copyExample = el("button", { class: "btn small", type: "button" }, "Copy");
+  const docsTab = el("div", { class: "fn-tab-body" },
+    el("label", { class: "function-field" }, "Description", documentation),
+    el("div", { class: "function-field" }, el("span", {}, "Use it in a cell"), el("div", { class: "fn-row" }, example, copyExample)),
+    el("p", { class: "muted fn-hint" }, "Published functions appear in cell autocomplete with this description. Formula functions export to XLSX as LAMBDA names; SQL and Python functions are not Excel formulas."));
+
+  // ---- versions tab -------------------------------------------------------------------
+  const versionList = el("ul", { class: "fn-versions", "aria-label": "Published versions" });
+  const dependencies = el("textarea", { "aria-label": "Dependency versions", rows: 2, spellcheck: false, class: "fn-code" });
+  const pins = el("textarea", { "aria-label": "Active function versions", rows: 3, spellcheck: false, class: "fn-code" });
+  const pinMap = el("button", { class: "btn small", type: "button" }, "Activate version map");
+  const versionsTab = el("div", { class: "fn-tab-body" },
+    versionList,
+    el("details", { class: "fn-advanced" }, el("summary", {}, "Advanced: dependencies and version map"),
+      el("label", { class: "function-field" }, "Dependency versions (JSON overrides)", dependencies),
+      el("label", { class: "function-field" }, "Active versions (edit together for dependent upgrades)", pins),
+      el("div", { class: "fn-row" }, pinMap)));
+
+  // ---- tabs ---------------------------------------------------------------------------
+  const tabNames = ["Code", "Tests", "Docs", "Versions"] as const;
+  const bodies = [codeTab, testsTab, docsTab, versionsTab];
+  const tabs = tabNames.map((t) => el("button", { type: "button", role: "tab", class: "fn-tab", id: `fn-tab-${t}`, "aria-controls": `fn-panel-${t}` }, t));
+  bodies.forEach((b, i) => { b.id = `fn-panel-${tabNames[i]}`; b.setAttribute("role", "tabpanel"); b.setAttribute("aria-labelledby", tabs[i].id); });
+  let tab = 0;
+  const showTab = (i: number, focus = false) => {
+    tab = i;
+    tabs.forEach((t, j) => { t.setAttribute("aria-selected", String(i === j)); t.tabIndex = i === j ? 0 : -1; });
+    bodies.forEach((b, j) => { b.hidden = i !== j; });
+    if (focus) tabs[i].focus();
+    if (i === 1) renderTests();
+    if (i === 3) renderVersions();
+  };
+  tabs.forEach((t, i) => t.addEventListener("click", () => showTab(i)));
+  const tabList = el("div", { role: "tablist", class: "fn-tabs", "aria-label": "Function parts" }, ...tabs);
+  tabList.addEventListener("keydown", (e) => {
+    const d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+    if (d) { e.preventDefault(); showTab((tab + d + tabs.length) % tabs.length, true); }
+    else if (e.key === "Home") { e.preventDefault(); showTab(0, true); }
+    else if (e.key === "End") { e.preventDefault(); showTab(tabs.length - 1, true); }
+  });
+
+  // ---- results strip ------------------------------------------------------------------
+  const runBtn = el("button", { class: "btn", type: "button", title: "Run tests (⌘↵ / Ctrl+Enter)" }, "Run tests");
+  const publishBtn = el("button", { class: "btn btn-primary", type: "button" }, "Publish version");
+  const runState = el("span", { class: "fn-run-state", role: "status" });
+  const resultsBody = el("div", { class: "fn-results-body" });
+  const consoleBody = el("pre", { class: "fn-console", role: "log", "aria-label": "Console" });
+  const resultsTabs = [el("button", { type: "button", class: "fn-rtab", "aria-pressed": "true" }, "Results"), el("button", { type: "button", class: "fn-rtab", "aria-pressed": "false" }, "Console")];
+  const collapse = el("button", { class: "icon-btn", type: "button", "aria-expanded": "true", "aria-label": "Hide results" }, icon("chevron"));
+  const results$ = el("section", { class: "fn-results", "aria-label": "Test results" },
+    el("div", { class: "fn-results-head" }, ...resultsTabs, el("div", { class: "spacer" }), runState, collapse),
+    resultsBody, consoleBody);
+  consoleBody.hidden = true;
+  resultsTabs.forEach((b, i) => b.addEventListener("click", () => {
+    resultsTabs.forEach((x, j) => x.setAttribute("aria-pressed", String(i === j)));
+    resultsBody.hidden = i !== 0; consoleBody.hidden = i !== 1;
+  }));
+  collapse.addEventListener("click", () => {
+    const open = collapse.getAttribute("aria-expanded") !== "true";
+    collapse.setAttribute("aria-expanded", String(open));
+    collapse.setAttribute("aria-label", open ? "Hide results" : "Show results");
+    results$.classList.toggle("collapsed", !open);
+  });
+
+  const divider = el("div", { class: "fn-divider", role: "separator", tabindex: "0", "aria-orientation": "vertical", "aria-label": "Resize functions panel", title: "Drag, or use the arrow keys, to resize" });
+  const heading = el("h2", { id: "fn-panel-title", class: "sr-only" }, "Functions");
+  const panel = el("aside", { class: "fn-panel", "aria-labelledby": "fn-panel-title" },
+    divider,
+    el("div", { class: "fn-panel-inner" },
+      heading,
+      el("div", { class: "fn-panel-head" }, switcher, newBtn, el("div", { class: "spacer" }), expandBtn, closeBtn),
+      el("div", { class: "fn-title" }, signature, state),
+      tabList, ...bodies,
+      el("div", { class: "fn-actions" }, runBtn, publishBtn),
+      results$));
+
+  // ---- model --------------------------------------------------------------------------
+  const read = () => {
+    draft = { ...draft, name: name.value.trim(), kind: kind.value as FunctionKind, args: args.value, source: source.value,
+      documentation: documentation.value, returns: returns.value as Draft["returns"], volatile: volatile.checked, dependencies: dependencies.value };
+  };
   const definition = (): FunctionDefinition => {
-    const parsed: unknown = JSON.parse(tests.value);
-    if (!Array.isArray(parsed)) throw new Error("Tests must be a JSON array");
-    const d: FunctionDefinition = { name: name.value.trim(), kind: kind.value as FunctionKind, arguments: args.value.split(",").map(x => x.trim()), source: source.value, documentation: documentation.value, tests: parsed as FunctionTest[], dependencies: JSON.parse(dependencies.value) };
-    if (d.kind === "python") { d.returns = returns.value as FunctionDefinition["returns"]; d.volatile = volatile.checked; d.dependencies = {}; }
+    const n = argList(draft.args).length;
+    const wrong = draft.tests.findIndex((t) => t.arguments.length !== n);
+    if (wrong >= 0) throw new Error(`Test ${wrong + 1} has ${draft.tests[wrong].arguments.length} inputs but the function takes ${n}. Fix it on the Tests tab.`);
+    let deps: Record<string, number>;
+    try { deps = JSON.parse(draft.dependencies || "{}"); } catch { throw new Error("Dependency versions are not valid JSON (Versions → Advanced)."); }
+    const d: FunctionDefinition = { name: draft.name, kind: draft.kind, arguments: argList(draft.args), source: draft.source,
+      documentation: draft.documentation, tests: draft.tests, dependencies: deps };
+    if (d.kind === "python") { d.returns = draft.returns; d.volatile = draft.volatile; d.dependencies = {}; }
     return d;
   };
-  const current = (): string | null => { try { return normalize(definition()); } catch { return null; } };
+  const key = (): string | null => { try { return normalize(definition()); } catch { return null; } };
+  const fill = (d: Draft) => {
+    draft = { ...d, tests: d.tests.map((t) => ({ arguments: [...t.arguments], expected: t.expected })) };
+    name.value = d.name; kind.value = d.kind; args.value = d.args; source.value = d.source; documentation.value = d.documentation;
+    returns.value = d.returns; volatile.checked = d.volatile; dependencies.value = d.dependencies;
+    results = null;
+    render();
+  };
+  const fromVersion = (f: WorkbookFunction, version: number): Draft => {
+    const v = f.versions.find((x) => x.version === version)!;
+    const d = v.definition;
+    return { name: d.name, kind: d.kind, args: d.arguments.join(", "), source: d.source, documentation: d.documentation,
+      tests: d.tests, returns: d.returns ?? "number", volatile: !!d.volatile, dependencies: JSON.stringify(v.dependencies) };
+  };
 
-  /** Signature line and Draft / Tested / Published state of what the editor holds. */
+  // ---- rendering ----------------------------------------------------------------------
+  const lineNumbers = () => {
+    const lines = Math.max(1, source.value.split("\n").length);
+    gutter.textContent = Array.from({ length: lines }, (_, i) => String(i + 1)).join("\n");
+    gutter.scrollTop = source.scrollTop;
+  };
   const render = () => {
-    const argList = args.value.split(",").map(x => x.trim()).filter(Boolean);
-    signature.textContent = `${name.value.trim().toUpperCase() || "NAME"}(${argList.join(", ")})`;
-    const now = current();
-    const published = now && selected?.name === name.value.trim()
-      ? selected.versions.find(v => normalize(v.definition) === now) : undefined;
+    const names = argList(draft.args);
+    signature.textContent = `${draft.name.toUpperCase() || "NAME"}(${names.join(", ")})`;
+    example.textContent = `=${draft.name.toUpperCase() || "NAME"}(${names.map(() => "…").join(", ")})`;
+    pythonRow.hidden = draft.kind !== "python";
+    sourceHint.textContent = draft.kind === "python"
+      ? `def ${draft.name.toLowerCase() || "name"}(${names.join(", ")}): … runs in an isolated worker with no network or files. Running tests never runs it in cells.`
+      : draft.kind === "sql" ? "A DuckDB scalar expression over the arguments. Test inputs are text: cast them explicitly."
+      : "A sheet formula over the arguments, without the leading =.";
+    lineNumbers();
+    const now = key();
+    const published = now && selected?.name === draft.name ? selected.versions.find((v) => normalize(v.definition) === now) : undefined;
+    const ran = results && results.key === now ? results : null;
+    const passed = ran && !ran.error && ran.list.every((t) => t.passed);
     const [label, tone, title] = published
       ? [`Published · v${published.version}${published.version === selected!.pinned ? " · active" : ""}`, "published",
-        published.version === selected!.pinned ? "This version is the one the workbook uses." : "Published, not active: select it and choose Activate to use it."]
-      : now && now === tested ? ["Tested · ready to publish", "tested", "Every test passed for exactly this definition."]
-      : now && now === failed ? ["Draft · tests failing", "failing", "Fix the definition or its tests; publishing needs them to pass."]
+        published.version === selected!.pinned ? "The workbook uses this version." : "Published, not active here: activate it on the Versions tab."]
+      : passed ? ["Tested · ready to publish", "tested", "Every test passed for exactly this definition."]
+      : ran ? ["Draft · tests failing", "failing", "Fix the definition or its tests; publishing needs them to pass."]
       : ["Draft", "draft", "Not published. Run the tests, then publish a version."];
-    state.textContent = label;
-    state.dataset.state = tone;
-    state.title = title;
+    state.textContent = label; state.dataset.state = tone; state.title = title;
+    runState.textContent = running ? "Running…" : results && results.key !== now ? "Results are for an earlier edit" : ran ? (ran.error ? "Failed" : passed ? "Passed" : "Failing") : "";
+    renderResults();
+    if (tab === 1) renderTests();
+    if (tab === 3) renderVersions();
+    runBtn.disabled = running; publishBtn.disabled = running;
+    expandBtn.replaceChildren(icon(expanded ? "restore" : "maximize"));
+    expandBtn.setAttribute("aria-label", expanded ? "Narrow functions panel" : "Widen functions panel");
+    expandBtn.setAttribute("aria-pressed", String(expanded));
   };
-  const showKind = () => {
-    const py = kind.value === "python";
-    pythonFields.hidden = !py;
-    sourceLabel.textContent = py ? "Python source" : "Expression";
-    sourceHint.textContent = py
-      ? `Define def ${name.value.trim().toLowerCase() || "name"}(${args.value}): … It runs in an isolated worker with no network or files; results are kept by their exact arguments.`
-      : kind.value === "sql" ? "A DuckDB scalar expression over the arguments. Test inputs are strings: cast them explicitly."
-      : "A sheet formula over the arguments, without the leading =. Sheet numbers use spreadsheet precision.";
-    render();
-  };
-  for (const input of [name, args, source, documentation, tests, dependencies, returns, volatile]) input.addEventListener("input", () => { showKind(); });
-  kind.addEventListener("change", showKind);
 
-  const load = (f: WorkbookFunction, version = f.pinned) => {
-    selected = f;
-    const v = f.versions.find(v => v.version === version)!;
-    name.value = v.definition.name; kind.value = v.definition.kind; args.value = v.definition.arguments.join(", ");
-    returns.value = v.definition.returns ?? "number"; volatile.checked = !!v.definition.volatile;
-    source.value = v.definition.source; documentation.value = v.definition.documentation; tests.value = JSON.stringify(v.definition.tests, null, 2); dependencies.value = JSON.stringify(v.dependencies);
-    versions.replaceChildren(...f.versions.map(v => el("option", { value: v.version }, `v${v.version}${v.version === f.pinned ? " · active" : ""}`)));
-    const runtime = v.runtime ? `\nPython ${v.runtime.version} · runtime ${v.runtime.id}${v.runtime.packages.length ? " · " + v.runtime.packages.join(", ") : ""}` : "";
-    versions.value = String(version); status.textContent = `${f.name} · workbook scope · pinned v${f.pinned}\n${v.adapter}\nDependencies: ${JSON.stringify(v.dependencies)}${runtime}`;
-    for (const li of list.querySelectorAll("button")) li.setAttribute("aria-current", li.dataset.name === f.name ? "true" : "false");
-    showKind();
+  const renderResults = () => {
+    const now = key();
+    if (!results) { resultsBody.replaceChildren(el("p", { class: "muted" }, "Run the tests to see results here.")); return; }
+    const stale = results.key !== now;
+    if (results.error) { resultsBody.replaceChildren(el("p", { class: "dialog-error" }, results.error)); return; }
+    resultsBody.replaceChildren(
+      ...(stale ? [el("p", { class: "notice" }, "Edited since this run: run the tests again.")] : []),
+      results.list.length
+        ? el("ol", { class: "fn-result-list" }, ...results.list.map((t, i) => el("li", { class: t.passed ? "pass" : "fail" },
+          el("strong", {}, t.passed ? "Passed" : "Failed"), ` · test ${i + 1} · actual ${t.actual} · expected ${t.expected}`)))
+        : el("p", {}, "Definition checked; there are no tests."));
   };
-  const blank = () => {
-    selected = undefined;
-    name.value = ""; args.value = ""; source.value = ""; documentation.value = "";
-    tests.value = "[]"; dependencies.value = "{}"; volatile.checked = false;
-    versions.replaceChildren();
-    status.textContent = "";
-    for (const li of list.querySelectorAll("button")) li.setAttribute("aria-current", "false");
-    showKind();
-    name.focus();
-  };
-  async function refresh() {
-    const items = await rpc.call("functions", {});
-    pins.value = JSON.stringify(Object.fromEntries(items.map(f => [f.name, f.pinned])), null, 2);
-    list.replaceChildren(...items.map(f => {
-      const k = f.versions.find(v => v.version === f.pinned)?.definition.kind ?? "formula";
-      return el("li", {}, el("button", { class: "fn-item", "aria-label": `${f.name} · v${f.pinned}`, "data-name": f.name, onclick: () => load(f) },
-        el("span", { class: "fn-item-name" }, f.name),
-        el("span", { class: `fn-kind fn-kind-${k}` }, KIND_LABEL[k] ?? k),
-        el("span", { class: "fn-item-version" }, `v${f.pinned}`)));
+
+  const renderTests = () => {
+    const names = argList(draft.args);
+    testHead.replaceChildren(el("th", { scope: "col" }, "#"), ...names.map((a) => el("th", { scope: "col" }, a)),
+      el("th", { scope: "col" }, "Expected"), el("th", { scope: "col" }, "Actual"), el("th", { scope: "col" }, el("span", { class: "sr-only" }, "Remove")));
+    const ran = results && !results.error && results.key === key() ? results.list : null;
+    const mismatch = draft.tests.filter((t) => t.arguments.length !== names.length).length;
+    testNotice.hidden = !mismatch;
+    testNotice.replaceChildren(`${mismatch} test${mismatch === 1 ? "" : "s"} do not match the ${names.length} argument${names.length === 1 ? "" : "s"}. `,
+      el("button", { class: "btn small", type: "button", onclick: () => {
+        draft.tests = draft.tests.map((t) => ({ ...t, arguments: names.map((_, i) => t.arguments[i] ?? "") }));
+        render(); renderTests();
+      } }, "Match the arguments"));
+    testRows.replaceChildren(...draft.tests.map((t, i) => {
+      const cell = (label: string, value: string, set: (v: string) => void) => {
+        const input = el("input", { "aria-label": label, value, spellcheck: false });
+        input.addEventListener("input", () => { set(input.value); render(); });
+        return el("td", {}, input);
+      };
+      const r = ran?.[i];
+      return el("tr", { class: r ? (r.passed ? "pass" : "fail") : "" },
+        el("th", { scope: "row" }, String(i + 1)),
+        ...names.map((a, j) => cell(`Test ${i + 1} ${a}`, t.arguments[j] ?? "", (v) => { t.arguments[j] = v; })),
+        cell(`Test ${i + 1} expected`, t.expected, (v) => { t.expected = v; }),
+        el("td", { class: "fn-actual" }, r ? `${r.passed ? "✓" : "✗"} ${r.actual}` : ""),
+        el("td", {}, el("button", { class: "icon-btn", type: "button", "aria-label": `Remove test ${i + 1}`, onclick: () => { draft.tests.splice(i, 1); render(); renderTests(); } }, icon("x"))));
     }));
-    if (!items.length) list.append(el("li", { class: "fn-empty" }, "No published functions yet. Fill in the form, run its tests and publish."));
-    if (selected) { const found = items.find(f => f.name === selected!.name); if (found) load(found); }
+    if (!draft.tests.length) testRows.append(el("tr", {}, el("td", { colspan: String(names.length + 4), class: "muted" }, "No tests yet.")));
+    if (document.activeElement !== testsJson) testsJson.value = JSON.stringify(draft.tests, null, 2);
+  };
+  addTest.addEventListener("click", () => {
+    draft.tests.push({ arguments: argList(draft.args).map(() => ""), expected: "" });
+    render(); renderTests();
+    testRows.querySelector<HTMLInputElement>("tr:last-child input")?.focus();
+  });
+  jsonApply.addEventListener("click", () => {
+    try {
+      const v: unknown = JSON.parse(testsJson.value);
+      if (!Array.isArray(v) || !v.every((t) => t && Array.isArray(t.arguments) && t.arguments.every((a: unknown) => typeof a === "string") && typeof t.expected === "string")) {
+        throw new Error("Expected a list of { \"arguments\": [\"…\"], \"expected\": \"…\" } with text values.");
+      }
+      draft.tests = v as FunctionTest[]; jsonError.textContent = ""; render(); renderTests();
+    } catch (e) { jsonError.textContent = (e as Error).message; }
+  });
+
+  const renderVersions = () => {
+    const f = selected && selected.name === draft.name ? selected : undefined;
+    if (!f) { versionList.replaceChildren(el("li", { class: "muted" }, "Not published yet. Run the tests, then Publish version.")); return; }
+    versionList.replaceChildren(...[...f.versions].reverse().map((v) => {
+      const active = v.version === f.pinned;
+      return el("li", { class: active ? "active" : "" },
+        el("span", { class: "fn-version-name" }, `v${v.version}`, active ? el("span", { class: "fn-badge" }, "active") : null),
+        el("span", { class: "muted" }, v.adapter + (v.runtime ? ` · Python ${v.runtime.version}` : "")),
+        el("div", { class: "fn-row" },
+          el("button", { class: "btn small", type: "button", "aria-label": `Open v${v.version}`, onclick: () => { fill(fromVersion(f, v.version)); showTab(0); } }, "Open"),
+          active ? null : el("button", { class: "btn small", type: "button", "aria-label": `Activate v${v.version} in this workbook`, onclick: () => void act(async () => {
+            await rpc.call("pin_functions", { pins: { [f.name]: v.version } });
+            say(`${f.name} v${v.version} is now active in this workbook.`);
+            await refresh();
+          }) }, "Activate in this workbook")));
+    }));
+    if (document.activeElement !== pins) pins.value = JSON.stringify(Object.fromEntries(functions.map((x) => [x.name, x.pinned])), null, 2);
+  };
+
+  const say = (line: string) => { log.push(`${new Date().toLocaleTimeString()}  ${line}`); consoleBody.textContent = log.slice(-200).join("\n"); };
+
+  async function refresh(): Promise<void> {
+    functions = await rpc.call("functions", {});
+    const current = selected?.name ?? (draft.name || "");
+    selected = functions.find((f) => f.name === current);
+    switcher.replaceChildren(el("option", { value: "" }, "Draft · not published"),
+      ...functions.map((f) => el("option", { value: f.name }, `${f.name} · v${f.pinned}`)));
+    switcher.value = selected ? selected.name : "";
     render();
   }
-  versions.onchange = () => selected && load(selected, Number(versions.value));
-  const controls: HTMLButtonElement[] = [];
-  const action = (label: string, run: () => Promise<void>, primary = false) => {
-    const button = el("button", { class: `btn${primary ? " btn-primary" : ""}`, onclick: async () => {
-      controls.forEach(b => b.disabled = true);
-      // Refresh replaces the options after a mutation. Do not accept a new selection
-      // that would be silently overwritten before Activate becomes available again.
-      versions.disabled = true;
-      try { await run(); } catch (e) { status.textContent = String(e); }
-      finally { controls.forEach(b => b.disabled = false); versions.disabled = false; render(); }
-    } }, label); controls.push(button); return button;
+
+  const act = async (work: () => Promise<void>) => {
+    running = true; render();
+    try { await work(); } catch (e) { say(String((e as Error).message ?? e)); results = { key: key() ?? "", list: [], error: (e as Error).message }; }
+    finally { running = false; render(); }
   };
-  const test = action("Run tests", async () => {
-    const tried = current();
-    const results = await rpc.call("test_function", { definition: definition() });
-    const ok = results.every(t => t.passed);
-    tested = ok ? tried : null;
-    failed = ok ? null : tried;
-    status.textContent = results.length ? results.map((t, i) => `${i + 1}: ${t.passed ? "Passed" : "FAILED"} · actual ${t.actual} · expected ${t.expected}`).join("\n") : "Definition validated; no test cases supplied.";
+
+  const runTests = () => act(async () => {
+    read();
+    const seq = ++runSeq, k = key();
+    const d = definition();
+    say(`Running ${d.tests.length} test${d.tests.length === 1 ? "" : "s"} for ${d.name || "the draft"}…`);
+    const list = await rpc.call("test_function", { definition: d });
+    if (seq !== runSeq) return; // a newer run replaced this one
+    results = { key: k ?? "", list };
+    const failedCount = list.filter((t) => !t.passed).length;
+    say(list.length ? `${list.length - failedCount} passed, ${failedCount} failed.` : "Definition checked; no tests.");
   });
-  const publish = action("Publish version", async () => {
-    selected = await rpc.call("publish_function", { definition: definition() }); await refresh();
-    status.textContent += "\nPublished. Existing functions keep their active version until you select a version and activate it.";
-  }, true);
-  const activate = action("Activate selected version", async () => {
-    if (!selected) throw new Error("Select a published function first");
-    await rpc.call("pin_functions", { pins: { [selected.name]: Number(versions.value) } }); await refresh();
+  runBtn.addEventListener("click", () => void runTests());
+  publishBtn.addEventListener("click", () => void act(async () => {
+    read();
+    const f = await rpc.call("publish_function", { definition: definition() });
+    selected = f;
+    say(`Published ${f.name} v${f.versions[f.versions.length - 1].version}. Workbooks keep their active version until you activate another (Versions).`);
+    await refresh();
+  }));
+  pinMap.addEventListener("click", () => void act(async () => {
+    let map: Record<string, number>;
+    try { map = JSON.parse(pins.value); } catch { throw new Error("The version map is not valid JSON."); }
+    await rpc.call("pin_functions", { pins: map });
+    say("Version map activated together.");
+    await refresh();
+  }));
+
+  switcher.addEventListener("change", () => {
+    const f = functions.find((x) => x.name === switcher.value);
+    if (!f) return;
+    selected = f; fill(fromVersion(f, f.pinned));
   });
-  const group = action("Activate version map", async () => {
-    await rpc.call("pin_functions", { pins: JSON.parse(pins.value) }); await refresh();
-    status.textContent += "\nVersion map activated atomically.";
+  const start = (d: Draft) => { selected = undefined; fill(d); switcher.value = ""; showTab(0); name.focus(); };
+  newBtn.addEventListener("click", () => start({ ...EMPTY }));
+
+  for (const input of [name, args, source, documentation, dependencies, returns, volatile]) input.addEventListener("input", () => { read(); render(); });
+  kind.addEventListener("change", () => { read(); render(); });
+  source.addEventListener("scroll", () => { gutter.scrollTop = source.scrollTop; });
+  // Tab indents in the code editor; Escape first, then Tab, moves on (WCAG 2.1.2).
+  let escaped = false;
+  source.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { escaped = true; e.stopPropagation(); return; }
+    if (e.key === "Tab" && !e.shiftKey && !escaped) {
+      e.preventDefault(); source.setRangeText("  ", source.selectionStart, source.selectionEnd, "end"); read(); render();
+    }
+    if (e.key !== "Tab") escaped = false;
   });
-  const section = (title: string, ...children: (HTMLElement | null)[]) =>
-    el("section", { class: "fn-section" }, el("h3", {}, title), ...children);
-  const dialog = el("section", { class: "dialog function-dialog" },
-    el("div", { class: "fn-header" },
-      el("h2", {}, "Function library"),
-      el("p", {}, "Workbook-scoped functions. Formula functions run in sheets; SQL functions in queries and table columns; Python functions in sheets and as a whole table column (=NAME([column])), in isolated workers. Publishing never updates another workbook.")),
-    el("div", { class: "fn-body" },
-      el("aside", { class: "fn-side" },
-        el("div", { class: "fn-side-head" }, el("h3", {}, "Functions"), el("button", { class: "btn small", onclick: blank }, "New function")),
-        list),
-      el("div", { class: "fn-editor" },
-        el("div", { class: "fn-title" }, signature, state),
-        status,
-        section("Definition",
-          el("div", { class: "fn-row" }, field("Name", name), field("Execution engine", kind)),
-          pythonFields,
-          field("Arguments (comma separated)", args),
-          field(sourceLabel, source, sourceHint),
-          field("Documentation and example usage", documentation)),
-        section("Tests",
-          field("Tests: arguments and expected display values (JSON)", tests),
-          el("p", { class: "muted fn-note" }, "NULL binds SQL NULL. XLSX compatibility depends on Excel LAMBDA support; SQL and Python functions are not Excel formulas.")),
-        section("Versions",
-          el("div", { class: "fn-row fn-versions" }, versions, activate),
-          field("Dependency versions (optional JSON overrides)", dependencies),
-          field("Active versions (edit together for dependent upgrades)", pins), el("div", {}, group)))),
-    el("div", { class: "dialog-actions fn-actions" }, test, publish, el("div", { class: "spacer" }), el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
-  const modal = openModal(dialog, () => modal.close());
-  showKind();
-  void refresh().catch(e => status.textContent = String(e)); name.focus();
-  return () => modal.close();
+  copyExample.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(example.textContent ?? ""); toast("Copied"); } catch { /* the text stays selectable */ }
+  });
+
+  // ---- size and keys ------------------------------------------------------------------
+  const maxWidth = () => Math.max(MIN_WIDTH, window.innerWidth - GRID_MIN);
+  const applyWidth = () => {
+    const w = expanded ? maxWidth() : Math.min(maxWidth(), Math.max(MIN_WIDTH, width));
+    panel.style.flexBasis = `${w}px`;
+    divider.setAttribute("aria-valuenow", String(Math.round(w)));
+    divider.setAttribute("aria-valuemin", String(MIN_WIDTH));
+    divider.setAttribute("aria-valuemax", String(Math.round(maxWidth())));
+  };
+  const setWidth = (w: number) => {
+    expanded = false; width = Math.min(maxWidth(), Math.max(MIN_WIDTH, w)); applyWidth(); render();
+    try { localStorage.setItem(WIDTH_KEY, String(Math.round(width))); } catch { /* this page only */ }
+  };
+  divider.addEventListener("keydown", (e) => {
+    const step = { ArrowLeft: 24, ArrowRight: -24 }[e.key];
+    if (step) { e.preventDefault(); setWidth(width + step); }
+    else if (e.key === "Home") { e.preventDefault(); setWidth(MIN_WIDTH); }
+    else if (e.key === "End") { e.preventDefault(); setWidth(maxWidth()); }
+  });
+  divider.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); divider.setPointerCapture(e.pointerId);
+    const move = (m: PointerEvent) => setWidth(panel.getBoundingClientRect().right - m.clientX);
+    const up = () => { divider.removeEventListener("pointermove", move); divider.removeEventListener("pointerup", up); };
+    divider.addEventListener("pointermove", move); divider.addEventListener("pointerup", up);
+  });
+  expandBtn.addEventListener("click", () => { expanded = !expanded; applyWidth(); render(); });
+  window.addEventListener("resize", applyWidth);
+  panel.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!running) void runTests(); }
+    else if (e.key === "Escape" && !e.defaultPrevented && !(e.target instanceof HTMLTextAreaElement)) { e.preventDefault(); controller.close(); }
+  });
+
+  let opener: HTMLElement | null = null;
+  const controller: FunctionPanel = {
+    get isOpen() { return isOpen; },
+    open() {
+      if (!isOpen) {
+        opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        mount(panel); isOpen = true; applyWidth();
+      }
+      void refresh().then(() => { if (!functions.length && !draft.name && !draft.source) offerExample(); }).catch((e) => say(String(e)));
+      (tabs[tab]).focus();
+    },
+    close() {
+      if (!isOpen) return;
+      panel.remove(); isOpen = false; onClosed();
+      if (opener?.isConnected) opener.focus();
+    },
+  };
+  const offerExample = () => {
+    resultsBody.replaceChildren(el("p", {}, "No functions in this workbook yet. ",
+      el("button", { class: "btn small", type: "button", onclick: () => start({ ...EXAMPLE, tests: EXAMPLE.tests.map((t) => ({ ...t, arguments: [...t.arguments] })) }) }, "Start from an example")));
+  };
+  closeBtn.addEventListener("click", () => controller.close());
+  showTab(0);
+  fill({ ...EMPTY });
+  return controller;
 }
 
 /** Suggest active workbook functions without changing the expression evaluator. */

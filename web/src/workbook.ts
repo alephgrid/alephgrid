@@ -10,7 +10,7 @@ import { AnalyzePane } from "./analyzepane";
 import { FindBar, type FindProvider } from "./findbar";
 import { dataToolsDialog } from "./tools";
 import type { Validation } from "./protocol";
-import { functionCompletion, functionLibrary } from "./functions";
+import { functionCompletion, functionPanel, type FunctionPanel } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc, RpcError } from "./api";
 import { importFile } from "./importer";
 import { historyDialog } from "./history";
@@ -266,7 +266,7 @@ export class WorkbookScreen {
   /** The server is restarting this workbook's compute (a new size): say so once it is back. */
   private restarting = false;
   private closeFormulaHelp: (() => void) | null = null;
-  private closeFunctions: (() => void) | null = null;
+  private functions: FunctionPanel | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
 
   constructor(meta: WorkbookMeta, private goHome: () => void) {
@@ -525,7 +525,7 @@ export class WorkbookScreen {
 
   dispose(): void {
     this.disposed = true;
-    this.closeFunctions?.();
+    this.functions?.close();
     this.closeFormulaHelp?.();
     this.disposeFunctionCompletion?.();
     this.sql?.close();
@@ -603,7 +603,7 @@ export class WorkbookScreen {
       dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
       dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
       sql: () => this.sqlPanel(),
-      functions: () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
+      functions: () => this.openFunctions(),
       formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
       commands: () => { commandPalette(this.commands); },
       shortcuts: () => { shortcutHelp(this.commands); },
@@ -864,8 +864,8 @@ export class WorkbookScreen {
         () => this.pickingFormula() ? this.showSheetForPicking(sh.index) : void this.openSheet(sh.index))), "No sheets yet.", ["Add a sheet", () => void this.createSheet()]),
       this.allowSql ? section("Queries", this.savedQueries.map((q) => item("query", q.name, `v${q.version}`, false, () => this.sqlPanel(q.id),
         `${q.name} · ${q.kind} query, version ${q.version}`)), "Saved SQL queries appear here.", ["Write a query", () => this.sqlPanel()]) : null,
-      section("Functions", this.functionsList.map((f) => item("fx", f.name, `v${f.pinned}`, false, () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); },
-        `${f.name} · version ${f.pinned} in use`)), "Reusable functions appear here.", ["Define a function", () => { this.closeFunctions?.(); this.closeFunctions = functionLibrary(this.rpc, this.allowSql); }]),
+      section("Functions", this.functionsList.map((f) => item("fx", f.name, `v${f.pinned}`, false, () => this.openFunctions(),
+        `${f.name} · version ${f.pinned} in use`)), "Reusable functions appear here.", ["Define a function", () => this.openFunctions()]),
     ].filter((x): x is HTMLElement => !!x));
   }
 
@@ -2056,9 +2056,19 @@ export class WorkbookScreen {
     }));
   }
 
+  /** U.06: functions in a side panel beside the grid; it keeps its draft while closed.
+   *  One side panel at a time: opening it closes Analyze, and the other way round. */
+  private openFunctions(): void {
+    if (this.analysis) { this.analysis.close(); this.analysis = null; }
+    this.functions ??= functionPanel(this.rpc, this.allowSql, (panel) => this.mainEl.parentElement!.append(panel), () => undefined);
+    if (this.functions.isOpen) this.functions.close();
+    else this.functions.open();
+  }
+
   /** U.15: Analyze beside the grid; its result docks under the grid. */
   private openAnalyze(): void {
     if (this.analysis) { this.analysis.close(); this.analysis = null; return; }
+    this.functions?.close();
     const body = this.mainEl.parentElement!;
     this.analysis = new AnalyzePane(this.rpc, {
       pane: (panel, onClose) => {
