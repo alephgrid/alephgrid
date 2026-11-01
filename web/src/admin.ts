@@ -84,7 +84,7 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
       break;
     }
     case "Usage and limits": {
-      const u = await get<SpaceUsage[]>("/api/admin/usage");
+      const u = (await get<{ spaces: SpaceUsage[] }>("/api/admin/usage")).spaces;
       body.replaceChildren(table("Usage per space", ["Space", "Workbooks", "Open", "Storage", "Jobs", "Limits"], u.map((x) => {
         const l = x.limits;
         const parts = [

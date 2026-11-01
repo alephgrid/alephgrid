@@ -19,7 +19,7 @@ test("U.08: Share shows the link, who can open it and the next steps", async ({ 
   const wb = await server.createWorkbook("Shared book");
   await page.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
   await page.goto(`${server.url}/w/${wb}`);
-  await page.getByRole("button", { name: "Share" }).click();
+  await page.getByRole("button", { name: "Share", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Share “Shared book”" });
   await expect(dialog.getByRole("textbox", { name: "Workbook link" })).toHaveValue(`${server.url}/w/${wb}`);
   await expect(dialog).toContainText("General");
