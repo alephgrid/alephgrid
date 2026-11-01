@@ -3,11 +3,12 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightBlog from 'starlight-blog';
 
-// GitHub Pages project-site defaults. When the custom domain is live, set
-// SITE_URL=https://<domain> and SITE_BASE=/ in the deploy environment —
-// nothing in the pages hard-codes either value.
-const site = process.env.SITE_URL || 'https://alephgrid.github.io';
-const base = process.env.SITE_BASE || '/alephgrid';
+// Cloudflare Workers static hosting: the site serves at the root. When the
+// custom domain is live, set SITE_URL=https://<domain> as a build variable —
+// nothing in the pages hard-codes either value. (SITE_BASE exists only for
+// hosts that serve under a subpath, e.g. GitHub Pages project sites.)
+const site = process.env.SITE_URL || 'https://alephgrid-site.workers.dev';
+const base = process.env.SITE_BASE || '/';
 
 export default defineConfig({
   site,
