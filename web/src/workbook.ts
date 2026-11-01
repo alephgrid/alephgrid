@@ -42,6 +42,7 @@ function compactRows(n: number): string {
   return `${new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)} rows`;
 }
 import { setTheme, THEME_CHOICES, themeButton, themePreference } from "./theme";
+import { shareDialog } from "./share";
 
 const FILTER_OPS: { value: FilterOp; label: string; needsValue: boolean }[] = [
   { value: "eq", label: "is equal to", needsValue: true },
@@ -751,6 +752,8 @@ export class WorkbookScreen {
         el("div", { class: "spacer" }),
         el("button", { class: "command-search", title: "Search all commands (⌘K)", "aria-keyshortcuts": "Meta+K Control+K", onclick: act.commands },
           icon("search", 14), el("span", { class: "command-search-label" }, "Search commands"), el("kbd", { "aria-hidden": "true" }, "⌘K")),
+        el("button", { class: "btn btn-primary btn-small share-btn", type: "button", title: "Who can open this workbook, its link, agents",
+          onclick: () => void shareDialog({ id: this.meta.id, name: this.meta.name, space: this.meta.space }, () => historyDialog(this.rpc, () => void this.resync())) }, "Share"),
         tool("clock", "History", act.history, { title: "Everyone's recent changes; undo table changes" }),
         tool("cpu", "Compute", act.compute, { title: "This workbook's compute: state, size, idle shutdown" }),
         this.themeBtn,

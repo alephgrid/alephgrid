@@ -826,3 +826,26 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .agent-setup-row input, .agent-setup-row textarea { flex: 1 1 auto; min-width: 0; font-size: 12px; }
 .agent-what { max-width: 360px; overflow-wrap: anywhere; }
 .agent-failed { color: var(--danger); }
+
+/* U.10: server administration */
+.admin-dialog { width: min(980px, 100%); }
+.admin-tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); margin: 8px 0; }
+.admin-tab { border: 0; background: none; padding: 6px 10px; border-bottom: 2px solid transparent; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.admin-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.admin-body { min-height: 200px; max-height: 60vh; overflow: auto; }
+.admin-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0; }
+.admin-facts dt { color: var(--muted); }
+.admin-facts dd { margin: 0; }
+.admin-actions { justify-content: flex-start; margin: 8px 0; }
+
+/* U.08: Share */
+.share-dialog { width: min(560px, 100%); }
+.share-link { display: flex; gap: 6px; margin: 8px 0; }
+.share-link input { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+.share-members { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 8px; }
+.share-members li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 10px; }
+.share-members li + li { border-top: 1px solid var(--border); }
+.share-actions { justify-content: flex-start; }
+.share-btn { margin-right: 4px; }
+.space-settings .settings-section + .settings-section { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+.space-settings h3 { margin: 4px 0; font-size: 14px; }
