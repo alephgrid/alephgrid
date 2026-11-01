@@ -120,7 +120,7 @@ async fn uploads_are_private_to_their_workbook_and_can_be_cancelled() {
     src.sheets().export_xlsx(&x).unwrap();
     let (status, body) = stage(&server, &a, "x.xlsx", std::fs::read(&x).unwrap()).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["preview"], json!({ "kind": "sheets", "sheets": [{ "index": 0, "name": "Only", "rows": 0, "columns": 0, "layout": 0 }], "warnings": [] }));
+    assert_eq!(body["preview"], json!({ "kind": "sheets", "sheets": [{ "index": 0, "name": "Only", "rows": 0, "columns": 0, "layout": 0, "frozen_columns": 0 }], "warnings": [] }));
     server.stop().await;
 }
 

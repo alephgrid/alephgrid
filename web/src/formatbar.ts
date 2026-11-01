@@ -67,7 +67,9 @@ export function formatBar(host: FormatHost): HTMLElement {
     void host.apply({ num_fmt: code });
   });
   const dec = (more: boolean) => {
-    const b = el("button", { class: "fmt-btn", type: "button", "aria-label": more ? "More decimals" : "Fewer decimals", title: more ? "More decimals" : "Fewer decimals" }, more ? ".0+" : ".0−");
+    // Named by its text (not aria-label), so the visible glyph need not match the name.
+    const b = el("button", { class: "fmt-btn", type: "button", title: more ? "More decimals" : "Fewer decimals" },
+      el("span", { "aria-hidden": "true" }, more ? ".0+" : ".0−"), el("span", { class: "sr-only" }, more ? "More decimals" : "Fewer decimals"));
     b.addEventListener("click", () => void host.apply({ num_fmt: stepDecimals(host.current()?.num_fmt ?? "", more) }));
     return b;
   };

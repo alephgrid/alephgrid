@@ -732,7 +732,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetInsertRows { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
-            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, (count as i64))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, count as i64)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteRows { sheet, at, count, layout } => {
@@ -744,7 +744,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
         Op::SheetInsertColumns { sheet, at, count, layout } => {
             expect_layout(wb, sheet, layout)?;
             wb.with_sheets(|s| s.insert_columns(sheet, at, count))?;
-            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, (count as i64))?;
+            wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, count as i64)?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteColumns { sheet, at, count, layout } => {
