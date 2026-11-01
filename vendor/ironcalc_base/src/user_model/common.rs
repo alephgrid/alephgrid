@@ -215,6 +215,9 @@ pub struct UserModel<'a> {
     pub(crate) model: Model<'a>,
     history: History,
     send_queue: Vec<QueueDiffs>,
+    /// Whether changes are queued for a remote model at all (Alephgrid patch, SEC.12):
+    /// a server that never sends them must not keep them.
+    queue_changes: bool,
     pause_evaluation: bool,
     /// What the user is looking at: selected sheet, selection and scroll
     /// position of each sheet, window size. Runtime state only: it is not
@@ -256,6 +259,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            queue_changes: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         }
@@ -276,6 +280,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            queue_changes: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         })
@@ -291,6 +296,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            queue_changes: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         })
@@ -334,10 +340,12 @@ impl<'a> UserModel<'a> {
     pub fn undo(&mut self) -> Result<(), String> {
         if let Some(diff_list) = self.history.undo() {
             self.apply_undo_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Undo,
-                list: diff_list.clone(),
-            });
+            if self.queue_changes {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Undo,
+                    list: diff_list.clone(),
+                });
+            }
         };
         Ok(())
     }
@@ -349,10 +357,12 @@ impl<'a> UserModel<'a> {
     pub fn redo(&mut self) -> Result<(), String> {
         if let Some(diff_list) = self.history.redo() {
             self.apply_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Redo,
-                list: diff_list.clone(),
-            });
+            if self.queue_changes {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Redo,
+                    list: diff_list.clone(),
+                });
+            }
         };
         Ok(())
     }
@@ -392,6 +402,20 @@ impl<'a> UserModel<'a> {
     /// * [UserModel::pause_evaluation]
     pub fn evaluate(&mut self) {
         self.model.evaluate()
+    }
+
+    /// See [Model::set_evaluation_limits] (Alephgrid patch).
+    pub fn set_evaluation_limits(
+        &mut self,
+        cells: u64,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.model.set_evaluation_limits(cells, cancel);
+    }
+
+    /// See [Model::evaluation_stopped].
+    pub fn evaluation_stopped(&self) -> Option<&str> {
+        self.model.evaluation_stopped()
     }
 
     /// Register (or remove) functions evaluated by the host (Alephgrid patch 2).
@@ -2313,11 +2337,42 @@ impl<'a> UserModel<'a> {
     }
 
     pub(crate) fn push_diff_list(&mut self, diff_list: DiffList) {
-        self.send_queue.push(QueueDiffs {
-            r#type: DiffType::Redo,
-            list: diff_list.clone(),
-        });
+        if self.queue_changes {
+            self.send_queue.push(QueueDiffs {
+                r#type: DiffType::Redo,
+                list: diff_list.clone(),
+            });
+        }
         self.history.push(diff_list);
+    }
+
+    /// Stop (or resume) queueing changes for a remote model; stopping drops what is
+    /// queued (Alephgrid patch, SEC.12).
+    pub fn set_queue_changes(&mut self, queue: bool) {
+        self.queue_changes = queue;
+        if !queue {
+            self.send_queue.clear();
+        }
+    }
+
+    /// Changes queued for a remote model and not yet flushed.
+    pub fn queued_changes(&self) -> usize {
+        self.send_queue.len()
+    }
+
+    /// Forget the oldest `count` undo steps (Alephgrid patch, SEC.12).
+    pub fn forget_oldest_undo(&mut self, count: usize) {
+        self.history.forget_oldest(count);
+    }
+
+    /// Undo steps kept.
+    pub fn undo_len(&self) -> usize {
+        self.history.undo_stack.len()
+    }
+
+    /// Forget all undo and redo history (Alephgrid patch, SEC.12).
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 
     pub(super) fn evaluate_if_not_paused(&mut self) {

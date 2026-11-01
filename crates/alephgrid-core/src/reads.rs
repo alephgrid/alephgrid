@@ -233,11 +233,28 @@ impl Db<'_> {
     }
 
     pub fn formulas(&self, table: &str) -> Result<Vec<(String, String)>> {
-        Ok(self
+        let rows: Vec<(String, String, String)> = self
             .conn
-            .prepare(&format!("SELECT name, formula FROM _rf_columns WHERE table_name = {} ORDER BY position", lit(table)))?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?)
+            .prepare(&format!("SELECT name, formula, language FROM _rf_columns WHERE table_name = {} ORDER BY position", lit(table)))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows.into_iter().map(|(n, f, lang)| { let f = if lang == "sql" { self.checked_sql_formula(f) } else { f }; (n, f) }).collect())
+    }
+
+    /// A stored SQL formula as it may be run: formulas are validated when written, and the
+    /// file can be edited outside Alephgrid, so one that no longer passes the same checks
+    /// reads as NULL instead of reaching the engine (SEC.01).
+    fn checked_sql_formula(&self, formula: String) -> String {
+        if self.shared.checked_formulas.lock().unwrap().contains(&formula) {
+            return formula;
+        }
+        match crate::formula::analyze(self.conn, &formula) {
+            Ok(_) => {
+                self.shared.checked_formulas.lock().unwrap().insert(formula.clone());
+                formula
+            }
+            Err(_) => "NULL".into(),
+        }
     }
 
     /// Formula columns written in spreadsheet syntax (`language = 'sheet'`).
@@ -1207,7 +1224,13 @@ impl Db<'_> {
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| !is_internal(&c.name))
-                .map(|(i, c)| format!("_c{i} AS {}", ident(&c.name)))
+                .map(|(i, c)| {
+                    if format == ExportFormat::CsvExcel && is_text_type(&c.sql_type) {
+                        format!("{} AS {}", neutralized(&format!("_c{i}")), ident(&c.name))
+                    } else {
+                        format!("_c{i} AS {}", ident(&c.name))
+                    }
+                })
                 .collect();
             let aliases: Vec<String> = (0..described.len()).map(|i| format!("_c{i}")).collect();
             let select = format!("SELECT {} FROM (\n{}\n) AS _q({})", keep.join(", "), q.sql, aliases.join(", "));
@@ -1247,6 +1270,18 @@ impl Db<'_> {
 
     pub fn copy_to(&self, select: &str, path: &Path, format: ExportFormat) -> Result<()> {
         let options = copy_options(format);
+        let wrapped;
+        let select = if format == ExportFormat::CsvExcel {
+            let columns = self.describe(select)?;
+            let list: Vec<String> = columns
+                .iter()
+                .map(|c| if is_text_type(&c.sql_type) { format!("{} AS {}", neutralized(&ident(&c.name)), ident(&c.name)) } else { ident(&c.name) })
+                .collect();
+            wrapped = format!("SELECT {} FROM ({select}) AS _x", list.join(", "));
+            wrapped.as_str()
+        } else {
+            select
+        };
         self.conn
             .execute_batch(&format!("COPY ({select}) TO {} ({options});", lit(&path.to_string_lossy())))
             .with_context(|| format!("writing {}", path.display()))?;
@@ -1277,9 +1312,19 @@ impl Db<'_> {
     }
 }
 
+/// A text column as written to a CSV for spreadsheets (see [`ExportFormat::CsvExcel`]).
+fn neutralized(column: &str) -> String {
+    format!("CASE WHEN left({column}, 1) IN ('=', '+', '-', '@', chr(9), chr(13)) THEN '''' || {column} ELSE {column} END")
+}
+
+fn is_text_type(sql_type: &str) -> bool {
+    let t = sql_type.to_ascii_uppercase();
+    t == "VARCHAR" || t.starts_with("VARCHAR(") || t == "TEXT" || t == "STRING"
+}
+
 fn copy_options(format: ExportFormat) -> &'static str {
     match format {
-        ExportFormat::Csv => "FORMAT csv, HEADER",
+        ExportFormat::Csv | ExportFormat::CsvExcel => "FORMAT csv, HEADER",
         ExportFormat::Parquet => "FORMAT parquet, COMPRESSION zstd",
         ExportFormat::Json => "FORMAT json",
     }

@@ -822,7 +822,10 @@ impl<'a> Model<'a> {
             WrongReferenceKind { .. } => {
                 CalcResult::new_error(Error::REF, cell, "Wrong reference".to_string())
             }
-            OpRangeKind { left, right } => self.get_range(left, right, cell),
+            OpRangeKind { left, right } => {
+                let range = self.get_range(left, right, cell);
+                self.bounded_range(range, cell)
+            }
             WrongRangeKind { .. } => {
                 CalcResult::new_error(Error::REF, cell, "Wrong range".to_string())
             }
@@ -858,7 +861,7 @@ impl<'a> Model<'a> {
                 } else {
                     *column2 + cell.column
                 };
-                CalcResult::Range {
+                let range = CalcResult::Range {
                     left: CellReferenceIndex {
                         sheet: *sheet_index,
                         row: r1.min(r2),
@@ -869,7 +872,8 @@ impl<'a> Model<'a> {
                         row: r1.max(r2),
                         column: c1.max(c2),
                     },
-                }
+                };
+                self.bounded_range(range, cell)
             }
             OpConcatenateKind { left, right } => self.handle_concatenate(left, right, cell),
             OpProductKind { kind, left, right } => match kind {
@@ -1687,6 +1691,64 @@ impl<'a> Model<'a> {
         self.workbook.worksheet(sheet)?.is_empty_cell(row, column)
     }
 
+    /// A range a formula refers to, unless it declares more cells than any
+    /// evaluation may walk: then the evaluation stops (Alephgrid patch). Many
+    /// functions walk the whole declared rectangle, so its size, not what the
+    /// sheet holds, bounds their cost.
+    fn bounded_range(&mut self, range: CalcResult, cell: CellReferenceIndex) -> CalcResult {
+        if let CalcResult::Range { left, right } = &range {
+            let area = ((right.row - left.row + 1).max(0) as u64)
+                .saturating_mul((right.column - left.column + 1).max(0) as u64);
+            if area > crate::evaluation::MAX_RANGE_CELLS {
+                let reason = format!(
+                    "a range of {area} cells is too large (at most {})",
+                    crate::evaluation::MAX_RANGE_CELLS
+                );
+                if self.evaluation.in_pass && self.evaluation.stopped.is_none() {
+                    self.evaluation.stopped = Some(reason.clone());
+                }
+                return CalcResult::new_error(Error::ERROR, cell, reason);
+            }
+        }
+        range
+    }
+
+    /// Whether a `width` × `height` range may be read into an array: no larger
+    /// than `MAX_ARRAY_CELLS`, and within what the evaluation may still read.
+    /// When not, the evaluation is stopped (Alephgrid patch).
+    fn array_fits(&mut self, width: usize, height: usize) -> bool {
+        let area = (width as u64).saturating_mul(height as u64);
+        if area > crate::evaluation::MAX_ARRAY_CELLS {
+            if self.evaluation.stopped.is_none() {
+                self.evaluation.stopped = Some(format!(
+                    "a range of {area} cells is too large to use as an array (at most {})",
+                    crate::evaluation::MAX_ARRAY_CELLS
+                ));
+            }
+            return false;
+        }
+        if self.evaluation.visits.saturating_add(area) > self.evaluation.visit_budget {
+            self.evaluation.spend(area);
+        }
+        self.evaluation.stopped.is_none()
+    }
+
+    /// Limits evaluation: at most `cells` cell reads per `evaluate()`, and
+    /// `cancel`, when set to true from another thread, stops it.
+    pub fn set_evaluation_limits(
+        &mut self,
+        cells: u64,
+        cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.evaluation.visit_budget = cells;
+        self.evaluation.cancel = cancel;
+    }
+
+    /// Why the last `evaluate()` stopped before it finished, if it did.
+    pub fn evaluation_stopped(&self) -> Option<&str> {
+        self.evaluation.stopped.as_deref()
+    }
+
     /// Evaluates all cells in a given range and returns the results in a 2D vector.
     pub(crate) fn evaluate_range(
         &mut self,
@@ -1695,6 +1757,9 @@ impl<'a> Model<'a> {
     ) -> Vec<Vec<ArrayNode>> {
         let width = (right.column - left.column + 1).max(0) as usize;
         let height = (right.row - left.row + 1).max(0) as usize;
+        if !self.array_fits(width, height) {
+            return vec![vec![ArrayNode::Error(Error::ERROR)]];
+        }
         let mut result = Vec::with_capacity(height);
         for row in left.row..=right.row {
             let mut row_result = Vec::with_capacity(width);
@@ -1722,6 +1787,9 @@ impl<'a> Model<'a> {
     ) -> Option<Vec<f64>> {
         let width = (right.column - left.column + 1).max(0) as usize;
         let height = (right.row - left.row + 1).max(0) as usize;
+        if !self.array_fits(width, height) {
+            return None;
+        }
         let mut numbers = Vec::with_capacity(width * height);
         let mut only_numbers = true;
         for row in left.row..=right.row {

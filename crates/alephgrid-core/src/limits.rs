@@ -46,6 +46,25 @@ pub fn json_size(v: &Value) -> usize {
     }
 }
 
+/// Cells one sheet evaluation may read before it stops (SEC.07). Formulas over whole
+/// columns read only the used area; this bounds a formula over a huge declared range,
+/// or a sheet whose used area was stretched by a value in a far corner.
+pub const SHEET_EVALUATION_CELLS: u64 = 20_000_000;
+
+/// Bytes the parts of an imported .xlsx may expand to (SEC.08)…
+pub const XLSX_MAX_EXPANDED_BYTES: u64 = 256 << 20;
+/// …and at most this many times the file's size (zip bombs), but never less than
+/// [`XLSX_MIN_ALLOWANCE`].
+pub const XLSX_MAX_RATIO: u64 = 100;
+pub const XLSX_MIN_ALLOWANCE: u64 = 16 << 20;
+/// Cells an .xlsx import may bring into sheets.
+pub const XLSX_MAX_CELLS: usize = 2_000_000;
+
+/// Sheet undo history: at most this many steps, and this many cell changes in all; the
+/// oldest are forgotten first (SEC.12).
+pub const SHEET_UNDO_STEPS: usize = 200;
+pub const SHEET_UNDO_ENTRIES: usize = 500_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,3 +87,4 @@ mod tests {
         }
     }
 }
+

@@ -181,6 +181,9 @@ pub enum Denied {
     NotFound(String),
     #[error("{0}")]
     BadRequest(String),
+    /// Refused for now: something else is running, or it ran moments ago (HTTP 409).
+    #[error("{0}")]
+    Conflict(String),
 }
 
 impl Denied {
@@ -190,6 +193,7 @@ impl Denied {
             Denied::Forbidden(_) | Denied::Refused(_) => "forbidden",
             Denied::NotFound(_) => "not_found",
             Denied::BadRequest(_) => "bad_request",
+            Denied::Conflict(_) => "conflict",
         }
     }
 }

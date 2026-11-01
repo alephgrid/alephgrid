@@ -46,6 +46,11 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return CalcResult::new_error(Error::ERROR, cell, m),
+                    };
                     for row in left.row..=right.row {
                         for column in left.column..=right.column {
                             match self.evaluate_cell(

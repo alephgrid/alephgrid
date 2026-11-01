@@ -217,6 +217,13 @@ impl Controller {
                 continue;
             }
             let Ok(mut record) = serde_json::from_slice::<RuntimeAllocation>(&std::fs::read(&path)?) else { continue };
+            // A record names the workbook its file is named after, and a valid id; anything
+            // else is not ours to act on (SEC.14).
+            let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            if !crate::state::valid_id(&record.workbook) || record.workbook != stem {
+                tracing::warn!("ignoring allocation record {}: it does not name its own workbook", path.display());
+                continue;
+            }
             if !record.state.is_live() {
                 continue;
             }
@@ -463,7 +470,11 @@ impl Controller {
             checkpoint: &advance,
             handoff: Mutex::new(handoff),
         };
-        let started = self.provider.ensure(&req).and_then(|h| {
+        // A panic while opening (a damaged file the engine trips over) fails this start, not
+        // the server (SEC.14).
+        let ensured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.provider.ensure(&req)))
+            .unwrap_or_else(|_| Err(RuntimeFailure::new(FailureKind::StartupFailed, "the workbook could not be opened (the engine stopped unexpectedly)")));
+        let started = ensured.and_then(|h| {
             // A cancel that arrived while the engine was opening still wins.
             if cancel.load(Ordering::SeqCst) {
                 let _ = self.provider.stop(&h);
@@ -807,6 +818,24 @@ impl Controller {
     }
 
     /// Expire unused view materializations in every open workbook.
+    /// Re-estimate the sheet memory of open workbooks whose sheets changed, and give DuckDB
+    /// what is left of each reservation (SEC.12). Called by the janitor.
+    pub fn refresh_sheet_estimates(&self) {
+        let handles: Vec<(String, Arc<WorkbookHandle>)> =
+            self.slots().map.iter().filter_map(|(k, s)| s.handle.clone().map(|h| (k.clone(), h))).collect();
+        for (workbook, handle) in handles {
+            let Some(sheets) = handle.sheet_estimate_if_changed() else { continue };
+            let mut ledger = self.ledger();
+            let Some(current) = ledger.get(&workbook) else { continue };
+            ledger.set_sheet_estimate(&workbook, sheets);
+            let mem = ledger.duckdb_memory(&workbook, &current);
+            drop(ledger);
+            if let Err(e) = handle.apply_limits(mem, &current) {
+                tracing::warn!(workbook, "could not apply resource limits: {e:#}");
+            }
+        }
+    }
+
     pub fn expire_views(&self, ttl_ms: u64) -> usize {
         let handles: Vec<Arc<WorkbookHandle>> = self.slots().map.values().filter_map(|s| s.handle.clone()).collect();
         handles.iter().map(|h| h.expire_views(ttl_ms)).sum()
@@ -948,6 +977,7 @@ impl Controller {
                     duckdb_memory_limit: mem,
                     duckdb_threads: threads,
                     jobs: h.sched.load() as u64,
+                    database_bytes: crate::state::database_bytes(&self.data.join(k)),
                 }
             })
             .collect();
@@ -957,6 +987,7 @@ impl Controller {
             reserved: ledger.total(),
             upload_bytes: ledger.uploads(),
             upload_budget: self.budget.upload_bytes(),
+            workbook_size_limit: None,
         }
     }
 

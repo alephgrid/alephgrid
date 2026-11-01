@@ -170,6 +170,11 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_VIEW_TTL", default_value_t = 900)]
     view_ttl: u64,
 
+    /// Largest a workbook's database may grow (e.g. 50GiB); operations that add data are
+    /// refused past it, deleting stays possible. Default: no limit.
+    #[arg(long, env = "ALEPHGRID_MAX_WORKBOOK_SIZE", value_parser = parse_size)]
+    max_workbook_size: Option<u64>,
+
     /// Largest file upload, e.g. "100GB".
     #[arg(long, env = "ALEPHGRID_MAX_UPLOAD", value_parser = parse_size, default_value = "100GiB")]
     max_upload: u64,
@@ -190,7 +195,9 @@ struct Cli {
     #[arg(long, env = "ALEPHGRID_SHUTDOWN_GRACE", default_value_t = 30)]
     shutdown_grace: u64,
 
-    /// Disable the ad-hoc SQL console (recommended for shared servers you don't fully trust users on).
+    /// Refuse every operation that runs user-written SQL: the SQL console, saved queries,
+    /// tables from queries, SQL formula columns and SQL functions. Spreadsheet formulas,
+    /// no-code analysis and Python functions stay available.
     #[arg(long, env = "ALEPHGRID_DISABLE_SQL")]
     disable_sql: bool,
 
@@ -325,6 +332,7 @@ async fn main() -> Result<()> {
     config.view_ttl = Duration::from_secs(cli.view_ttl);
     config.shutdown_grace = Duration::from_secs(cli.shutdown_grace);
     config.max_upload_bytes = cli.max_upload;
+    config.max_workbook_bytes = cli.max_workbook_size;
     config.max_message_bytes = cli.max_message as usize;
     config.request_timeout = Duration::from_secs(cli.request_timeout.max(1));
     config.job_timeout = Duration::from_secs(cli.job_timeout.max(1));

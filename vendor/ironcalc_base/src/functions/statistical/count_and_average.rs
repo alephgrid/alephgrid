@@ -69,6 +69,11 @@ impl<'a> Model<'a> {
                         ));
                     }
 
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return Err(CalcResult::new_error(Error::ERROR, cell, m)),
+                    };
                     for row in left.row..=right.row {
                         for column in left.column..=right.column {
                             match self.evaluate_cell(CellReferenceIndex {
@@ -163,6 +168,11 @@ impl<'a> Model<'a> {
                         ));
                     }
 
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return Err(CalcResult::new_error(Error::ERROR, cell, m)),
+                    };
                     for row in left.row..=right.row {
                         for column in left.column..=right.column {
                             match self.evaluate_cell(CellReferenceIndex {
@@ -240,6 +250,11 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return CalcResult::new_error(Error::ERROR, cell, m),
+                    };
                     for row in left.row..(right.row + 1) {
                         for column in left.column..(right.column + 1) {
                             match self.evaluate_cell(CellReferenceIndex {
@@ -351,6 +366,11 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return CalcResult::new_error(Error::ERROR, cell, m),
+                    };
                     for row in left.row..(right.row + 1) {
                         for column in left.column..(right.column + 1) {
                             if let CalcResult::Number(_) = self.evaluate_cell(CellReferenceIndex {
@@ -387,6 +407,11 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
+                    // Walk only the used area (Alephgrid patch, SEC.07).
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return CalcResult::new_error(Error::ERROR, cell, m),
+                    };
                     for row in left.row..(right.row + 1) {
                         for column in left.column..(right.column + 1) {
                             match self.evaluate_cell(CellReferenceIndex {
@@ -437,6 +462,14 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
+                    // Walk only the used area; everything beyond it is blank (Alephgrid patch, SEC.07).
+                    let declared = ((right.row - left.row + 1).max(0) as u64) * ((right.column - left.column + 1).max(0) as u64);
+                    let right = match self.clip_range(left, right) {
+                        Ok(r) => r,
+                        Err(m) => return CalcResult::new_error(Error::ERROR, cell, m),
+                    };
+                    let walked = ((right.row - left.row + 1).max(0) as u64) * ((right.column - left.column + 1).max(0) as u64);
+                    result += (declared - walked) as f64;
                     for row in left.row..(right.row + 1) {
                         for column in left.column..(right.column + 1) {
                             match self.evaluate_cell(CellReferenceIndex {

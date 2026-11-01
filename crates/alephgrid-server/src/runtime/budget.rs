@@ -61,6 +61,8 @@ pub struct ResourceUsage {
     pub reserved: Reservation,
     pub upload_bytes: u64,
     pub upload_budget: u64,
+    /// Largest a workbook's database may grow, if limited (SEC.11).
+    pub workbook_size_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -72,6 +74,8 @@ pub struct AllocationUsage {
     pub duckdb_threads: String,
     /// Jobs waiting or running.
     pub jobs: u64,
+    /// Bytes of the workbook's database file and log.
+    pub database_bytes: u64,
 }
 
 impl Ledger {

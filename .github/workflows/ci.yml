@@ -43,12 +43,12 @@ jobs:
           sudo mount -t tmpfs -o size=64m tmpfs /mnt/rfsmall
           sudo chown "$(id -u):$(id -g)" /mnt/rfsmall
       # Includes tests/protocol.rs, which fails when web/src/protocol.ts is stale.
-      - run: cargo test --workspace
+      - run: cargo test --workspace --locked
         env:
           PROPTEST_CASES: "96"
           ALEPHGRID_SMALL_FS: /mnt/rfsmall
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo build -p alephgrid-server
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo build -p alephgrid-server --locked
       - uses: actions/upload-artifact@v4
         with:
           name: alephgrid-debug

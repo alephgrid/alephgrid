@@ -12,7 +12,8 @@ use serde_json::Value;
 use crate::sql::{ident, translate};
 
 const PREFIX: &str = "SELECT (";
-const SUFFIX: &str = ") AS v";
+/// Starts on a new line, so a `--` comment at the end of a formula cannot swallow it (SEC.14).
+const SUFFIX: &str = "\n) AS v";
 
 /// A column reference inside a formula, located in the translated SQL expression.
 #[derive(Debug, Clone)]

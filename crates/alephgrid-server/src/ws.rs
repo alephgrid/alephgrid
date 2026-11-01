@@ -439,6 +439,42 @@ struct Ctx {
     downloads: Arc<crate::state::Downloads>,
     /// Python tests of a definition being published, run before the writer was taken (8.07).
     tested: Option<alephgrid_core::TestedPython>,
+    /// The workbook's database file and the size it may grow to (SEC.11).
+    database: std::path::PathBuf,
+    max_workbook_bytes: Option<u64>,
+}
+
+/// Demo tables a workbook may hold, and rows one may have, when made over the protocol
+/// (SEC.11); `--demo-rows` on the command line is the operator's and not capped.
+const MAX_DEMO_TABLES: usize = 3;
+const MAX_PROTOCOL_DEMO_ROWS: u64 = 10_000_000;
+
+/// Whether an operation only takes data away (allowed when the workbook is at its size limit).
+fn only_removes(op: &Op) -> bool {
+    use Op::*;
+    matches!(
+        op,
+        DropTable { .. } | DropColumn { .. } | DeleteRows { .. } | SheetDelete { .. } | SheetDeleteRows { .. } | SheetDeleteColumns { .. }
+            | DeleteSavedView { .. } | DeleteQuery { .. } | DeleteAnalysis { .. } | DeleteDashboard { .. } | Undo { .. } | SheetUndo
+    )
+}
+
+/// Refuse an operation that may add data once the database is at its limit (SEC.11).
+fn check_size(op: &Op, ctx: &Ctx) -> Result<()> {
+    let Some(limit) = ctx.max_workbook_bytes else { return Ok(()) };
+    if only_removes(op) {
+        return Ok(());
+    }
+    let wal = ctx.database.with_extension("duckdb.wal");
+    let size = std::fs::metadata(&ctx.database).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    if size >= limit {
+        bail!(alephgrid_core::limits::TooLarge(format!(
+            "this workbook holds {} MiB, its limit is {} MiB; delete tables or rows first, or ask an admin to raise the limit",
+            size >> 20,
+            limit >> 20
+        )));
+    }
+    Ok(())
 }
 
 /// A query result written to a file, ready to download once.
@@ -534,6 +570,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
     let changed = |table: String| Some(Event::TableChanged { table, origin, revision: 0 });
     let tables = || Some(Event::TablesChanged { origin, revision: 0 });
     let sheet_changed = |sheet: u32| Some(Event::SheetChanged { sheet: Some(sheet), origin, revision: 0 });
+    check_size(&op, ctx)?;
     Ok(match op {
         Op::SaveAnalysis { saved, name, spec, chart, chart_kind } => (json!(wb.save_analysis_as(saved.as_deref(), &name, spec, chart, chart_kind)?),Some(Event::Resync { revision: None })),
         Op::SetValidations { table, rules } => (json!(wb.set_validations(&table, rules)?), Some(Event::TableChanged { table, origin, revision: 0 })),
@@ -588,10 +625,17 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             (Value::Null, changed(table))
         }
         Op::AddFormulaColumn { table, name, formula, language } => {
+            // A SQL formula is a DuckDB expression: SQL, so gated with it (SEC.10).
+            if language == alephgrid_core::FormulaLanguage::Sql {
+                require_sql(ctx)?;
+            }
             wb.add_formula_column_as(&table, &name, &formula, language)?;
             (Value::Null, changed(table))
         }
         Op::UpdateFormula { table, name, formula } => {
+            if wb.formula_language(&table, &name)? == alephgrid_core::FormulaLanguage::Sql {
+                require_sql(ctx)?;
+            }
             wb.update_formula(&table, &name, &formula)?;
             (Value::Null, changed(table))
         }
@@ -608,7 +652,13 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let origin = Some(saved.as_str()).filter(|s| !s.is_empty()).map(|s| (s, version));
             (json!(wb.create_table_from_query_with(&name, &sql, &params, origin)?), tables())
         }
-        Op::CreateDemoTable { rows } => (json!(wb.create_demo_table(rows.min(MAX_DEMO_ROWS))?), tables()),
+        Op::CreateDemoTable { rows } => {
+            let demos = wb.list_tables()?.iter().filter(|t| t.name.starts_with("flights")).count();
+            if demos >= MAX_DEMO_TABLES {
+                bail!(alephgrid_core::limits::TooLarge(format!("a workbook holds at most {MAX_DEMO_TABLES} demo tables; drop one first")));
+            }
+            (json!(wb.create_demo_table(rows.min(MAX_DEMO_ROWS).min(MAX_PROTOCOL_DEMO_ROWS))?), tables())
+        }
         Op::DropTable { table } => {
             wb.drop_table(&table)?;
             (Value::Null, tables())
@@ -1262,6 +1312,8 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
             export_dir: state.workbook_scratch(".exports", &handle.id),
             downloads: state.downloads.clone(),
             tested: None,
+            database: handle.dir.join("data.duckdb"),
+            max_workbook_bytes: state.config.max_workbook_bytes,
         };
         let data_dir = state.config.data_dir.clone();
         let recalc_timeout = state.config.job_timeout;

@@ -166,7 +166,7 @@ not read until they drain; beyond 64 MiB it is closed.
 | `sheet_to_table` | `sheet, name` | `TableInfo`. Reads every used row; column types come from the cells |
 | `history` | `after?, limit?` (≤ 1000) | `HistoryEntry[]` (`{revision, mutation_id?, op, actor?, at_ms, summary, undo?}`), oldest first; `undo` (`{table, kind, undoes?, undone_by?}`) is present for table changes that can still be taken back |
 | `schema` | – | `TableSchema[]` (`{name, row_count, columns}`), user tables only |
-| `export_query` | `sql, params?, format?` (`csv` default, `parquet`, `json`) | `QueryExport {download, file_name, rows, bytes, revision}`: the complete result, from one snapshot, written server-side; fetch it once from `GET /api/workbooks/{id}/downloads/{download}` within an hour |
+| `export_query` | `sql, params?, format?` (`csv` default, `csv_excel`, `parquet`, `json`; `csv_excel` puts a `'` before text starting with `=`, `+`, `-`, `@`, tab or carriage return, for opening in a spreadsheet application) | `QueryExport {download, file_name, rows, bytes, revision}`: the complete result, from one snapshot, written server-side; fetch it once from `GET /api/workbooks/{id}/downloads/{download}` within an hour |
 | `sql_change` | `sql, params?` | `SqlChangeOutcome {table, kind, rows}`: `INSERT INTO t [(cols)] <query or VALUES>`, `UPDATE t SET col = expr, … [WHERE …]` or `DELETE FROM t [WHERE …]` as one change (record ids, revision, history); anything else is `not_allowed` |
 | `saved_queries` | – | `SavedQuery[]` (`{id, name, kind, version, sql, params, created_at, updated_at}`), latest version each |
 | `query_versions` | `saved` | `QueryVersion[]` (`{version, sql, params, created_at, revision}`) |
@@ -242,7 +242,7 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | GET/POST | `/api/workspaces` | list, or create `{name}` |
 | PATCH/DELETE | `/api/workspaces/{id}` | rename `{name}`; delete keeps its workbooks (they become unfiled) |
 | POST | `/api/workbooks/{id}/import?filename=x.parquet[&table=name]` | raw body, streamed to a private scratch directory (limited by `--max-upload` and the temp budget); returns `{kind: "table", table}` or `{kind: "sheets", sheets}` for .xlsx. A failed or interrupted upload leaves no file and no table |
-| GET | `/api/workbooks/{id}/export?spec=<json ViewSpec>&format=csv\|parquet\|json` | honours sort, filters and hidden columns |
+| GET | `/api/workbooks/{id}/export?spec=<json ViewSpec>&format=csv\|csv_excel\|parquet\|json` | honours sort, filters and hidden columns |
 | POST | `/api/workbooks/{id}/uploads?filename=x.csv` | raw body; stages the file and returns `UploadCreated {upload_id, filename, size_bytes, preview}`. Nothing is imported yet. Unclaimed uploads expire after an hour |
 | POST | `/api/workbooks/{id}/uploads/{upload}/preview` | `ImportRequest {types?}` → `UploadPreview` with the given column types |
 | POST | `/api/workbooks/{id}/uploads/{upload}/import` | `ImportRequest {table?, types?, job?}` → `Imported`. On failure the upload is kept for a retry, and the error body carries `problem {message, line?, column?, value?, suggested_type?}` |
@@ -256,7 +256,9 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | PUT | `/api/spaces/{id}/profiles` | `SpaceProfiles {profiles}` (organization admins): profiles granted to the space besides `standard`; unknown ids are 400 |
 | GET | `/api/admin/resources` | host budget, each open workbook's reservation and the DuckDB limits read back from it, jobs, upload bytes |
 | GET | `/api/admin/sessions` | open connections with unsent bytes |
-| POST | `/api/admin/backups` | back up every workbook into `<data-dir>/.backups/backup-<ms>/` → `{path, manifest}` (see DURABILITY.md) |
+| POST | `/api/admin/backups` | back up every workbook into `<data-dir>/.backups/backup-<ms>/` → `{path, name, manifest}` (see DURABILITY.md). One at a time (409 while one runs), at most one per `backup_interval` (409), refused without enough free disk; only the newest `backups_kept` (5) are kept |
+| GET | `/api/admin/backups` | the kept backups, newest first: `[{name, created_at_ms, workbooks, bytes}]` |
+| DELETE | `/api/admin/backups/{name}` | remove one backup → 204 |
 
 A missing or trashed workbook answers **404**. Opening a workbook can fail with **409** (it needs a newer storage format or a capability this
 server lacks), **423** (another process holds it), **429** (its space reached its open-workbooks or

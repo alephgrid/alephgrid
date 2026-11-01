@@ -3,7 +3,7 @@
 FROM node:22-bookworm-slim AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json* ./
-RUN npm ci || npm install
+RUN npm ci
 COPY web/ ./
 COPY crates/alephgrid-core/data/ /src/crates/alephgrid-core/data/
 RUN npm run build
@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock* rust-toolchain.toml ./
 COPY crates ./crates
 COPY vendor ./vendor
 COPY --from=web /src/web/dist ./web/dist
-RUN cargo build --release --locked -p alephgrid-server || cargo build --release -p alephgrid-server
+RUN cargo build --release --locked -p alephgrid-server
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \

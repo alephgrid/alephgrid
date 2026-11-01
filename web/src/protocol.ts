@@ -367,7 +367,7 @@ download: string, file_name: string, rows: number, bytes: number,
  */
 revision: number, };
 
-export type ExportFormat = "csv" | "parquet" | "json";
+export type ExportFormat = "csv" | "csv_excel" | "parquet" | "json";
 
 export type Align = "left" | "right" | "center";
 
@@ -846,9 +846,17 @@ duckdb_memory_limit: string, duckdb_threads: string,
 /**
  * Jobs waiting or running.
  */
-jobs: number, };
+jobs: number, 
+/**
+ * Bytes of the workbook's database file and log.
+ */
+database_bytes: number, };
 
-export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationUsage>, reserved: Reservation, upload_bytes: number, upload_budget: number, };
+export type ResourceUsage = { budget: HostBudget, allocations: Array<AllocationUsage>, reserved: Reservation, upload_bytes: number, upload_budget: number, 
+/**
+ * Largest a workbook's database may grow, if limited (SEC.11).
+ */
+workbook_size_limit: number | null, };
 
 export type BackupEntry = { id: string, name: string, 
 /**

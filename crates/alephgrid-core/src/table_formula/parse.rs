@@ -444,7 +444,16 @@ pub struct Parser<'a> {
     lexer: Lexer<'a>,
     tok: Tok,
     span: Span,
+    /// Nesting (parentheses, arguments) and operators so far: bounded so that neither
+    /// parsing nor compiling recurses without limit (SEC.09).
+    depth: usize,
+    operators: usize,
 }
+
+/// The most a formula may nest, the most operators it may have, and its longest length.
+pub const MAX_NESTING: usize = 100;
+pub const MAX_OPERATORS: usize = 1000;
+pub const MAX_FORMULA_CHARS: usize = 8192;
 
 /// Parse a formula as typed (a leading `=` is optional).
 pub fn parse(formula: &str) -> ParseResult<Expr> {
@@ -455,10 +464,13 @@ pub fn parse(formula: &str) -> ParseResult<Expr> {
 /// are on that sheet.
 pub fn parse_in(formula: &str, home: Option<&str>) -> ParseResult<Expr> {
     let chars: Vec<char> = formula.chars().collect();
+    if chars.len() > MAX_FORMULA_CHARS {
+        return err(format!("the formula is longer than {MAX_FORMULA_CHARS} characters"), 0, chars.len());
+    }
     let mut lexer = Lexer { chars, pos: 0, _text: formula, home: home.map(str::to_string) };
     lexer.skip_space();
     if lexer.peek(0) == Some('=') { lexer.pos += 1; }
-    let mut p = Parser { lexer, tok: Tok::End, span: Span { start: 0, end: 0 } };
+    let mut p = Parser { lexer, tok: Tok::End, span: Span { start: 0, end: 0 }, depth: 0, operators: 0 };
     p.advance()?;
     if p.tok == Tok::End {
         return err("the formula is empty", 0, formula.chars().count());
@@ -482,7 +494,27 @@ impl Parser<'_> {
         if let Tok::Op(o) = self.tok { Some(o) } else { None }
     }
 
+    fn count_operator(&mut self) -> ParseResult<()> {
+        self.operators += 1;
+        if self.operators > MAX_OPERATORS {
+            return err(format!("the formula has more than {MAX_OPERATORS} operators"), self.span.start, self.span.end);
+        }
+        Ok(())
+    }
+
+    /// Parse a nested part (inside parentheses or a call), at most [`MAX_NESTING`] deep.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> ParseResult<T>) -> ParseResult<T> {
+        if self.depth >= MAX_NESTING {
+            return err(format!("the formula nests more than {MAX_NESTING} levels deep"), self.span.start, self.span.end);
+        }
+        self.depth += 1;
+        let out = f(self);
+        self.depth -= 1;
+        out
+    }
+
     fn binary(&mut self, op: BinaryOp, left: Expr, next: fn(&mut Self) -> ParseResult<Expr>) -> ParseResult<Expr> {
+        self.count_operator()?;
         self.advance()?;
         let right = next(self)?;
         let span = Span { start: left.span.start, end: right.span.end };
@@ -537,6 +569,7 @@ impl Parser<'_> {
     fn percent(&mut self) -> ParseResult<Expr> {
         let mut e = self.unary()?;
         while self.op() == Some("%") {
+            self.count_operator()?;
             let end = self.span.end;
             self.advance()?;
             let span = Span { start: e.span.start, end };
@@ -549,6 +582,7 @@ impl Parser<'_> {
     fn unary(&mut self) -> ParseResult<Expr> {
         let op = match self.op() { Some("-") => Some(UnaryOp::Neg), Some("+") => Some(UnaryOp::Plus), _ => None };
         if let Some(op) = op {
+            self.count_operator()?;
             let start = self.span.start;
             self.advance()?;
             let e = self.unary()?;
@@ -574,7 +608,7 @@ impl Parser<'_> {
             }
             Tok::LParen => {
                 self.advance()?;
-                let e = self.comparison()?;
+                let e = self.nested(Self::comparison)?;
                 if self.tok != Tok::RParen {
                     return err("expected )", self.span.start, self.span.end);
                 }
@@ -585,7 +619,7 @@ impl Parser<'_> {
             Tok::Ident(name) => {
                 self.advance()?;
                 match &self.tok {
-                    Tok::LParen => self.call(name, span),
+                    Tok::LParen => self.nested(|p| p.call(name, span)),
                     Tok::Brackets(items) => {
                         let items = items.clone();
                         let end = self.span.end;

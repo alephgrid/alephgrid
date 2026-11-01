@@ -19,6 +19,7 @@ mod props;
 mod sheets;
 mod sql;
 mod sqlwork;
+mod security;
 mod storage;
 mod table_formulas;
 mod views;

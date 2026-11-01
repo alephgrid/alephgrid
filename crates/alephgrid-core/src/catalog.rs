@@ -48,6 +48,12 @@ pub struct Shared {
     pub(crate) results: crate::results::ResultsStore,
     /// Results of worker (Python) functions (phase 8).
     pub(crate) functions: Arc<crate::external::ResultCache>,
+    /// Stored SQL formulas that passed validation since the workbook was opened (SEC.01): a
+    /// formula read back from the file is checked again before it reaches a query.
+    pub(crate) checked_formulas: Mutex<std::collections::HashSet<String>>,
+    /// Stops a running sheet evaluation when set (SEC.07); outside the sheets' lock so a
+    /// deadline can reach it while an evaluation holds that lock.
+    pub(crate) sheet_cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Grouped lookup relations built into scratch tables, keyed by their SQL. An entry is valid
@@ -172,7 +178,10 @@ impl Shared {
     pub(crate) fn new(mut sheets: Sheets) -> Shared {
         let functions = Arc::new(crate::external::ResultCache::default());
         sheets.set_external(Some(Arc::new(crate::external::SheetHook(functions.clone()))));
+        let sheet_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        sheets.set_cancel(sheet_cancel.clone());
         Shared {
+            sheet_cancel,
             functions,
             catalog: Mutex::new(Catalog { next_view: 1, ..Default::default() }),
             sheets: Mutex::new(sheets),
@@ -180,6 +189,7 @@ impl Shared {
             scratch_seq: AtomicU64::new(0),
             lookups: Mutex::new(LookupCache::default()),
             results: crate::results::ResultsStore::new(),
+            checked_formulas: Mutex::new(Default::default()),
         }
     }
 

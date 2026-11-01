@@ -54,6 +54,21 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
   return res.json();
 }
 
+/** Thrown for an id that is not a plain path segment (SEC.06). */
+export class BadId extends Error {}
+
+/**
+ * An id from the server, as one URL path segment. Ids are `[A-Za-z0-9_-]{1,64}`; anything
+ * else (`..`, a slash) is refused so it cannot retarget a request (SEC.06).
+ */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+export const isId = (id: string): boolean => ID.test(id);
+export function seg(id: string | number): string {
+  const s = String(id);
+  if (!ID.test(s)) throw new BadId(`invalid id ${JSON.stringify(s).slice(0, 80)}`);
+  return encodeURIComponent(s);
+}
+
 export const api = {
   config: () => http<{
     version: string; auth: AuthMode; setup_required: boolean; sso: { label: string } | null; allow_sql: boolean; sheet_copy_rows?: number;
@@ -66,74 +81,75 @@ export const api = {
   changePassword: (current: string, next: string) => http<void>("POST", "/api/me/password", { current, new: next }),
   lookupInvite: (code: string) => http<InviteInfo>("POST", "/api/invites/lookup", { code }),
   acceptInvite: (code: string, name: string, password: string) => http<Me>("POST", "/api/invites/accept", { code, name, password }),
-  list: () => http<WorkbookListing[]>("GET", "/api/workbooks"),
+  // A listing entry whose id is not a plain segment is dropped, never linked (SEC.06).
+  list: () => http<WorkbookListing[]>("GET", "/api/workbooks").then((ws) => ws.filter((w) => isId(w.id))),
   create: (name: string, space?: string | null) => http<WorkbookMeta>("POST", "/api/workbooks", { name, space: space ?? null }),
-  get: (id: string) => http<{ workbook: WorkbookMeta; role: SpaceRole; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${id}`),
+  get: (id: string) => http<{ workbook: WorkbookMeta; role: SpaceRole; tables: TableInfo[]; sheets: SheetInfo[] }>("GET", `/api/workbooks/${seg(id)}`),
   update: (id: string, patch: WorkbookPatch) =>
-    http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, patch),
-  rename: (id: string, name: string) => http<WorkbookMeta>("PATCH", `/api/workbooks/${id}`, { name }),
-  duplicate: (id: string) => http<WorkbookMeta>("POST", `/api/workbooks/${id}/duplicate`),
+    http<WorkbookMeta>("PATCH", `/api/workbooks/${seg(id)}`, patch),
+  rename: (id: string, name: string) => http<WorkbookMeta>("PATCH", `/api/workbooks/${seg(id)}`, { name }),
+  duplicate: (id: string) => http<WorkbookMeta>("POST", `/api/workbooks/${seg(id)}/duplicate`),
   /** Moves the workbook to the trash. */
-  remove: (id: string) => http<void>("DELETE", `/api/workbooks/${id}`),
-  trash: () => http<WorkbookListing[]>("GET", "/api/trash"),
-  restore: (id: string) => http<WorkbookMeta>("POST", `/api/trash/${id}/restore`),
-  purge: (id: string) => http<void>("DELETE", `/api/trash/${id}`),
+  remove: (id: string) => http<void>("DELETE", `/api/workbooks/${seg(id)}`),
+  trash: () => http<WorkbookListing[]>("GET", "/api/trash").then((ws) => ws.filter((w) => isId(w.id))),
+  restore: (id: string) => http<WorkbookMeta>("POST", `/api/trash/${seg(id)}/restore`),
+  purge: (id: string) => http<void>("DELETE", `/api/trash/${seg(id)}`),
   emptyTrash: () => http<void>("DELETE", "/api/trash"),
   spaces: () => http<SpaceListing[]>("GET", "/api/spaces"),
   createSpace: (name: string, org?: string) => http<Space>("POST", "/api/spaces", { name, org: org ?? null }),
-  renameSpace: (id: string, name: string) => http<Space>("PATCH", `/api/spaces/${id}`, { name }),
-  removeSpace: (id: string) => http<void>("DELETE", `/api/spaces/${id}`),
-  spaceMembers: (id: string) => http<SpaceMember[]>("GET", `/api/spaces/${id}/members`),
+  renameSpace: (id: string, name: string) => http<Space>("PATCH", `/api/spaces/${seg(id)}`, { name }),
+  removeSpace: (id: string) => http<void>("DELETE", `/api/spaces/${seg(id)}`),
+  spaceMembers: (id: string) => http<SpaceMember[]>("GET", `/api/spaces/${seg(id)}/members`),
   setSpaceMember: (id: string, kind: MemberKind, principal: string, role: SpaceRole) =>
-    http<void>("PUT", `/api/spaces/${id}/members`, { kind, principal, role }),
+    http<void>("PUT", `/api/spaces/${seg(id)}/members`, { kind, principal, role }),
   removeSpaceMember: (id: string, kind: MemberKind, principal: string) =>
-    http<void>("DELETE", `/api/spaces/${id}/members/${kind}/${encodeURIComponent(principal)}`),
-  tokens: (space: string) => http<Token[]>("GET", `/api/spaces/${space}/tokens`),
+    http<void>("DELETE", `/api/spaces/${seg(id)}/members/${seg(kind)}/${encodeURIComponent(principal)}`),
+  tokens: (space: string) => http<Token[]>("GET", `/api/spaces/${seg(space)}/tokens`),
   createToken: (space: string, name: string, role: SpaceRole, days: number) =>
-    http<{ token: Token; secret: string }>("POST", `/api/spaces/${space}/tokens`, { name, role, days }),
-  revokeToken: (space: string, token: string) => http<void>("DELETE", `/api/spaces/${space}/tokens/${token}`),
-  orgMembers: (org: string) => http<OrgMember[]>("GET", `/api/orgs/${org}/members`),
-  setOrgRole: (org: string, user: string, role: OrgRole) => http<void>("PATCH", `/api/orgs/${org}/members/${user}`, { role }),
-  removeOrgMember: (org: string, user: string) => http<void>("DELETE", `/api/orgs/${org}/members/${user}`),
-  invites: (org: string) => http<Invite[]>("GET", `/api/orgs/${org}/invites`),
+    http<{ token: Token; secret: string }>("POST", `/api/spaces/${seg(space)}/tokens`, { name, role, days }),
+  revokeToken: (space: string, token: string) => http<void>("DELETE", `/api/spaces/${seg(space)}/tokens/${seg(token)}`),
+  orgMembers: (org: string) => http<OrgMember[]>("GET", `/api/orgs/${seg(org)}/members`),
+  setOrgRole: (org: string, user: string, role: OrgRole) => http<void>("PATCH", `/api/orgs/${seg(org)}/members/${seg(user)}`, { role }),
+  removeOrgMember: (org: string, user: string) => http<void>("DELETE", `/api/orgs/${seg(org)}/members/${seg(user)}`),
+  invites: (org: string) => http<Invite[]>("GET", `/api/orgs/${seg(org)}/invites`),
   invite: (org: string, email: string, org_role: OrgRole, space: string | null, space_role: SpaceRole | null, days = 7) =>
-    http<{ invite: Invite; code: string; path: string }>("POST", `/api/orgs/${org}/invites`, { email, org_role, space, space_role, days }),
-  revokeInvite: (org: string, invite: string) => http<void>("DELETE", `/api/orgs/${org}/invites/${invite}`),
-  audit: (org: string, before?: number) => http<AuditEvent[]>("GET", `/api/orgs/${org}/audit${before ? `?before=${before}` : ""}`),
-  library: (space: string) => http<LibraryEntry[]>("GET", `/api/spaces/${space}/library`),
+    http<{ invite: Invite; code: string; path: string }>("POST", `/api/orgs/${seg(org)}/invites`, { email, org_role, space, space_role, days }),
+  revokeInvite: (org: string, invite: string) => http<void>("DELETE", `/api/orgs/${seg(org)}/invites/${seg(invite)}`),
+  audit: (org: string, before?: number) => http<AuditEvent[]>("GET", `/api/orgs/${seg(org)}/audit${before ? `?before=${before}` : ""}`),
+  library: (space: string) => http<LibraryEntry[]>("GET", `/api/spaces/${seg(space)}/library`),
   publishToLibrary: (space: string, workbook: string, kind: LibraryKind, object: string) =>
-    http<LibraryEntry>("POST", `/api/spaces/${space}/library`, { workbook, kind, object }),
+    http<LibraryEntry>("POST", `/api/spaces/${seg(space)}/library`, { workbook, kind, object }),
   changeLibraryEntry: (space: string, entry: string, patch: { name?: string; retired?: boolean }) =>
-    http<void>("PATCH", `/api/spaces/${space}/library/${entry}`, patch),
-  useLibraryEntry: (workbook: string, entry: string) => http<{ result: unknown; revision: number }>("POST", `/api/workbooks/${workbook}/library`, { entry }),
-  shareable: (workbook: string) => http<{ queries: SavedQuery[]; views: SavedView[]; functions: WorkbookFunction[] }>("GET", `/api/workbooks/${workbook}/shareable`),
-  setPublishRole: (space: string, role: SpaceRole) => http<Space>("PATCH", `/api/spaces/${space}`, { publish_role: role }),
-  usage: (org: string) => http<SpaceUsage[]>("GET", `/api/orgs/${org}/usage`),
-  setQuota: (space: string, limits: QuotaLimits) => http<SpaceUsage | null>("PUT", `/api/spaces/${space}/quota`, limits),
-  setSpaceProfiles: (space: string, profiles: string[]) => http<SpaceUsage | null>("PUT", `/api/spaces/${space}/profiles`, { profiles }),
+    http<void>("PATCH", `/api/spaces/${seg(space)}/library/${seg(entry)}`, patch),
+  useLibraryEntry: (workbook: string, entry: string) => http<{ result: unknown; revision: number }>("POST", `/api/workbooks/${seg(workbook)}/library`, { entry }),
+  shareable: (workbook: string) => http<{ queries: SavedQuery[]; views: SavedView[]; functions: WorkbookFunction[] }>("GET", `/api/workbooks/${seg(workbook)}/shareable`),
+  setPublishRole: (space: string, role: SpaceRole) => http<Space>("PATCH", `/api/spaces/${seg(space)}`, { publish_role: role }),
+  usage: (org: string) => http<SpaceUsage[]>("GET", `/api/orgs/${seg(org)}/usage`),
+  setQuota: (space: string, limits: QuotaLimits) => http<SpaceUsage | null>("PUT", `/api/spaces/${seg(space)}/quota`, limits),
+  setSpaceProfiles: (space: string, profiles: string[]) => http<SpaceUsage | null>("PUT", `/api/spaces/${seg(space)}/profiles`, { profiles }),
   /** The workbook's compute; starts nothing. */
-  runtime: (id: string) => http<RuntimeStatus>("GET", `/api/workbooks/${id}/runtime`),
-  runtimeAction: (id: string, req: RuntimeRequest) => http<RuntimeStatus>("POST", `/api/workbooks/${id}/runtime`, req),
-  profiles: (id: string) => http<ProfileChoice[]>("GET", `/api/workbooks/${id}/profiles`),
-  setUserDisabled: (user: string, disabled: boolean) => http<PublicUser | null>("PATCH", `/api/users/${user}`, { disabled }),
+  runtime: (id: string) => http<RuntimeStatus>("GET", `/api/workbooks/${seg(id)}/runtime`),
+  runtimeAction: (id: string, req: RuntimeRequest) => http<RuntimeStatus>("POST", `/api/workbooks/${seg(id)}/runtime`, req),
+  profiles: (id: string) => http<ProfileChoice[]>("GET", `/api/workbooks/${seg(id)}/profiles`),
+  setUserDisabled: (user: string, disabled: boolean) => http<PublicUser | null>("PATCH", `/api/users/${seg(user)}`, { disabled }),
   previewUpload: (id: string, upload: string, req: ImportRequest) =>
-    http<UploadPreview>("POST", `/api/workbooks/${id}/uploads/${upload}/preview`, req),
+    http<UploadPreview>("POST", `/api/workbooks/${seg(id)}/uploads/${seg(upload)}/preview`, req),
   importUpload: (id: string, upload: string, req: ImportRequest) =>
-    http<Imported>("POST", `/api/workbooks/${id}/uploads/${upload}/import`, req),
-  cancelUpload: (id: string, upload: string) => http<void>("DELETE", `/api/workbooks/${id}/uploads/${upload}`),
-  jobStatus: (id: string, job: string) => http<JobStatus>("GET", `/api/workbooks/${id}/jobs/${job}`),
-  cancelJob: (id: string, job: string) => http<void>("DELETE", `/api/workbooks/${id}/jobs/${job}`),
+    http<Imported>("POST", `/api/workbooks/${seg(id)}/uploads/${seg(upload)}/import`, req),
+  cancelUpload: (id: string, upload: string) => http<void>("DELETE", `/api/workbooks/${seg(id)}/uploads/${seg(upload)}`),
+  jobStatus: (id: string, job: string) => http<JobStatus>("GET", `/api/workbooks/${seg(id)}/jobs/${seg(job)}`),
+  cancelJob: (id: string, job: string) => http<void>("DELETE", `/api/workbooks/${seg(id)}/jobs/${seg(job)}`),
   // Downloads are authorized by the session cookie; no secret goes into these URLs.
   xlsxUrl(id: string): string {
-    return `/api/workbooks/${id}/export.xlsx`;
+    return `/api/workbooks/${seg(id)}/export.xlsx`;
   },
   /** A finished `export_query` file; it can be downloaded once. */
   downloadUrl(id: string, download: string): string {
-    return `/api/workbooks/${id}/downloads/${encodeURIComponent(download)}`;
+    return `/api/workbooks/${seg(id)}/downloads/${seg(download)}`;
   },
   exportUrl(id: string, spec: unknown, format: string): string {
     const q = new URLSearchParams({ spec: JSON.stringify(spec), format });
-    return `/api/workbooks/${id}/export?${q}`;
+    return `/api/workbooks/${seg(id)}/export?${q}`;
   },
 };
 
@@ -145,7 +161,7 @@ export function stageUpload(
 ): { done: Promise<UploadCreated>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const done = new Promise<UploadCreated>((resolve, reject) => {
-    xhr.open("POST", `/api/workbooks/${workbookId}/uploads?filename=${encodeURIComponent(file.name)}`);
+    xhr.open("POST", `/api/workbooks/${seg(workbookId)}/uploads?filename=${encodeURIComponent(file.name)}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       let body: any = null;
@@ -276,7 +292,7 @@ export class Rpc {
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const url = `${proto}://${location.host}/ws/${this.workbookId}`;
+      const url = `${proto}://${location.host}/ws/${seg(this.workbookId)}`;
       this.onStatus("connecting");
       const ws = new WebSocket(url);
       let opened = false;

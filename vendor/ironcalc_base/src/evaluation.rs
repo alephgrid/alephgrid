@@ -421,7 +421,25 @@ pub(crate) struct Evaluation {
     /// restart, the cells stay on `stack`, still `Evaluating`, to be run again
     /// from the top once the recursion has unwound.
     pub(crate) unwinding: bool,
+    /// Cells an evaluation may read before it stops (Alephgrid patch: a formula
+    /// cannot make the evaluation run or allocate without bound).
+    pub(crate) visit_budget: u64,
+    /// Cells read so far by the running `evaluate()`.
+    pub(crate) visits: u64,
+    /// Set from outside to stop the running evaluation (a deadline, a cancel).
+    pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Why the last `evaluate()` stopped early, if it did. Every formula
+    /// evaluated after that reads as an error.
+    pub(crate) stopped: Option<String>,
 }
+
+/// Cells one evaluation may read when nobody has said otherwise.
+pub const DEFAULT_VISIT_BUDGET: u64 = 20_000_000;
+/// The most cells one range in a formula may declare: about a hundred whole
+/// columns, or a hundred whole rows.
+pub const MAX_RANGE_CELLS: u64 = 120_000_000;
+/// The largest range a formula may hold as an array of values.
+pub const MAX_ARRAY_CELLS: u64 = 2_000_000;
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
 /// and in bytes of stack. Measured on a chain of `=A2+1`: a formula takes about
@@ -471,11 +489,41 @@ impl Default for Evaluation {
             max_stack: DEFAULT_MAX_STACK,
             stack_base: 0,
             unwinding: false,
+            visit_budget: DEFAULT_VISIT_BUDGET,
+            visits: 0,
+            cancel: None,
+            stopped: None,
         }
     }
 }
 
 impl Evaluation {
+    /// Accounts for `cells` cells about to be read. False, and the evaluation
+    /// is stopped, when that goes over the budget or a cancel was asked for.
+    pub(crate) fn spend(&mut self, cells: u64) -> bool {
+        if self.stopped.is_some() {
+            return false;
+        }
+        self.visits = self.visits.saturating_add(cells);
+        if self.visits > self.visit_budget {
+            self.stopped = Some(format!(
+                "the formulas read more than {} cells; use smaller ranges",
+                self.visit_budget
+            ));
+            return false;
+        }
+        if (cells > 1 || self.visits & 0xfff == 0)
+            && self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            self.stopped = Some("the calculation was cancelled".to_string());
+            return false;
+        }
+        true
+    }
+
     /// See `Model::record_seen`. Here so that a read can be put on record
     /// while the sheet it was made in is still borrowed.
     pub(crate) fn record_seen(&mut self, position: CellReferenceIndex, seen: Seen) {
@@ -504,6 +552,8 @@ impl<'a> Model<'a> {
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
+        self.evaluation.visits = 0;
+        self.evaluation.stopped = None;
         self.sync_anchor_order();
         // Every pass starts from the same sheet: what an abandoned pass wrote
         // is undone. This is what makes a pass a function of the anchor order.
@@ -513,6 +563,9 @@ impl<'a> Model<'a> {
         let mut spills_before = self.dynamic_spills();
         let mut log = RestartLog::new();
         while let Some(restart) = self.run_pass(&log.circular) {
+            if self.evaluation.stopped.is_some() {
+                break;
+            }
             let marked = log.record(&restart, &mut self.evaluation.anchor_order);
             spills_before.retain(|(position, cell)| {
                 let dropped = match &restart {
@@ -726,6 +779,10 @@ impl<'a> Model<'a> {
             // nothing computed now is kept. This comes before anything is put
             // on record: a read that was not made is nobody's dependency.
             return CalcResult::EmptyCell;
+        }
+        if !self.evaluation.spend(1) {
+            let reason = self.evaluation.stopped.clone().unwrap_or_default();
+            return CalcResult::new_error(Error::ERROR, cell_reference, reason);
         }
         // The cell is looked at, not cloned: what is needed of it is copied
         // out, and the sheet is free again before anything else is evaluated.
@@ -1045,6 +1102,18 @@ impl<'a> Model<'a> {
         }
     }
 
+    /// `clip_to_used_area` for a range given by its corners: the bottom-right
+    /// corner to walk to.
+    pub(crate) fn clip_range(
+        &mut self,
+        left: CellReferenceIndex,
+        right: CellReferenceIndex,
+    ) -> Result<CellReferenceIndex, String> {
+        let (row, column) =
+            self.clip_to_used_area(left.sheet, left.row, left.column, right.row, right.column)?;
+        Ok(CellReferenceIndex { sheet: right.sheet, row, column })
+    }
+
     /// Clips a whole-column or whole-row range to the sheet's used area, so
     /// that a function walking it visits only the cells that can hold
     /// something. Returns the bottom-right corner to walk to. The cells the
@@ -1059,22 +1128,22 @@ impl<'a> Model<'a> {
         row2: i32,
         column2: i32,
     ) -> Result<(i32, i32), String> {
-        let whole_rows = row1 == 1 && row2 == LAST_ROW;
-        let whole_columns = column1 == 1 && column2 == LAST_COLUMN;
-        if !whole_rows && !whole_columns {
-            return Ok((row2, column2));
-        }
+        // Every range is clipped, not only whole rows and columns (Alephgrid
+        // patch): nothing beyond the used area can hold a value.
         let dimension = self
             .workbook
             .worksheet(sheet)
             .map_err(|_| format!("Invalid worksheet index: '{sheet}'"))?
             .dimension();
-        let last_row = if whole_rows { dimension.max_row } else { row2 };
-        let last_column = if whole_columns {
-            dimension.max_column
-        } else {
-            column2
-        };
+        let last_row = row2.min(dimension.max_row.max(row1 - 1));
+        let last_column = column2.min(dimension.max_column.max(column1 - 1));
+        let area = (last_row - row1 + 1).max(0) as u64 * (last_column - column1 + 1).max(0) as u64;
+        if self.evaluation.visits.saturating_add(area) > self.evaluation.visit_budget {
+            self.evaluation.spend(area);
+        }
+        if let Some(reason) = &self.evaluation.stopped {
+            return Err(reason.clone());
+        }
         // The remainder: the rows below the used area over the whole width,
         // and the columns beyond it within the rows that are walked.
         self.record_seen_empty_range(sheet, last_row + 1, column1, row2, column2);

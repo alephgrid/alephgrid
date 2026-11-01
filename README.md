@@ -120,7 +120,7 @@ machine), there is no sign-in and the server only listens on 127.0.0.1.
 | `--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks` | `ALEPHGRID_SPACE_*` | no limits (admins can set them per space) |
 | `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
-| `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL console enabled |
+| `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL allowed; when set, every operation that runs user-written SQL is refused (console, saved queries, tables from queries, SQL formula columns, SQL functions) |
 | `--demo-rows N` | | generate a demo workbook |
 
 ## Formulas

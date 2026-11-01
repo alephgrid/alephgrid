@@ -5,7 +5,7 @@ use crate::{
     sql::{ident, lit},
     storage, Workbook,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use duckdb::Connection;
 use ironcalc::base::expressions::{
     parser::{new_parser_english, Node},
@@ -369,6 +369,20 @@ pub(crate) fn check_runtime(conn: &Connection, items: &[WorkbookFunction]) -> Re
     }
     Ok(())
 }
+/// The checks a SQL function's definition passes when published, without the registry
+/// context (names, arguments, references, the function policy).
+fn check_sql_definition(conn: &Connection, d: &FunctionDefinition) -> Result<()> {
+    if !name_ok(&d.name) || d.arguments.is_empty() || d.arguments.len() > 16 || d.source.len() > 4096 || !d.arguments.iter().all(|a| name_ok(a)) {
+        bail!("stored function {:?} has an invalid definition", d.name);
+    }
+    let refs = formula::analyze(conn, &d.source).with_context(|| format!("stored function {} does not validate", d.name))?;
+    if refs.iter().any(|r| r.qualified || !d.arguments.iter().any(|a| a.eq_ignore_ascii_case(&r.name))) {
+        bail!("stored function {} references more than its arguments", d.name);
+    }
+    let tree = crate::sqlpolicy::parse(conn, &format!("SELECT ({})", crate::sql::formula_to_sql(&d.source)))?;
+    sql_calls(&tree, &mut BTreeSet::new())?;
+    Ok(())
+}
 fn macro_sql(d: &FunctionDefinition) -> String {
     format!(
         "CREATE OR REPLACE MACRO {}({}) AS (\n{}\n);",
@@ -475,7 +489,12 @@ impl Workbook {
         let epoch = epoch(&self.conn)?;
         for v in &versions {
             match v.definition.kind {
-                FunctionKind::Sql => self.conn.execute_batch(&macro_sql(&v.definition))?,
+                FunctionKind::Sql => {
+                    // The registry is read back from the file: check each definition again
+                    // before it becomes a macro (SEC.01).
+                    check_sql_definition(&self.conn, &v.definition)?;
+                    self.conn.execute_batch(&macro_sql(&v.definition))?
+                }
                 FunctionKind::Python => {
                     let d = &v.definition;
                     let suffix = if d.volatile { format!("#{epoch}") } else { String::new() };

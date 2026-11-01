@@ -2058,6 +2058,8 @@ export class WorkbookScreen {
     const filtered = this.spec.sort.length || this.spec.filters.length ? " (current view)" : "";
     const items: MenuItem[] = [
       { label: `CSV${filtered}`, action: () => this.download(this.spec, "csv") },
+      // Text a spreadsheet would run as a formula gets a leading ' (SEC.13).
+      { label: `CSV for Excel or Sheets${filtered}`, action: () => this.download(this.spec, "csv_excel") },
       { label: `Parquet${filtered}`, action: () => this.download(this.spec, "parquet") },
       { label: `JSON lines${filtered}`, action: () => this.download(this.spec, "json") },
     ];
