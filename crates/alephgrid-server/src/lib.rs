@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod protocol;
 pub mod python;
 pub mod quota;
+pub mod reserve;
 pub mod runtime;
 pub mod sched;
 pub mod state;

@@ -199,7 +199,7 @@ Depends on phase 1. Complete before shared hosting or expensive custom-function 
 - [x] **3.T02** Test 3.06–3.09: randomized edits against a reference model, stable IDs, duplicate mutations, revision monotonicity, migration rollback limits and consistent backup/restore under activity.
   - Evidence: TEST_MATRIX 3.T02; pass 2026-10-26.
 - [x] **3.T03** Test 3.08–3.15: injected write/disk-full/permission failures, crash during persistence, SIGTERM, duplicate starts, cancel-before-ready, controller restart and failed allocation cleanup; explicitly record unsupported storage-fault simulations.
-  - Evidence: TEST_MATRIX 3.T03; real disk-full on a 64 MB filesystem; unsupported faults listed.
+  - Evidence: TEST_MATRIX 3.T03; real disk-full on a 64 MB filesystem; unsupported faults listed. **1 Nov 2026, first run on CircleCI's tmpfs:** after a full-disk failure the server could not restart ("could not record the allocation: No space left on device"): DuckDB keeps a rolled-back change's blocks in the file (checked: an 85 MB rolled-back write stays after ROLLBACK, CHECKPOINT and close). Fixed with a disk reserve (`reserve.rs`, `--disk-reserve`, default 32 MiB): released on a disk-full write or record failure, recreated once there is room, shown in Administration.
 - [x] **3.10 — Gate:** Cancellation, overload, disk-full, crash/restart and restore tests preserve consistency and keep resource use bounded.
   - Evidence: TEST_MATRIX 3.10 gate run 2026-10-26 (local; CI not yet run). No multi-node failover implied.
 

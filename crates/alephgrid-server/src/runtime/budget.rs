@@ -63,6 +63,12 @@ pub struct ResourceUsage {
     pub upload_budget: u64,
     /// Largest a workbook's database may grow, if limited (SEC.11).
     pub workbook_size_limit: Option<u64>,
+    /// Free bytes on the data directory's disk, when the platform says.
+    pub disk_free_bytes: Option<u64>,
+    /// The disk reserve (3.T03): its size (0 when off) and whether it is held. Not held while
+    /// it is on means the disk filled up and the reserve was given back.
+    pub disk_reserve_bytes: u64,
+    pub disk_reserve_held: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

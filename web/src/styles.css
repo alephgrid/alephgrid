@@ -810,6 +810,7 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .admin-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 8px 0; }
 .admin-facts dt { color: var(--muted); }
 .admin-facts dd { margin: 0; }
+.admin-facts dd.admin-warning { color: var(--warn); font-weight: 600; }
 .admin-actions { justify-content: flex-start; margin: 8px 0; }
 
 /* U.08: Share */

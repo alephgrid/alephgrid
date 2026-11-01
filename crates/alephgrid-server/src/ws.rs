@@ -1610,7 +1610,12 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
                         }
                         r
                     }
-                    Err(e) => error_reply(id, &withdrawn(e), &data_dir),
+                    Err(e) => {
+                        // A write that ran out of disk leaves its blocks in the file: give
+                        // the disk reserve back so the server can still record and restart.
+                        audit_state.controller.disk_reserve.note(&e);
+                        error_reply(id, &withdrawn(e), &data_dir)
+                    }
                 }
             } else {
                 let downloads = ctx.downloads.clone();
@@ -1641,7 +1646,10 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
                         }
                         json!({ "id": id, "ok": true, "result": v })
                     }
-                    Err(e) => error_reply(id, &withdrawn(e), &data_dir),
+                    Err(e) => {
+                        audit_state.controller.disk_reserve.note(&e);
+                        error_reply(id, &withdrawn(e), &data_dir)
+                    }
                 }
             };
             cancels.lock().unwrap().remove(&id);

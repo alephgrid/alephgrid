@@ -124,6 +124,7 @@ backups, upgrades and restores are covered in [docs/OPERATIONS.md](docs/OPERATIO
 | `--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks` | `ALEPHGRID_SPACE_*` | no limits (admins can set them per space) |
 | `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
+| `--disk-reserve` | `ALEPHGRID_DISK_RESERVE` | 32MiB kept back so the server can still restart when the disk fills ([operations](docs/OPERATIONS.md#disk-is-full)) |
 | `--idle-timeout` | | seconds without activity before a workbook's compute sleeps |
 | `--profile name=MEM:THREADS[:dedicated]` | | extra compute sizes admins can grant to spaces |
 | `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL allowed; when set, every operation that runs user-written SQL is refused |
