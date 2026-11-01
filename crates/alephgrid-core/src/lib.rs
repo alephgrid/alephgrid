@@ -38,7 +38,7 @@ mod workbook;
 
 pub use model::*;
 pub use comments::CellComment;
-pub use sheets::{SheetSearch, CellStyle, StyledCell, StylePatch, Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
+pub use sheets::{SortBy, SheetSearch, CellStyle, StyledCell, StylePatch, Align, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode, SheetBlock, SheetInfo, SheetInput};
 pub use import::{ColumnType, FilePreview, ImportProblem, PreviewColumn};
 pub use queries::SchemaChanged;
 pub use results::{ResultsActivity, RESULTS_MIN_ROWS};

@@ -2093,6 +2093,20 @@ export class WorkbookScreen {
     }
   }
 
+  /** S.06: sort the selected rows of the sheet by the first selected column. */
+  private async sortRange(desc: boolean, header: boolean): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return;
+    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    try {
+      await this.rpc.call("sheet_sort", { sheet, area, by: [{ column: 0, desc }], header, layout });
+      await this.refreshSheet();
+    } catch (e) { toast((e as Error).message, "error"); }
+  }
+
   /** S.11: the comments pane beside the grid. */
   private openComments(): void {
     if (this.commentsPane && !this.commentsPane.closed) { void this.commentsPane.reload(); return; }
@@ -2228,6 +2242,12 @@ export class WorkbookScreen {
         { label: rows > 1 ? `Delete ${rows} rows` : "Delete row", danger: true, action: () => this.sheetOp("sheet_delete_rows", { at: sel.r0, count: rows }) },
         { label: cols > 1 ? `Delete ${cols} columns` : "Delete column", danger: true, action: () => this.sheetOp("sheet_delete_columns", { at: sel.c0, count: cols }) },
         "sep",
+        ...(rows > 1 ? [
+          { label: `Sort rows by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, false) },
+          { label: `Sort rows by ${columnLetter(sel.c0)}, Z → A`, action: () => void this.sortRange(true, false) },
+          { label: `Sort below the header row by ${columnLetter(sel.c0)}, A → Z`, action: () => void this.sortRange(false, true) },
+          "sep" as const,
+        ] : []),
         { label: "Add comment…", action: () => void this.addComment(sel.r0, sel.c0) },
         { label: "Show comments", action: () => this.openComments() },
         "sep",

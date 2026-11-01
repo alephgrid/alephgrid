@@ -161,3 +161,23 @@ fn sheets_duplicate_and_take_tab_colours() {
     assert!(s.undo().unwrap());
     assert_eq!(s.info(0).unwrap().color, None);
 }
+
+/// S.06: a range sorts by its columns as one undo step, with a header row kept; numbers
+/// before text, empty cells last; ranges with formulas are refused.
+#[test]
+fn ranges_sort_by_columns() {
+    use crate::sheets::SortBy;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    let rows = [("name", "n"), ("b", "10"), ("a", "9"), ("c", ""), ("a", "2")];
+    let inputs: Vec<SheetInput> = rows.iter().enumerate().flat_map(|(i, (x, y))| [sheet_input(i as u32, 0, x), sheet_input(i as u32, 1, y)]).collect();
+    s.set(0, &inputs).unwrap();
+    s.sort_range(0, area(0, 0, 5, 2), &[SortBy { column: 0, desc: false }, SortBy { column: 1, desc: true }], true).unwrap();
+    let col = |s: &Sheets, c: u32| (0..5).map(|r| shown(s, r, c)).collect::<Vec<_>>();
+    assert_eq!(col(&s, 0), vec!["name", "a", "a", "b", "c"]);
+    assert_eq!(col(&s, 1), vec!["n", "9", "2", "10", ""]);
+    assert!(s.undo().unwrap());
+    assert_eq!(col(&s, 0), vec!["name", "b", "a", "c", "a"]);
+    s.set(0, &[sheet_input(1, 1, "=1+1")]).unwrap();
+    assert!(s.sort_range(0, area(0, 0, 5, 2), &[SortBy { column: 1, desc: false }], true).is_err());
+}

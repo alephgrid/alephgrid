@@ -133,3 +133,65 @@ fn replace_any_case(text: &str, find: &str, with: &str) -> String {
     out.push_str(&text[i..]);
     out
 }
+
+/// One key of a range sort: a column of the range (0-based within it) and its direction.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SortBy {
+    pub column: u32,
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub desc: bool,
+}
+
+impl Sheets {
+    /// Sort the rows of `area` by `keys` (S.06), keeping a first header row when `header`,
+    /// as one undo step. Numbers sort before text, empty cells last. Ranges holding formulas
+    /// are refused: their references would point at other cells once rows move.
+    pub fn sort_range(&mut self, index: u32, area: super::CellArea, keys: &[SortBy], header: bool) -> Result<()> {
+        self.check_index(index)?;
+        area.check("sort")?;
+        if keys.is_empty() || keys.iter().any(|k| k.column >= area.columns) {
+            bail!("sort by one or more columns of the range");
+        }
+        let m = self.model()?;
+        let start = area.row + u32::from(header);
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for r in start..area.row + area.rows {
+            let mut row = Vec::new();
+            for c in area.column..area.column + area.columns {
+                let input = m.get_cell_content(index, r as i32 + 1, c as i32 + 1).unwrap_or_default();
+                if input.starts_with('=') {
+                    bail!("this range holds formulas; sorting them would change what they refer to, so sort a range of values");
+                }
+                row.push(input);
+            }
+            rows.push(row);
+        }
+        #[derive(PartialEq, PartialOrd)]
+        enum Key { Num(f64), Text(String), Empty }
+        let key = |s: &str| if s.is_empty() { Key::Empty } else if let Ok(n) = s.parse::<f64>() { Key::Num(n) } else { Key::Text(s.to_lowercase()) };
+        rows.sort_by(|a, b| {
+            for k in keys {
+                let (x, y) = (key(&a[k.column as usize]), key(&b[k.column as usize]));
+                let ord = match (&x, &y) {
+                    (Key::Empty, Key::Empty) => std::cmp::Ordering::Equal,
+                    (Key::Empty, _) => return std::cmp::Ordering::Greater,
+                    (_, Key::Empty) => return std::cmp::Ordering::Less,
+                    _ => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                };
+                let ord = if k.desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let mut inputs = Vec::new();
+        for (i, row) in rows.into_iter().enumerate() {
+            for (j, v) in row.into_iter().enumerate() {
+                inputs.push(SheetInput { row: start + i as u32, column: area.column + j as u32, value: v, base: None });
+            }
+        }
+        self.set(index, &inputs)
+    }
+}
