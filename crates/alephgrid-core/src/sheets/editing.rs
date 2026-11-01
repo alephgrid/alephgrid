@@ -328,7 +328,7 @@ impl Sheets {
 
     /// The formula `input`, typed at source cell `from`, as it reads when copied to `to`
     /// (sheet, row, column). The source sheet does not matter: see below.
-    fn translate(&self, input: &str, from: (u32, u32), to: (u32, u32, u32)) -> Result<String> {
+    pub(super) fn translate(&self, input: &str, from: (u32, u32), to: (u32, u32, u32)) -> Result<String> {
         let Some(body) = input.strip_prefix('=') else { return Ok(input.to_string()) };
         let m = self.model()?.get_model();
         let wb = &m.workbook;

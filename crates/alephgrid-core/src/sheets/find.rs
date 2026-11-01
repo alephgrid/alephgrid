@@ -155,22 +155,24 @@ impl Sheets {
         }
         let m = self.model()?;
         let start = area.row + u32::from(header);
-        let mut rows: Vec<Vec<String>> = Vec::new();
+        // Each row keeps where it came from: formulas move with their row and their
+        // relative references are rewritten as a copy to the new row would (S.06). Keys
+        // are values: a formula sorts by what it shows.
+        let mut rows: Vec<(u32, Vec<String>, Vec<String>)> = Vec::new();
         for r in start..area.row + area.rows {
-            let mut row = Vec::new();
+            let (mut inputs, mut keys) = (Vec::new(), Vec::new());
             for c in area.column..area.column + area.columns {
-                let input = m.get_cell_content(index, r as i32 + 1, c as i32 + 1).unwrap_or_default();
-                if input.starts_with('=') {
-                    bail!("this range holds formulas; sorting them would change what they refer to, so sort a range of values");
-                }
-                row.push(input);
+                let (row, col) = (r as i32 + 1, c as i32 + 1);
+                let input = m.get_cell_content(index, row, col).unwrap_or_default();
+                keys.push(if input.starts_with('=') { m.get_formatted_cell_value(index, row, col).unwrap_or_default().replace(',', "") } else { input.clone() });
+                inputs.push(input);
             }
-            rows.push(row);
+            rows.push((r, inputs, keys));
         }
         #[derive(PartialEq, PartialOrd)]
         enum Key { Num(f64), Text(String), Empty }
         let key = |s: &str| if s.is_empty() { Key::Empty } else if let Ok(n) = s.parse::<f64>() { Key::Num(n) } else { Key::Text(s.to_lowercase()) };
-        rows.sort_by(|a, b| {
+        rows.sort_by(|(_, _, a), (_, _, b)| {
             for k in keys {
                 let (x, y) = (key(&a[k.column as usize]), key(&b[k.column as usize]));
                 let ord = match (&x, &y) {
@@ -187,9 +189,12 @@ impl Sheets {
             std::cmp::Ordering::Equal
         });
         let mut inputs = Vec::new();
-        for (i, row) in rows.into_iter().enumerate() {
+        for (i, (from, row, _)) in rows.into_iter().enumerate() {
+            let to = start + i as u32;
             for (j, v) in row.into_iter().enumerate() {
-                inputs.push(SheetInput { row: start + i as u32, column: area.column + j as u32, value: v, base: None });
+                let column = area.column + j as u32;
+                let value = if v.starts_with('=') && from != to { self.translate(&v, (from, column), (index, to, column))? } else { v };
+                inputs.push(SheetInput { row: to, column, value, base: None });
             }
         }
         self.set(index, &inputs)

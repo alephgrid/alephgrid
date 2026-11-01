@@ -163,7 +163,7 @@ fn sheets_duplicate_and_take_tab_colours() {
 }
 
 /// S.06: a range sorts by its columns as one undo step, with a header row kept; numbers
-/// before text, empty cells last; ranges with formulas are refused.
+/// before text, empty cells last.
 #[test]
 fn ranges_sort_by_columns() {
     use crate::sheets::SortBy;
@@ -178,8 +178,36 @@ fn ranges_sort_by_columns() {
     assert_eq!(col(&s, 1), vec!["n", "9", "2", "10", ""]);
     assert!(s.undo().unwrap());
     assert_eq!(col(&s, 0), vec!["name", "b", "a", "c", "a"]);
-    s.set(0, &[sheet_input(1, 1, "=1+1")]).unwrap();
-    assert!(s.sort_range(0, area(0, 0, 5, 2), &[SortBy { column: 1, desc: false }], true).is_err());
+}
+
+/// S.06: formulas move with their rows; relative references are rewritten as a copy to the
+/// new row would be (so a row keeps referring to itself), absolute ones stay; formula
+/// columns sort by the values they show.
+#[test]
+fn ranges_with_formulas_sort() {
+    use crate::sheets::SortBy;
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    let mut inputs = vec![sheet_input(0, 0, "n"), sheet_input(0, 1, "tens"), sheet_input(0, 2, "first")];
+    for (r, v) in [(1, "3"), (2, "1"), (3, "2")] {
+        inputs.push(sheet_input(r, 0, v));
+        inputs.push(sheet_input(r, 1, &format!("=A{}*10", r + 1)));
+        inputs.push(sheet_input(r, 2, "=$A$2"));
+    }
+    s.set(0, &inputs).unwrap();
+    s.sort_range(0, area(0, 0, 4, 3), &[SortBy { column: 0, desc: false }], true).unwrap();
+    let col = |s: &Sheets, c: u32| (0..4).map(|r| shown(s, r, c)).collect::<Vec<_>>();
+    assert_eq!(col(&s, 0), vec!["n", "1", "2", "3"]);
+    assert_eq!(col(&s, 1), vec!["tens", "10", "20", "30"]);
+    assert_eq!(col(&s, 2), vec!["first", "1", "1", "1"]);
+    let b = s.fetch(0, 1, 3, 3).unwrap();
+    let typed: Vec<String> = b.rows.iter().map(|r| r[1].clone().and_then(|c| c.2).unwrap_or_default()).collect();
+    assert_eq!(typed, vec!["=A2*10", "=A3*10", "=A4*10"]);
+    s.sort_range(0, area(0, 0, 4, 3), &[SortBy { column: 1, desc: true }], true).unwrap();
+    assert_eq!(col(&s, 0), vec!["n", "3", "2", "1"]);
+    assert_eq!(col(&s, 1), vec!["tens", "30", "20", "10"]);
+    assert!(s.undo().unwrap());
+    assert_eq!(col(&s, 0), vec!["n", "1", "2", "3"]);
 }
 
 /// S.01: borders on an area, one undo step, kept through XLSX.
