@@ -10,6 +10,7 @@ import { WorkbookScreen } from "./workbook";
 import { waitForCompute } from "./compute";
 import { brandMark, icon, type IconName } from "./icons";
 import { themeButton } from "./theme";
+import { agentsDialog } from "./agents";
 
 const app = document.getElementById("app")!;
 let current: WorkbookScreen | null = null;
@@ -479,6 +480,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       { label: owner ? "Members…" : "Who has access…", action: () => membersDialog(sp, () => {}) },
       ...(owner ? [{ label: "Service tokens…", action: () => tokensDialog(sp) }] : []));
   }
+  if (owner) items.push("sep", { label: "Agent connections…", hint: "MCP, read-only", action: () => agentsDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name }))) });
   items.push("sep", { label: "Delete space", danger: true, disabled: !owner, action: async () => {
     const n = home.workbooks.filter((w) => w.space === sp.id).length;
     if (n) {

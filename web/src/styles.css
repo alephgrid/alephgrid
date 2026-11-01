@@ -813,3 +813,16 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .import-pane .import-samples { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-pane .import-preview { overflow: auto; max-height: 40vh; }
 .import-pane .dialog-actions { margin-top: auto; padding-top: 12px; position: sticky; bottom: 0; background: var(--surface, var(--bg)); }
+
+/* M.07: agent connections */
+.agents-dialog .agent-form { display: grid; gap: 8px; }
+.agent-row { grid-template-columns: 1fr auto auto auto; }
+.agent-scope { font-size: 12px; }
+.agent-actions { display: flex; gap: 6px; }
+.agent-setup { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel, var(--bg)); margin-bottom: 8px; }
+.agent-setup-item { display: grid; gap: 4px; }
+.agent-setup-label { font-size: 12px; color: var(--muted); }
+.agent-setup-row { display: flex; gap: 6px; align-items: flex-start; }
+.agent-setup-row input, .agent-setup-row textarea { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+.agent-what { max-width: 360px; overflow-wrap: anywhere; }
+.agent-failed { color: var(--danger); }

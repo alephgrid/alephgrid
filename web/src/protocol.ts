@@ -614,6 +614,18 @@ user?: PublicUser, };
 
 export type Token = { id: string, name: string, space_id: string, role: SpaceRole, created_by: string, created_at: number, expires_at: number, revoked_at?: number, last_used?: number, };
 
+export type AgentConnection = { id: string, name: string, space_id: string, 
+/**
+ * Workbooks it may read; absent: every workbook of the space.
+ */
+workbooks?: Array<string>, created_by: string, created_at: number, expires_at: number, revoked_at?: number, last_used?: number, };
+
+export type AgentActivity = { at_ms: number, tool: string, workbook?: string, ok: boolean, 
+/**
+ * What it did: SQL, rows, result handle, or the error.
+ */
+detail: Record<string, unknown>, };
+
 export type Invite = { id: string, org_id: string, email: string, org_role: OrgRole, space_id?: string, space_role?: SpaceRole, created_by: string, created_at: number, expires_at: number, accepted_at?: number, revoked_at?: number, };
 
 export type AuditEvent = { seq: number, at: number, 

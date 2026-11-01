@@ -59,3 +59,14 @@ pub mod duckdb_handles {
 
 #[cfg(test)]
 mod tests;
+
+/// The DuckDB library version this build links (for receipts and diagnostics).
+pub fn duckdb_version() -> String {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        duckdb::Connection::open_in_memory()
+            .and_then(|c| c.query_row("SELECT version()", [], |r| r.get::<_, String>(0)))
+            .unwrap_or_else(|_| "unknown".into())
+    })
+    .clone()
+}

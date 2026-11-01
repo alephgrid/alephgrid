@@ -5,6 +5,7 @@ pub mod auth;
 pub mod backup;
 pub mod http;
 pub mod library;
+pub mod mcp;
 pub mod protocol;
 pub mod python;
 pub mod quota;
