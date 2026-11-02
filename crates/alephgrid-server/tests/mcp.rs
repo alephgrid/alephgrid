@@ -44,6 +44,11 @@ impl Mcp {
         v["result"]["structuredContent"].clone()
     }
 
+    /// A tool's whole result, error or not.
+    async fn tool_value(&mut self, name: &str, args: Value) -> Value {
+        self.rpc("tools/call", json!({ "name": name, "arguments": args })).await["result"].clone()
+    }
+
     /// A tool error's message.
     async fn tool_error(&mut self, name: &str, args: Value) -> String {
         let v = self.rpc("tools/call", json!({ "name": name, "arguments": args })).await;
@@ -302,6 +307,61 @@ async fn long_queries_become_jobs() {
     let s = mcp.tool("job_status", json!({ "job": job })).await;
     assert_eq!(s["status"], "cancelled");
     assert!(mcp.tool_error("job_status", json!({ "job": "nope" })).await.contains("no such job"));
+    server.stop().await;
+}
+
+/// Agent reads run like the app's bulk reads: the server's job time limit stops a query that
+/// runs too long, at most 4 requests of a connection compute at once, and cancelling a job
+/// really stops it (its place comes back only when its work has ended).
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_queries_obey_the_time_limit_and_the_running_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start_with(dir.path(), |c| c.job_timeout = std::time::Duration::from_secs(1)).await;
+    let (a, _b, mut mcp) = setup(&server).await;
+    let endless = "SELECT count(*) FROM range(100000000000) r(i) WHERE i % 7 = 3";
+    let started = mcp.tool("run_query", json!({ "workbook": a, "sql": endless, "wait_seconds": 0 })).await;
+    let job = started["job"].as_str().expect("a job id").to_string();
+    let mut ended = None;
+    for _ in 0..200 {
+        let s = mcp.tool_value("job_status", json!({ "job": job })).await;
+        if s["structuredContent"].get("status") != Some(&json!("running")) {
+            ended = Some(s);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let ended = ended.expect("the time limit ended the query");
+    assert!(ended.to_string().contains("deadline"), "{ended}");
+
+    // The cap counts work that computes, and a cancelled job keeps its place until it stops.
+    let server2_dir = tempfile::tempdir().unwrap();
+    let server2 = TestServer::start_with(server2_dir.path(), |c| c.job_timeout = std::time::Duration::from_secs(600)).await;
+    let (a2, _b2, mut mcp2) = setup(&server2).await;
+    let mut jobs = Vec::new();
+    for _ in 0..4 {
+        let s = mcp2.tool("run_query", json!({ "workbook": a2, "sql": endless, "wait_seconds": 0 })).await;
+        jobs.push(s["job"].as_str().expect("a job id").to_string());
+    }
+    // Give the four time to start computing.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(mcp2.tool_error("run_query", json!({ "workbook": a2, "sql": endless, "wait_seconds": 0 })).await.contains("4 running requests"));
+    assert!(mcp2.tool_error("preview_table", json!({ "workbook": a2, "table": "orders" })).await.contains("4 running requests"), "synchronous reads count too");
+    for j in &jobs {
+        assert_eq!(mcp2.tool("cancel_job", json!({ "job": j })).await["status"], "cancelled");
+        mcp2.tool("job_status", json!({ "job": j })).await;
+    }
+    // Cancelling stopped them: the connection may compute again.
+    let mut admitted = false;
+    for _ in 0..100 {
+        let r = mcp2.tool_value("preview_table", json!({ "workbook": a2, "table": "orders" })).await;
+        if !r.to_string().contains("4 running requests") {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(admitted, "cancelled jobs stop and give their places back");
+    server2.stop().await;
     server.stop().await;
 }
 

@@ -184,7 +184,7 @@ pub fn backup_offline(data_dir: &Path, dest: &Path) -> Result<BackupManifest> {
             alephgrid_core::storage::copy_durably(&src.join("workbook.json"), &dir.join("workbook.json"))?;
             entries.push(entry(&meta, &db, revision)?);
         }
-        let store = crate::auth::Store::open(&control.join("control.duckdb"))?;
+        let store = crate::auth::Store::open_allowing(&control.join("control.duckdb"), &[dest.to_path_buf()])?;
         crate::state::migrate_to_spaces(data_dir, &store)?;
         let sum = self::control(&store, dest)?;
         drop(store);

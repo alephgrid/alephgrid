@@ -18,7 +18,7 @@ pub mod routes;
 pub mod store;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -297,7 +297,10 @@ pub struct Auth {
     /// Bumped by every change to identities, roles, sessions, tokens or a workbook's
     /// space; open connections recheck their access when it moves.
     generation: tokio::sync::watch::Sender<u64>,
+    /// Sign-in attempts per email: (count, last attempt).
     failures: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Bounds how many password checks run at once.
+    hashing: Gate,
     /// One-time code that creates the instance admin while no user exists.
     setup_code: Mutex<Option<String>>,
     pub oidc: Option<oidc::Oidc>,
@@ -323,7 +326,7 @@ pub fn hash(secret: &str) -> String {
 }
 
 /// Constant-time equality of two hashes.
-fn same(a: &str, b: &str) -> bool {
+pub(crate) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
@@ -362,6 +365,36 @@ pub fn normalize_email(email: &str) -> Result<String> {
     Ok(e)
 }
 
+/// A counting gate for blocking threads: at most `n` holders at once.
+struct Gate {
+    free: Mutex<usize>,
+    cv: Condvar,
+}
+
+struct GateGuard<'a>(&'a Gate);
+
+impl Gate {
+    fn new(n: usize) -> Gate {
+        Gate { free: Mutex::new(n), cv: Condvar::new() }
+    }
+
+    fn acquire(&self) -> GateGuard<'_> {
+        let mut free = self.free.lock().unwrap();
+        while *free == 0 {
+            free = self.cv.wait(free).unwrap();
+        }
+        *free -= 1;
+        GateGuard(self)
+    }
+}
+
+impl Drop for GateGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.free.lock().unwrap() += 1;
+        self.0.cv.notify_one();
+    }
+}
+
 /// The value of cookie `name` in a request.
 pub fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get_all(axum::http::header::COOKIE).iter().filter_map(|v| v.to_str().ok()).flat_map(|v| v.split(';')).find_map(|kv| {
@@ -388,6 +421,7 @@ impl Auth {
             audit_thread: Mutex::new(Some(thread)),
             generation: tokio::sync::watch::Sender::new(1),
             failures: Mutex::new(HashMap::new()),
+            hashing: Gate::new(std::thread::available_parallelism().map_or(2, |n| n.get()).max(2)),
             setup_code: Mutex::new(None),
             oidc,
         };
@@ -464,27 +498,31 @@ impl Auth {
 
     // -------------------------------------------------------------- sign-in
 
-    fn locked_out(&self, key: &str) -> Option<Duration> {
-        let f = self.failures.lock().unwrap();
-        f.get(key).filter(|(n, at)| *n >= MAX_FAILURES && at.elapsed() < LOCKOUT).map(|(_, at)| LOCKOUT - at.elapsed())
-    }
-
-    fn failed(&self, key: &str) {
+    /// Count a sign-in attempt for `key` before checking it, in one step, so attempts made
+    /// at the same time cannot all slip under the limit. Refused (with the time left) when
+    /// `key` already has `MAX_FAILURES` failures within `LOCKOUT`.
+    fn begin_attempt(&self, key: &str) -> std::result::Result<(), Duration> {
         let mut f = self.failures.lock().unwrap();
         let e = f.entry(key.to_string()).or_insert((0, Instant::now()));
         if e.1.elapsed() >= LOCKOUT {
             *e = (0, Instant::now());
         }
+        if e.0 >= MAX_FAILURES {
+            return Err(LOCKOUT.saturating_sub(e.1.elapsed()));
+        }
         e.0 += 1;
         e.1 = Instant::now();
+        Ok(())
     }
 
     /// Check an email and password; the same message whatever was wrong.
     pub fn password_login(&self, email: &str, password: &str) -> Result<User> {
         let key = email.trim().to_lowercase();
-        if let Some(left) = self.locked_out(&key) {
+        if let Err(left) = self.begin_attempt(&key) {
             bail!(Denied::Refused(format!("too many failed sign-ins; try again in {} minute(s)", left.as_secs().div_ceil(60))));
         }
+        // Argon2 holds about 19 MiB while it runs: a few at a time.
+        let _hashing = self.hashing.acquire();
         let user = self.store.user_by_email(&key)?;
         let hash = user.as_ref().and_then(|u| u.password_hash.clone());
         let ok = verify_password(password, hash.as_deref().unwrap_or_else(|| decoy_hash()));
@@ -493,10 +531,8 @@ impl Auth {
                 self.failures.lock().unwrap().remove(&key);
                 Ok(u)
             }
-            _ => {
-                self.failed(&key);
-                bail!(Denied::Refused("the email or password is wrong".into()))
-            }
+            // The attempt was counted when it began.
+            _ => bail!(Denied::Refused("the email or password is wrong".into())),
         }
     }
 

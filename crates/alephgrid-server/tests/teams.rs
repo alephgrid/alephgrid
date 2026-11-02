@@ -388,6 +388,34 @@ async fn open_connections_lose_access_when_it_is_revoked() {
     t.server.stop().await;
 }
 
+/// An open view belongs to the connection that opened it: another session of the workbook,
+/// a viewer's say, cannot read it, re-point it at other rows or close it, so an editor's
+/// change by position always lands on the rows the editor was shown.
+#[tokio::test(flavor = "multi_thread")]
+async fn views_belong_to_the_connection_that_opened_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = team(dir.path()).await;
+    let mut editor = t.editor.ws(&t.wa).await.unwrap();
+    let mut viewer = t.viewer.ws(&t.wa).await.unwrap();
+    let info = editor.ok("open_view", json!({ "spec": { "table": "t" } })).await;
+    let view = info["view_id"].as_u64().unwrap();
+    for (op, params) in [
+        ("update_view", json!({ "view_id": view, "spec": { "table": "t", "sort": [{ "column": "s", "desc": true }] } })),
+        ("view_info", json!({ "view_id": view })),
+        ("fetch", json!({ "view_id": view, "row_start": 0, "row_count": 3 })),
+        ("stats", json!({ "view_id": view, "column": "s", "start": 0, "end": 1 })),
+        ("close_view", json!({ "view_id": view })),
+    ] {
+        let e = viewer.call(op, params).await.expect_err(op);
+        assert!(e.contains("unknown view"), "{op}: {e}");
+    }
+    // The editor's view is untouched and still theirs.
+    let again = editor.ok("view_info", json!({ "view_id": view })).await;
+    assert_eq!(again["row_count"], info["row_count"]);
+    editor.ok("fetch", json!({ "view_id": view, "row_start": 0, "row_count": 3 })).await;
+    t.server.stop().await;
+}
+
 /// Service tokens: one space, their role, header only, revocable, expiring (7.02).
 #[tokio::test(flavor = "multi_thread")]
 async fn service_tokens_are_scoped_to_their_space_and_role() {
@@ -529,6 +557,22 @@ async fn password_sign_in_refuses_guessing() {
     assert!(locked["error"].as_str().unwrap().contains("too many failed sign-ins"), "{locked}");
     let audit = server.state.auth.store.audit_events(None, None, None, 100).unwrap();
     assert!(audit.iter().filter(|e| e.action == "sign_in_failed").count() >= 5);
+    server.stop().await;
+}
+
+/// Attempts sent all at once count too: at most 5 passwords are checked per lockout window,
+/// however many arrive together (each attempt is counted before its slow check runs).
+#[tokio::test(flavor = "multi_thread")]
+async fn password_lockout_holds_under_concurrent_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start_accounts(dir.path(), |_| {}).await;
+    let tries = (0..40).map(|_| server.login(ADMIN_EMAIL, "not the password"));
+    let replies = futures_util::future::join_all(tries).await;
+    let checked = replies.iter().filter(|r| r.as_ref().err().is_some_and(|(_, b)| b["error"].as_str().unwrap_or("").contains("wrong"))).count();
+    let refused = replies.iter().filter(|r| r.as_ref().err().is_some_and(|(_, b)| b["error"].as_str().unwrap_or("").contains("too many"))).count();
+    assert_eq!(checked, alephgrid_server::auth::MAX_FAILURES as usize, "only {} passwords may be checked", alephgrid_server::auth::MAX_FAILURES);
+    assert_eq!(checked + refused, 40);
+    assert!(server.login(ADMIN_EMAIL, ADMIN_PASSWORD).await.is_err(), "the right password is refused while locked out");
     server.stop().await;
 }
 
@@ -847,28 +891,52 @@ impl Idp {
     }
 }
 
-/// Starts a sign-in at the server, plays the identity provider's part with `claims` (the
-/// test's nonce is filled in unless `claims` sets one), and returns the callback's reply.
-async fn sso(server: &TestServer, idp: &Idp, claims: Value, signer: &'static str) -> (u16, String, Option<String>) {
+/// Starts a sign-in at the server as a browser would: the identity provider's query and the
+/// sign-in cookie the server gave this browser.
+async fn start_sso(server: &TestServer, idp: &Idp) -> (HashMap<String, String>, String) {
     let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let r = http.get(server.url("/api/auth/oidc/start?next=/w/abc")).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 303);
+    let flow = r.headers().get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find_map(|v| v.split(';').next()?.strip_prefix("alephgrid_sso=").map(str::to_string)).expect("the sign-in is held in a cookie");
     let location = reqwest::Url::parse(r.headers()["location"].to_str().unwrap()).unwrap();
     assert!(location.as_str().starts_with(&format!("{}/authorize", idp.issuer)));
     let q: HashMap<String, String> = location.query_pairs().into_owned().collect();
     assert_eq!(q["code_challenge_method"], "S256");
     assert_eq!(q["client_id"], CLIENT_ID);
+    (q, flow)
+}
+
+/// Plays the identity provider's part with `claims` for a started sign-in (the nonce is
+/// filled in unless `claims` sets one) and returns the code to come back with.
+fn grant(idp: &Idp, q: &HashMap<String, String>, claims: Value, signer: &'static str) -> String {
     let mut claims = claims;
     if claims.get("nonce").is_none() {
         claims["nonce"] = json!(q["nonce"]);
     }
     let code = alephgrid_server::auth::random_id();
     idp.codes.lock().unwrap().insert(code.clone(), Grant { claims, challenge: q["code_challenge"].clone(), signer });
-    let r = http.get(server.url(&format!("/api/auth/oidc/callback?code={code}&state={}", common::urlencode(&q["state"])))).send().await.unwrap();
+    code
+}
+
+/// Comes back from the identity provider with `cookie` (if any) as the browser's cookies.
+async fn callback(server: &TestServer, code: &str, state: &str, cookie: Option<&str>) -> (u16, String, Option<String>) {
+    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let mut req = http.get(server.url(&format!("/api/auth/oidc/callback?code={code}&state={}", common::urlencode(state))));
+    if let Some(c) = cookie {
+        req = req.header("Cookie", c);
+    }
+    let r = req.send().await.unwrap();
     let status = r.status().as_u16();
     let cookie = session_cookie(r.headers());
     let to = r.headers().get("location").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
     (status, to, cookie)
+}
+
+/// A whole sign-in in one browser; returns the callback's reply.
+async fn sso(server: &TestServer, idp: &Idp, claims: Value, signer: &'static str) -> (u16, String, Option<String>) {
+    let (q, flow) = start_sso(server, idp).await;
+    let code = grant(idp, &q, claims, signer);
+    callback(server, &code, &q["state"], Some(&format!("alephgrid_sso={flow}"))).await
 }
 
 fn claims(idp: &Idp, sub: &str, email: &str, groups: &[&str]) -> Value {
@@ -961,6 +1029,26 @@ async fn single_sign_on_maps_claims_to_users_and_roles() {
     let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let r = http.get(s.url("/api/auth/oidc/callback?code=x&state=never-issued")).send().await.unwrap();
     assert!(r.headers()["location"].to_str().unwrap().contains("expired"), "{:?}", r.headers());
+    // A sign-in finishes only in the browser that started it: a callback link someone else
+    // started (code and state of their own sign-in) signs no other browser in, whether it
+    // has no sign-in cookie or the cookie of a sign-in of its own (login CSRF).
+    let (q, flow) = start_sso(s, &idp).await;
+    let code = grant(&idp, &q, base(), "idp");
+    let (_, to, cookie) = callback(s, &code, &q["state"], None).await;
+    assert!(to.starts_with("/login?error=") && cookie.is_none(), "no cookie: {to}");
+    let (_, other) = start_sso(s, &idp).await;
+    let (_, to, cookie) = callback(s, &code, &q["state"], Some(&format!("alephgrid_sso={other}"))).await;
+    assert!(to.starts_with("/login?error=") && cookie.is_none(), "another browser's sign-in: {to}");
+    let (_, to, cookie) = callback(s, &code, &q["state"], Some(&format!("alephgrid_sso={flow}x"))).await;
+    assert!(to.starts_with("/login?error=") && cookie.is_none(), "a tampered cookie: {to}");
+    // Starting sign-ins keeps nothing on the server, so anonymous starts cannot fill a table
+    // and keep others from signing in.
+    for _ in 0..50 {
+        start_sso(s, &idp).await;
+    }
+    let (_, to, cookie) = sso(s, &idp, base(), "idp").await;
+    assert_eq!(to, "/w/abc");
+    assert!(cookie.is_some());
     // The valid one still works after all that.
     let (_, to, cookie) = sso(s, &idp, base(), "idp").await;
     assert_eq!(to, "/w/abc");
@@ -1069,6 +1157,8 @@ async fn space_quotas_limit_storage_workbooks_jobs_and_open_workbooks() {
     assert_eq!(s, 507, "{v}");
     let mut ws = t.editor.ws(&t.wa).await.unwrap();
     assert_eq!(ws.code("create_table_from_query", json!({ "name": "copy", "sql": "SELECT * FROM t" })).await.as_deref(), Some("quota"));
+    // A data tool's result is a copy of the table too.
+    assert_eq!(ws.code("apply_transform", json!({ "table": "t", "transform": { "kind": "trim", "column": "s" }, "name": "trimmed" })).await.as_deref(), Some("quota"));
     let tables: Vec<String> = ws.ok("tables", json!({})).await.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
     assert_eq!(tables, vec!["t"], "nothing was added");
     let view = ws.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();

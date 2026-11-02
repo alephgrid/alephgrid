@@ -38,11 +38,13 @@ async fn reads_are_answered_while_a_long_change_runs_and_cancel_hits_only_its_ta
     let mut a = server.ws(&wb).await;
     let mut b = server.ws(&wb).await;
     let view = table(&mut a, "t", "SELECT i AS n FROM range(1000) r(i)").await;
+    // Views belong to their connection: B edits through a view of its own.
+    let vb = b.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
     let before = a.ok("history", json!({})).await.as_array().unwrap().len();
     // A starts a change that would run for minutes; B's change queues behind it.
     let slow = a.send("create_table_from_query", json!({ "name": "slow", "sql": SLOW_SQL })).await;
     until_writer_busy(&server, &wb).await;
-    let queued = b.send("edit", json!({ "view_id": view, "edits": [{ "row": 0, "column": "n", "value": "-1" }] })).await;
+    let queued = b.send("edit", json!({ "view_id": vb, "edits": [{ "row": 0, "column": "n", "value": "-1" }] })).await;
     // Reads do not wait for the writer.
     let started = Instant::now();
     let v = b.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
@@ -144,6 +146,7 @@ async fn a_flooding_session_does_not_hold_back_another() {
     let mut a = server.ws(&wb).await;
     let mut b = server.ws(&wb).await;
     let view = table(&mut a, "t", "SELECT 0 AS n, 0 AS m").await;
+    let vb = b.ok("open_view", json!({ "spec": { "table": "t" } })).await["view_id"].as_u64().unwrap();
     let slow = a.send("create_table_from_query", json!({ "name": "slow", "sql": SLOW_SQL })).await;
     until_writer_busy(&server, &wb).await;
     let flood: Vec<u64> = {
@@ -156,7 +159,7 @@ async fn a_flooding_session_does_not_hold_back_another() {
     let state = server.state.clone();
     let w = wb.clone();
     eventually("A's edits are queued", move || state.controller.handle(&w).is_some_and(|h| h.sched.waiting().1 >= 20)).await;
-    let light = b.send("edit", json!({ "view_id": view, "edits": [{ "row": 0, "column": "m", "value": "1" }] })).await;
+    let light = b.send("edit", json!({ "view_id": vb, "edits": [{ "row": 0, "column": "m", "value": "1" }] })).await;
     a.ok("cancel", json!({ "request": slow })).await;
     let b_rev = revision_of(&b.reply(light).await.unwrap());
     let mut a_revs = Vec::new();
@@ -410,8 +413,10 @@ async fn a_client_that_does_not_read_is_cut_off_with_bounded_buffering() {
         use futures_util::SinkExt;
         let v = server.state.controller.handle(&wb).unwrap();
         let _ = v;
+        // Large replies it never reads: whole queries over the table (it has no view of its
+        // own, and views belong to their connection).
         for i in 0..30 {
-            let frame = json!({ "id": i + 1, "op": "fetch", "view_id": view, "row_start": 0, "row_count": 200 });
+            let frame = json!({ "id": i + 1, "op": "query", "sql": "SELECT s FROM t" });
             if sink.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await.is_err() {
                 break;
             }

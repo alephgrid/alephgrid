@@ -455,9 +455,19 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
-        MaterializeAnalysis { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
+        MaterializeAnalysis { .. } | ApplyTransform { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
         | TableFromView { .. } | SheetToTable { .. } | SqlChange { .. } | RefreshMaterialized { .. } => Some((true, Class::Bulk)),
         _ => Some((true, Class::Interactive)),
+    }
+}
+
+/// The open view an op names, if any. Views belong to the connection that opened them: one
+/// session may not read, re-point or close another's view, nor write through it.
+fn view_named(op: &Op) -> Option<u64> {
+    match op {
+        Op::UpdateView { view_id, .. } | Op::ViewInfo { view_id } | Op::CloseView { view_id } | Op::Fetch { view_id, .. }
+        | Op::Stats { view_id, .. } | Op::FindInView { view_id, .. } => Some(*view_id),
+        _ => view_of(op),
     }
 }
 
@@ -1419,6 +1429,10 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
         if let Some(cap) = required_caps(&envelope.op).iter().find(|c| !space_now.allows(role, **c)) {
             let e = crate::auth::forbidden(cap.describe());
             outbox.push(error_reply(id, &e, &state.config.data_dir).to_string(), true);
+            continue;
+        }
+        if let Some(v) = view_named(&envelope.op).filter(|v| !views.lock().unwrap().contains(v)) {
+            outbox.push(error_reply(id, &anyhow::anyhow!("unknown view {v}"), &state.config.data_dir).to_string(), true);
             continue;
         }
         let Some((is_write, class)) = classify(&envelope.op) else {
