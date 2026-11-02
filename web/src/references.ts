@@ -1,5 +1,5 @@
 /** A1 reference editor, not an expression evaluator. Never rewrites quoted text or names. */
-export interface ReferenceToken { start: number; end: number; row: number; column: number; absoluteRow: boolean; absoluteColumn: boolean; qualified: boolean }
+interface ReferenceToken { start: number; end: number; row: number; column: number; absoluteRow: boolean; absoluteColumn: boolean; qualified: boolean }
 const identifier = (c: string | undefined) => !!c && /[\p{L}\p{N}_.]/u.test(c);
 
 export function referenceTokens(text: string): ReferenceToken[] {

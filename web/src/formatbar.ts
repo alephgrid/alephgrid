@@ -13,7 +13,7 @@ export interface FormatHost {
   border(kind: string): Promise<void>;
 }
 
-export const NUMBER_FORMATS: { label: string; code: string }[] = [
+const NUMBER_FORMATS: { label: string; code: string }[] = [
   { label: "General", code: "" },
   { label: "Number (1,234.56)", code: "#,##0.00" },
   { label: "Whole number (1,235)", code: "#,##0" },
@@ -27,7 +27,7 @@ export const NUMBER_FORMATS: { label: string; code: string }[] = [
 ];
 
 /** A number format with one more (or fewer) decimal place. */
-export function stepDecimals(code: string, more: boolean): string {
+function stepDecimals(code: string, more: boolean): string {
   const base = code === "" || code.toLowerCase() === "general" ? "0" : code;
   const m = /0(\.0*)?/.exec(base);
   if (!m) return more ? `${base}.0` : base;

@@ -6,7 +6,7 @@ import { el } from "./ui";
 
 export type ChartType = "bar" | "column" | "line" | "area" | "scatter" | "pie";
 
-export interface ChartData {
+interface ChartData {
   /** One label per category (x axis, bar or slice). */
   labels: string[];
   series: { name: string; values: (number | null)[] }[];
@@ -24,7 +24,7 @@ function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<strin
 }
 
 /** A readable number for an axis or label: up to 3 significant digits with k/M/B. */
-export function shortNumber(v: number): string {
+function shortNumber(v: number): string {
   const a = Math.abs(v);
   const fmt = (n: number, s: string) => `${Number(n.toPrecision(3))}${s}`;
   if (a >= 1e9) return fmt(v / 1e9, "B");
@@ -34,7 +34,7 @@ export function shortNumber(v: number): string {
 }
 
 /** "Nice" ticks covering [lo, hi]. */
-export function ticks(lo: number, hi: number, count = 5): number[] {
+function ticks(lo: number, hi: number, count = 5): number[] {
   if (!(hi > lo)) { hi = lo + 1; }
   const raw = (hi - lo) / count;
   const mag = 10 ** Math.floor(Math.log10(raw));

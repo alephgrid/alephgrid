@@ -60,12 +60,13 @@ substrings in one editable VARCHAR column. It affects the whole table, including
 filters. NULL cells remain NULL. Find text must be nonempty; regex and multi-column replacement
 are not supported.
 
-**Preview replacement** gives the total affected-cell count and up to 50 before/after examples.
-Apply is tied to that workbook revision: any intervening workbook change requires a new preview.
+In the find bar's replace row, **Preview** gives the total affected-cell count and up to 50
+before/after examples. **Replace all** is tied to that workbook revision: any intervening
+workbook change requires a new preview.
 A replacement is limited to 10,000 affected cells and 4 MiB of old/new value data and serialized
 undo data. Expansion beyond that budget fails before changing data.
 
-The most recent replacement has a durable undo record. **Undo last replacement** restores it
+The most recent replacement has a durable undo record. **Undo replace** restores it
 only if no workbook mutation has occurred since; this protects later edits. The browser retains
 the undo revision locally, so it remains available after reloading in the same browser. Protocol
 clients can retain `undo_revision` themselves. Undo history here is independent from sheet cell

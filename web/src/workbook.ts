@@ -238,7 +238,6 @@ export class WorkbookScreen {
   private analysis: AnalyzePane | null = null;
   private presentation = emptyPresentation();
   private closePresentation: (() => void) | null = null;
-  private closeReplace: (() => void) | null = null;
   private findBar = new FindBar(() => this.grid.focus());
   /** S.11: comments of the open sheet (cell keys) and the comments pane. */
   private commentCells = new Set<string>();
@@ -534,7 +533,6 @@ export class WorkbookScreen {
     this.disposeFunctionCompletion?.();
     this.sql?.close();
     this.analysis?.close();
-    this.closeReplace?.();
     this.closePresentation?.();
     this.rpc.close();
     clearTimeout(this.statsTimer);

@@ -249,11 +249,6 @@ export class Grid {
     this.invalidate();
   }
 
-  /** The polite live region that announces the active cell. */
-  get liveRegion(): HTMLElement {
-    return this.announcer;
-  }
-
   /** Accessible name of the grid, e.g. the table or sheet name. */
   setLabel(label: string): void {
     this.host.setAttribute("aria-label", label);
@@ -1356,15 +1351,13 @@ export class Grid {
   }
 }
 
-export const DEFAULT_ROW_HEIGHT = ROW_H;
-
 function sameRange(a: Range, b: Range): boolean {
   return a.r0 === b.r0 && a.r1 === b.r1 && a.c0 === b.c0 && a.c1 === b.c1;
 }
 
 /** Where dragging the fill handle of `s` to cell (r, c) fills: the selection grown along the
  *  axis the pointer left it furthest on (down/up or right/left), else the selection itself. */
-export function fillTarget(s: Range, r: number, c: number): Range {
+function fillTarget(s: Range, r: number, c: number): Range {
   const rows = r > s.r1 ? r - s.r1 : r < s.r0 ? s.r0 - r : 0;
   const cols = c > s.c1 ? c - s.c1 : c < s.c0 ? s.c0 - c : 0;
   if (rows === 0 && cols === 0) return s;

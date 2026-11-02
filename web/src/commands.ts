@@ -8,9 +8,9 @@ import { el, openModal } from "./ui";
 
 /** Where focus is when the key is pressed. `grid`: the spreadsheet grid; `editor`: a cell
  *  or formula editor (its keys are handled there and listed here for help and audits). */
-export type CommandContext = "grid" | "editor";
+type CommandContext = "grid" | "editor";
 
-export interface Shortcut {
+interface Shortcut {
   /** `KeyboardEvent.key`, compared case-insensitively for letters. */
   key: string;
   /** Cmd on macOS, Ctrl elsewhere (either is accepted, as before). */
@@ -37,7 +37,7 @@ export interface Command {
 
 export const isMac = () => /Mac|iPhone|iPad/.test(navigator.platform);
 
-export function shortcutLabel(s: Shortcut, mac = isMac()): string {
+function shortcutLabel(s: Shortcut, mac = isMac()): string {
   const parts: string[] = [];
   if (s.ctrl) parts.push(mac ? "⌃" : "Ctrl");
   if (s.mod) parts.push(mac ? "⌘" : "Ctrl");

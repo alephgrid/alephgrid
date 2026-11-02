@@ -56,14 +56,14 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 /** Thrown for an id that is not a plain path segment (SEC.06). */
-export class BadId extends Error {}
+class BadId extends Error {}
 
 /**
  * An id from the server, as one URL path segment. Ids are `[A-Za-z0-9_-]{1,64}`; anything
  * else (`..`, a slash) is refused so it cannot retarget a request (SEC.06).
  */
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-export const isId = (id: string): boolean => ID.test(id);
+const isId = (id: string): boolean => ID.test(id);
 export function seg(id: string | number): string {
   const s = String(id);
   if (!ID.test(s)) throw new BadId(`invalid id ${JSON.stringify(s).slice(0, 80)}`);
@@ -240,7 +240,7 @@ type Pending = {
  * "unsaved" while some wait for the connection, "failed" when one was dropped unsaved (until
  * the next change is acknowledged).
  */
-export type SaveState = "saved" | "saving" | "unsaved" | "failed";
+type SaveState = "saved" | "saving" | "unsaved" | "failed";
 
 /** JSON-RPC-ish client over one WebSocket per workbook, with automatic reconnect. */
 export class Rpc {
@@ -381,11 +381,6 @@ export class Rpc {
 
   get isClosed(): boolean {
     return this.closed;
-  }
-
-  /** Changes waiting to be resent after a reconnect (for tests and status). */
-  get keptCount(): number {
-    return this.kept.length;
   }
 
   /** After a reconnect: a change sent for view `from` goes to the reopened view `to`. */

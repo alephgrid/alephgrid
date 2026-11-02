@@ -1,9 +1,8 @@
 import { Rpc } from "./api";
 import { el, openModal } from "./ui";
-import { resultTable } from "./analysis";
+import { field, resultTable } from "./analysis";
 import type { Column, Rule, Transform, Validation } from "./protocol";
 
-const field = (label: string, input: HTMLElement) => el("label", { class: "analysis-field" }, label, input);
 const select = (label: string, values: string[]) => el("select", { "aria-label": label }, ...values.map(value => el("option", { value }, value)));
 
 /** Data tools (F.12): validation rules (lists become dropdowns), transforms previewed and

@@ -1,7 +1,6 @@
 import data from "../../crates/alephgrid-core/data/function_catalog.json";
 import { el, openModal } from "./ui";
 
-export const functionCatalog = data;
 export const builtinFunctions = data.functions.filter(f => f.sheet_status === "registered" && f.signature !== null);
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;

@@ -1,32 +1,14 @@
 import { Rpc } from "./api";
 import { el, openModal } from "./ui";
 import { renderChart, type ChartType } from "./charts";
-import type { Aggregate, AnalysisSpec, AnalysisResult, SavedAnalysis, TableSchema, QueryResult, ReplacePreview, ChartKind, Measure, Calculated, Dashboard, DashboardResult, ColumnValues } from "./protocol";
+import type { AnalysisSpec, AnalysisResult, SavedAnalysis, TableSchema, QueryResult, ChartKind, Dashboard, DashboardResult, ColumnValues } from "./protocol";
 
-const field = (label: string, input: HTMLElement) => el("label", { class: "analysis-field" }, label, input);
-const select = (label: string, values: string[]) => el("select", { "aria-label": label }, ...values.map(value => el("option", { value }, value)));
+export const field = (label: string, input: HTMLElement) => el("label", { class: "analysis-field" }, label, input);
 export function resultTable(result: QueryResult, onRow?: (row: unknown[]) => void): HTMLElement {
   return el("div", { class: "analysis-result" }, el("table", { class: "result-table" },
     el("thead", {}, el("tr", {}, ...result.columns.map(c => el("th", { scope: "col" }, c.name)), ...(onRow ? [el("th", { scope: "col" }, "Rows")] : []))),
     el("tbody", {}, ...result.rows.map(row => el("tr", {}, ...row.map(value => el("td", {}, value === null ? "NULL" : String(value))),
       ...(onRow ? [el("td", {}, el("button", { class: "btn btn-small", onclick: () => onRow(row) }, "Show rows"))] : []))))));
-}
-
-/** Measures written one per line: `revenue = sum(amount)`, `orders = count()`. */
-export function parseMeasures(text: string): Measure[] {
-  return text.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
-    const m = /^(.+?)\s*=\s*(count|sum|average|min|max)\s*\(\s*(.*?)\s*\)$/i.exec(line);
-    if (!m) throw new Error(`measure "${line}": write name = sum(column), average(column), min(column), max(column) or count()`);
-    return { name: m[1], aggregate: m[2].toLowerCase() as Aggregate, ...(m[3] ? { value: m[3] } : {}) };
-  });
-}
-/** Calculated measures, one per line: `average = [@revenue]/[@orders]`. */
-export function parseCalculated(text: string): Calculated[] {
-  return text.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
-    const i = line.indexOf("=");
-    if (i < 1) throw new Error(`calculated measure "${line}": write name = formula`);
-    return { name: line.slice(0, i).trim(), formula: "=" + line.slice(i + 1).trim() };
-  });
 }
 
 /** A chart of a summary or report (U.18): every numeric measure is a series, groups are
@@ -48,41 +30,6 @@ export function drawChart(out: HTMLElement, spec: AnalysisSpec, data: AnalysisRe
   const partial = rows.length > 100 || data.result.truncated;
   out.append(box, el("p", { class: "chart-note" }, `${rows.length} ${rows.length === 1 ? "group" : "groups"}${partial ? "; the chart shows the first 100" : ""}. Totals are not drawn.`));
 }
-export async function replaceDialog(rpc: Rpc, table: string, workbookId: string): Promise<() => void> {
-  const schema = (await rpc.call("schema", {})).find(t => t.name === table);
-  const column = select("Replace column", schema?.columns.filter(c => c.sql_type === "VARCHAR" && !c.formula).map(c => c.name) ?? []);
-  const find = el("input", { "aria-label": "Find text" }), replacement = el("input", { "aria-label": "Replacement text" });
-  const status = el("p", { role: "status" }), output = el("div");
-  let preview: ReplacePreview | null = null;
-  let previewSpec: ReturnType<typeof spec> | null = null;
-  let generation = 0;
-  const key = `alephgrid-replace-${workbookId}`;
-  let revision = Number(localStorage.getItem(key)) || 0;
-  const spec = () => ({ table, column: column.value, find: find.value, replacement: replacement.value });
-  const run = async (fn: () => Promise<void>) => { try { await fn(); } catch (e) { status.textContent = String(e); } };
-  const apply = el("button", { class: "btn", disabled: true, onclick: () => run(async () => {
-    if (!preview || !previewSpec) return; apply.disabled = true;
-    const r = await rpc.call("replace_apply", { spec: previewSpec, revision: preview.sample.revision }); revision = r.undo_revision;
-    localStorage.setItem(key, String(revision)); preview = null; status.textContent = `Replaced ${r.rows} cells. Undo is available until the next workbook change.`;
-  }) }, "Apply replacement");
-  for (const input of [column, find, replacement]) input.addEventListener("input", () => { generation++; preview = null; apply.disabled = true; });
-  const dialog = el("section", { class: "dialog analysis-dialog" }, el("h2", {}, "Find and replace"),
-    el("p", {}, "Literal, case-sensitive replacement across this table, including filtered or hidden rows. NULL cells are unchanged. At most 10,000 affected cells; undo refuses intervening edits."),
-    field("Column", column), field("Find", find), field("Replace with", replacement),
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => run(async () => {
-      const seq = ++generation, request = spec();
-      const response = await rpc.call("replace_preview", { spec: request });
-      if (seq !== generation) return;
-      preview = response; previewSpec = request; output.replaceChildren(resultTable(preview.sample));
-      status.textContent = `${preview.matches} matching cells; preview shows up to 50.`; apply.disabled = preview.matches === 0 || preview.matches > 10_000;
-    }) }, "Preview replacement"), apply,
-    el("button", { class: "btn", onclick: () => run(async () => {
-      if (!revision) throw new Error("No replacement to undo in this browser");
-      await rpc.call("replace_undo", { revision }); revision = 0; localStorage.removeItem(key); preview = null; apply.disabled = true; status.textContent = "Replacement undone.";
-    }) }, "Undo last replacement"), el("button", { class: "btn", onclick: () => modal.close() }, "Close")), status, output);
-  const modal = openModal(dialog, () => modal.close()); find.focus(); return () => modal.close();
-}
-
 /** Dashboards (F.11): saved analyses as tiles on a 12-column grid, with shared slicers that
  *  filter every report of their table. Tiles are laid out two per row, at most 12. */
 export function dashboardsDialog(rpc: Rpc): () => void {

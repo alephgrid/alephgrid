@@ -18,7 +18,7 @@ const ROLE_HINT: Record<SpaceRole, string> = {
 };
 
 /** Where to go after signing in: a path on this server only. */
-export function nextPath(): string {
+function nextPath(): string {
   const n = new URLSearchParams(location.search).get("next") ?? "/";
   return n.startsWith("/") && !n.startsWith("//") ? n : "/";
 }
@@ -295,7 +295,7 @@ export function tokensDialog(space: SpaceListing): void {
 }
 
 /** Members of an organization and its invitations (admins). */
-export function peopleDialog(org: string, orgName: string, me: Me): void {
+function peopleDialog(org: string, orgName: string, me: Me): void {
   panel(`People of ${orgName}`, async function render(body) {
     const [members, invites, spaces] = await Promise.all([api.orgMembers(org), api.invites(org), api.spaces()]);
     const act = async (f: () => Promise<unknown>) => {
@@ -351,7 +351,7 @@ function describeEvent(e: AuditEvent): string {
 }
 
 /** Recent audit events of an organization (admins). */
-export function auditDialog(org: string): void {
+function auditDialog(org: string): void {
   panel("Activity", async (body) => {
     const events = await api.audit(org);
     body.replaceChildren(events.length

@@ -59,7 +59,7 @@ export function closeMenu(): void {
   menuOpener = null;
 }
 
-export interface MenuOptions {
+interface MenuOptions {
   /** ArrowLeft / ArrowRight in the menu: move to the neighbouring menu of a menu bar. */
   onArrow?: (direction: -1 | 1) => void;
   /** Called however the menu closes. */
@@ -134,7 +134,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
   };
 }
 
-export interface Field {
+interface Field {
   name: string;
   label: string;
   value?: string;

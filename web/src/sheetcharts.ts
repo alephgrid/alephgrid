@@ -58,11 +58,6 @@ export class SheetChartsLayer {
     this.set([]);
   }
 
-  /** Whether an unsaved preview is showing. */
-  hasDraft(): boolean {
-    return !!this.preview;
-  }
-
   /** Remove the unsaved preview without storing anything. */
   discardDraft(): void {
     this.preview?.box.remove();

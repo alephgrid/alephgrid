@@ -8,7 +8,7 @@ export const ROW_BLOCK = 100;
 export const COL_BLOCK = 32;
 const MAX_IN_FLIGHT = 4;
 /** Default bound of the cache, fresh and stale blocks together. */
-export const DEFAULT_CACHE_BYTES = 32 << 20;
+const DEFAULT_CACHE_BYTES = 32 << 20;
 /** Keeps (row block, column block) keys exact up to 2^20 column blocks. */
 const KEY_SPAN = 1 << 20;
 

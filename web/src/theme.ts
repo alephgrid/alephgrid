@@ -4,7 +4,7 @@
 import { el } from "./ui";
 import { icon } from "./icons";
 
-export type ThemePreference = "system" | "light" | "dark";
+type ThemePreference = "system" | "light" | "dark";
 const KEY = "alephgrid-theme";
 const system = matchMedia("(prefers-color-scheme: dark)");
 let preference: ThemePreference = "system";

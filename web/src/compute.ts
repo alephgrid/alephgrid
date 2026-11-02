@@ -27,7 +27,7 @@ export function profileLabel(id: string): string {
 }
 
 /** What a profile reserves, in words. */
-export function describeProfile(p: ComputeProfile): string {
+function describeProfile(p: ComputeProfile): string {
   if (p.memory_bytes === undefined) return "an equal share of the server";
   const threads = p.threads ?? 1;
   return `${bytes(p.memory_bytes)} and ${threads} thread${threads === 1 ? "" : "s"}${p.dedicated ? ", dedicated: never closed to make room for others" : ""}`;
