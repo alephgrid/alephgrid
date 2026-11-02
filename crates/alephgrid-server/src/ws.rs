@@ -533,8 +533,7 @@ fn check_size(op: &Op, ctx: &Ctx) -> Result<()> {
     if only_removes(op) {
         return Ok(());
     }
-    let wal = ctx.database.with_extension("duckdb.wal");
-    let size = std::fs::metadata(&ctx.database).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    let size = crate::state::database_bytes(ctx.database.parent().expect("the database lives in its workbook's directory"));
     if size >= limit {
         bail!(alephgrid_core::limits::TooLarge(format!(
             "this workbook holds {} MiB, its limit is {} MiB; delete tables or rows first, or ask an admin to raise the limit",

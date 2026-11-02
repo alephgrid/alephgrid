@@ -24,7 +24,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use alephgrid_core::{Reader, Workbook};
@@ -38,6 +38,26 @@ use crate::runtime::controller::{operation_id, Controller, StageHook, StopReason
 use crate::runtime::controller::Admission;
 use crate::runtime::{ComputePolicy, ComputeProfile, FailureKind, IsolationClass, OwnershipAssignment, ProviderKind, Reservation, RuntimeFailure, STANDARD};
 use crate::ws::Event;
+
+// The data directory's layout: one directory per workbook, named by its id, holding its
+// database and its metadata, beside dot-directories the server keeps for itself.
+/// A workbook's database file, in its directory.
+pub const DB_FILE: &str = "data.duckdb";
+/// A workbook's metadata file, in its directory.
+pub const META_FILE: &str = "workbook.json";
+/// Per-workbook scratch for uploads being staged.
+pub const UPLOADS: &str = ".uploads";
+/// Per-workbook scratch for exports and snapshots being written.
+pub const EXPORTS: &str = ".exports";
+/// Online backups.
+pub const BACKUPS: &str = ".backups";
+/// Deleted workbooks, until purged.
+pub const TRASH: &str = ".trash";
+
+/// Whether `dir` is one of the server's own dot-directories rather than a workbook.
+pub fn is_hidden(dir: &Path) -> bool {
+    dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+}
 
 /// DuckDB handle types, re-exported by the engine's dependency.
 pub mod duckdb_handles {
@@ -1035,19 +1055,19 @@ pub struct AppState {
 pub type Shared = Arc<AppState>;
 
 pub fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    alephgrid_core::storage::now_secs()
+}
+
+/// Bytes of a workbook's database (with its write-ahead log).
+pub fn database_bytes(workbook_dir: &Path) -> u64 {
+    let db = workbook_dir.join(DB_FILE);
+    std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(db.with_extension("duckdb.wal")).map(|m| m.len()).unwrap_or(0)
 }
 
 /// Directories a workbook's database may touch: its upload and export scratch
 /// directories and its spill directory. Created here, so DuckDB can resolve them.
-/// Bytes of a workbook's database (with its write-ahead log).
-pub fn database_bytes(workbook_dir: &Path) -> u64 {
-    let db = workbook_dir.join("data.duckdb");
-    std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(db.with_extension("duckdb.wal")).map(|m| m.len()).unwrap_or(0)
-}
-
 pub fn allowed_dirs(data_dir: &Path, workbook: &str, temp: &Path) -> Result<Vec<PathBuf>> {
-    let dirs = vec![data_dir.join(".uploads").join(workbook), data_dir.join(".exports").join(workbook), temp.to_path_buf()];
+    let dirs = vec![data_dir.join(UPLOADS).join(workbook), data_dir.join(EXPORTS).join(workbook), temp.to_path_buf()];
     for d in &dirs {
         std::fs::create_dir_all(d)?;
     }
@@ -1122,7 +1142,7 @@ impl AppState {
             Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
         }
         // Leftovers of uploads/exports interrupted by a crash; never user data.
-        for scratch in [".uploads", ".exports"] {
+        for scratch in [UPLOADS, EXPORTS] {
             let dir = config.data_dir.join(scratch);
             if dir.exists() {
                 std::fs::remove_dir_all(&dir).with_context(|| format!("cleaning {}", dir.display()))?;
@@ -1212,7 +1232,7 @@ impl AppState {
     }
 
     fn trash_dir(&self) -> PathBuf {
-        self.config.data_dir.join(".trash")
+        self.config.data_dir.join(TRASH)
     }
 
     /// Register a staged upload; also drops uploads nobody claimed within [`UPLOAD_TTL`].
@@ -1284,7 +1304,7 @@ impl AppState {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&self.config.data_dir)? {
             let dir = entry?.path();
-            if dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
+            if is_hidden(&dir) {
                 continue;
             }
             let Ok(mut meta) = read_meta(&dir) else { continue };
@@ -1355,7 +1375,7 @@ impl AppState {
         if self.shutting_down.load(Ordering::SeqCst) {
             bail!("the server is shutting down");
         }
-        if !self.workbook_dir(id).join("workbook.json").exists() {
+        if !self.workbook_dir(id).join(META_FILE).exists() {
             bail!("workbook {id} not found");
         }
         Ok(())
@@ -1490,6 +1510,20 @@ impl AppState {
         out
     }
 
+    /// Copy workbook `id`'s database (open as `handle`) to `target` from one snapshot and
+    /// return its revision. The database may only write its own scratch directories (4.07):
+    /// copy there, then move the file to `target`.
+    pub fn snapshot_to(&self, handle: &WorkbookHandle, id: &str, target: &Path) -> Result<u64> {
+        let scratch = self.scratch_dir(EXPORTS, id)?;
+        let staged = scratch.join(DB_FILE);
+        let copied = handle.with_reader(|r| r.backup_to(&staged)).and_then(|rev| {
+            std::fs::rename(&staged, target)?;
+            Ok(rev)
+        });
+        let _ = std::fs::remove_dir_all(&scratch);
+        copied
+    }
+
     /// Copy a workbook (tables, formulas, sheets and history) into a new one, from one
     /// snapshot while the source keeps working.
     pub fn duplicate(&self, id: &str) -> Result<WorkbookMeta> {
@@ -1500,14 +1534,8 @@ impl AppState {
         let dir = self.workbook_dir(&new);
         std::fs::create_dir_all(&dir)?;
         let copied = (|| -> Result<()> {
-            let target = dir.join("data.duckdb");
-            // The source database may only write its own scratch directories (4.07): copy
-            // there, then move the file into the new workbook's directory.
-            let scratch = self.scratch_dir(".exports", id)?;
-            let staged = scratch.join("data.duckdb");
-            let copied = src.with_reader(|r| r.backup_to(&staged)).and_then(|_| Ok(std::fs::rename(&staged, &target)?));
-            let _ = std::fs::remove_dir_all(&scratch);
-            copied?;
+            let target = dir.join(DB_FILE);
+            self.snapshot_to(&src, id, &target)?;
             // The copy is a new workbook: bind it to its own id.
             Workbook::open_locked(&target, &alephgrid_core::storage::Lockdown::default())?.rebind_identity(&new)?;
             Ok(())
@@ -1537,7 +1565,7 @@ impl AppState {
             bail!("invalid workbook id");
         }
         let dir = self.workbook_dir(id);
-        if !dir.join("workbook.json").exists() {
+        if !dir.join(META_FILE).exists() {
             bail!("workbook {id} not found");
         }
         if !self.controller.block(id) {
@@ -1584,7 +1612,7 @@ impl AppState {
         }
         let from = self.trash_dir().join(id);
         let to = self.workbook_dir(id);
-        if !from.join("workbook.json").exists() {
+        if !from.join(META_FILE).exists() {
             bail!("workbook {id} is not in the trash");
         }
         if to.exists() {
@@ -1648,7 +1676,7 @@ impl AppState {
             return Ok(h.meta.lock().unwrap().space.clone());
         }
         let dir = self.workbook_dir(id);
-        let meta = if dir.join("workbook.json").exists() { read_meta(&dir) } else { read_meta(&self.trash_dir().join(id)) };
+        let meta = if dir.join(META_FILE).exists() { read_meta(&dir) } else { read_meta(&self.trash_dir().join(id)) };
         meta.map(|m| m.space).map_err(|_| anyhow!("workbook {id} not found"))
     }
 
@@ -1759,12 +1787,11 @@ pub fn migrate_to_spaces(data_dir: &Path, store: &crate::auth::Store) -> Result<
         })?,
     };
     let mut moved = 0;
-    for parent in [data_dir.to_path_buf(), data_dir.join(".trash")] {
+    for parent in [data_dir.to_path_buf(), data_dir.join(TRASH)] {
         let Ok(entries) = std::fs::read_dir(&parent) else { continue };
         for e in entries {
             let dir = e?.path();
-            let hidden = dir.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
-            if (hidden && parent == data_dir) || !dir.join("workbook.json").exists() {
+            if (is_hidden(&dir) && parent == data_dir) || !dir.join(META_FILE).exists() {
                 continue;
             }
             // A workbook whose workbook.json does not match its directory stays unplaced (and
@@ -1836,7 +1863,7 @@ pub struct WorkbookPatch {
 
 pub fn read_meta(dir: &Path) -> Result<WorkbookMeta> {
     let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let bytes = std::fs::read(dir.join("workbook.json")).with_context(|| format!("workbook {id} not found"))?;
+    let bytes = std::fs::read(dir.join(META_FILE)).with_context(|| format!("workbook {id} not found"))?;
     let meta: WorkbookMeta = serde_json::from_slice(&bytes)?;
     // The id is the workbook's filesystem key: it must be the directory's own name (SEC.02).
     if !valid_id(&meta.id) || meta.id != id {
@@ -1846,5 +1873,5 @@ pub fn read_meta(dir: &Path) -> Result<WorkbookMeta> {
 }
 
 pub fn write_meta(dir: &Path, meta: &WorkbookMeta) -> Result<()> {
-    crate::runtime::write_durably(&dir.join("workbook.json"), &serde_json::to_vec_pretty(meta)?)
+    crate::runtime::write_durably(&dir.join(META_FILE), &serde_json::to_vec_pretty(meta)?)
 }

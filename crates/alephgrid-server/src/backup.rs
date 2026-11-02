@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ts_rs::TS;
 
-use crate::state::{read_meta, Shared, WorkbookMeta};
+use crate::state::{read_meta, Shared, WorkbookMeta, DB_FILE, META_FILE};
 
 pub const BACKUP_FORMAT: u32 = 2;
 
@@ -128,19 +128,10 @@ pub fn backup_online(state: &Shared, dest: &Path) -> Result<BackupManifest> {
             let handle = state.get(&id)?;
             let dir = dest.join(&id);
             std::fs::create_dir_all(&dir)?;
-            let db = dir.join("data.duckdb");
-            // The workbook's database may only write its own scratch directories (4.07):
-            // copy there, then move the file into the backup.
-            let scratch = state.scratch_dir(".exports", &id)?;
-            let staged = scratch.join("data.duckdb");
-            let copied = handle.with_reader(|r| r.backup_to(&staged)).and_then(|rev| {
-                std::fs::rename(&staged, &db)?;
-                Ok(rev)
-            });
-            let _ = std::fs::remove_dir_all(&scratch);
-            let revision = copied?;
+            let db = dir.join(DB_FILE);
+            let revision = state.snapshot_to(&handle, &id, &db)?;
             let meta = handle.meta.lock().unwrap().clone();
-            crate::runtime::write_durably(&dir.join("workbook.json"), &serde_json::to_vec_pretty(&meta)?)?;
+            crate::state::write_meta(&dir, &meta)?;
             entries.push(entry(&meta, &db, revision)?);
         }
         // After the workbooks: every space a copied workbook names is in this copy.
@@ -166,22 +157,22 @@ pub fn backup_offline(data_dir: &Path, dest: &Path) -> Result<BackupManifest> {
         let mut entries = Vec::new();
         for e in std::fs::read_dir(data_dir)? {
             let src = e?.path();
-            if src.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) || !src.join("workbook.json").exists() {
+            if crate::state::is_hidden(&src) || !src.join(META_FILE).exists() {
                 continue;
             }
             let meta = read_meta(&src)?;
             let dir = dest.join(&meta.id);
             std::fs::create_dir_all(&dir)?;
-            let db = dir.join("data.duckdb");
+            let db = dir.join(DB_FILE);
             let revision = {
-                let conn = duckdb::Connection::open(src.join("data.duckdb"))?;
+                let conn = duckdb::Connection::open(src.join(DB_FILE))?;
                 conn.execute_batch("CHECKPOINT;")?;
                 let rev = if alephgrid_core::storage::format_of(&conn)? >= 2 { alephgrid_core::storage::revision(&conn)? } else { 0 };
                 drop(conn);
                 rev
             };
-            alephgrid_core::storage::copy_durably(&src.join("data.duckdb"), &db)?;
-            alephgrid_core::storage::copy_durably(&src.join("workbook.json"), &dir.join("workbook.json"))?;
+            alephgrid_core::storage::copy_durably(&src.join(DB_FILE), &db)?;
+            alephgrid_core::storage::copy_durably(&src.join(META_FILE), &dir.join(META_FILE))?;
             entries.push(entry(&meta, &db, revision)?);
         }
         let store = crate::auth::Store::open(&control.join("control.duckdb"))?;
@@ -221,7 +212,7 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
         if !crate::state::valid_id(&e.id) {
             bail!("invalid workbook id {:?} in the manifest", e.id);
         }
-        let db = src.join(&e.id).join("data.duckdb");
+        let db = src.join(&e.id).join(DB_FILE);
         let sum = sha256_file(&db)?;
         if sum != e.sha256 {
             bail!("the backup of workbook {} ({}) is damaged: checksum {sum} does not match {}", e.id, e.name, e.sha256);
@@ -239,7 +230,7 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
         // A new directory of its own: create_dir fails if anything is already there (SEC.14).
         std::fs::create_dir(&staging).with_context(|| format!("cannot create the staging directory {}", staging.display()))?;
         for e in &manifest.workbooks {
-            for f in ["data.duckdb", "workbook.json"] {
+            for f in [DB_FILE, META_FILE] {
                 let from = src.join(&e.id).join(f);
                 // Only plain files are restored: a link could point anywhere (SEC.14).
                 if std::fs::symlink_metadata(&from).map(|m| !m.file_type().is_file()).unwrap_or(true) {
@@ -248,16 +239,16 @@ pub fn restore(src: &Path, data_dir: &Path) -> Result<BackupManifest> {
             }
             let to = staging.join(&e.id);
             std::fs::create_dir_all(&to)?;
-            alephgrid_core::storage::copy_durably(&src.join(&e.id).join("data.duckdb"), &to.join("data.duckdb"))?;
-            alephgrid_core::storage::copy_durably(&src.join(&e.id).join("workbook.json"), &to.join("workbook.json"))?;
+            alephgrid_core::storage::copy_durably(&src.join(&e.id).join(DB_FILE), &to.join(DB_FILE))?;
+            alephgrid_core::storage::copy_durably(&src.join(&e.id).join(META_FILE), &to.join(META_FILE))?;
             // workbook.json must name the workbook the manifest and the database are bound to (SEC.02).
-            let meta: crate::state::WorkbookMeta = serde_json::from_slice(&std::fs::read(to.join("workbook.json"))?)
+            let meta: WorkbookMeta = serde_json::from_slice(&std::fs::read(to.join(META_FILE))?)
                 .with_context(|| format!("workbook {} has an unreadable workbook.json", e.id))?;
             if meta.id != e.id {
                 bail!("workbook {}'s workbook.json names a different workbook ({:?})", e.id, meta.id);
             }
             // Opened with the engine locked down: nothing in the file runs with file or network access (SEC.01).
-            let wb = alephgrid_core::Workbook::open_locked(&to.join("data.duckdb"), &alephgrid_core::storage::Lockdown::default())
+            let wb = alephgrid_core::Workbook::open_locked(&to.join(DB_FILE), &alephgrid_core::storage::Lockdown::default())
                 .with_context(|| format!("restored workbook {} does not open", e.id))?;
             let revision = wb.revision()?;
             if revision != e.revision {

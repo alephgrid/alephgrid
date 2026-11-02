@@ -651,10 +651,15 @@ async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Prin
     Ok(Json(out))
 }
 
+/// Where online backups go: `<data-dir>/.backups`.
+fn backups_root(state: &Shared) -> std::path::PathBuf {
+    state.config.data_dir.join(crate::state::BACKUPS)
+}
+
 /// The online backups under `<data-dir>/.backups`, newest first.
 async fn list_backups(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
     state.auth.require_instance_admin(&p)?;
-    Ok(Json(blocking(move || crate::backup::list(&state.config.data_dir.join(".backups"))).await?))
+    Ok(Json(blocking(move || crate::backup::list(&backups_root(&state))).await?))
 }
 
 async fn delete_backup(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
@@ -663,7 +668,7 @@ async fn delete_backup(State(state): State<Shared>, Extension(p): Extension<Prin
         if !name.starts_with("backup-") || !crate::state::valid_id(&name) {
             bail!(crate::auth::not_found("backup not found"));
         }
-        let dir = state.config.data_dir.join(".backups").join(&name);
+        let dir = backups_root(&state).join(&name);
         if !dir.join("manifest.json").exists() {
             bail!(crate::auth::not_found("backup not found"));
         }
@@ -903,7 +908,7 @@ async fn receive(state: &Shared, workbook: &str, file_name: &str, headers: &Head
     if let Some(u) = used {
         crate::quota::check_storage(u, declared.unwrap_or(0), quota).map_err(ApiError::from)?;
     }
-    let scratch = state.scratch_dir(".uploads", workbook)?;
+    let scratch = state.scratch_dir(crate::state::UPLOADS, workbook)?;
     let path = scratch.join(file_name);
     let mut reserved = 0u64;
     let received = async {
@@ -1129,7 +1134,7 @@ async fn export(
     let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
     let table = spec.table.clone();
-    let scratch = state.scratch_dir(".exports", &id)?;
+    let scratch = state.scratch_dir(crate::state::EXPORTS, &id)?;
     let path = scratch.join("export");
     let out = path.clone();
     let format = q.format;
@@ -1147,20 +1152,31 @@ async fn export(
         )
         .await
         .map_err(ApiError::from);
+    let (file, len) = open_then_unlink(written, &path, &scratch).await?;
+    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "table", "table": table, "format": format.extension(), "bytes": len }));
+    Ok(file_response(file, len, "application/octet-stream", &file_name))
+}
+
+/// Open the file a job `written` (when it succeeded), then remove its scratch `dir`: the
+/// open handle keeps the bytes readable after unlinking. Returns the file and its length.
+async fn open_then_unlink(written: ApiResult<()>, path: &std::path::Path, dir: &std::path::Path) -> ApiResult<(tokio::fs::File, u64)> {
     let opened = match written {
-        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
+        Ok(()) => tokio::fs::File::open(path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
         Err(e) => Err(e),
     };
-    // The open handle keeps the bytes readable after unlinking.
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let _ = tokio::fs::remove_dir_all(dir).await;
     let file = opened?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
-    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "table", "table": table, "format": format.extension(), "bytes": len }));
+    Ok((file, len))
+}
+
+/// Stream `file` (`len` bytes) as a download named `file_name`.
+fn file_response(file: tokio::fs::File, len: u64, content_type: &'static str, file_name: &str) -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&file_name));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    headers.insert(header::CONTENT_DISPOSITION, attachment(file_name));
+    (headers, Body::from_stream(ReaderStream::new(file))).into_response()
 }
 
 /// Stream a finished query export (`export_query`) once; the file is removed afterwards.
@@ -1171,17 +1187,9 @@ async fn download(State(state): State<Shared>,
         .downloads
         .take(&id, &download)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "this export was already downloaded or has expired; export again"))?;
-    let opened = tokio::fs::File::open(&d.path).await;
-    // The open handle keeps the bytes readable after the directory is removed.
-    let _ = tokio::fs::remove_dir_all(&d.dir).await;
-    let file = opened.map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
-    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let (file, len) = open_then_unlink(Ok(()), &d.path, &d.dir).await?;
     state.auth.record(&p, "export_downloaded", &space, &id, json!({ "download": download, "bytes": len }));
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-    headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&d.file_name));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    Ok(file_response(file, len, "application/octet-stream", &d.file_name))
 }
 
 /// Download all sheets of a workbook as one .xlsx file.
@@ -1204,7 +1212,7 @@ async fn export_xlsx(State(state): State<Shared>,
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
-    let scratch = state.scratch_dir(".exports", &id)?;
+    let scratch = state.scratch_dir(crate::state::EXPORTS, &id)?;
     let path = scratch.join("sheets.xlsx");
     let out = path.clone();
     let written = h
@@ -1218,22 +1226,9 @@ async fn export_xlsx(State(state): State<Shared>,
         })))
         .await
         .map_err(ApiError::from);
-    let opened = match written {
-        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
-        Err(e) => Err(e),
-    };
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    let file = opened?;
-    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let (file, len) = open_then_unlink(written, &path, &scratch).await?;
     state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "xlsx", "bytes": len }));
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".parse().unwrap(),
-    );
-    headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&format!("{name}.xlsx")));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    Ok(file_response(file, len, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", &format!("{name}.xlsx")))
 }
 
 async fn websocket(

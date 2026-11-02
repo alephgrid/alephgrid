@@ -89,7 +89,7 @@ impl LocalProvider {
                     ("max_temp_directory_size".into(), format!("{}B", req.reservation.temp_disk_bytes.max(1 << 20))),
                 ],
             };
-            let engine = Workbook::open_locked(&req.workbook_dir.join("data.duckdb"), &lockdown).map_err(startup)?;
+            let engine = Workbook::open_locked(&req.workbook_dir.join(crate::state::DB_FILE), &lockdown).map_err(startup)?;
             if let Some(from) = engine.open_report().migrated_from {
                 tracing::info!(workbook = req.workbook, "migrated storage format {from} → {}", alephgrid_core::storage::FORMAT);
             }
