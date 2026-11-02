@@ -268,6 +268,28 @@ export class WorkbookScreen {
   private functions: FunctionPanel | null = null;
   private disposeFunctionCompletion: (() => void) | null = null;
 
+  /** Every command once; the menus, the toolbar, the top bar and the command registry share them. */
+  private readonly act = {
+    formatTable: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } },
+    findReplace: () => this.openFind(true),
+    find: () => this.openFind(false),
+    addColumn: () => this.addColumnDialog(),
+    filter: () => this.filterDialog(this.grid.active.c),
+    names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } },
+    goTo: () => void this.goTo(),
+    importFile: () => this.fileInput.click(),
+    analyze: () => this.openAnalyze(),
+    dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
+    dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
+    sql: () => this.sqlPanel(),
+    functions: () => this.openFunctions(),
+    formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
+    commands: () => { commandPalette(this.commands); },
+    shortcuts: () => { shortcutHelp(this.commands); },
+    history: () => historyDialog(this.rpc, () => void this.resync()),
+    compute: () => computeDialog(this.meta.id),
+  };
+
   constructor(meta: WorkbookMeta, private goHome: () => void) {
     this.meta = meta;
     this.rpc = new Rpc(meta.id);
@@ -597,27 +619,7 @@ export class WorkbookScreen {
         if (files) this.importFiles([...files]);
         (e.target as HTMLInputElement).value = "";
       } });
-    // Every command once; the menus, the toolbar and the top bar share them.
-    const act = {
-      formatTable: async () => { if (this.active?.kind !== "table") return; const name = this.active.name; this.closePresentation?.(); try { this.closePresentation = await presentationDialog(this.rpc, name, () => this.reloadPresentation(name)); } catch (e) { toast(String(e), "error"); } },
-      findReplace: () => this.openFind(true),
-      find: () => this.openFind(false),
-      addColumn: () => this.addColumnDialog(),
-      filter: () => this.filterDialog(this.grid.active.c),
-      names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } },
-      goTo: () => void this.goTo(),
-      importFile: () => this.fileInput.click(),
-      analyze: () => this.openAnalyze(),
-      dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
-      dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
-      sql: () => this.sqlPanel(),
-      functions: () => this.openFunctions(),
-      formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
-      commands: () => { commandPalette(this.commands); },
-      shortcuts: () => { shortcutHelp(this.commands); },
-      history: () => historyDialog(this.rpc, () => void this.resync()),
-      compute: () => computeDialog(this.meta.id),
-    };
+    const act = this.act;
     const tool = (name: IconName, label: string, run: (e: MouseEvent) => void, o: { text?: string; title?: string; menu?: boolean } = {}) =>
       el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label,
         "aria-haspopup": o.menu ? "menu" : false, onclick: run },
@@ -2053,14 +2055,14 @@ export class WorkbookScreen {
       fill: (d) => this.fill(d),
       selectAll: () => void this.grid.contextSelectAll(),
       selectEntire: (w) => this.grid.selectEntire(w),
-      goTo: () => this.goTo(),
-      names: async () => { this.closeNames?.(); this.closeNames = await namesDialog(this.namesContext()); },
-      formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
-      sql: () => this.sqlPanel(),
-      palette: () => { commandPalette(this.commands); },
-      shortcuts: () => { shortcutHelp(this.commands); },
-      history: () => historyDialog(this.rpc, () => void this.resync()),
-      compute: () => computeDialog(this.meta.id),
+      goTo: this.act.goTo,
+      names: this.act.names,
+      formulaHelp: this.act.formulaHelp,
+      sql: this.act.sql,
+      palette: this.act.commands,
+      shortcuts: this.act.shortcuts,
+      history: this.act.history,
+      compute: this.act.compute,
       find: (replace) => this.openFind(replace),
       toggleStyle: (key) => void this.applyStyle({ [key]: !(this.sheetCache.style(this.grid.active.r, this.grid.active.c)?.[key] ?? false) }),
     }));
