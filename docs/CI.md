@@ -74,3 +74,33 @@ Each run uses credits: a VM with 4 CPUs for the Rust and browser jobs. The first
 first after `Cargo.lock` changes, compiles DuckDB and takes longest; later runs restore it from
 the cache. Use **check** for pull requests and **full** before a release or after changes to
 storage, collaboration or recovery.
+
+## Release safety
+
+The release workflow holds publishing tokens, so a few things are checked in the repository
+and a few must be set by the owner once.
+
+In the repository:
+
+* `tools/ci.sh release vX.Y.Z` releases only if the tag on GitHub names the same commit as
+  the tag in your checkout, and that commit is on `main`.
+* Third-party images in the release jobs run by digest, before the registry token is given to
+  docker: `tonistiigi/binfmt` (arm64 emulation) and `moby/buildkit` (the image builder). To
+  update one, look up the new digest (`docker buildx imagetools inspect tonistiigi/binfmt:latest`)
+  and change it in `.circleci/config.yml` in its own pull request.
+* npm: a version already on npm is skipped only when its `dist.integrity` equals this build's
+  package (a re-run). Anything else under that name and version stops the job before the main
+  `alephgrid` package is published, so it can never depend on a package someone else uploaded.
+  Reserve the platform package names before the first release.
+
+Once, by the owner (not visible in the repository):
+
+* CircleCI → Organization settings → Contexts → `release` → restrict it to a security group
+  holding only the maintainers.
+* CircleCI → Project settings → Advanced: *Pass secrets to builds from forked pull requests*
+  off.
+* GitHub → Settings → Rules: a tag ruleset on `refs/tags/v*` so only maintainers can create,
+  move or delete release tags.
+* Prefer a token that can only push packages (`write:packages`) for the image, and a
+  fine-grained token with *Contents: write* on this repository for the GitHub release, over
+  one classic token with `repo` scope.

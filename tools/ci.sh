@@ -56,8 +56,18 @@ case "${1:-}" in
   release)
     need
     tag=${2:?usage: tools/ci.sh release vX.Y.Z}
-    case "$tag" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "a release tag looks like v0.1.0" >&2; exit 2 ;; esac
-    git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || { echo "tag $tag is not on origin; push it first (docs/RELEASING.md)" >&2; exit 1; }
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "a release tag looks like v0.1.0" >&2; exit 2; }
+    # Release exactly the commit this checkout tagged: the tag on origin must name the same
+    # commit as the local tag, and that commit must be on main. CircleCI builds (and runs
+    # the release config of) whatever the remote tag names when it starts.
+    # An annotated tag is listed twice; "^{}" is the commit it names.
+    remote_commit=$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | awk '{c=$1} /\^\{\}$/{p=$1} END{print (p ? p : c)}')
+    [ -n "$remote_commit" ] || { echo "tag $tag is not on origin; push it first (docs/RELEASING.md)" >&2; exit 1; }
+    local_commit=$(git rev-parse --verify --quiet "$tag^{commit}") || { echo "tag $tag is not in this checkout; git fetch --tags" >&2; exit 1; }
+    [ "$remote_commit" = "$local_commit" ] || { echo "tag $tag on origin is $remote_commit, here it is $local_commit: not releasing" >&2; exit 1; }
+    git fetch --quiet origin main
+    git merge-base --is-ancestor "$local_commit" origin/main || { echo "tag $tag ($local_commit) is not on main: not releasing" >&2; exit 1; }
+    echo "Releasing $tag at $local_commit"
     params=$(jq -n --arg v "${tag#v}" '{run_release: true, release_version: $v}')
     if [ -n "${CIRCLECI_DEFINITION_ID:-}" ]; then
       body=$(jq -n --arg d "$CIRCLECI_DEFINITION_ID" --arg t "$tag" --argjson p "$params" '{definition_id:$d, config:{tag:$t}, checkout:{tag:$t}, parameters:$p}')
