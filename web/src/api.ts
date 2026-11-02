@@ -184,10 +184,14 @@ export function stageUpload(
   return { done, abort: () => xhr.abort() };
 }
 
-/** Operations that change nothing: never given a mutation id, retried when the server is busy. */
+/** Operations that change nothing: never given a mutation id, retried when the server is busy.
+ *  Keep in step with the reads (`(false, _)`) of classify() in crates/alephgrid-server/src/ws.rs. */
 const READS = new Set<OpName>([
   "tables", "open_view", "update_view", "view_info", "close_view", "fetch", "stats", "query", "sheets", "sheet_fetch",
   "analyze", "analyses", "replace_preview", "presentation", "functions", "test_function", "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
+  "sheet_names", "comments", "sheet_layout", "sheet_charts", "sheet_rules", "hidden_sheets", "column_values", "find_in_view", "sheet_find", "sheet_find_all",
+  "sheet_cell_detail", "sheet_region", "sheet_check_formula", "dashboards", "dashboard", "validations", "preview_transform", "inspect_formula",
+  "xlsx_compatibility", "drill", "sheet_column_texts", "sheet_range_values",
   // Writes a file to download but changes no data: never kept and resent after a reconnect.
   "export_query",
 ]);
