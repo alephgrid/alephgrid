@@ -1,3 +1,5 @@
+import { columnIndex } from "./format";
+
 /** A1 reference editor, not an expression evaluator. Never rewrites quoted text or names. */
 interface ReferenceToken { start: number; end: number; row: number; column: number; absoluteRow: boolean; absoluteColumn: boolean; qualified: boolean }
 const identifier = (c: string | undefined) => !!c && /[\p{L}\p{N}_.]/u.test(c);
@@ -18,8 +20,7 @@ export function referenceTokens(text: string): ReferenceToken[] {
     if (identifier(text[i - 1]) || text[i - 1] === '$') { i++; continue; }
     const m = /^(\$?)([A-Za-z]{1,3})(\$?)([1-9][0-9]*)/.exec(text.slice(i));
     if (!m || identifier(text[i + m[0].length]) || /[(!]/.test(text.slice(i + m[0].length).trimStart()[0] ?? "")) { i++; continue; }
-    let column = 0;
-    for (const c of m[2].toUpperCase()) column = column * 26 + c.charCodeAt(0) - 64;
+    const column = columnIndex(m[2]) + 1;
     const row = Number(m[4]);
     if (column <= 16384 && row <= 1048576) out.push({ start: i, end: i + m[0].length, row: row - 1, column: column - 1, absoluteRow: !!m[3], absoluteColumn: !!m[1], qualified: text[i - 1] === '!' });
     i += m[0].length;

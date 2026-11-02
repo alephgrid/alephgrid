@@ -49,6 +49,9 @@ export function rawText(v: CellValue): string {
   return String(v);
 }
 
+/** Zero-based column index of letters such as `A` or `xfd`; the inverse of columnLetter. */
+export const columnIndex = (letters: string) => [...letters.toUpperCase()].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
+
 export function columnLetter(index: number): string {
   let s = "";
   let n = index + 1;

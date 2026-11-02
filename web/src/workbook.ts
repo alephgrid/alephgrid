@@ -672,7 +672,7 @@ export class WorkbookScreen {
         { label: "Actual size (100%)", action: () => this.setZoom(1) },
         "sep" as const,
         ...(this.isSheet() ? [
-          { label: `Freeze columns A–${String.fromCharCode(65 + Math.min(25, this.grid.active.c))}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
+          { label: `Freeze columns A–${columnLetter(this.grid.active.c)}`, action: () => void this.freezeColumns(this.grid.active.c + 1) },
           { label: "Unfreeze columns", action: () => void this.freezeColumns(0) },
           { label: `Freeze rows 1–${this.grid.active.r + 1}`, action: () => void this.freezeRows(Math.min(100, this.grid.active.r + 1)) },
           { label: "Unfreeze rows", action: () => void this.freezeRows(0) },

@@ -1,11 +1,9 @@
 import type { NamedRange, SheetInfo } from "./protocol";
 import type { Rpc } from "./api";
 import { el, openModal, toast, confirmDialog } from "./ui";
-import { columnLetter } from "./format";
+import { columnIndex, columnLetter } from "./format";
 
 export interface Address { sheet: string | null; r0: number; c0: number; r1: number; c1: number }
-
-const columnIndex = (letters: string) => [...letters.toUpperCase()].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1;
 
 /** A sheet name as written in a formula: quoted unless it is a plain identifier that cannot be read as a cell. */
 export function quoteSheet(name: string): string {
