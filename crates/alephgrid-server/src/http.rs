@@ -445,7 +445,7 @@ async fn create_workbook(State(state): State<Shared>, Extension(p): Extension<Pr
         };
         let h = state.create(&name, &space.id)?;
         let meta = h.meta.lock().unwrap().clone();
-        state.auth.audit(&p, "workbook_created", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "name": meta.name }));
+        state.auth.audit_workbook(&p, "workbook_created", &space, &meta.id, json!({ "name": meta.name }));
         Ok(meta)
     })
     .await?;
@@ -459,7 +459,7 @@ async fn duplicate_workbook(State(state): State<Shared>, Extension(p): Extension
     blocking(move || s.auth.require_space(&pp, &sid, Cap::CreateWorkbook)).await?;
     let meta = blocking(move || {
         let meta = state.duplicate(&id)?;
-        state.auth.audit(&p, "workbook_duplicated", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "from": id }));
+        state.auth.audit_workbook(&p, "workbook_duplicated", &space, &meta.id, json!({ "from": id }));
         Ok(meta)
     })
     .await?;
@@ -553,7 +553,7 @@ async fn runtime_action(
     let status = blocking(move || {
         let c = &state.controller;
         if let Some(name) = &req.profile {
-            let profile = c.policy.profile(name).ok_or_else(|| crate::auth::Denied::BadRequest(format!("unknown compute profile {name:?}")))?;
+            let profile = c.policy.profile(name).ok_or_else(|| crate::auth::bad_request(format!("unknown compute profile {name:?}")))?;
             let current = state.admission(&id, None)?.profile.id;
             if profile.id != current {
                 if let Some(refusal) = profile_refusal(&state, &p, &space, role, profile)? {
@@ -619,15 +619,15 @@ async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Prin
     let out = blocking(move || {
         // One at a time, not too often, only with room for it, and only the newest few kept (SEC.11).
         let Ok(_running) = state.backup_running.try_lock() else {
-            bail!(crate::auth::Denied::Conflict("a backup is already running; wait for it to finish".into()));
+            return Err(crate::auth::conflict("a backup is already running; wait for it to finish"));
         };
         if let Some(at) = *state.last_backup.lock().unwrap() {
             let wait = state.config.backup_interval.saturating_sub(at.elapsed());
             if !wait.is_zero() {
-                bail!(crate::auth::Denied::Conflict(format!("the last backup finished moments ago; try again in {} s", wait.as_secs().max(1))));
+                return Err(crate::auth::conflict(format!("the last backup finished moments ago; try again in {} s", wait.as_secs().max(1))));
             }
         }
-        let root = state.config.data_dir.join(".backups");
+        let root = backups_root(&state);
         std::fs::create_dir_all(&root)?;
         let needed: u64 = state.list()?.iter().map(|w| crate::state::database_bytes(&state.workbook_dir(&w.meta.id))).sum();
         if let Some(free) = crate::backup::free_bytes(&root) {
@@ -712,7 +712,7 @@ async fn update_workbook(
                 state.require_workbook(&p, &id, Cap::DeleteWorkbook)?;
                 let (dest, _) = state.auth.require_space(&p, to, Cap::CreateWorkbook)?;
                 if dest.org_id != space.org_id {
-                    bail!(crate::auth::Denied::BadRequest("a workbook can move only between spaces of one organization".into()));
+                    return Err(crate::auth::bad_request("a workbook can move only between spaces of one organization"));
                 }
                 Some(dest)
             }
@@ -732,7 +732,7 @@ async fn delete_workbook(State(state): State<Shared>, Extension(p): Extension<Pr
     let (space, _) = allowed(&state, &p, &id, Cap::DeleteWorkbook).await?;
     blocking(move || {
         state.delete(&id)?;
-        state.auth.audit(&p, "workbook_deleted", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        state.auth.audit_workbook(&p, "workbook_deleted", &space, &id, json!({}));
         Ok(())
     })
     .await?;
@@ -773,7 +773,7 @@ async fn restore_workbook(State(state): State<Shared>, Extension(p): Extension<P
     Ok(Json(
         blocking(move || {
             let meta = state.restore(&id)?;
-            state.auth.audit(&p, "workbook_restored", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+            state.auth.audit_workbook(&p, "workbook_restored", &space, &id, json!({}));
             Ok(meta)
         })
         .await?,
@@ -784,7 +784,7 @@ async fn purge_workbook(State(state): State<Shared>, Extension(p): Extension<Pri
     let (space, _) = allowed(&state, &p, &id, Cap::Purge).await?;
     blocking(move || {
         state.purge(Some(&id))?;
-        state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        state.auth.audit_workbook(&p, "workbook_purged", &space, &id, json!({}));
         Ok(())
     })
     .await?;
@@ -799,7 +799,7 @@ async fn empty_trash(State(state): State<Shared>, Extension(p): Extension<Princi
         for w in state.trash()? {
             if let Some(space) = spaces.get(&w.meta.space) {
                 state.purge(Some(&w.meta.id))?;
-                state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&w.meta.id), json!({}));
+                state.auth.audit_workbook(&p, "workbook_purged", space, &w.meta.id, json!({}));
             }
         }
         Ok(())
@@ -1277,12 +1277,16 @@ pub fn attachment(name: &str) -> axum::http::HeaderValue {
         .chars()
         .map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' })
         .collect();
-    let encoded: String = name
-        .bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect();
+    let encoded = percent_encode(name);
     axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"))
         .unwrap_or_else(|_| axum::http::HeaderValue::from_static("attachment"))
+}
+
+/// Percent-encode every byte but the RFC 3986 unreserved ones (`A-Z a-z 0-9 - . _ ~`).
+pub(crate) fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 /// Open (or find) a workbook off the async threads: starting an allocation can migrate files.

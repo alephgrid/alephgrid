@@ -1689,7 +1689,7 @@ impl AppState {
         let live = self.list()?.into_iter().filter(|w| w.meta.space == id).count();
         let trashed = self.trash()?.into_iter().filter(|w| w.meta.space == id).count();
         if live + trashed > 0 {
-            bail!(crate::auth::Denied::BadRequest(format!(
+            return Err(crate::auth::bad_request(format!(
                 "this space still holds {live} workbook(s) and {trashed} in the trash; move or delete them first"
             )));
         }

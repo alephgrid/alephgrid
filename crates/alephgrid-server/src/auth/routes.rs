@@ -10,19 +10,23 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::store::{Invite, MemberKind, SpaceMember, Store};
-use super::{forbidden, not_found, refused, Cap, Denied, OrgRole, Principal, SpaceRole};
+use super::{bad_request as bad, forbidden, not_found, refused, Cap, Denied, OrgRole, Principal, SpaceRole};
 use crate::http::{blocking, ApiError, ApiResult};
 use crate::state::Shared;
-
-fn bad(msg: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(Denied::BadRequest(msg.into()))
-}
 
 fn with_cookie(cookie: String, body: Value) -> Response {
     ([(header::SET_COOKIE, cookie), (header::CACHE_CONTROL, "no-store".to_string())], Json(body)).into_response()
 }
 
 /// What `/api/me` says about a principal.
+/// Start a session for `user` signing in `via` a method: the principal it makes and the
+/// cookie that carries it.
+fn new_session(state: &Shared, user: super::User, via: &str) -> anyhow::Result<(Principal, String)> {
+    let (secret, expires) = state.auth.start_session(&user, via)?;
+    let cookie = state.auth.session_cookie(Some((&secret, expires)));
+    Ok((Principal::User { user: std::sync::Arc::new(user), session: super::hash(&secret), expires_at: expires }, cookie))
+}
+
 fn describe(state: &Shared, p: &Principal) -> anyhow::Result<Value> {
     let auth = &state.auth;
     Ok(match p {
@@ -61,10 +65,9 @@ pub struct SetupBody {
 pub async fn setup(State(state): State<Shared>, Json(b): Json<SetupBody>) -> ApiResult<Response> {
     blocking(move || {
         let user = state.auth.complete_setup(&b.code, &b.email, &b.name, &b.password)?;
-        let (secret, expires) = state.auth.start_session(&user, "password")?;
-        let p = Principal::User { user: std::sync::Arc::new(user), session: super::hash(&secret), expires_at: expires };
+        let (p, cookie) = new_session(&state, user, "password")?;
         state.auth.audit(&p, "signed_in", None, None, None, json!({ "via": "setup" }));
-        Ok(with_cookie(state.auth.session_cookie(Some((&secret, expires))), describe(&state, &p)?))
+        Ok(with_cookie(cookie, describe(&state, &p)?))
     })
     .await
 }
@@ -130,10 +133,7 @@ pub async fn change_password(State(state): State<Shared>, Extension(p): Extensio
         }
         super::check_password_rules(&b.new)?;
         state.auth.store.set_password(&user.id, &super::hash_password(&b.new)?)?;
-        state.auth.store.txn(|c| {
-            c.execute("DELETE FROM sessions WHERE user_id = ? AND hash <> ?", duckdb::params![user.id, session])?;
-            Ok(())
-        })?;
+        state.auth.store.delete_sessions_except(&user.id, session)?;
         state.auth.bump();
         state.auth.audit(&p, "password_changed", None, None, None, json!({}));
         Ok(StatusCode::NO_CONTENT)
@@ -168,8 +168,7 @@ pub struct CallbackQuery {
 }
 
 fn to_login(message: &str) -> Response {
-    let q: String = message.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-    Redirect::to(&format!("/login?error={q}")).into_response()
+    Redirect::to(&format!("/login?error={}", crate::http::percent_encode(message))).into_response()
 }
 
 /// The identity provider sends the browser back here; sign in and go on.
@@ -237,9 +236,7 @@ fn oidc_user(state: &Shared, c: &super::oidc::Claims) -> anyhow::Result<super::U
     auth.store.txn(|t| {
         if join == super::oidc::OidcJoin::Any {
             if let Some(org) = &default_org {
-                let mut s = t.prepare("SELECT count(*) FROM org_members WHERE org_id = ? AND user_id = ?")?;
-                let n: i64 = s.query_row(duckdb::params![org, user.id], |r| r.get(0))?;
-                if n == 0 {
+                if !Store::is_org_member(t, org, &user.id)? {
                     Store::set_org_role(t, org, &user.id, OrgRole::Member)?;
                 }
             }
@@ -267,7 +264,7 @@ fn open_invite(state: &Shared, code: &str) -> anyhow::Result<Invite> {
     let invalid = || not_found("this invitation is not valid; ask for a new one");
     let (id, secret) = parse_code(code).ok_or_else(invalid)?;
     let (inv, stored) = state.auth.store.invite(id)?.ok_or_else(invalid)?;
-    if super::hash(secret) != stored {
+    if !super::same(&super::hash(secret), &stored) {
         return Err(invalid());
     }
     if inv.accepted_at.is_some() || inv.revoked_at.is_some() || inv.expires_at <= super::now_ms() {
@@ -343,9 +340,8 @@ pub async fn accept_invite(State(state): State<Shared>, headers: HeaderMap, Json
                     Store::accept_invite(c, &inv, &u.id)?;
                     Ok(u)
                 })?;
-                let (secret, expires) = state.auth.start_session(&user, "password")?;
-                let cookie = state.auth.session_cookie(Some((&secret, expires)));
-                (Principal::User { user: std::sync::Arc::new(user), session: super::hash(&secret), expires_at: expires }, Some(cookie))
+                let (p, cookie) = new_session(&state, user, "password")?;
+                (p, Some(cookie))
             }
         };
         state.auth.bump();
@@ -908,7 +904,7 @@ pub async fn set_space_profiles(
             profiles.sort();
             profiles.dedup();
             if let Some(unknown) = profiles.iter().find(|p| state.controller.policy.profile(p).is_none()) {
-                return Err(anyhow::Error::new(crate::auth::Denied::BadRequest(format!("unknown compute profile {unknown:?}"))));
+                return Err(bad(format!("unknown compute profile {unknown:?}")));
             }
             state.auth.store.set_space_profiles(&id, &profiles)?;
             state.auth.audit(&p, "space_profiles_changed", Some(&space.org_id), Some(&id), None, json!({ "profiles": profiles }));

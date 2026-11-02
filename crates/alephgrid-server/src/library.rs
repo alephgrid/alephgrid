@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ts_rs::TS;
 
-use crate::auth::{not_found, Cap, Denied, Principal, SpaceRole, Store};
+use crate::auth::{bad_request as bad, not_found, Cap, Principal, SpaceRole, Store};
 use crate::http::{blocking, ApiResult};
 use crate::state::{Shared, Work};
 
@@ -77,10 +77,6 @@ pub struct LibraryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retired_at: Option<u64>,
     pub latest: LibraryVersion,
-}
-
-fn bad(msg: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(Denied::BadRequest(msg.into()))
 }
 
 // ------------------------------------------------------------------ store
