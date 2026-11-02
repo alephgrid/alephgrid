@@ -91,6 +91,7 @@ impl Shared {
     }
 
     /// Store results for tables of at least `rows` rows (tests use small tables).
+    #[cfg(test)]
     pub fn set_results_min_rows(&self, rows: u64) {
         self.results.min_rows.store(rows, Ordering::Relaxed);
     }

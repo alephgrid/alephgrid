@@ -380,8 +380,6 @@ pub enum Op {
 /// Default for the most rows copied from a table or query into a sheet (sheets keep every
 /// cell in memory). Set with `--sheet-copy-rows`.
 pub const SHEET_COPY_ROWS: usize = 100_000;
-/// Most demo rows a client may ask for over the protocol.
-pub const MAX_DEMO_ROWS: u64 = 100_000_000;
 
 fn default_limit() -> usize {
     500
@@ -739,7 +737,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             if demos >= MAX_DEMO_TABLES {
                 bail!(alephgrid_core::limits::TooLarge(format!("a workbook holds at most {MAX_DEMO_TABLES} demo tables; drop one first")));
             }
-            (json!(wb.create_demo_table(rows.min(MAX_DEMO_ROWS).min(MAX_PROTOCOL_DEMO_ROWS))?), tables())
+            (json!(wb.create_demo_table(rows.min(MAX_PROTOCOL_DEMO_ROWS))?), tables())
         }
         Op::DropTable { table } => {
             wb.drop_table(&table)?;

@@ -378,11 +378,13 @@ impl Sheets {
     }
 
     /// Undo steps the engine keeps (for tests of the trim).
+    #[cfg(test)]
     pub fn engine_undo_len(&self) -> usize {
         self.model.as_ref().map(|m| m.undo_len()).unwrap_or(0)
     }
 
     /// Changes queued for a remote model (always none: nothing is sent, SEC.12).
+    #[cfg(test)]
     pub fn queued_changes(&self) -> usize {
         self.model.as_ref().map(|m| m.queued_changes()).unwrap_or(0)
     }
@@ -726,10 +728,6 @@ impl Sheets {
             bail!(crate::Conflict::values(format!("someone else changed {}{more} since you started editing; nothing was changed", changed.join(", "))));
         }
         Ok(())
-    }
-
-    pub fn can_undo(&self) -> bool {
-        !self.undo_groups.is_empty()
     }
 
     /// The id of the step the next undo takes back (after [`Sheets::finish`]).

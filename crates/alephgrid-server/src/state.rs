@@ -1086,17 +1086,9 @@ pub fn dir_size(dir: &Path) -> u64 {
 /// data directory) do not trip each other's faults.
 static FAULTS: Mutex<Vec<(&'static str, Option<String>, u32)>> = Mutex::new(Vec::new());
 
-pub fn arm_fault(point: &'static str, times: u32) {
-    FAULTS.lock().unwrap().push((point, None, times));
-}
-
 /// Arm `point` only for operations on paths containing `scope` (a data directory, say).
 pub fn arm_fault_in(point: &'static str, scope: &Path, times: u32) {
     FAULTS.lock().unwrap().push((point, Some(scope.to_string_lossy().to_string()), times));
-}
-
-pub fn disarm_faults() {
-    FAULTS.lock().unwrap().clear();
 }
 
 pub fn fault(point: &'static str) -> Result<()> {
