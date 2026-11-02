@@ -431,6 +431,11 @@ pub(crate) struct Evaluation {
     /// Why the last `evaluate()` stopped early, if it did. Every formula
     /// evaluated after that reads as an error.
     pub(crate) stopped: Option<String>,
+    /// LAMBDA calls running right now (Alephgrid patch: a lambda that calls itself is an
+    /// error, not a stack overflow; see `Model::enter_lambda`).
+    pub(crate) lambda_depth: usize,
+    /// Where the stack was when the outermost running LAMBDA call started.
+    pub(crate) lambda_stack_base: usize,
 }
 
 /// Cells one evaluation may read when nobody has said otherwise.
@@ -449,10 +454,12 @@ pub const MAX_ARRAY_CELLS: u64 = 2_000_000;
 /// thread) and cost nothing to workbooks that never reach them.
 const DEFAULT_MAX_DEPTH: usize = 64;
 const DEFAULT_MAX_STACK: usize = 256 * 1024;
+/// How many LAMBDA calls may run inside one another (each also limited by stack).
+pub(crate) const MAX_LAMBDA_DEPTH: usize = 1000;
 
 /// Roughly where the stack is: the address of a local.
 #[inline(never)]
-fn stack_address() -> usize {
+pub(crate) fn stack_address() -> usize {
     let marker = 0u8;
     std::hint::black_box(&marker) as *const u8 as usize
 }
@@ -493,6 +500,8 @@ impl Default for Evaluation {
             visits: 0,
             cancel: None,
             stopped: None,
+            lambda_depth: 0,
+            lambda_stack_base: 0,
         }
     }
 }

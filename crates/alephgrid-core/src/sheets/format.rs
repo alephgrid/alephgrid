@@ -65,7 +65,12 @@ pub struct CellStyle {
 pub(crate) fn rgb(c: &ironcalc::base::types::Color) -> Option<String> {
     match c {
         ironcalc::base::types::Color::Rgb(v) => {
+            // A stored model may come from someone else's file: only hex digits, so slicing
+            // cannot split a character and nothing but a colour reaches the page.
             let hex = v.trim_start_matches('#');
+            if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
             let hex = if hex.len() == 8 { &hex[2..] } else { hex };
             (hex.len() == 6).then(|| format!("#{}", hex.to_uppercase()))
         }
@@ -319,5 +324,19 @@ impl Sheets {
     pub fn cell_style(&self, index: u32, row: u32, column: u32) -> Result<CellStyle> {
         let m = self.model()?;
         Ok(CellStyle::of(&m.get_cell_style(index, row as i32 + 1, column as i32 + 1).map_err(|e| anyhow!(e))?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironcalc::base::types::Color;
+
+    #[test]
+    fn only_hex_colours_come_out_and_odd_text_does_not_panic() {
+        assert_eq!(super::rgb(&Color::Rgb("#ff00aa".into())).as_deref(), Some("#FF00AA"));
+        assert_eq!(super::rgb(&Color::Rgb("FFFF00AA".into())).as_deref(), Some("#FF00AA"));
+        for bad in ["#é1234567", "red;x:y", "#12345", "#zzzzzz"] {
+            assert_eq!(super::rgb(&Color::Rgb(bad.into())), None, "{bad}");
+        }
     }
 }
