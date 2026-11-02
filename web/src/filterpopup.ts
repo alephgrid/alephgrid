@@ -140,9 +140,11 @@ export function filterPopup(column: Column, spec: ViewSpec, x: number, y: number
   };
   const onDown = (e: MouseEvent) => { if (!popup.contains(e.target as Node)) close(); };
   popup.addEventListener("keydown", onKey);
+  let listenTimer = 0;
   const close = () => {
     if (!popup.isConnected) return;
     popup.remove();
+    clearTimeout(listenTimer);
     document.removeEventListener("mousedown", onDown, true);
     open = null;
     returnFocus?.focus();
@@ -153,7 +155,7 @@ export function filterPopup(column: Column, spec: ViewSpec, x: number, y: number
   popup.style.width = `${w}px`;
   popup.style.left = `${Math.max(8, Math.min(x, window.innerWidth - w - 8))}px`;
   popup.style.top = `${Math.max(8, Math.min(y, window.innerHeight - popup.offsetHeight - 8))}px`;
-  setTimeout(() => document.addEventListener("mousedown", onDown, true));
+  listenTimer = window.setTimeout(() => document.addEventListener("mousedown", onDown, true));
   render();
   search.focus();
   void load();

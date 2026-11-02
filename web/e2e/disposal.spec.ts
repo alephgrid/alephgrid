@@ -94,6 +94,9 @@ test("opening and leaving a workbook does not accumulate listeners, observers or
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: /Export/ }).click();
     await page.getByRole("menuitem").first().press("Escape");
+    // The Functions panel listens for window resizes while open; leaving must remove that.
+    await page.getByRole("button", { name: "Functions", exact: true }).click();
+    await expect(page.getByRole("complementary", { name: "Functions" })).toBeVisible();
     await page.locator("button.brand").click();
     await expect(page.locator(".wb-row", { hasText: "Leak check" })).toBeVisible();
   }

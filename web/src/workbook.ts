@@ -26,10 +26,10 @@ import type {
 import type { MaterializedTable, SavedQuery, WorkbookFunction } from "./protocol";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
-import { confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
+import { closeMenu, confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
-import { filterPopup } from "./filterpopup";
+import { closeFilterPopup, filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
 import { SheetChartsLayer, rangeText } from "./sheetcharts";
@@ -519,13 +519,13 @@ export class WorkbookScreen {
     if (!focused || focused === document.body) this.grid.focus();
   }
 
-  /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   /** Changes the server has not acknowledged yet (they would be lost by leaving, U.02). */
   hasUnsaved(): boolean {
     const st = this.rpc.saveState;
     return st === "unsaved" || st === "saving";
   }
 
+  /** Leave the screen: close the socket, drop pending replies, stop timers and listeners. */
   dispose(): void {
     this.disposed = true;
     this.functions?.close();
@@ -534,6 +534,12 @@ export class WorkbookScreen {
     this.sql?.close();
     this.analysis?.close();
     this.closePresentation?.();
+    this.closeNames?.();
+    this.closeDashboards?.();
+    this.closeTools?.();
+    closeMenu();
+    closeFilterPopup();
+    clearTimeout(this.functionsTimer);
     this.rpc.close();
     clearTimeout(this.statsTimer);
     for (const t of this.timers) clearTimeout(t);

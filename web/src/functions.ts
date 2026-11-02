@@ -419,7 +419,6 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     divider.addEventListener("pointermove", move); divider.addEventListener("pointerup", up);
   });
   expandBtn.addEventListener("click", () => { expanded = !expanded; applyWidth(); render(); });
-  window.addEventListener("resize", applyWidth);
   panel.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!running) void runTests(); }
     else if (e.key === "Escape" && !e.defaultPrevented && !(e.target instanceof HTMLTextAreaElement)) { e.preventDefault(); controller.close(); }
@@ -432,6 +431,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       if (!isOpen) {
         opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         mount(panel); isOpen = true; applyWidth();
+        window.addEventListener("resize", applyWidth);
       }
       void refresh().then(() => { if (!functions.length && !draft.name && !draft.source) offerExample(); }).catch((e) => say(String(e)));
       (tabs[tab]).focus();
@@ -439,6 +439,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     close() {
       if (!isOpen) return;
       panel.remove(); isOpen = false; onClosed();
+      window.removeEventListener("resize", applyWidth);
       if (opener?.isConnected) opener.focus();
     },
   };
