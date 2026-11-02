@@ -104,8 +104,8 @@ pub struct CellRef {
 }
 
 /// Excel's grid: what a sheet cell reference may address.
-pub const MAX_SHEET_ROW: u32 = 1_048_576;
-pub const MAX_SHEET_COLUMN: u32 = 16_384;
+pub const MAX_SHEET_ROW: u32 = crate::sheets::MAX_ROWS;
+pub const MAX_SHEET_COLUMN: u32 = crate::sheets::MAX_COLUMNS;
 
 impl CellRef {
     /// The reference as typed in a formula, quoting the sheet name where needed and keeping

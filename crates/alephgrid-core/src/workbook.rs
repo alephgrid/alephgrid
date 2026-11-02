@@ -26,7 +26,7 @@ use crate::limits;
 use crate::model::*;
 use crate::reads::{is_internal, Db};
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
-use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
+use crate::sql::{formula_to_sql, id_list, ident, lit, sanitize_table_name};
 use crate::sqlpolicy::{self, QueryParam};
 use crate::storage::{self, HistoryEntry, OpenReport, ID, ORD, ORD_GAP};
 
@@ -1055,9 +1055,9 @@ impl Workbook {
                 }
                 id.to_string()
             }
-            None => format!("v{:x}{:04x}", now_secs(), self.saved_views(None)?.len()),
+            None => format!("v{:x}{:04x}", storage::now_secs(), self.saved_views(None)?.len()),
         };
-        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: now_secs() };
+        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: storage::now_secs() };
         self.mutating("save_view", None, |wb| {
             wb.conn.execute("DELETE FROM _rf_views WHERE id = ?", [&view.id])?;
             wb.conn.execute(
@@ -1287,7 +1287,7 @@ impl Workbook {
         }
         let records: BTreeSet<i64> = cells.iter().filter_map(|c| if let Target::Record(r) = c.0 { Some(r) } else { None }).collect();
         if !records.is_empty() {
-            let list = records.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+            let list = id_list(&records);
             let found: i64 =
                 self.conn.query_row(&format!("SELECT count(*) FROM main.{} WHERE {ID} IN ({list})", ident(&table)), [], |r| r.get(0))?;
             if found as usize != records.len() {
@@ -1391,8 +1391,8 @@ impl Workbook {
             ids.dedup();
             undo_cells.insert(column.to_string(), Some(ids));
         }
-        let id_list = |ids: &BTreeSet<i64>| if ids.is_empty() { "false".to_string() } else { format!("{ID} IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")) };
-        let capture = self.undo_begin(&table, &id_list(&touched))?;
+        let in_ids = |ids: &BTreeSet<i64>| if ids.is_empty() { "false".to_string() } else { format!("{ID} IN ({})", id_list(ids)) };
+        let capture = self.undo_begin(&table, &in_ids(&touched))?;
         storage::touch_table(&self.conn, &table)?;
         if appended > 0 {
             self.conn.execute_batch(&format!(
@@ -1409,8 +1409,8 @@ impl Workbook {
             self.conn.execute_batch(sql)?;
         }
         let after = match appended {
-            0 => id_list(&touched),
-            n => format!("({}) OR ({ID} >= {} AND {ID} < {})", id_list(&touched), meta.next_id, meta.next_id + n as i64),
+            0 => in_ids(&touched),
+            n => format!("({}) OR ({ID} >= {} AND {ID} < {})", in_ids(&touched), meta.next_id, meta.next_id + n as i64),
         };
         self.undo_finish(capture, &after, undo_cells)?;
         Ok(EditOutcome { table, cells_changed, rows_appended: appended, first_appended: (appended > 0).then_some(meta.next_id) })
@@ -2142,10 +2142,6 @@ fn fits_double(text: &str) -> bool {
     let digits: String = text.trim_start_matches(['+', '-']).chars().filter(|c| *c != '.').collect();
     let significant = digits.trim_start_matches('0').trim_end_matches('0');
     text.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c)) && significant.len() <= 15
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// `_rf_meta` key of the sheets' layouts (see [`SheetInfo::layout`]).

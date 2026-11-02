@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::catalog::{Materialized, PosIndex, Shared, ViewEntry};
 use crate::limits;
 use crate::model::*;
-use crate::sql::{formula_to_sql, ident, lit};
+use crate::sql::{formula_to_sql, id_list, ident, lit};
 use crate::sqlpolicy::{self, CheckedSelect, NotAllowed, QueryParam};
 use crate::storage::{self, ID, ORD};
 use crate::wire::{self, Codec};
@@ -202,15 +202,7 @@ impl Db<'_> {
         if is_internal_table(name) {
             return Ok(false);
         }
-        let n: i64 = self.conn.query_row(
-            &format!(
-                "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND database_name = current_database() AND table_name = {}",
-                lit(name)
-            ),
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+        storage::table_exists(self.conn, name)
     }
 
     pub fn count_rows(&self, table: &str) -> Result<u64> {
@@ -915,7 +907,7 @@ impl Db<'_> {
                 }
                 Some(_) => {
                     let ids = self.ids_for_range(m, row_start, end)?;
-                    let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+                    let list = id_list(&ids);
                     (Some(ids), format!("SELECT {ID}{projection} FROM ({base}) WHERE {ID} IN ({list})"))
                 }
             };

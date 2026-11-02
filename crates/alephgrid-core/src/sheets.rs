@@ -22,6 +22,7 @@ pub use layout::{Axis, LineSize, MergeMode, SheetLayout, GRID_COLUMN_WIDTH, GRID
 pub use find::{SheetMatches, SheetSearch, SortBy};
 mod links;
 pub use format::{CellStyle, StyledCell, StylePatch};
+pub(crate) use format::is_hex_color;
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
 pub(crate) use links::{slot_input, slot_of};
 pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
@@ -1347,15 +1348,9 @@ fn used_size(m: &UserModel<'static>, index: u32) -> (u32, u32) {
     }
 }
 
+/// `A`, `Z`, `AA`, … for a 0-based column index.
 pub fn column_name(index: u32) -> String {
-    let mut n = index + 1;
-    let mut s = Vec::new();
-    while n > 0 {
-        let r = ((n - 1) % 26) as u8;
-        s.push((b'A' + r) as char);
-        n = (n - 1) / 26;
-    }
-    s.iter().rev().collect()
+    crate::table_formula::column_letters(index + 1)
 }
 
 /// Cell texts that mean the same: equal, or the same number written differently (the

@@ -10,6 +10,11 @@ pub fn lit(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Row ids joined by commas, for `IN (...)`.
+pub fn id_list<'a>(ids: impl IntoIterator<Item = &'a i64>) -> String {
+    ids.into_iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+}
+
 /// Turn a user-facing name into something safe and readable for a table name.
 pub fn sanitize_table_name(raw: &str) -> String {
     let mut out: String = raw

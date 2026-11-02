@@ -131,12 +131,16 @@ pub struct StylePatch {
 const H: &[&str] = &["general", "left", "center", "right", "fill", "justify", "centercontinuous", "distributed"];
 const V: &[&str] = &["bottom", "center", "top", "justify", "distributed"];
 
+/// Whether `v` is a colour written `#RRGGBB`.
+pub(crate) fn is_hex_color(v: &str) -> bool {
+    v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn color(v: &str) -> Result<String> {
     if v.is_empty() {
         return Ok(String::new());
     }
-    let ok = v.len() == 7 && v.starts_with('#') && v[1..].chars().all(|c| c.is_ascii_hexdigit());
-    if !ok {
+    if !is_hex_color(v) {
         bail!("colours are written #RRGGBB, not {v:?}");
     }
     Ok(v.to_uppercase())
