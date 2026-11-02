@@ -3,17 +3,16 @@
 // preview-then-apply replacement with undo. The provider says where to look: a table view
 // (searched on the server over every row) or, with S.04, a sheet.
 
-import { el, toast } from "./ui";
+import { el, toast, toastError } from "./ui";
 import { icon } from "./icons";
 import { formatCount } from "./format";
-
-export interface FindHit { row: number; columns: number[] }
+import type { FindHit, FindResult } from "./protocol";
 
 export interface FindProvider {
   label: string;
   /** Sheets offer whole-cell and in-formulas matching (S.04). */
   sheetOptions?: boolean;
-  find(text: string, matchCase: boolean, from: number, backwards: boolean, count: boolean): Promise<{ matches?: number; hits: FindHit[] }>;
+  find(text: string, matchCase: boolean, from: number, backwards: boolean, count: boolean): Promise<FindResult>;
   active(): { r: number; c: number };
   go(row: number, column: number): void;
   columnName?(c: number): string;
@@ -53,6 +52,11 @@ export class FindBar {
   private timer = 0;
   private provider: FindProvider | null = null;
 
+  /** The text in the "Replace with" box. */
+  get replacementText(): string {
+    return this.replacement.value;
+  }
+
   constructor(private onClose: () => void) {
     const prev = el("button", { class: "icon-btn", type: "button", title: "Previous match (Shift+Enter)", "aria-label": "Previous match" }, icon("chevron", 14));
     prev.classList.add("find-prev");
@@ -67,7 +71,7 @@ export class FindBar {
       const r = this.provider?.replace;
       if (!r?.one || !this.input.value) return;
       try { await r.one(this.input.value, this.replacement.value, this.matchCase); await this.step(false); await this.refresh(); }
-      catch (e) { toast((e as Error).message, "error"); }
+      catch (e) { toastError(e); }
     });
     this.oneBtn = one;
     this.replaceRow.append(this.column, this.replacement, one, preview, this.applyBtn, undo);
@@ -103,18 +107,18 @@ export class FindBar {
         this.count.textContent = n === 0 ? "No cell to replace" : `${formatCount(n)} cells will change in ${this.column.value}`;
         this.applyBtn.disabled = n === 0 || n > 10_000;
         if (n > 10_000) this.count.textContent = `${formatCount(n)} cells: at most 10,000 can be replaced at once`;
-      } catch (e) { toast((e as Error).message, "error"); }
+      } catch (e) { toastError(e); }
     });
     this.applyBtn.addEventListener("click", async () => {
       const r = this.provider?.replace;
       if (!r) return;
       this.applyBtn.disabled = true;
-      try { toast(await r.apply(), "success"); void this.refresh(); } catch (e) { toast((e as Error).message, "error"); }
+      try { toast(await r.apply(), "success"); void this.refresh(); } catch (e) { toastError(e); }
     });
     undo.addEventListener("click", async () => {
       const r = this.provider?.replace;
       if (!r) return;
-      try { toast(await r.undo(), "success"); void this.refresh(); } catch (e) { toast((e as Error).message, "error"); }
+      try { toast(await r.undo(), "success"); void this.refresh(); } catch (e) { toastError(e); }
     });
   }
 

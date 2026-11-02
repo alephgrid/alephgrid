@@ -4,7 +4,7 @@
 
 import { api, type SpaceListing } from "./api";
 import type { AgentActivity, AgentConnection, AgentProposal } from "./types";
-import { confirmDialog, el, openModal, toast } from "./ui";
+import { confirmDialog, el, openModal, toast, toastError } from "./ui";
 
 function when(ms?: number | null): string {
   return ms ? new Date(ms).toLocaleString() : "never";
@@ -78,7 +78,7 @@ function proposalsDialog(c: AgentConnection, workbooks: { id: string; name: stri
       const payload = p.payload as { sql?: string };
       const decide = (approve: boolean) => async () => {
         try { await api.decideProposal(c.id, p.id, approve); toast(approve ? `Saved “${p.name}”` : "Rejected", approve ? "success" : "info"); await render(); }
-        catch (e) { toast((e as Error).message, "error"); }
+        catch (e) { toastError(e); }
       };
       return el("section", { class: "proposal", "aria-label": `Proposal ${p.name}` },
         el("div", { class: "proposal-head" }, el("strong", {}, p.name),
@@ -126,7 +126,7 @@ export function agentsDialog(space: SpaceListing, workbooks: { id: string; name:
         el("button", { class: "btn btn-small", type: "button", "aria-label": `Proposals of ${c.name}`, onclick: () => proposalsDialog(c, workbooks, () => void render()) }, "Proposals"),
         c.revoked_at ? null : el("button", { class: "btn btn-small", type: "button", "aria-label": `Revoke ${c.name}`, onclick: async () => {
           if (!(await confirmDialog(`Revoke “${c.name}”?`, "The agent loses access at once, its results included.", "Revoke"))) return;
-          try { await api.revokeAgent(c.id); await render(); } catch (e) { toast((e as Error).message, "error"); }
+          try { await api.revokeAgent(c.id); await render(); } catch (e) { toastError(e); }
         } }, "Revoke"))))
       : [el("p", { class: "muted" }, "No agent connections yet.")]));
   };

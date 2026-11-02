@@ -10,7 +10,8 @@ import { renderChart, type ChartType } from "./charts";
 import type { SheetChart } from "./protocol";
 import { columnLetter } from "./format";
 import { referenceRanges } from "./references";
-import { el, formDialog, toast } from "./ui";
+import { areaOf } from "./sheetarea";
+import { el, formDialog, pointerDrag, toast, toastError } from "./ui";
 
 export interface ChartsHost {
   /** Top-left of a cell in CSS pixels relative to the grid, and the zoom. */
@@ -118,7 +119,7 @@ export class SheetChartsLayer {
           this.set([...this.charts, chart]);
           resolve(true);
         } catch (e) {
-          toast((e as Error).message, "error");
+          toastError(e);
           create.disabled = cancel.disabled = false;
         }
       };
@@ -134,7 +135,7 @@ export class SheetChartsLayer {
       await this.host.save(next);
       this.set(next);
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
       this.set(this.charts);
     }
   }
@@ -175,40 +176,24 @@ export class SheetChartsLayer {
       });
       if (!v) return;
       const r = referenceRanges(v.range.trim())[0];
-      await this.update(id, { title: v.title.trim(), data: { row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 } });
+      await this.update(id, { title: v.title.trim(), data: areaOf(r) });
     });
     // Move by the title bar; drop anchors the chart at the cell under its top-left corner.
     bar.addEventListener("pointerdown", (e) => {
       if ((e.target as HTMLElement).closest("button, select")) return;
-      e.preventDefault();
-      bar.setPointerCapture(e.pointerId);
       const start = { x: e.clientX, y: e.clientY, left: box.offsetLeft, top: box.offsetTop };
-      const move = (m: PointerEvent) => { box.style.left = `${start.left + m.clientX - start.x}px`; box.style.top = `${start.top + m.clientY - start.y}px`; };
-      const up = (u: PointerEvent) => {
-        bar.removeEventListener("pointermove", move);
-        bar.removeEventListener("pointerup", up);
+      pointerDrag(bar, e, (m) => { box.style.left = `${start.left + m.clientX - start.x}px`; box.style.top = `${start.top + m.clientY - start.y}px`; }, (u) => {
         const r = box.getBoundingClientRect();
         const cell = this.host.cellAt(r.left + 2, r.top + 2);
         if (cell && (u.clientX !== start.x || u.clientY !== start.y)) void this.update(id, { row: cell.r, column: cell.c });
         else this.position();
-      };
-      bar.addEventListener("pointermove", move);
-      bar.addEventListener("pointerup", up);
+      });
     });
     grip.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      grip.setPointerCapture(e.pointerId);
       const z = this.host.zoom(), now = current();
       const start = { x: e.clientX, y: e.clientY, w: now.width, h: now.height };
       const size = (m: PointerEvent) => ({ width: Math.round(Math.max(160, Math.min(2000, start.w + (m.clientX - start.x) / z))), height: Math.round(Math.max(120, Math.min(2000, start.h + (m.clientY - start.y) / z))) });
-      const move = (m: PointerEvent) => { const s = size(m); box.style.width = `${s.width * z}px`; box.style.height = `${s.height * z}px`; };
-      const up = (u: PointerEvent) => {
-        grip.removeEventListener("pointermove", move);
-        grip.removeEventListener("pointerup", up);
-        void this.update(id, size(u));
-      };
-      grip.addEventListener("pointermove", move);
-      grip.addEventListener("pointerup", up);
+      pointerDrag(grip, e, (m) => { const s = size(m); box.style.width = `${s.width * z}px`; box.style.height = `${s.height * z}px`; }, (u) => void this.update(id, size(u)));
     });
   }
 

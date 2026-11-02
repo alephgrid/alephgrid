@@ -63,6 +63,18 @@ export function columnLetter(index: number): string {
   return s;
 }
 
+/** "512 B", "1.5 KB", "20 MB": binary units, one decimal below 10. */
+export function bytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+/** "1.2M", "35K": a count in compact notation. */
+export const formatCompact = (n: number): string => compact.format(n);
+
 export function formatCount(n: number): string {
   return n.toLocaleString();
 }

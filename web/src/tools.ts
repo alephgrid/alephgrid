@@ -46,7 +46,7 @@ export function dataToolsDialog(rpc: Rpc, table: string, columns: Column[], open
       act("Remove rules of this column", async () => { const report = await rpc.call("set_validations", { table, rules: rules.filter(r => r.column !== column.value) }); rules = report.rules; showRules(report.violations); status.textContent = "Rules removed."; })),
     el("h3", {}, "Clean up into a new table"), field("Transform", transform), field("Argument", arg), field("Split parts", parts), field("New table name", name),
     el("div", { class: "dialog-actions" },
-      act("Preview", async () => { const p = await rpc.call("preview_transform", { table, transform: spec() }); status.textContent = `${p.rows} rows · ${p.affected} ${transform.value === "dedupe" ? "duplicates left out" : transform.value === "convert" ? "values that do not convert (blank)" : "values changed"}`; output.replaceChildren(resultTable({ columns: p.sample.columns, rows: p.sample.rows, truncated: p.sample.truncated, revision: 0, sources: [] } as never)); }),
+      act("Preview", async () => { const p = await rpc.call("preview_transform", { table, transform: spec() }); status.textContent = `${p.rows} rows · ${p.affected} ${transform.value === "dedupe" ? "duplicates left out" : transform.value === "convert" ? "values that do not convert (blank)" : "values changed"}`; output.replaceChildren(resultTable(p.sample)); }),
       act("Create table", async () => { const info = await rpc.call("apply_transform", { table, transform: spec(), name: name.value }); modal.close(); await openTable(info.name); })),
     el("h3", {}, "Inspect a formula"), field("Formula column", formula),
     el("div", { class: "dialog-actions" },

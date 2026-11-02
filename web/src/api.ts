@@ -35,7 +35,8 @@ export function isRuntimeFailure(e: unknown): e is HttpError {
   return e instanceof HttpError && (e.status === 409 || e.status === 423 || e.status === 503);
 }
 
-async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** A JSON request; a failure throws HttpError with the server's message. */
+export async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
@@ -172,9 +173,9 @@ export function stageUpload(
     xhr.open("POST", `/api/workbooks/${seg(workbookId)}/uploads?filename=${encodeURIComponent(file.name)}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
-      let body: any = null;
+      let body: (UploadCreated & { error?: string; problem?: ImportProblem }) | null = null;
       try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as UploadCreated);
       else reject(new HttpError(xhr.status, body?.error ?? `upload failed (${xhr.status})`, body?.problem));
     };
     xhr.onerror = () => reject(new Error("upload failed: network error"));

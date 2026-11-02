@@ -4,7 +4,7 @@ import { renderChart, type ChartType } from "./charts";
 import type { AnalysisSpec, AnalysisResult, SavedAnalysis, TableSchema, QueryResult, ChartKind, Dashboard, DashboardResult, ColumnValues } from "./protocol";
 
 export const field = (label: string, input: HTMLElement) => el("label", { class: "analysis-field" }, label, input);
-export function resultTable(result: QueryResult, onRow?: (row: unknown[]) => void): HTMLElement {
+export function resultTable(result: Pick<QueryResult, "columns" | "rows">, onRow?: (row: unknown[]) => void): HTMLElement {
   return el("div", { class: "analysis-result" }, el("table", { class: "result-table" },
     el("thead", {}, el("tr", {}, ...result.columns.map(c => el("th", { scope: "col" }, c.name)), ...(onRow ? [el("th", { scope: "col" }, "Rows")] : []))),
     el("tbody", {}, ...result.rows.map(row => el("tr", {}, ...row.map(value => el("td", {}, value === null ? "NULL" : String(value))),

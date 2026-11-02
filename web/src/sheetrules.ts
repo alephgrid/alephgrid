@@ -3,8 +3,9 @@
 
 import type { Rpc } from "./api";
 import type { CellArea, CellStyle, SheetColorRule, SheetRules } from "./protocol";
+import { areaContains } from "./sheetarea";
 import { rangeText } from "./sheetcharts";
-import { el, openModal, toast } from "./ui";
+import { el, openModal, toastError } from "./ui";
 
 /** Whether a colour rule's condition holds for a cell showing `t`. */
 export function ruleMatches(x: SheetColorRule, t: string): boolean {
@@ -24,7 +25,7 @@ export function ruleMatches(x: SheetColorRule, t: string): boolean {
 /** Cell (r, c)'s own style with the fill of the first matching colour rule; its own fill wins.
  *  `text` is the cell's displayed text, read only when a rule covers the cell. */
 export function ruleFill(rules: SheetRules, own: CellStyle | undefined, text: () => string, r: number, c: number): CellStyle | undefined {
-  const rule = rules.colors.find((x) => r >= x.area.row && r < x.area.row + x.area.rows && c >= x.area.column && c < x.area.column + x.area.columns && ruleMatches(x, text()));
+  const rule = rules.colors.find((x) => areaContains(x.area, r, c) && ruleMatches(x, text()));
   if (rule?.condition === "scale" && !own?.fill) {
     // Colour scale: the rule's colour, stronger the closer the value is to the top of "low,high".
     const [lo, hi] = rule.value.split(",").map(Number);
@@ -54,7 +55,7 @@ export async function rulesDialog(rpc: Rpc, sheet: number, name: string, host: R
     el("div", { class: "dialog-actions" }, done));
   const save = async (next: typeof rules) => {
     try { await rpc.call("set_sheet_rules", { sheet, rules: next }); rules = next; host.changed(next); render(); }
-    catch (e) { toast((e as Error).message, "error"); }
+    catch (e) { toastError(e); }
   };
   const goTo = (a: CellArea) => {
     modal.close();

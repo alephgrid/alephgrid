@@ -3,6 +3,7 @@
 
 import { formatValue, isNumericKind, rawText } from "./format";
 import { applyReferenceLock } from "./references";
+import { THEME_EVENT } from "./theme";
 import type { Align, CellValue, Column, Filter, SortKey } from "./types";
 import type { CellStyle } from "./protocol";
 
@@ -195,7 +196,7 @@ export class Grid {
     // The theme can change by the system or by the user's choice (theme.ts).
     const repaint = () => { this.colors = palette(); this.invalidate(); };
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", repaint, { signal });
-    window.addEventListener("alephgrid-theme", repaint, { signal });
+    window.addEventListener(THEME_EVENT, repaint, { signal });
     this.scroller.addEventListener("scroll", () => this.onScroll(), { signal });
     this.scroller.addEventListener("wheel", (e) => this.onWheel(e), { passive: false, signal });
     this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e), { signal });

@@ -81,6 +81,11 @@ export class CommandRegistry {
     return this.commands;
   }
 
+  /** Run command `id` (nothing if there is none, or it has no `run`). */
+  run(id: string): void | Promise<void> {
+    return this.commands.find((c) => c.id === id)?.run?.();
+  }
+
   /** Two commands bound to the same key in the same context. */
   conflicts(): string[] {
     const seen = new Map<string, string>();

@@ -3,46 +3,37 @@ import { applyReferenceLock, referenceInsertion, referenceRanges } from "./refer
 import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
 import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
-import type { PasteMode } from "./protocol";
+import type { CellArea, CellComment, ColumnValues, MaterializedTable, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, StylePatch, Validation, WorkbookFunction } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { dashboardsDialog } from "./analysis";
 import { AnalyzePane } from "./analyzepane";
 import { FindBar, type FindProvider } from "./findbar";
 import { dataToolsDialog } from "./tools";
-import type { Validation } from "./protocol";
 import { functionCompletion, functionPanel, type FunctionPanel } from "./functions";
 import { api, HttpError, isRuntimeFailure, Rpc, RpcError } from "./api";
 import { importFile } from "./importer";
 import { historyDialog } from "./history";
 import { computeDialog, pausedText, profileLabel, waitForCompute } from "./compute";
-import type { RuntimeStatus } from "./protocol";
 
 import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
-import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
+import { columnLetter, formatCompact, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { parseTsv, tsvCell } from "./tsv";
+import { store, stored, unstore } from "./storage";
 import { ruleFill, rulesDialog } from "./sheetrules";
+import { areaContains, areaOf, rangeOf } from "./sheetarea";
 import { Grid, type Cell, type GridEdit, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
-import type { MaterializedTable, SavedQuery, WorkbookFunction } from "./protocol";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
-import { closeMenu, confirmDialog, el, formDialog, openModal, showMenu, toast, type MenuItem } from "./ui";
+import { closeMenu, confirmDialog, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { closeFilterPopup, filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
 import { SheetChartsLayer } from "./sheetcharts";
-import type { CellComment, SheetLayout, SheetRules } from "./protocol";
-import type { StylePatch } from "./protocol";
-import type { ColumnValues } from "./protocol";
-
-/** "1.2M rows" for the explorer. */
-function compactRows(n: number): string {
-  return `${new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n)} rows`;
-}
 import { setTheme, THEME_CHOICES, themeButton, themePreference } from "./theme";
 import { shareDialog } from "./share";
 
@@ -98,6 +89,17 @@ function describeFilter(f: Filter): string {
   return `${f.column} ${op?.label ?? f.op}${op?.needsValue ? ` “${f.value ?? ""}”` : ""}`;
 }
 
+/** Runs tasks one after another in the order they were given; a failed task does not stop
+ *  the ones after it. */
+function serialQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+  let queue: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>) => {
+    const run = queue.then(task, task);
+    queue = run.catch(() => undefined);
+    return run;
+  };
+}
+
 /** The workbook no longer exists (or is in the trash): the server answers "not found". */
 function isGone(e: unknown): boolean {
   return e instanceof HttpError && (e.status === 404 || e.status === 410 || (e.status === 400 && /not found/i.test(e.message)));
@@ -146,7 +148,7 @@ export class WorkbookScreen {
   private explorerEl = el("nav", { class: "workbook-explorer", "aria-label": "Workbook explorer" });
   private explorerBtn: HTMLButtonElement | null = null;
   private explorerOpen = (() => {
-    try { const v = localStorage.getItem("alephgrid-explorer"); if (v) return v === "open"; } catch { /* default */ }
+    const v = stored("alephgrid-explorer"); if (v) return v === "open";
     return false; // collapsed until the person opens it (UI direction v2)
   })();
   private functionsList: WorkbookFunction[] = [];
@@ -176,26 +178,15 @@ export class WorkbookScreen {
   private rules: Validation[] = [];
   private commands = new CommandRegistry();
   /** Cells last copied or cut in this workbook, so pasting their text pastes the cells
-   *  (formulas, formats) rather than the displayed values. */
-  /** Copied sheet cells, with the sheet's layout when copied (a paste is refused once it moved). */
+   *  (formulas, formats) rather than the displayed values; with the sheet's layout when
+   *  copied (a paste is refused once it moved). */
   private clip: { sheet: number; range: Range; text: string; cut: boolean; layout?: number } | null = null;
   /** Sheet changes run one after another in the order the user made them: a formula's parse
    *  check must not let a later edit (or undo) reach the server first. */
-  private sheetQueue: Promise<unknown> = Promise.resolve();
-
-  private inSheetOrder<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.sheetQueue.then(task, task);
-    this.sheetQueue = run.catch(() => undefined);
-    return run;
-  }
+  private inSheetOrder = serialQueue();
   /** Table edits, like sheet changes, are sent one after another in the user's order: an
    *  edit of a row the previous one appended then knows its record id. */
-  private tableQueue: Promise<unknown> = Promise.resolve();
-  private inTableOrder<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.tableQueue.then(task, task);
-    this.tableQueue = run.catch(() => undefined);
-    return run;
-  }
+  private inTableOrder = serialQueue();
   private tabsEl = el("div", { class: "tabs", role: "tablist" });
   private statsEl = el("div", { class: "stats" });
   private rowsEl = el("div", { class: "row-count" });
@@ -227,7 +218,7 @@ export class WorkbookScreen {
     apply: (patch) => this.applyStyle(patch),
     clear: () => this.applyStyle(null),
     border: (kind) => this.applyBorder(kind),
-  }) as HTMLElement & { sync?: () => void };
+  });
   private replaceRevision = 0;
   /** Tables made from a query, and the saved queries they may name. */
   private materialized: MaterializedTable[] = [];
@@ -250,7 +241,7 @@ export class WorkbookScreen {
     find: () => this.openFind(false),
     addColumn: () => this.addColumnDialog(),
     filter: () => this.filterDialog(this.grid.active.c),
-    names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); } },
+    names: async () => { this.closeNames?.(); try { this.closeNames = await namesDialog(this.namesContext()); } catch (e) { toastError(e); } },
     goTo: () => void this.goTo(),
     importFile: () => this.fileInput.click(),
     analyze: () => this.openAnalyze(),
@@ -484,7 +475,7 @@ export class WorkbookScreen {
       this.maxMessageBytes = config.max_message_bytes ?? this.maxMessageBytes;
       this.maxEditCells = config.max_edit_cells ?? this.maxEditCells;
     } catch { /* keep default */ }
-    try { const z = Number(localStorage.getItem(`alephgrid-zoom-${this.meta.id}`)); if (z && z !== 1) requestAnimationFrame(() => this.grid.setZoom(z)); } catch { /* private mode */ }
+    const z = Number(stored(`alephgrid-zoom-${this.meta.id}`)); if (z && z !== 1) requestAnimationFrame(() => this.grid.setZoom(z));
     try {
       await this.rpc.connect();
     } catch (e) {
@@ -667,9 +658,9 @@ export class WorkbookScreen {
         { label: "Demo data: 1M rows", action: () => this.createDemo(1_000_000) },
       ]],
       ["Format", () => this.isSheet() ? [
-        { label: "Bold", hint: "⌘B", action: () => this.commands.list().find((c) => c.id === "format.bold")?.run?.() },
-        { label: "Italic", hint: "⌘I", action: () => this.commands.list().find((c) => c.id === "format.italic")?.run?.() },
-        { label: "Underline", hint: "⌘U", action: () => this.commands.list().find((c) => c.id === "format.underline")?.run?.() },
+        { label: "Bold", hint: "⌘B", action: () => this.commands.run("format.bold") },
+        { label: "Italic", hint: "⌘I", action: () => this.commands.run("format.italic") },
+        { label: "Underline", hint: "⌘U", action: () => this.commands.run("format.underline") },
         "sep",
         { label: "Number: 1,234.56", action: () => void this.applyStyle({ num_fmt: "#,##0.00" }) },
         { label: "Percent: 12.35%", action: () => void this.applyStyle({ num_fmt: "0.00%" }) },
@@ -811,7 +802,7 @@ export class WorkbookScreen {
 
   private toggleExplorer(): void {
     this.explorerOpen = !this.explorerOpen;
-    try { localStorage.setItem("alephgrid-explorer", this.explorerOpen ? "open" : "closed"); } catch { /* this page only */ }
+    store("alephgrid-explorer", this.explorerOpen ? "open" : "closed");
     this.applyExplorer();
   }
 
@@ -845,7 +836,7 @@ export class WorkbookScreen {
         items.length ? el("ul", {}, ...items) : el("p", { class: "explorer-empty" }, empty));
     };
     this.explorerEl.replaceChildren(...[
-      section("Tables", this.tables.map((t) => item("table", t.name, compactRows(t.row_count), a?.kind === "table" && a.name === t.name, () => void this.openTable(t.name),
+      section("Tables", this.tables.map((t) => item("table", t.name, `${formatCompact(t.row_count)} rows`, a?.kind === "table" && a.name === t.name, () => void this.openTable(t.name),
         `${t.name} · ${formatCount(t.row_count)} rows · ${t.column_count} columns`)), "Import a file to add a table.", ["Add a table from a file", () => this.fileInput.click()]),
       section("Sheets", this.sheets.map((sh) => item("sheet", sh.name, "", a?.kind === "sheet" && a.index === sh.index,
         () => this.pickingFormula() ? this.showSheetForPicking(sh.index) : void this.openSheet(sh.index))), "No sheets yet.", ["Add a sheet", () => void this.createSheet()]),
@@ -929,11 +920,11 @@ export class WorkbookScreen {
           const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
           if (!v) return;
           try { this.currentSaved = await this.rpc.call("rename_saved_view", { saved: current.id, name: v.name }); await this.loadSavedViews(); }
-          catch (err) { toast((err as Error).message, "error"); }
+          catch (err) { toastError(err); }
         } },
         { label: `Delete “${current.name}”`, danger: true, action: async () => {
           if (!(await confirmDialog(`Delete the view “${current.name}”?`, "Only the saved view goes; the table and its data stay."))) return;
-          await this.rpc.call("delete_saved_view", { saved: current.id }).catch((err) => toast((err as Error).message, "error"));
+          await this.rpc.call("delete_saved_view", { saved: current.id }).catch((err) => toastError(err));
           this.currentSaved = null;
           await this.loadSavedViews();
         } },
@@ -955,7 +946,7 @@ export class WorkbookScreen {
       await this.loadSavedViews();
       toast(`Saved view “${this.currentSaved.name}”`, "success");
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -970,7 +961,7 @@ export class WorkbookScreen {
       await this.openTable(info.name);
       toast(`Created ${info.name} (${formatCount(info.row_count)} rows, snapshot)`, "success");
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -995,7 +986,7 @@ export class WorkbookScreen {
       await this.openSheet(copy.sheet.index);
       this.reportCopy(copy, t.name);
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -1022,7 +1013,7 @@ export class WorkbookScreen {
   /** U.20: a short, dismissible first-run guide on a workbook, once per browser. */
   private welcome(): HTMLElement | null {
     try { if (localStorage.getItem("alephgrid-welcome-done")) return null; } catch { return null; }
-    const done = () => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* private mode */ } strip.remove(); };
+    const done = () => { store("alephgrid-welcome-done", "1"); strip.remove(); };
     const kbd = (k: string) => el("kbd", {}, k);
     const tips = [
       el("li", {}, "Filter a column by its values: its header's ", el("strong", {}, "▾"), " or ", kbd("Alt"), "+", kbd("↓")),
@@ -1114,7 +1105,7 @@ export class WorkbookScreen {
           if (!Number.isInteger(from) || from === s.index) return;
           e.preventDefault();
           try { await this.rpc.call("sheet_reorder", { sheet: from, to: s.index }); await this.loadItems(); }
-          catch (err) { toast((err as Error).message, "error"); }
+          catch (err) { toastError(err); }
         },
       }, el("span", { class: "tab-icon" }, icon("sheet", 13)), s.name,
         s.color ? el("span", { class: "tab-color", "aria-hidden": "true", style: `background:${s.color}` }) : null);
@@ -1159,7 +1150,7 @@ export class WorkbookScreen {
       this.grid.scrollToTop();
       this.grid.select({ r: 0, c: 0 });
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     } finally {
       this.busy(null);
     }
@@ -1224,7 +1215,7 @@ export class WorkbookScreen {
       this.sheetCache.refresh();
       this.grid.invalidate();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -1284,7 +1275,7 @@ export class WorkbookScreen {
         await this.refreshSheet();
       }
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -1304,7 +1295,7 @@ export class WorkbookScreen {
         await this.refreshSheet();
       }
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -1322,7 +1313,7 @@ export class WorkbookScreen {
       const ms = performance.now() - started;
       if (ms > 400) toast(`${formatCount(info.row_count)} rows in ${(ms / 1000).toFixed(1)}s`);
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     } finally {
       this.busy(null);
     }
@@ -1626,7 +1617,7 @@ export class WorkbookScreen {
       if (!changed) toast(redo ? "Nothing to redo" : "Nothing to undo");
       await this.refreshSheet();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -1680,7 +1671,7 @@ export class WorkbookScreen {
         await this.rpc.call("update_formula", { table: this.spec.table, name: col.name, formula: value });
         toast(`Updated formula for ${col.name}`, "success");
       } catch (e) {
-        toast((e as Error).message, "error");
+        toastError(e);
       }
     } else {
       await this.commitEdits([{ r, c, value: value === "" ? null : value }]);
@@ -1696,7 +1687,7 @@ export class WorkbookScreen {
     try {
       problem = await this.rpc.call("sheet_check_formula", { sheet: origin.index, row: origin.r, column: origin.c, formula: value });
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
       return false;
     }
     if (!problem) { this.formulaProblem.hidden = true; return true; }
@@ -1783,7 +1774,7 @@ export class WorkbookScreen {
   }
 
   private async goTo(): Promise<void> {
-    try { await goToDialog(this.namesContext()); } catch (e) { toast((e as Error).message, "error"); }
+    try { await goToDialog(this.namesContext()); } catch (e) { toastError(e); }
   }
 
   private async goToAddress(text: string): Promise<void> {
@@ -1894,7 +1885,7 @@ export class WorkbookScreen {
     if (!clip || this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
     const r = clip.range;
-    const source = { row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 };
+    const source = areaOf(r);
     if (source.rows * source.columns > this.maxEditCells) { toast(`That paste is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
     try {
       let area;
@@ -1918,8 +1909,7 @@ export class WorkbookScreen {
       this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
       toast(`${clip.cut ? "Moved" : "Pasted"} ${formatCount(area.rows * area.columns)} cells`, "success");
     } catch (e) {
-      this.reportConflict(e);
-      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+      await this.sheetConflict(e);
     }
   }
 
@@ -1960,7 +1950,7 @@ export class WorkbookScreen {
   private async fill(direction: "down" | "right"): Promise<void> {
     if (this.active?.kind !== "sheet") return;
     const s = this.grid.selection();
-    let area = { row: s.r0, column: s.c0, rows: s.r1 - s.r0 + 1, columns: s.c1 - s.c0 + 1 };
+    let area = areaOf(s);
     if (direction === "down" && area.rows === 1) {
       if (s.r0 === 0) { toast("There is no row above to fill down from"); return; }
       area = { ...area, row: s.r0 - 1, rows: 2 };
@@ -1980,30 +1970,28 @@ export class WorkbookScreen {
       this.sheetCache.refresh();
       this.grid.invalidate();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
   /** The fill handle was dragged: continue series, count on text, or repeat the pattern. */
   private async dragFill(source: Range, target: Range): Promise<void> {
     if (this.active?.kind !== "sheet") return;
-    const area = (r: Range) => ({ row: r.r0, column: r.c0, rows: r.r1 - r.r0 + 1, columns: r.c1 - r.c0 + 1 });
     const back = () => this.grid.select({ r: source.r1, c: source.c1 }, { r: source.r0, c: source.c0 }, false);
-    const t = area(target);
+    const t = areaOf(target);
     if (t.rows * t.columns > this.maxEditCells) { toast(`That fill is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); back(); return; }
     try {
       const sheet = this.active.index;
       const layout = this.shownLayout(sheet, target.r0, target.r1);
       if (layout === null) { back(); return; }
-      const info = await this.inSheetOrder(() => this.rpc.call("sheet_drag_fill", { sheet, source: area(source), target: t, layout }));
+      const info = await this.inSheetOrder(() => this.rpc.call("sheet_drag_fill", { sheet, source: areaOf(source), target: t, layout }));
       this.sheets = this.sheets.map((x) => (x.index === info.index ? info : x));
       this.applySheetInfo(info, false);
       this.sheetCache.refresh();
       this.grid.invalidate();
     } catch (e) {
       back();
-      this.reportConflict(e);
-      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+      await this.sheetConflict(e);
     }
   }
 
@@ -2011,8 +1999,7 @@ export class WorkbookScreen {
   private async sheetRegion(at: Cell): Promise<Range | null> {
     if (this.active?.kind !== "sheet") return null;
     try {
-      const a = await this.rpc.call("sheet_region", { sheet: this.active.index, row: at.r, column: at.c });
-      return { r0: a.row, c0: a.column, r1: a.row + a.rows - 1, c1: a.column + a.columns - 1 };
+      return rangeOf(await this.rpc.call("sheet_region", { sheet: this.active.index, row: at.r, column: at.c }));
     } catch {
       return null;
     }
@@ -2108,17 +2095,17 @@ export class WorkbookScreen {
           const { revision, ...rest } = pending;
           const r = await this.rpc.call("replace_apply", { spec: { ...rest, table }, revision });
           this.replaceRevision = r.undo_revision;
-          try { localStorage.setItem(key, String(r.undo_revision)); } catch { /* private mode */ }
+          store(key, String(r.undo_revision));
           pending = null;
           return `Replaced ${formatCount(r.rows)} cells. Undo is available until the next change to the workbook.`;
         },
         undo: async () => {
           let revision = this.replaceRevision;
-          if (!revision) { try { revision = Number(localStorage.getItem(key)) || 0; } catch { revision = 0; } }
+          if (!revision) revision = Number(stored(key)) || 0;
           if (!revision) throw new Error("No replacement to undo in this browser");
           await this.rpc.call("replace_undo", { revision });
           this.replaceRevision = 0;
-          try { localStorage.removeItem(key); } catch { /* private mode */ }
+          unstore(key);
           return "Replacement undone";
         },
       },
@@ -2172,7 +2159,7 @@ export class WorkbookScreen {
           return (await this.rpc.call("sheet_find", { sheet: current(), search, count: true })).matches ?? 0;
         },
         apply: async () => {
-          const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
+          const input = this.findBar.replacementText;
           const search = searchOf(last.text, last.matchCase);
           const n = this.findBar.allSheets
             ? await this.rpc.call("sheet_replace_all", { search, replacement: input })
@@ -2213,40 +2200,49 @@ export class WorkbookScreen {
       await this.rpc.call(op, { sheet, ...params, layout });
       await this.refreshSheet();
     } catch (e) {
-      this.reportConflict(e);
-      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+      await this.sheetConflict(e);
     }
+  }
+
+  /** The open sheet, its selected cells and the layout they are shown in; null when no
+   *  sheet is open or the layout is out of date. */
+  private selectedSheetArea(): { sheet: number; area: CellArea; layout: number } | null {
+    if (this.active?.kind !== "sheet") return null;
+    const sheet = this.active.index;
+    const sel = this.grid.selection();
+    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
+    if (layout === null) return null;
+    return { sheet, area: areaOf(sel), layout };
+  }
+
+  /** A sheet change failed: say why, and show the sheet as it is now after a conflict. */
+  private async sheetConflict(e: unknown): Promise<void> {
+    this.reportConflict(e);
+    if ((e as RpcError).code === "conflict") await this.refreshSheet();
   }
 
   /** S.01: format the selected cells of the current sheet (null clears their formats). */
   private async applyStyle(patch: StylePatch | null): Promise<void> {
-    if (this.active?.kind !== "sheet") return;
-    const sheet = this.active.index;
-    const sel = this.grid.selection();
-    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
-    if (layout === null) return;
-    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const at = this.selectedSheetArea();
+    if (!at) return;
+    const { sheet, area, layout } = at;
     try {
       if (patch) await this.rpc.call("sheet_style", { sheet, area, style: patch, layout });
       else await this.rpc.call("sheet_clear_format", { sheet, area, layout });
       await this.refreshSheet();
       this.formatBarEl.sync?.();
     } catch (e) {
-      this.reportConflict(e);
-      if ((e as RpcError).code === "conflict") await this.refreshSheet();
+      await this.sheetConflict(e);
     }
   }
 
   /** S.01: borders on the selected cells. */
   private async applyBorder(kind: string): Promise<void> {
-    if (this.active?.kind !== "sheet") return;
-    const sheet = this.active.index;
-    const sel = this.grid.selection();
-    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
-    if (layout === null) return;
-    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const at = this.selectedSheetArea();
+    if (!at) return;
+    const { sheet, area, layout } = at;
     try { await this.rpc.call("sheet_border", { sheet, area, kind, weight: "thin", layout }); await this.refreshSheet(); }
-    catch (e) { toast((e as Error).message, "error"); }
+    catch (e) { toastError(e); }
   }
 
   /** S.09 / U.04b: preview a chart of the selected range; it is stored with the workbook only
@@ -2255,7 +2251,7 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     const sel = this.grid.selection();
     if (sel.r1 - sel.r0 > 1000 || sel.c1 - sel.c0 > 20) { toast("A chart reads at most 1,000 rows and 20 series: select a smaller range", "error"); return; }
-    void this.chartsLayer.draft({ row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 }).then((created) => {
+    void this.chartsLayer.draft(areaOf(sel)).then((created) => {
       if (created) toast("Chart created", "success");
       this.grid.focus();
     });
@@ -2271,7 +2267,7 @@ export class WorkbookScreen {
   }
 
   /** The shown text of a chart's data range, read from the server (bounded by the chart). */
-  private async chartValues(a: { row: number; column: number; rows: number; columns: number }): Promise<string[][]> {
+  private async chartValues(a: CellArea): Promise<string[][]> {
     if (this.active?.kind !== "sheet") return [];
     const block = await this.rpc.call("sheet_fetch", { sheet: this.active.index, row_start: a.row, row_count: a.rows, column_count: a.column + a.columns });
     // Labels (first row and column) as shown; values as stored, so number formats
@@ -2287,22 +2283,19 @@ export class WorkbookScreen {
   /** S.08: zoom the grid; remembered per workbook in this browser. */
   private setZoom(z: number): void {
     this.grid.setZoom(z);
-    try { localStorage.setItem(`alephgrid-zoom-${this.meta.id}`, String(this.grid.getZoom())); } catch { /* private mode */ }
+    store(`alephgrid-zoom-${this.meta.id}`, String(this.grid.getZoom()));
     toast(`Zoom ${Math.round(this.grid.getZoom() * 100)}%`);
   }
 
   /** S.06: sort the selected rows of the sheet by the first selected column. */
   private async sortRange(desc: boolean, header: boolean): Promise<void> {
-    if (this.active?.kind !== "sheet") return;
-    const sheet = this.active.index;
-    const sel = this.grid.selection();
-    const layout = this.shownLayout(sheet, sel.r0, sel.r1);
-    if (layout === null) return;
-    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const at = this.selectedSheetArea();
+    if (!at) return;
+    const { sheet, area, layout } = at;
     try {
       await this.rpc.call("sheet_sort", { sheet, area, by: [{ column: 0, desc }], header, layout });
       await this.refreshSheet();
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
   }
 
   /** S.11: the comments pane beside the grid. */
@@ -2326,7 +2319,7 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
     const sel = this.grid.selection();
-    const area = { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const area = areaOf(sel);
     const rules = await this.rpc.call("sheet_rules", { sheet });
     if (kind === "color") {
       const v = await formDialog("Colour cells that…", [
@@ -2351,14 +2344,14 @@ export class WorkbookScreen {
       }
     }
     try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
-    catch (e) { toast((e as Error).message, "error"); }
+    catch (e) { toastError(e); }
   }
 
   /** S.10: the allowed values of the active sheet cell, offered while editing it. */
   private sheetChoices(): string[] {
     const { r, c } = this.grid.active;
     return this.sheetRules.validations
-      .filter((v) => r >= v.area.row && r < v.area.row + v.area.rows && c >= v.area.column && c < v.area.column + v.area.columns)
+      .filter((v) => areaContains(v.area, r, c))
       .flatMap((v) => v.list ?? []);
   }
 
@@ -2379,14 +2372,14 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
     const sel = this.grid.selection();
-    const touches = (a: { row: number; column: number; rows: number; columns: number }) =>
+    const touches = (a: CellArea) =>
       a.row <= sel.r1 && a.row + a.rows - 1 >= sel.r0 && a.column <= sel.c1 && a.column + a.columns - 1 >= sel.c0;
     const rules = await this.rpc.call("sheet_rules", { sheet });
     const next = { colors: rules.colors.filter((r) => !touches(r.area)), validations: rules.validations.filter((r) => !touches(r.area)) };
     const removed = rules.colors.length + rules.validations.length - next.colors.length - next.validations.length;
     if (!removed) { toast("No rule covers these cells"); return; }
     try { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); this.sheetRules = next; this.grid.invalidate(); toast(`Removed ${removed} rule${removed === 1 ? "" : "s"}`); }
-    catch (e) { toast((e as Error).message, "error"); }
+    catch (e) { toastError(e); }
   }
 
   private setComments(list: CellComment[]): void {
@@ -2410,14 +2403,14 @@ export class WorkbookScreen {
       await this.rpc.call("add_comment", { sheet: this.active.index, row, column, text: v.text });
       this.openComments();
       await this.loadComments();
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
   }
 
   /** S.05: the sheet's sizes, hidden lines and frozen panes, kept in the workbook. */
   private sheetLayout: SheetLayout | null = null;
   private layoutSeq = 0;
   /** S.06: the last range filter of this sheet, so its popup shows what is kept. */
-  private rangeFilter: { sheet: number; area: { row: number; column: number; rows: number; columns: number }; header: boolean; column: number; keep: string[] | null } | null = null;
+  private rangeFilter: { sheet: number; area: CellArea; header: boolean; column: number; keep: string[] | null } | null = null;
 
   private sheetWidths(): number[] {
     const sized = new Map((this.sheetLayout?.columns ?? []).map((c) => [c.index, c.hidden ? 0 : c.size]));
@@ -2437,7 +2430,7 @@ export class WorkbookScreen {
       const widths = this.sheetWidths();
       if (widths.join() !== this.grid.columnWidths().join()) this.grid.setColumns(widths);
       this.grid.setRowSizes(l.rows.map((x) => ({ index: x.index, size: x.hidden ? 0 : x.size })));
-      this.grid.setMerges(l.merged.map((a) => ({ r0: a.row, c0: a.column, r1: a.row + a.rows - 1, c1: a.column + a.columns - 1 })));
+      this.grid.setMerges(l.merged.map((a) => rangeOf(a)));
     } catch { /* the grid keeps default sizes */ }
   }
 
@@ -2454,7 +2447,7 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     try {
       await this.rpc.call("sheet_resize", { sheet: this.active.index, axis, start, count, size: Math.max(4, Math.min(2000, Math.round(size))) });
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
     await this.loadSheetLayout();
   }
 
@@ -2473,7 +2466,7 @@ export class WorkbookScreen {
         else this.grid.select({ r: sel.r0, c: Math.min(this.sheetCols.length - 1, start + count) });
       }
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
       await this.loadSheetLayout();
     }
   }
@@ -2493,7 +2486,7 @@ export class WorkbookScreen {
     const sheet = this.active.index;
     this.rpc.call("sheet_column_texts", { sheet, column: c })
       .then((texts) => { if (this.active?.kind === "sheet" && this.active.index === sheet) this.grid.fitColumn(c, texts); })
-      .catch((e) => toast((e as Error).message, "error"));
+      .catch((e) => toastError(e));
     return true;
   }
 
@@ -2502,9 +2495,9 @@ export class WorkbookScreen {
     if (this.active?.kind !== "sheet") return;
     const sel = this.grid.selection();
     try {
-      await this.rpc.call("sheet_merge", { sheet: this.active.index, area: { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 }, mode });
+      await this.rpc.call("sheet_merge", { sheet: this.active.index, area: areaOf(sel), mode });
       this.sheetCache.refresh();
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
     await this.loadSheetLayout();
   }
 
@@ -2515,7 +2508,7 @@ export class WorkbookScreen {
       await this.rpc.call("sheet_freeze", { sheet: this.active.index, columns, rows });
       await this.loadItems();
       this.grid.invalidate();
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
   }
 
   /** S.06: filter the selected range by the values of the active cell's column. */
@@ -2524,7 +2517,7 @@ export class WorkbookScreen {
     const sheet = this.active.index;
     const sel = this.grid.selection();
     const prev = this.rangeFilter?.sheet === sheet ? this.rangeFilter : null;
-    const area = prev && sel.r0 === sel.r1 && sel.c0 === sel.c1 ? prev.area : { row: sel.r0, column: sel.c0, rows: sel.r1 - sel.r0 + 1, columns: sel.c1 - sel.c0 + 1 };
+    const area = prev && sel.r0 === sel.r1 && sel.c0 === sel.c1 ? prev.area : areaOf(sel);
     header = prev && area === prev.area ? prev.header : header;
     const column = Math.min(Math.max(clicked ?? this.grid.active.c, area.column), area.column + area.columns - 1);
     const col = this.sheetCols[column];
@@ -2549,7 +2542,7 @@ export class WorkbookScreen {
           const hidden = await this.rpc.call("sheet_filter", { sheet, area, header, column, ...(keep ? { keep } : {}) });
           this.rangeFilter = keep ? { sheet, area, header, column, keep } : null;
           toast(keep ? `${hidden.toLocaleString()} rows hidden by the filter` : "Filter cleared; every row is shown");
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
         await this.loadSheetLayout();
       },
     }, this.grid);
@@ -2562,7 +2555,7 @@ export class WorkbookScreen {
       await this.rpc.call("sheet_freeze", { sheet: this.active.index, columns });
       await this.loadItems();
       this.grid.invalidate();
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
   }
 
   /** U.16: the value filter popup of a table column. */
@@ -2722,7 +2715,7 @@ export class WorkbookScreen {
           const name = await this.rpc.call("rename_table", { table: t.name, new_name: v.name });
           await this.loadItems();
           if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } },
       { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [], hidden: [] }, "csv") },
       { label: "Copy to a sheet…", action: () => this.copyTableToSheet(t) },
@@ -2731,7 +2724,7 @@ export class WorkbookScreen {
         if (!(await confirmDialog(`Delete “${t.name}”?`, `${formatCount(t.row_count)} rows will be permanently removed from this workbook.`))) return;
         try {
           await this.rpc.call("drop_table", { table: t.name });
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } },
     ], x, y);
   }
@@ -2740,13 +2733,13 @@ export class WorkbookScreen {
     showMenu([
       { label: "Duplicate", action: async () => {
         try { const copy = await this.rpc.call("sheet_duplicate", { sheet: s.index }); await this.loadItems(); await this.openSheet(copy.index); }
-        catch (e) { toast((e as Error).message, "error"); }
+        catch (e) { toastError(e); }
       } },
       ...(() => {
         const pos = this.sheets.findIndex((x) => x.index === s.index);
         const move = async (to: number) => {
           try { await this.rpc.call("sheet_reorder", { sheet: s.index, to }); await this.loadItems(); }
-          catch (e) { toast((e as Error).message, "error"); }
+          catch (e) { toastError(e); }
         };
         return [
           { label: "Move left", disabled: pos <= 0, action: () => void move(this.sheets[pos - 1].index) },
@@ -2755,7 +2748,7 @@ export class WorkbookScreen {
       })(),
       { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
         try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
-        catch (e) { toast((e as Error).message, "error"); }
+        catch (e) { toastError(e); }
       } },
       { label: "Unhide sheet…", action: async () => {
         const hidden = await this.rpc.call("hidden_sheets", {});
@@ -2763,13 +2756,13 @@ export class WorkbookScreen {
         const v = await formDialog("Unhide a sheet", [{ name: "name", label: "Sheet", type: "select", options: hidden.map((n) => ({ value: n, label: n })) }], "Unhide");
         if (!v) return;
         try { await this.rpc.call("sheet_unhide", { name: v.name }); await this.loadItems(); }
-        catch (e) { toast((e as Error).message, "error"); }
+        catch (e) { toastError(e); }
       } },
       { label: "Tab colour…", action: async () => {
         const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply");
         if (!v) return;
         try { await this.rpc.call("sheet_color", { sheet: s.index, color: v.color.trim() }); await this.loadItems(); }
-        catch (e) { toast((e as Error).message, "error"); }
+        catch (e) { toastError(e); }
       } },
       "sep",
       { label: "Rename…", action: async () => {
@@ -2779,7 +2772,7 @@ export class WorkbookScreen {
           await this.rpc.call("sheet_rename", { sheet: s.index, name: v.name, layout: s.layout });
           await this.loadItems();
           if (this.active?.kind === "sheet" && this.active.index === s.index) this.active.name = v.name;
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } },
       { label: "Convert to table", hint: "first row = header", action: async () => {
         try {
@@ -2787,7 +2780,7 @@ export class WorkbookScreen {
           await this.loadItems();
           await this.openTable(info.name);
           toast(`Created table ${info.name} (${formatCount(info.row_count)} rows)`, "success");
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } },
       { label: "Download all sheets (.xlsx)", action: () => this.downloadXlsx() },
       "sep",
@@ -2795,7 +2788,7 @@ export class WorkbookScreen {
         if (!(await confirmDialog(`Delete sheet “${s.name}”?`, "Its cells and formulas will be removed. Formulas in other sheets that point at it will show #REF!."))) return;
         try {
           await this.rpc.call("sheet_delete", { sheet: s.index, layout: s.layout });
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } },
     ], x, y);
   }
@@ -2843,7 +2836,7 @@ export class WorkbookScreen {
    *  replaces by values before downloading (F.13), never silently. */
   private async downloadXlsx(): Promise<void> {
     let notes: string[] = [];
-    try { notes = await this.rpc.call("xlsx_compatibility", {}); } catch (e) { toast((e as Error).message, "error"); return; }
+    try { notes = await this.rpc.call("xlsx_compatibility", {}); } catch (e) { toastError(e); return; }
     if (notes.length) {
       const shown = notes.slice(0, 20).join("\n") + (notes.length > 20 ? `\n… and ${notes.length - 20} more` : "");
       if (!(await confirmDialog("XLSX compatibility", `${notes.length} note${notes.length === 1 ? "" : "s"} for this download:\n${shown}`, "Download anyway"))) return;
@@ -2868,7 +2861,7 @@ export class WorkbookScreen {
       await this.openSheet(info.index);
       this.grid.focus();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -2946,7 +2939,7 @@ export class WorkbookScreen {
     try {
       await this.rpc.call("drop_column", { table: this.spec.table, name: col.name });
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -2976,7 +2969,7 @@ export class WorkbookScreen {
       );
       closeBtn.focus();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     } finally {
       this.busy(null);
     }
@@ -3132,7 +3125,7 @@ export class WorkbookScreen {
       await this.openTable(info.name);
       toast(`Generated ${formatCount(rows)} rows in ${((performance.now() - started) / 1000).toFixed(1)}s`, "success");
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     } finally {
       this.busy(null);
     }

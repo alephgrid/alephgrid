@@ -2,24 +2,13 @@
 // SQL), its resources and the open workbooks, live sessions, backups, usage and limits per
 // space, and the audit log. Standalone use stays simple: one dialog, opened from the hub.
 
-import { bytes } from "./compute";
+import { http } from "./api";
+import { bytes } from "./format";
 import type { AuditEvent, ResourceUsage, SpaceUsage } from "./protocol";
-import { confirmDialog, el, openModal, toast } from "./ui";
+import { confirmDialog, el, openModal, toast, toastError } from "./ui";
 
 type Backup = { name: string; created_at_ms: number; workbooks: number; bytes: number };
 type Session = { session: number; workbook: string; outbox_bytes: number; peak_outbox_bytes: number };
-
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(path, { credentials: "same-origin" });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({ error: r.statusText }))).error ?? r.statusText);
-  return r.json() as Promise<T>;
-}
-
-async function send(method: string, path: string): Promise<unknown> {
-  const r = await fetch(path, { method, credentials: "same-origin", headers: { "Content-Type": "application/json" } });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({ error: r.statusText }))).error ?? r.statusText);
-  return r.status === 204 ? null : r.json();
-}
 
 function table(caption: string, head: string[], rows: (string | Node)[][]): HTMLElement {
   if (!rows.length) return el("p", { class: "muted" }, "Nothing here yet.");
@@ -36,8 +25,8 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
   body.replaceChildren(el("p", { class: "muted" }, "Loading…"));
   switch (section) {
     case "Overview": {
-      const c = await get<Record<string, unknown>>("/api/config");
-      const r = await get<ResourceUsage>("/api/admin/resources");
+      const c = await http<Record<string, unknown>>("GET", "/api/config");
+      const r = await http<ResourceUsage>("GET", "/api/admin/resources");
       body.replaceChildren(el("dl", { class: "admin-facts" },
         el("dt", {}, "Version"), el("dd", {}, String(c.version)),
         el("dt", {}, "Sign-in"), el("dd", {}, c.auth === "local" ? "Local (no sign-in; this machine only)" : "Accounts (password or single sign-on)"),
@@ -55,30 +44,30 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
       break;
     }
     case "Workbooks and memory": {
-      const r = await get<ResourceUsage>("/api/admin/resources");
+      const r = await http<ResourceUsage>("GET", "/api/admin/resources");
       body.replaceChildren(
         el("p", { class: "dialog-lede" }, `Uploads in progress use ${bytes(r.upload_bytes)} of ${bytes(r.upload_budget)}. A workbook nobody has open sleeps and holds no memory; that is normal.`),
         table("Open workbooks", ["Workbook", "Memory", "Threads", "Jobs", "Database"], r.allocations.map((a) => [a.workbook, a.duckdb_memory_limit, a.duckdb_threads, String(a.jobs), bytes(a.database_bytes)])));
       break;
     }
     case "Sessions": {
-      const s = await get<Session[]>("/api/admin/sessions");
+      const s = await http<Session[]>("GET", "/api/admin/sessions");
       body.replaceChildren(table("Live sessions", ["Session", "Workbook", "Queued to send", "Peak"], s.map((x) => [String(x.session), x.workbook, bytes(x.outbox_bytes), bytes(x.peak_outbox_bytes)])));
       break;
     }
     case "Backups": {
-      const list = await get<Backup[]>("/api/admin/backups");
+      const list = await http<Backup[]>("GET", "/api/admin/backups");
       const make = el("button", { class: "btn btn-primary", type: "button" }, "Back up now");
       make.addEventListener("click", async () => {
         make.disabled = true;
-        try { await send("POST", "/api/admin/backups"); toast("Backup made", "success"); await render(section, body); }
-        catch (e) { toast((e as Error).message, "error"); make.disabled = false; }
+        try { await http("POST", "/api/admin/backups"); toast("Backup made", "success"); await render(section, body); }
+        catch (e) { toastError(e); make.disabled = false; }
       });
       const rows = list.map((b) => {
         const del = el("button", { class: "btn btn-small", type: "button", "aria-label": `Delete backup ${b.name}` }, "Delete");
         del.addEventListener("click", async () => {
           if (!(await confirmDialog(`Delete backup ${b.name}?`, "The copy is removed from the server's disk.", "Delete"))) return;
-          try { await send("DELETE", `/api/admin/backups/${encodeURIComponent(b.name)}`); await render(section, body); } catch (e) { toast((e as Error).message, "error"); }
+          try { await http("DELETE", `/api/admin/backups/${encodeURIComponent(b.name)}`); await render(section, body); } catch (e) { toastError(e); }
         });
         return [new Date(b.created_at_ms).toLocaleString(), String(b.workbooks), bytes(b.bytes), del];
       });
@@ -89,7 +78,7 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
       break;
     }
     case "Usage and limits": {
-      const u = (await get<{ spaces: SpaceUsage[] }>("/api/admin/usage")).spaces;
+      const u = (await http<{ spaces: SpaceUsage[] }>("GET", "/api/admin/usage")).spaces;
       body.replaceChildren(table("Usage per space", ["Space", "Workbooks", "Open", "Storage", "Jobs", "Limits"], u.map((x) => {
         const l = x.limits;
         const parts = [
@@ -104,7 +93,7 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
       break;
     }
     case "Audit log": {
-      const events = await get<AuditEvent[]>("/api/admin/audit?limit=200");
+      const events = await http<AuditEvent[]>("GET", "/api/admin/audit?limit=200");
       body.replaceChildren(table("Audit log", ["When", "Who", "What", "Where"], events.map((e) => [new Date(e.at).toLocaleString(), e.actor, e.action, e.workbook ?? e.space_id ?? ""])));
       break;
     }

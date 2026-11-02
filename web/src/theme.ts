@@ -3,6 +3,7 @@
 
 import { el } from "./ui";
 import { icon } from "./icons";
+import { store } from "./storage";
 
 type ThemePreference = "system" | "light" | "dark";
 const KEY = "alephgrid-theme";
@@ -28,7 +29,7 @@ export function themePreference(): ThemePreference { return preference; }
 
 export function setTheme(next: ThemePreference): void {
   preference = next;
-  try { localStorage.setItem(KEY, next); } catch { /* Kept for this page only. */ }
+  store(KEY, next);
   apply();
 }
 
