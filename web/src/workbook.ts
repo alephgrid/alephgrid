@@ -19,6 +19,8 @@ import type { RuntimeStatus } from "./protocol";
 
 import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
+import { parseTsv, tsvCell } from "./tsv";
+import { ruleFill, rulesDialog } from "./sheetrules";
 import { Grid, type Cell, type GridEdit, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
@@ -32,7 +34,7 @@ import { dockPanel } from "./dock";
 import { closeFilterPopup, filterPopup } from "./filterpopup";
 import { formatBar } from "./formatbar";
 import { CommentsPane } from "./commentspane";
-import { SheetChartsLayer, rangeText } from "./sheetcharts";
+import { SheetChartsLayer } from "./sheetcharts";
 import type { CellComment, SheetLayout, SheetRules } from "./protocol";
 import type { StylePatch } from "./protocol";
 import type { ColumnValues } from "./protocol";
@@ -94,33 +96,6 @@ function describeFilter(f: Filter): string {
   }
   const op = FILTER_OPS.find((o) => o.value === f.op);
   return `${f.column} ${op?.label ?? f.op}${op?.needsValue ? ` “${f.value ?? ""}”` : ""}`;
-}
-
-function parseTsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
-      else if (ch === '"') quoted = false;
-      else cell += ch;
-    } else if (ch === '"' && cell === "") quoted = true;
-    else if (ch === "\t") { row.push(cell); cell = ""; }
-    else if (ch === "\n" || ch === "\r") {
-      if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(cell); rows.push(row); row = []; cell = "";
-    } else cell += ch;
-  }
-  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
-  return rows;
-}
-
-function tsvCell(v: CellValue): string {
-  const s = rawText(v);
-  return /[\t\n"]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /** The workbook no longer exists (or is in the trash): the server answers "not found". */
@@ -2102,119 +2077,124 @@ export class WorkbookScreen {
   }
 
   private findProvider(): FindProvider | null {
-    if (this.active?.kind === "table" && this.view) {
-      const table = this.active.name;
-      const key = `alephgrid-replace-${this.meta.id}`;
-      let pending: { table: string; column: string; find: string; replacement: string; revision: number } | null = null;
-      return {
-        label: table,
-        find: async (text, matchCase, from, backwards, count) => {
-          if (!this.view) return { hits: [] };
-          return this.rpc.call("find_in_view", { view_id: this.view.view_id, text, match_case: matchCase, from: Math.max(0, Math.min(from, Number.MAX_SAFE_INTEGER)), backwards, count });
-        },
-        active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
-        go: (row, c) => this.grid.select({ r: row, c }),
-        columnName: (c) => this.view?.columns[c]?.name ?? "",
-        replace: {
-          columns: () => (this.view?.columns ?? []).filter((c) => c.kind === "text" && !c.formula).map((c) => c.name),
-          preview: async (column, find, replacement) => {
-            const spec = { table, column, find, replacement };
-            const p = await this.rpc.call("replace_preview", { spec });
-            pending = { ...spec, revision: p.sample.revision };
-            return p.matches;
-          },
-          apply: async () => {
-            if (!pending) throw new Error("Preview the replacement first");
-            const { revision, ...rest } = pending;
-            const r = await this.rpc.call("replace_apply", { spec: { ...rest, table }, revision });
-            this.replaceRevision = r.undo_revision;
-            try { localStorage.setItem(key, String(r.undo_revision)); } catch { /* private mode */ }
-            pending = null;
-            return `Replaced ${formatCount(r.rows)} cells. Undo is available until the next change to the workbook.`;
-          },
-          undo: async () => {
-            let revision = this.replaceRevision;
-            if (!revision) { try { revision = Number(localStorage.getItem(key)) || 0; } catch { revision = 0; } }
-            if (!revision) throw new Error("No replacement to undo in this browser");
-            await this.rpc.call("replace_undo", { revision });
-            this.replaceRevision = 0;
-            try { localStorage.removeItem(key); } catch { /* private mode */ }
-            return "Replacement undone";
-          },
-        },
-      };
-    }
-    if (this.active?.kind === "sheet") {
-      // The provider follows the open sheet: with "All sheets" it moves between them.
-      const opened = this.active.index;
-      const current = () => (this.active?.kind === "sheet" ? this.active.index : opened);
-      let last = { text: "", matchCase: false };
-      const searchOf = (text: string, matchCase: boolean) => ({ text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas });
-      return {
-        label: this.active.name,
-        sheetOptions: true,
-        find: async (text, matchCase, from, backwards, count) => {
-          last = { text, matchCase };
-          const search = searchOf(text, matchCase);
-          const sheet = current();
-          const out = await this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count: count && !this.findBar.allSheets });
-          if (count && this.findBar.allSheets) {
-            const all = await this.rpc.call("sheet_find_all", { search });
-            return { ...out, matches: all.reduce((n, s) => n + s.matches, 0) };
-          }
-          return out;
-        },
-        nextSheet: async (backwards) => {
-          const search = searchOf(last.text, last.matchCase);
-          const found = await this.rpc.call("sheet_find_all", { search });
-          if (!found.length) return false;
-          const order = this.sheets.map((s) => s.index);
-          const here = order.indexOf(current());
-          const ranked = found.map((f) => ({ f, d: ((order.indexOf(f.sheet) - here) * (backwards ? -1 : 1) + order.length) % order.length || order.length }));
-          ranked.sort((a, b) => a.d - b.d);
-          const target = ranked[0].f;
-          if (target.sheet !== current()) await this.openSheet(target.sheet);
-          const hits = (await this.rpc.call("sheet_find", { sheet: target.sheet, search, from: backwards ? 1_048_575 : 0, backwards })).hits;
-          const h = hits[0];
-          if (!h) return false;
-          this.grid.select({ r: h.row, c: backwards ? h.columns[h.columns.length - 1] : h.columns[0] });
-          if (target.sheet !== opened || found.length > 1) toast(`Found in ${target.name}`);
-          return true;
-        },
-        active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
-        go: (row, c) => this.grid.select({ r: row, c }),
-        replace: {
-          preview: async (_column, find) => {
-            const search = { ...searchOf(find, last.matchCase) };
-            if (this.findBar.allSheets) return (await this.rpc.call("sheet_find_all", { search })).reduce((n, s) => n + s.matches, 0);
-            return (await this.rpc.call("sheet_find", { sheet: current(), search, count: true })).matches ?? 0;
-          },
-          apply: async () => {
-            const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
-            const search = searchOf(last.text, last.matchCase);
-            const n = this.findBar.allSheets
-              ? await this.rpc.call("sheet_replace_all", { search, replacement: input })
-              : await this.rpc.call("sheet_replace", { sheet: current(), search, replacement: input });
-            await this.refreshSheet();
-            return `Replaced in ${formatCount(n)} cells${this.findBar.allSheets ? " across the sheets" : ""}. Undo (⌘Z) takes it back in one step.`;
-          },
-          undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
-          one: async (find, replacement, matchCase) => {
-            const { r, c } = this.grid.active;
-            const text = this.sheetCache.cell(r, c)?.[2] ?? this.sheetCache.cell(r, c)?.[0] ?? "";
-            const esc = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const next = text.replace(new RegExp(esc, matchCase ? "g" : "gi"), () => replacement);
-            if (next === text) return;
-            const sheet = current();
-            const layout = this.shownLayout(sheet, r, r);
-            if (layout === null) return;
-            await this.rpc.call("sheet_set", { sheet, inputs: [{ row: r, column: c, value: next }], layout });
-            await this.refreshSheet();
-          },
-        },
-      };
-    }
+    if (this.active?.kind === "table" && this.view) return this.tableFindProvider(this.active.name);
+    if (this.active?.kind === "sheet") return this.sheetFindProvider(this.active);
     return null;
+  }
+
+  /** Find in the whole table on the server; replace previews, applies and undoes one column. */
+  private tableFindProvider(table: string): FindProvider {
+    const key = `alephgrid-replace-${this.meta.id}`;
+    let pending: { table: string; column: string; find: string; replacement: string; revision: number } | null = null;
+    return {
+      label: table,
+      find: async (text, matchCase, from, backwards, count) => {
+        if (!this.view) return { hits: [] };
+        return this.rpc.call("find_in_view", { view_id: this.view.view_id, text, match_case: matchCase, from: Math.max(0, Math.min(from, Number.MAX_SAFE_INTEGER)), backwards, count });
+      },
+      active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
+      go: (row, c) => this.grid.select({ r: row, c }),
+      columnName: (c) => this.view?.columns[c]?.name ?? "",
+      replace: {
+        columns: () => (this.view?.columns ?? []).filter((c) => c.kind === "text" && !c.formula).map((c) => c.name),
+        preview: async (column, find, replacement) => {
+          const spec = { table, column, find, replacement };
+          const p = await this.rpc.call("replace_preview", { spec });
+          pending = { ...spec, revision: p.sample.revision };
+          return p.matches;
+        },
+        apply: async () => {
+          if (!pending) throw new Error("Preview the replacement first");
+          const { revision, ...rest } = pending;
+          const r = await this.rpc.call("replace_apply", { spec: { ...rest, table }, revision });
+          this.replaceRevision = r.undo_revision;
+          try { localStorage.setItem(key, String(r.undo_revision)); } catch { /* private mode */ }
+          pending = null;
+          return `Replaced ${formatCount(r.rows)} cells. Undo is available until the next change to the workbook.`;
+        },
+        undo: async () => {
+          let revision = this.replaceRevision;
+          if (!revision) { try { revision = Number(localStorage.getItem(key)) || 0; } catch { revision = 0; } }
+          if (!revision) throw new Error("No replacement to undo in this browser");
+          await this.rpc.call("replace_undo", { revision });
+          this.replaceRevision = 0;
+          try { localStorage.removeItem(key); } catch { /* private mode */ }
+          return "Replacement undone";
+        },
+      },
+    };
+  }
+
+  /** Find and replace in the open sheet, or across all sheets. */
+  private sheetFindProvider(sheet: { index: number; name: string }): FindProvider {
+    // The provider follows the open sheet: with "All sheets" it moves between them.
+    const opened = sheet.index;
+    const current = () => (this.active?.kind === "sheet" ? this.active.index : opened);
+    let last = { text: "", matchCase: false };
+    const searchOf = (text: string, matchCase: boolean) => ({ text, match_case: matchCase, whole: this.findBar.whole, formulas: this.findBar.formulas });
+    return {
+      label: sheet.name,
+      sheetOptions: true,
+      find: async (text, matchCase, from, backwards, count) => {
+        last = { text, matchCase };
+        const search = searchOf(text, matchCase);
+        const sheet = current();
+        const out = await this.rpc.call("sheet_find", { sheet, search, from: Math.max(0, Math.min(from, 1_048_575)), backwards, count: count && !this.findBar.allSheets });
+        if (count && this.findBar.allSheets) {
+          const all = await this.rpc.call("sheet_find_all", { search });
+          return { ...out, matches: all.reduce((n, s) => n + s.matches, 0) };
+        }
+        return out;
+      },
+      nextSheet: async (backwards) => {
+        const search = searchOf(last.text, last.matchCase);
+        const found = await this.rpc.call("sheet_find_all", { search });
+        if (!found.length) return false;
+        const order = this.sheets.map((s) => s.index);
+        const here = order.indexOf(current());
+        const ranked = found.map((f) => ({ f, d: ((order.indexOf(f.sheet) - here) * (backwards ? -1 : 1) + order.length) % order.length || order.length }));
+        ranked.sort((a, b) => a.d - b.d);
+        const target = ranked[0].f;
+        if (target.sheet !== current()) await this.openSheet(target.sheet);
+        const hits = (await this.rpc.call("sheet_find", { sheet: target.sheet, search, from: backwards ? 1_048_575 : 0, backwards })).hits;
+        const h = hits[0];
+        if (!h) return false;
+        this.grid.select({ r: h.row, c: backwards ? h.columns[h.columns.length - 1] : h.columns[0] });
+        if (target.sheet !== opened || found.length > 1) toast(`Found in ${target.name}`);
+        return true;
+      },
+      active: () => ({ r: this.grid.active.r, c: this.grid.active.c }),
+      go: (row, c) => this.grid.select({ r: row, c }),
+      replace: {
+        preview: async (_column, find) => {
+          const search = { ...searchOf(find, last.matchCase) };
+          if (this.findBar.allSheets) return (await this.rpc.call("sheet_find_all", { search })).reduce((n, s) => n + s.matches, 0);
+          return (await this.rpc.call("sheet_find", { sheet: current(), search, count: true })).matches ?? 0;
+        },
+        apply: async () => {
+          const input = this.findBar.el.querySelector<HTMLInputElement>('input[aria-label="Replace with"]')?.value ?? "";
+          const search = searchOf(last.text, last.matchCase);
+          const n = this.findBar.allSheets
+            ? await this.rpc.call("sheet_replace_all", { search, replacement: input })
+            : await this.rpc.call("sheet_replace", { sheet: current(), search, replacement: input });
+          await this.refreshSheet();
+          return `Replaced in ${formatCount(n)} cells${this.findBar.allSheets ? " across the sheets" : ""}. Undo (⌘Z) takes it back in one step.`;
+        },
+        undo: async () => { await this.rpc.call("sheet_undo", {}); await this.refreshSheet(); return "Replacement undone"; },
+        one: async (find, replacement, matchCase) => {
+          const { r, c } = this.grid.active;
+          const text = this.sheetCache.cell(r, c)?.[2] ?? this.sheetCache.cell(r, c)?.[0] ?? "";
+          const esc = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const next = text.replace(new RegExp(esc, matchCase ? "g" : "gi"), () => replacement);
+          if (next === text) return;
+          const sheet = current();
+          const layout = this.shownLayout(sheet, r, r);
+          if (layout === null) return;
+          await this.rpc.call("sheet_set", { sheet, inputs: [{ row: r, column: c, value: next }], layout });
+          await this.refreshSheet();
+        },
+      },
+    };
   }
 
   // ------------------------------------------------------------------ menus
@@ -2339,30 +2319,7 @@ export class WorkbookScreen {
 
   /** A cell's style with the first matching colour rule's fill (S.10). */
   private ruleStyle(r: number, c: number) {
-    const own = this.sheetCache.style(r, c);
-    const rule = this.sheetRules.colors.find((x) => r >= x.area.row && r < x.area.row + x.area.rows && c >= x.area.column && c < x.area.column + x.area.columns && (() => {
-      const t = this.sheetCache.cell(r, c)?.[0] ?? "";
-      const n = Number(t.replace(/,/g, "")), v = Number(x.value);
-      switch (x.condition) {
-        case "greater": return t !== "" && n > v;
-        case "less": return t !== "" && n < v;
-        case "equal": return t === x.value;
-        case "contains": return t.toLowerCase().includes(x.value.toLowerCase());
-        case "empty": return t === "";
-        case "not_empty": return t !== "";
-        case "scale": return t !== "" && !Number.isNaN(Number(t.replace(/,/g, "")));
-        default: return false;
-      }
-    })());
-    if (rule?.condition === "scale" && !own?.fill) {
-      // Colour scale: the rule's colour, stronger the closer the value is to the top of "low,high".
-      const [lo, hi] = rule.value.split(",").map(Number);
-      const n = Number((this.sheetCache.cell(r, c)?.[0] ?? "").replace(/,/g, ""));
-      const t = Math.max(0, Math.min(1, (n - lo) / ((hi - lo) || 1)));
-      const alpha = Math.round(40 + t * 215).toString(16).padStart(2, "0");
-      return { ...(own ?? {}), fill: `${rule.color}${alpha}` };
-    }
-    return rule && !own?.fill ? { ...(own ?? {}), fill: rule.color } : own;
+    return ruleFill(this.sheetRules, this.sheetCache.style(r, c), () => this.sheetCache.cell(r, c)?.[0] ?? "", r, c);
   }
 
   private async editRules(kind: "color" | "list"): Promise<void> {
@@ -2408,42 +2365,13 @@ export class WorkbookScreen {
   /** S.10: every colour and allowed-value rule of the sheet, to review, visit or delete. */
   private async rulesDialog(): Promise<void> {
     if (this.active?.kind !== "sheet") return;
-    const sheet = this.active.index, name = this.active.name;
-    let rules = await this.rpc.call("sheet_rules", { sheet });
-    const CONDITION: Record<string, string> = { greater: "greater than", less: "less than", equal: "equal to", contains: "contains", empty: "is empty", not_empty: "is not empty", scale: "shade by value" };
-    const list = el("ul", { class: "rules-list", "aria-label": "Rules" });
-    const done = el("button", { class: "btn btn-primary", type: "button" }, "Done");
-    const dialog = el("div", { class: "dialog rules-dialog" }, el("h2", {}, `Rules on ${name}`),
-      el("p", { class: "dialog-hint" }, "Colour rules fill matching cells; allowed-value rules refuse other values. Neither is written to XLSX files."), list,
-      el("div", { class: "dialog-actions" }, done));
-    const save = async (next: typeof rules) => {
-      try { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); rules = next; this.sheetRules = next; this.grid.invalidate(); render(); }
-      catch (e) { toast((e as Error).message, "error"); }
-    };
-    const goTo = (a: { row: number; column: number; rows: number; columns: number }) => {
-      modal.close();
-      this.grid.select({ r: a.row, c: a.column }, { r: a.row + a.rows - 1, c: a.column + a.columns - 1 });
-      this.grid.focus();
-    };
-    const item = (label: string, swatch: string | null, area: { row: number; column: number; rows: number; columns: number }, remove: () => void) =>
-      el("li", { class: "rules-item" },
-        swatch ? el("span", { class: "rules-swatch", style: `background:${swatch}`, "aria-hidden": "true" }) : el("span", { class: "rules-swatch rules-swatch-none", "aria-hidden": "true" }, "✓"),
-        el("span", { class: "rules-text" }, el("strong", {}, rangeText(area)), ` ${label}`),
-        el("button", { class: "btn btn-ghost btn-small", type: "button", "aria-label": `Go to ${rangeText(area)}`, onclick: () => goTo(area) }, "Go to"),
-        el("button", { class: "btn btn-ghost btn-small", type: "button", "aria-label": `Delete rule on ${rangeText(area)}`, onclick: remove }, "Delete"));
-    const render = () => {
-      const items = [
-        ...rules.colors.map((r, i) => item(r.condition === "scale" ? `shade by value from ${r.value || "low"}` : `${CONDITION[r.condition] ?? r.condition}${r.value ? ` ${r.value}` : ""} → fill ${r.color}`, r.color, r.area,
-          () => void save({ ...rules, colors: rules.colors.filter((_, j) => j !== i) }))),
-        ...rules.validations.map((v, i) => item(v.list?.length ? `allows ${v.list.join(", ")}` : `allows numbers${v.min !== undefined ? ` from ${v.min}` : ""}${v.max !== undefined ? ` to ${v.max}` : ""}`, null, v.area,
-          () => void save({ ...rules, validations: rules.validations.filter((_, j) => j !== i) }))),
-      ];
-      list.replaceChildren(...(items.length ? items : [el("li", { class: "rules-empty" }, "No rules yet: select cells, then use Conditional colour… or Allowed values… in the cell menu.")]));
-    };
-    render();
-    const modal = openModal(dialog, () => modal.close());
-    done.addEventListener("click", () => modal.close());
-    done.focus();
+    await rulesDialog(this.rpc, this.active.index, this.active.name, {
+      select: (a) => {
+        this.grid.select({ r: a.row, c: a.column }, { r: a.row + a.rows - 1, c: a.column + a.columns - 1 });
+        this.grid.focus();
+      },
+      changed: (rules) => { this.sheetRules = rules; this.grid.invalidate(); },
+    });
   }
 
   /** S.10: remove the rules that touch the selection. */
