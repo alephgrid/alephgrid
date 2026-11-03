@@ -1,7 +1,8 @@
 import { Rpc } from "./api";
 import { builtinFunctions } from "./catalog";
 import { icon } from "./icons";
-import { el, toast } from "./ui";
+import { el, pointerDrag, toast } from "./ui";
+import { store, stored } from "./storage";
 import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, WorkbookFunction } from "./protocol";
 
 /** U.06a–e: workbook functions in a resizable side panel beside the grid, with Code, Tests,
@@ -31,7 +32,7 @@ const EXAMPLE: Draft = {
 const EMPTY: Draft = { ...EXAMPLE, name: "", args: "", source: "", documentation: "", tests: [] };
 
 function savedWidth(): number {
-  try { const w = Number(localStorage.getItem(WIDTH_KEY)); return Number.isFinite(w) && w > 0 ? w : DEFAULT_WIDTH; } catch { return DEFAULT_WIDTH; }
+  const w = Number(stored(WIDTH_KEY)); return Number.isFinite(w) && w > 0 ? w : DEFAULT_WIDTH;
 }
 
 /** Fields compared to tell whether the panel holds a published version (order-independent). */
@@ -404,7 +405,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   };
   const setWidth = (w: number) => {
     expanded = false; width = Math.min(maxWidth(), Math.max(MIN_WIDTH, w)); applyWidth(); render();
-    try { localStorage.setItem(WIDTH_KEY, String(Math.round(width))); } catch { /* this page only */ }
+    store(WIDTH_KEY, String(Math.round(width)));
   };
   divider.addEventListener("keydown", (e) => {
     const step = { ArrowLeft: 24, ArrowRight: -24 }[e.key];
@@ -412,14 +413,8 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     else if (e.key === "Home") { e.preventDefault(); setWidth(MIN_WIDTH); }
     else if (e.key === "End") { e.preventDefault(); setWidth(maxWidth()); }
   });
-  divider.addEventListener("pointerdown", (e) => {
-    e.preventDefault(); divider.setPointerCapture(e.pointerId);
-    const move = (m: PointerEvent) => setWidth(panel.getBoundingClientRect().right - m.clientX);
-    const up = () => { divider.removeEventListener("pointermove", move); divider.removeEventListener("pointerup", up); };
-    divider.addEventListener("pointermove", move); divider.addEventListener("pointerup", up);
-  });
+  divider.addEventListener("pointerdown", (e) => pointerDrag(divider, e, (m) => setWidth(panel.getBoundingClientRect().right - m.clientX)));
   expandBtn.addEventListener("click", () => { expanded = !expanded; applyWidth(); render(); });
-  window.addEventListener("resize", applyWidth);
   panel.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!running) void runTests(); }
     else if (e.key === "Escape" && !e.defaultPrevented && !(e.target instanceof HTMLTextAreaElement)) { e.preventDefault(); controller.close(); }
@@ -432,6 +427,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       if (!isOpen) {
         opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         mount(panel); isOpen = true; applyWidth();
+        window.addEventListener("resize", applyWidth);
       }
       void refresh().then(() => { if (!functions.length && !draft.name && !draft.source) offerExample(); }).catch((e) => say(String(e)));
       (tabs[tab]).focus();
@@ -439,6 +435,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     close() {
       if (!isOpen) return;
       panel.remove(); isOpen = false; onClosed();
+      window.removeEventListener("resize", applyWidth);
       if (opener?.isConnected) opener.focus();
     },
   };

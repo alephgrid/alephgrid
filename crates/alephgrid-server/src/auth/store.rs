@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
+use alephgrid_core::sql::{ident, lit};
+use alephgrid_core::storage::now_ms;
 use duckdb::{params, Connection, OptionalExt};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -298,10 +300,6 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
-fn now_ms() -> u64 {
-    alephgrid_core::storage::now_ms()
-}
-
 fn user_row(r: &duckdb::Row) -> duckdb::Result<User> {
     let groups: String = r.get(6)?;
     Ok(User {
@@ -415,12 +413,12 @@ impl Store {
             bail!("{} already exists", path.display());
         }
         let conn = self.conn.lock().unwrap();
-        let target = path.to_string_lossy().replace('\'', "''");
+        let target = lit(&path.to_string_lossy());
         let db: String = conn.query_row("SELECT current_database()", [], |r| r.get(0))?;
         let copy = (|| -> Result<()> {
-            conn.execute_batch(&format!("ATTACH '{target}' AS ag_backup;"))?;
+            conn.execute_batch(&format!("ATTACH {target} AS ag_backup;"))?;
             conn.execute_batch("BEGIN TRANSACTION;")?;
-            let r = conn.execute_batch(&format!("COPY FROM DATABASE \"{db}\" TO ag_backup;"));
+            let r = conn.execute_batch(&format!("COPY FROM DATABASE {} TO ag_backup;", ident(&db)));
             match r {
                 Ok(()) => conn.execute_batch("COMMIT;")?,
                 Err(e) => {
@@ -587,6 +585,12 @@ impl Store {
     fn org_role_in(c: &Connection, org: &str, user: &str) -> Result<Option<OrgRole>> {
         let r: Option<String> = c.query_row("SELECT role FROM org_members WHERE org_id = ? AND user_id = ?", params![org, user], |r| r.get(0)).optional()?;
         Ok(r.and_then(|r| OrgRole::parse(&r)))
+    }
+
+    /// Whether `user` has any row in `org`'s members.
+    pub fn is_org_member(c: &Connection, org: &str, user: &str) -> Result<bool> {
+        let n: i64 = c.query_row("SELECT count(*) FROM org_members WHERE org_id = ? AND user_id = ?", params![org, user], |r| r.get(0))?;
+        Ok(n > 0)
     }
 
     pub fn set_org_role(c: &Connection, org: &str, user: &str, role: OrgRole) -> Result<()> {
@@ -836,9 +840,10 @@ impl Store {
         })
     }
 
-    pub fn delete_sessions_of(&self, user: &str) -> Result<()> {
+    /// End every session of `user` but the one hashed `keep`.
+    pub fn delete_sessions_except(&self, user: &str, keep: &str) -> Result<()> {
         self.txn(|c| {
-            c.execute("DELETE FROM sessions WHERE user_id = ?", params![user])?;
+            c.execute("DELETE FROM sessions WHERE user_id = ? AND hash <> ?", params![user, keep])?;
             Ok(())
         })
     }

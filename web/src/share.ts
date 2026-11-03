@@ -6,7 +6,7 @@
 import { agentsDialog } from "./agents";
 import { api, type Me, type SpaceListing } from "./api";
 import { membersDialog } from "./account";
-import { el, openModal, toast } from "./ui";
+import { el, openModal, toast, toastError } from "./ui";
 
 const ROLE: Record<string, string> = { viewer: "can view", editor: "can edit", owner: "owns the space" };
 
@@ -14,7 +14,7 @@ export async function shareDialog(workbook: { id: string; name: string; space: s
   let me: Me | null = null, space: SpaceListing | undefined;
   try {
     [me, space] = await Promise.all([api.me(), api.spaces().then((s) => s.find((x) => x.id === workbook.space))]);
-  } catch (e) { toast((e as Error).message, "error"); return; }
+  } catch (e) { toastError(e); return; }
   const link = `${location.origin}/w/${encodeURIComponent(workbook.id)}`;
   const linkBox = el("input", { readonly: true, class: "mono", value: link, "aria-label": "Workbook link" }) as HTMLInputElement;
   const copy = el("button", { class: "btn", type: "button" }, "Copy link");

@@ -380,8 +380,6 @@ pub enum Op {
 /// Default for the most rows copied from a table or query into a sheet (sheets keep every
 /// cell in memory). Set with `--sheet-copy-rows`.
 pub const SHEET_COPY_ROWS: usize = 100_000;
-/// Most demo rows a client may ask for over the protocol.
-pub const MAX_DEMO_ROWS: u64 = 100_000_000;
 
 fn default_limit() -> usize {
     500
@@ -545,8 +543,7 @@ fn check_size(op: &Op, ctx: &Ctx) -> Result<()> {
     if only_removes(op) {
         return Ok(());
     }
-    let wal = ctx.database.with_extension("duckdb.wal");
-    let size = std::fs::metadata(&ctx.database).map(|m| m.len()).unwrap_or(0) + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    let size = crate::state::database_bytes(ctx.database.parent().expect("the database lives in its workbook's directory"));
     if size >= limit {
         bail!(alephgrid_core::limits::TooLarge(format!(
             "this workbook holds {} MiB, its limit is {} MiB; delete tables or rows first, or ask an admin to raise the limit",
@@ -749,7 +746,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             if demos >= MAX_DEMO_TABLES {
                 bail!(alephgrid_core::limits::TooLarge(format!("a workbook holds at most {MAX_DEMO_TABLES} demo tables; drop one first")));
             }
-            (json!(wb.create_demo_table(rows.min(MAX_DEMO_ROWS).min(MAX_PROTOCOL_DEMO_ROWS))?), tables())
+            (json!(wb.create_demo_table(rows.min(MAX_PROTOCOL_DEMO_ROWS))?), tables())
         }
         Op::DropTable { table } => {
             wb.drop_table(&table)?;

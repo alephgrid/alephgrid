@@ -26,7 +26,7 @@ use crate::limits;
 use crate::model::*;
 use crate::reads::{is_internal, Db};
 use crate::sheets::{SheetInfo, SheetInput, Sheets};
-use crate::sql::{formula_to_sql, ident, lit, sanitize_table_name};
+use crate::sql::{formula_to_sql, id_list, ident, lit, sanitize_table_name};
 use crate::sqlpolicy::{self, QueryParam};
 use crate::storage::{self, HistoryEntry, OpenReport, ID, ORD, ORD_GAP};
 
@@ -1055,9 +1055,9 @@ impl Workbook {
                 }
                 id.to_string()
             }
-            None => format!("v{:x}{:04x}", now_secs(), self.saved_views(None)?.len()),
+            None => format!("v{:x}{:04x}", storage::now_secs(), self.saved_views(None)?.len()),
         };
-        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: now_secs() };
+        let view = SavedView { id: id.clone(), name: name.to_string(), spec, widths, updated_at: storage::now_secs() };
         self.mutating("save_view", None, |wb| {
             wb.conn.execute("DELETE FROM _rf_views WHERE id = ?", [&view.id])?;
             wb.conn.execute(
@@ -1131,10 +1131,6 @@ impl Workbook {
         self.db().fetch(id, row_start, row_count, 0, None)
     }
 
-    pub fn fetch_columns(&self, id: u64, row_start: u64, row_count: u64, column_start: u32, column_count: Option<u32>) -> Result<RowBlock> {
-        self.db().fetch(id, row_start, row_count, column_start, column_count)
-    }
-
     /// Count/sum/avg/min/max of a column over view rows `[start, end)`.
     pub fn stats(&self, id: u64, column: &str, start: u64, end: u64) -> Result<Stats> {
         self.db().stats(id, column, start, end)
@@ -1151,6 +1147,7 @@ impl Workbook {
     }
 
     /// Check the cached position index of `table` against its data (tests).
+    #[cfg(test)]
     pub fn verify_index(&self, table: &str) -> Result<bool> {
         let index = self.db().index(table)?;
         index.verify(&self.conn, table)?;
@@ -1290,7 +1287,7 @@ impl Workbook {
         }
         let records: BTreeSet<i64> = cells.iter().filter_map(|c| if let Target::Record(r) = c.0 { Some(r) } else { None }).collect();
         if !records.is_empty() {
-            let list = records.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
+            let list = id_list(&records);
             let found: i64 =
                 self.conn.query_row(&format!("SELECT count(*) FROM main.{} WHERE {ID} IN ({list})", ident(&table)), [], |r| r.get(0))?;
             if found as usize != records.len() {
@@ -1335,7 +1332,8 @@ impl Workbook {
         // Appended rows get new ids and order keys after the last row.
         let meta = storage::table_meta(&self.conn, &table)?;
         let index = self.db().index(&table)?;
-        let mut new_ords = Vec::new();
+        // The order key of the first appended row; the rest follow ORD_GAP apart.
+        let mut first_ord = 0;
         if appended > 0 {
             let first = m.row_count;
             let base_ord = if index.is_dense() {
@@ -1346,10 +1344,9 @@ impl Workbook {
                 index.ord_at(&self.conn, &table, first - 1)? + ORD_GAP
             };
             for k in 0..appended {
-                let rid = meta.next_id + k as i64;
-                pos_to_id.insert(first + k, rid);
-                new_ords.push(base_ord + k as i64 * ORD_GAP);
+                pos_to_id.insert(first + k, meta.next_id + k as i64);
             }
+            first_ord = base_ord;
         }
         let rid_of = |t: Target| -> Result<i64> {
             match t {
@@ -1394,15 +1391,15 @@ impl Workbook {
             ids.dedup();
             undo_cells.insert(column.to_string(), Some(ids));
         }
-        let id_list = |ids: &BTreeSet<i64>| if ids.is_empty() { "false".to_string() } else { format!("{ID} IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")) };
-        let capture = self.undo_begin(&table, &id_list(&touched))?;
+        let in_ids = |ids: &BTreeSet<i64>| if ids.is_empty() { "false".to_string() } else { format!("{ID} IN ({})", id_list(ids)) };
+        let capture = self.undo_begin(&table, &in_ids(&touched))?;
         storage::touch_table(&self.conn, &table)?;
         if appended > 0 {
             self.conn.execute_batch(&format!(
                 "INSERT INTO {} ({ID}, {ORD}) SELECT {} + i, {} + i * {ORD_GAP} FROM range({appended}) t(i);",
                 ident(&table),
                 meta.next_id,
-                new_ords[0]
+                first_ord
             ))?;
             storage::update_table(&self.conn, &table, Some(meta.next_id + appended as i64), None)?;
             self.after_commit.push(AfterCommit::Index(table.clone(), index.appended(appended)));
@@ -1412,8 +1409,8 @@ impl Workbook {
             self.conn.execute_batch(sql)?;
         }
         let after = match appended {
-            0 => id_list(&touched),
-            n => format!("({}) OR ({ID} >= {} AND {ID} < {})", id_list(&touched), meta.next_id, meta.next_id + n as i64),
+            0 => in_ids(&touched),
+            n => format!("({}) OR ({ID} >= {} AND {ID} < {})", in_ids(&touched), meta.next_id, meta.next_id + n as i64),
         };
         self.undo_finish(capture, &after, undo_cells)?;
         Ok(EditOutcome { table, cells_changed, rows_appended: appended, first_appended: (appended > 0).then_some(meta.next_id) })
@@ -2145,10 +2142,6 @@ fn fits_double(text: &str) -> bool {
     let digits: String = text.trim_start_matches(['+', '-']).chars().filter(|c| *c != '.').collect();
     let significant = digits.trim_start_matches('0').trim_end_matches('0');
     text.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c)) && significant.len() <= 15
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// `_rf_meta` key of the sheets' layouts (see [`SheetInfo::layout`]).

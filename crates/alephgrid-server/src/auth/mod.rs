@@ -210,6 +210,14 @@ pub fn not_found(what: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Denied::NotFound(what.into()))
 }
 
+pub fn bad_request(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Denied::BadRequest(message.into()))
+}
+
+pub fn conflict(message: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Denied::Conflict(message.into()))
+}
+
 /// Who is making a request.
 #[derive(Debug, Clone)]
 pub enum Principal {
@@ -317,12 +325,12 @@ pub fn secret() -> String {
 pub fn random_id() -> String {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).expect("the operating system's random source");
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    crate::runtime::hex(&b)
 }
 
 /// SHA-256 of a secret, hex. Secrets are stored only this way.
 pub fn hash(secret: &str) -> String {
-    Sha256::digest(secret.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    crate::runtime::hex(&Sha256::digest(secret.as_bytes()))
 }
 
 /// Constant-time equality of two hashes.
@@ -746,6 +754,11 @@ impl Auth {
         if let Err(e) = self.store.audit(&a) {
             tracing::error!("recording audit event {action}: {e:#}");
         }
+    }
+
+    /// [`Auth::audit`] of an action on `workbook` in `space`, recorded now.
+    pub fn audit_workbook(&self, p: &Principal, action: &str, space: &Space, workbook: &str, detail: serde_json::Value) {
+        self.audit(p, action, Some(&space.org_id), Some(&space.id), Some(workbook), detail);
     }
 }
 

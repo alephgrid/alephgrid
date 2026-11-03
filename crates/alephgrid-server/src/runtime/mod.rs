@@ -94,7 +94,8 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// What separates one workbook's execution from others'. Only `shared_process` exists in
-/// this build; the others name boundaries later providers may offer.
+/// this build; the others name boundaries later providers may offer, and stay in the wire
+/// format (records and specs written by other builds) even though nothing here makes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationClass {

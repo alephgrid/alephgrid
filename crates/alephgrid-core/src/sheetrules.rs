@@ -91,7 +91,7 @@ impl Workbook {
             if !CONDITIONS.contains(&r.condition.as_str()) {
                 bail!("unknown condition {:?}", r.condition);
             }
-            if !(r.color.len() == 7 && r.color.starts_with('#') && r.color[1..].chars().all(|c| c.is_ascii_hexdigit())) {
+            if !crate::sheets::is_hex_color(&r.color) {
                 bail!("colours are written #RRGGBB");
             }
         }

@@ -4,8 +4,9 @@
 
 import { api, HttpError, type InviteInfo, type Me, type SpaceListing } from "./api";
 import type { AuditEvent, Invite, LibraryKind, OrgMember, OrgRole, SpaceMember, SpaceRole, Token } from "./types";
-import { confirmDialog, el, formDialog, openModal, showMenu, toast } from "./ui";
+import { confirmDialog, el, formDialog, panelDialog, showMenu, toast, toastError } from "./ui";
 import { brandMark } from "./icons";
+import { bytes } from "./format";
 
 type Navigate = (path: string) => void;
 type Config = Awaited<ReturnType<typeof api.config>>;
@@ -18,7 +19,7 @@ const ROLE_HINT: Record<SpaceRole, string> = {
 };
 
 /** Where to go after signing in: a path on this server only. */
-export function nextPath(): string {
+function nextPath(): string {
   const n = new URLSearchParams(location.search).get("next") ?? "/";
   return n.startsWith("/") && !n.startsWith("//") ? n : "/";
 }
@@ -201,14 +202,6 @@ function fill(node: HTMLElement, ...children: (Node | string | null | undefined 
 }
 
 /** A dialog that re-renders its body; `close` ends it. */
-function panel(title: string, render: (body: HTMLElement, close: () => void) => Promise<void>): void {
-  const body = el("div", { class: "panel-body" });
-  const box = el("div", { class: "dialog wide" }, el("h2", {}, title), body,
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
-  const modal = openModal(box, () => modal.close());
-  render(body, () => modal.close()).catch((e) => body.replaceChildren(el("p", { role: "alert" }, (e as Error).message)));
-}
-
 function roleSelect(value: string, roles: readonly string[], labels: Record<string, string>, onchange?: (v: string) => void, label = "Role"): HTMLSelectElement {
   const s = el("select", { "aria-label": label }, ...roles.map((r) => el("option", { value: r }, labels[r] ?? r)));
   s.value = value;
@@ -222,12 +215,12 @@ const ORG_ROLES = ["member", "admin"] as const;
 /** Who has which role in a space; owners can change them. */
 export function membersDialog(space: SpaceListing, onChange: () => void): void {
   const manage = space.role === "owner";
-  panel(`Members of “${space.name}”`, async function render(body) {
+  panelDialog(`Members of “${space.name}”`, async function render(body) {
     const members: SpaceMember[] = await api.spaceMembers(space.id);
     const rows = members.map((m) => {
       const who = m.kind === "group" ? `Group: ${m.principal}` : (m.user ? `${m.user.name} <${m.user.email}>` : m.principal);
       const act = async (f: () => Promise<void>) => {
-        try { await f(); onChange(); await render(body); } catch (e) { toast((e as Error).message, "error"); }
+        try { await f(); onChange(); await render(body); } catch (e) { toastError(e); }
       };
       return el("div", { class: "member-row", role: "row" },
         el("span", { role: "cell" }, who),
@@ -261,7 +254,7 @@ export function membersDialog(space: SpaceListing, onChange: () => void): void {
 
 /** Service tokens of a space: create (the secret is shown once) and revoke. */
 export function tokensDialog(space: SpaceListing): void {
-  panel(`Service tokens of “${space.name}”`, async function render(body) {
+  panelDialog(`Service tokens of “${space.name}”`, async function render(body) {
     const tokens: Token[] = await api.tokens(space.id);
     const fresh = el("div", { class: "token-secret" });
     const name = el("input", { placeholder: "e.g. nightly import", "aria-label": "Token name" });
@@ -286,7 +279,7 @@ export function tokensDialog(space: SpaceListing): void {
       el("span", { role: "cell", class: "muted" }, t.revoked_at ? "revoked" : `expires ${new Date(t.expires_at).toLocaleDateString()}`),
       el("span", { role: "cell" }, t.revoked_at ? null : el("button", { class: "btn small", onclick: async () => {
         if (!(await confirmDialog(`Revoke “${t.name}”?`, "Anything using it stops working at once.", "Revoke"))) return;
-        try { await api.revokeToken(space.id, t.id); await render(body); } catch (e) { toast((e as Error).message, "error"); }
+        try { await api.revokeToken(space.id, t.id); await render(body); } catch (e) { toastError(e); }
       } }, "Revoke"))));
     body.replaceChildren(fresh,
       rows.length ? el("div", { class: "member-table", role: "table", "aria-label": "Tokens" }, ...rows) : el("p", {}, "No tokens."),
@@ -295,11 +288,11 @@ export function tokensDialog(space: SpaceListing): void {
 }
 
 /** Members of an organization and its invitations (admins). */
-export function peopleDialog(org: string, orgName: string, me: Me): void {
-  panel(`People of ${orgName}`, async function render(body) {
+function peopleDialog(org: string, orgName: string, me: Me): void {
+  panelDialog(`People of ${orgName}`, async function render(body) {
     const [members, invites, spaces] = await Promise.all([api.orgMembers(org), api.invites(org), api.spaces()]);
     const act = async (f: () => Promise<unknown>) => {
-      try { await f(); await render(body); } catch (e) { toast((e as Error).message, "error"); }
+      try { await f(); await render(body); } catch (e) { toastError(e); }
     };
     const rows = members.map((m: OrgMember) => el("div", { class: "member-row", role: "row" },
       el("span", { role: "cell" }, `${m.user.name} <${m.user.email}>`, m.user.disabled ? el("span", { class: "badge" }, "disabled") : null),
@@ -351,8 +344,8 @@ function describeEvent(e: AuditEvent): string {
 }
 
 /** Recent audit events of an organization (admins). */
-export function auditDialog(org: string): void {
-  panel("Activity", async (body) => {
+function auditDialog(org: string): void {
+  panelDialog("Activity", async (body) => {
     const events = await api.audit(org);
     body.replaceChildren(events.length
       ? el("div", { class: "member-table", role: "table", "aria-label": "Activity" }, ...events.map((e) => el("div", { class: "member-row", role: "row" },
@@ -367,16 +360,9 @@ export function isUnauthenticated(e: unknown): boolean {
   return e instanceof HttpError && e.status === 401;
 }
 
-function bytes(n: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
-
 /** Usage of each space against its limits; admins change a space's limits (7.07). */
 export function usageDialog(org: string): void {
-  panel("Usage and limits", async function render(body) {
+  panelDialog("Usage and limits", async function render(body) {
     const [spaces, config] = await Promise.all([api.usage(org), api.config()]);
     const offered = (config.profiles ?? []).filter((p) => p.id !== "standard").map((p) => p.id);
     const of = (used: string, limit: number | null | undefined, fmt: (n: number) => string = String) =>
@@ -405,7 +391,7 @@ export function usageDialog(org: string): void {
           await api.setQuota(u.space.id, { storage_bytes: opt(v.storage, 2 ** 30), workbooks: opt(v.workbooks), jobs: opt(v.jobs), open_workbooks: opt(v.open), compute_memory_bytes: opt(v.compute, 2 ** 30) });
           if (offered.length) await api.setSpaceProfiles(u.space.id, (v.profiles ?? "").split(",").map((x) => x.trim()).filter(Boolean));
           await render(body);
-        } catch (e) { toast((e as Error).message, "error"); }
+        } catch (e) { toastError(e); }
       } }, "Limits…"))));
     fill(body, el("p", { class: "muted" }, "Storage counts each space's workbooks and its trash. Limits left empty use the server's defaults."),
       el("div", { class: "member-table", role: "table", "aria-label": "Usage" }, ...rows));
@@ -418,10 +404,10 @@ const KIND_LABEL = { query: "Query", view: "View", function: "Function" } as con
 export function libraryDialog(space: SpaceListing, workbooks: { id: string; name: string; role?: SpaceRole }[], me: Me): void {
   const canPublish = space.role === "owner" || (space.role === "editor" && space.publish_role !== "owner");
   const writable = workbooks.filter((w) => w.role !== "viewer");
-  panel(`Library of “${space.name}”`, async function render(body) {
+  panelDialog(`Library of “${space.name}”`, async function render(body) {
     const entries = await api.library(space.id);
     const act = async (f: () => Promise<unknown>, done?: string) => {
-      try { await f(); if (done) toast(done, "success"); await render(body); } catch (e) { toast((e as Error).message, "error"); }
+      try { await f(); if (done) toast(done, "success"); await render(body); } catch (e) { toastError(e); }
     };
     const rows = entries.map((e) => el("div", { class: "member-row", role: "row" },
       el("span", { role: "cell" }, el("strong", {}, e.name), el("span", { class: "badge" }, KIND_LABEL[e.kind]), ` v${e.latest.version}`),

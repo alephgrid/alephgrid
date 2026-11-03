@@ -22,6 +22,25 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 let toastHost: HTMLElement | null = null;
 
+/** A pointer drag that started with `e` on `target`: the pointer is captured, `move` sees
+ *  each move and `up` the release, and both listeners go away on release. */
+export function pointerDrag(target: HTMLElement, e: PointerEvent, move: (m: PointerEvent) => void, up?: (u: PointerEvent) => void): void {
+  e.preventDefault();
+  target.setPointerCapture(e.pointerId);
+  const end = (u: PointerEvent) => {
+    target.removeEventListener("pointermove", move);
+    target.removeEventListener("pointerup", end);
+    up?.(u);
+  };
+  target.addEventListener("pointermove", move);
+  target.addEventListener("pointerup", end);
+}
+
+/** Show an error's message as an error toast. */
+export function toastError(e: unknown): void {
+  toast((e as Error).message, "error");
+}
+
 export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000,
   action?: { label: string; run: () => void }): void {
   if (!toastHost) {
@@ -59,7 +78,7 @@ export function closeMenu(): void {
   menuOpener = null;
 }
 
-export interface MenuOptions {
+interface MenuOptions {
   /** ArrowLeft / ArrowRight in the menu: move to the neighbouring menu of a menu bar. */
   onArrow?: (direction: -1 | 1) => void;
   /** Called however the menu closes. */
@@ -134,7 +153,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
   };
 }
 
-export interface Field {
+interface Field {
   name: string;
   label: string;
   value?: string;
@@ -208,6 +227,17 @@ export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dial
       if (opener?.isConnected) opener.focus({ preventScroll: true });
     },
   };
+}
+
+/** A wide dialog with a Close button whose body `render` fills (and may fill again); an
+ *  error it throws is shown in the body. `lede` is a line under the title. */
+export function panelDialog(title: string, render: (body: HTMLElement, close: () => void) => Promise<void>, opts: { lede?: string } = {}): void {
+  const body = el("div", { class: "panel-body" });
+  const box = el("div", { class: "dialog wide" }, el("h2", {}, title),
+    opts.lede ? el("p", { class: "dialog-lede" }, opts.lede) : null, body,
+    el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
+  const modal = openModal(box, () => modal.close());
+  render(body, () => modal.close()).catch((e) => body.replaceChildren(el("p", { role: "alert" }, (e as Error).message)));
 }
 
 /** Modal form. Resolves with field values, or null when cancelled. */

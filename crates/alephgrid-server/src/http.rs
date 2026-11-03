@@ -445,7 +445,7 @@ async fn create_workbook(State(state): State<Shared>, Extension(p): Extension<Pr
         };
         let h = state.create(&name, &space.id)?;
         let meta = h.meta.lock().unwrap().clone();
-        state.auth.audit(&p, "workbook_created", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "name": meta.name }));
+        state.auth.audit_workbook(&p, "workbook_created", &space, &meta.id, json!({ "name": meta.name }));
         Ok(meta)
     })
     .await?;
@@ -459,7 +459,7 @@ async fn duplicate_workbook(State(state): State<Shared>, Extension(p): Extension
     blocking(move || s.auth.require_space(&pp, &sid, Cap::CreateWorkbook)).await?;
     let meta = blocking(move || {
         let meta = state.duplicate(&id)?;
-        state.auth.audit(&p, "workbook_duplicated", Some(&space.org_id), Some(&space.id), Some(&meta.id), json!({ "from": id }));
+        state.auth.audit_workbook(&p, "workbook_duplicated", &space, &meta.id, json!({ "from": id }));
         Ok(meta)
     })
     .await?;
@@ -553,7 +553,7 @@ async fn runtime_action(
     let status = blocking(move || {
         let c = &state.controller;
         if let Some(name) = &req.profile {
-            let profile = c.policy.profile(name).ok_or_else(|| crate::auth::Denied::BadRequest(format!("unknown compute profile {name:?}")))?;
+            let profile = c.policy.profile(name).ok_or_else(|| crate::auth::bad_request(format!("unknown compute profile {name:?}")))?;
             let current = state.admission(&id, None)?.profile.id;
             if profile.id != current {
                 if let Some(refusal) = profile_refusal(&state, &p, &space, role, profile)? {
@@ -619,15 +619,15 @@ async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Prin
     let out = blocking(move || {
         // One at a time, not too often, only with room for it, and only the newest few kept (SEC.11).
         let Ok(_running) = state.backup_running.try_lock() else {
-            bail!(crate::auth::Denied::Conflict("a backup is already running; wait for it to finish".into()));
+            return Err(crate::auth::conflict("a backup is already running; wait for it to finish"));
         };
         if let Some(at) = *state.last_backup.lock().unwrap() {
             let wait = state.config.backup_interval.saturating_sub(at.elapsed());
             if !wait.is_zero() {
-                bail!(crate::auth::Denied::Conflict(format!("the last backup finished moments ago; try again in {} s", wait.as_secs().max(1))));
+                return Err(crate::auth::conflict(format!("the last backup finished moments ago; try again in {} s", wait.as_secs().max(1))));
             }
         }
-        let root = state.config.data_dir.join(".backups");
+        let root = backups_root(&state);
         std::fs::create_dir_all(&root)?;
         let needed: u64 = state.list()?.iter().map(|w| crate::state::database_bytes(&state.workbook_dir(&w.meta.id))).sum();
         if let Some(free) = crate::backup::free_bytes(&root) {
@@ -651,10 +651,15 @@ async fn create_backup(State(state): State<Shared>, Extension(p): Extension<Prin
     Ok(Json(out))
 }
 
+/// Where online backups go: `<data-dir>/.backups`.
+fn backups_root(state: &Shared) -> std::path::PathBuf {
+    state.config.data_dir.join(crate::state::BACKUPS)
+}
+
 /// The online backups under `<data-dir>/.backups`, newest first.
 async fn list_backups(State(state): State<Shared>, Extension(p): Extension<Principal>) -> ApiResult<impl IntoResponse> {
     state.auth.require_instance_admin(&p)?;
-    Ok(Json(blocking(move || crate::backup::list(&state.config.data_dir.join(".backups"))).await?))
+    Ok(Json(blocking(move || crate::backup::list(&backups_root(&state))).await?))
 }
 
 async fn delete_backup(State(state): State<Shared>, Extension(p): Extension<Principal>, Path(name): Path<String>) -> ApiResult<impl IntoResponse> {
@@ -663,7 +668,7 @@ async fn delete_backup(State(state): State<Shared>, Extension(p): Extension<Prin
         if !name.starts_with("backup-") || !crate::state::valid_id(&name) {
             bail!(crate::auth::not_found("backup not found"));
         }
-        let dir = state.config.data_dir.join(".backups").join(&name);
+        let dir = backups_root(&state).join(&name);
         if !dir.join("manifest.json").exists() {
             bail!(crate::auth::not_found("backup not found"));
         }
@@ -712,7 +717,7 @@ async fn update_workbook(
                 state.require_workbook(&p, &id, Cap::DeleteWorkbook)?;
                 let (dest, _) = state.auth.require_space(&p, to, Cap::CreateWorkbook)?;
                 if dest.org_id != space.org_id {
-                    bail!(crate::auth::Denied::BadRequest("a workbook can move only between spaces of one organization".into()));
+                    return Err(crate::auth::bad_request("a workbook can move only between spaces of one organization"));
                 }
                 Some(dest)
             }
@@ -732,7 +737,7 @@ async fn delete_workbook(State(state): State<Shared>, Extension(p): Extension<Pr
     let (space, _) = allowed(&state, &p, &id, Cap::DeleteWorkbook).await?;
     blocking(move || {
         state.delete(&id)?;
-        state.auth.audit(&p, "workbook_deleted", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        state.auth.audit_workbook(&p, "workbook_deleted", &space, &id, json!({}));
         Ok(())
     })
     .await?;
@@ -773,7 +778,7 @@ async fn restore_workbook(State(state): State<Shared>, Extension(p): Extension<P
     Ok(Json(
         blocking(move || {
             let meta = state.restore(&id)?;
-            state.auth.audit(&p, "workbook_restored", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+            state.auth.audit_workbook(&p, "workbook_restored", &space, &id, json!({}));
             Ok(meta)
         })
         .await?,
@@ -784,7 +789,7 @@ async fn purge_workbook(State(state): State<Shared>, Extension(p): Extension<Pri
     let (space, _) = allowed(&state, &p, &id, Cap::Purge).await?;
     blocking(move || {
         state.purge(Some(&id))?;
-        state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&id), json!({}));
+        state.auth.audit_workbook(&p, "workbook_purged", &space, &id, json!({}));
         Ok(())
     })
     .await?;
@@ -799,7 +804,7 @@ async fn empty_trash(State(state): State<Shared>, Extension(p): Extension<Princi
         for w in state.trash()? {
             if let Some(space) = spaces.get(&w.meta.space) {
                 state.purge(Some(&w.meta.id))?;
-                state.auth.audit(&p, "workbook_purged", Some(&space.org_id), Some(&space.id), Some(&w.meta.id), json!({}));
+                state.auth.audit_workbook(&p, "workbook_purged", space, &w.meta.id, json!({}));
             }
         }
         Ok(())
@@ -903,7 +908,7 @@ async fn receive(state: &Shared, workbook: &str, file_name: &str, headers: &Head
     if let Some(u) = used {
         crate::quota::check_storage(u, declared.unwrap_or(0), quota).map_err(ApiError::from)?;
     }
-    let scratch = state.scratch_dir(".uploads", workbook)?;
+    let scratch = state.scratch_dir(crate::state::UPLOADS, workbook)?;
     let path = scratch.join(file_name);
     let mut reserved = 0u64;
     let received = async {
@@ -1129,7 +1134,7 @@ async fn export(
     let h = open(&state, &id).await?;
     let file_name = format!("{}.{}", spec.table, q.format.extension());
     let table = spec.table.clone();
-    let scratch = state.scratch_dir(".exports", &id)?;
+    let scratch = state.scratch_dir(crate::state::EXPORTS, &id)?;
     let path = scratch.join("export");
     let out = path.clone();
     let format = q.format;
@@ -1147,20 +1152,31 @@ async fn export(
         )
         .await
         .map_err(ApiError::from);
+    let (file, len) = open_then_unlink(written, &path, &scratch).await?;
+    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "table", "table": table, "format": format.extension(), "bytes": len }));
+    Ok(file_response(file, len, "application/octet-stream", &file_name))
+}
+
+/// Open the file a job `written` (when it succeeded), then remove its scratch `dir`: the
+/// open handle keeps the bytes readable after unlinking. Returns the file and its length.
+async fn open_then_unlink(written: ApiResult<()>, path: &std::path::Path, dir: &std::path::Path) -> ApiResult<(tokio::fs::File, u64)> {
     let opened = match written {
-        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
+        Ok(()) => tokio::fs::File::open(path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
         Err(e) => Err(e),
     };
-    // The open handle keeps the bytes readable after unlinking.
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    let _ = tokio::fs::remove_dir_all(dir).await;
     let file = opened?;
     let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
-    state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "table", "table": table, "format": format.extension(), "bytes": len }));
+    Ok((file, len))
+}
+
+/// Stream `file` (`len` bytes) as a download named `file_name`.
+fn file_response(file: tokio::fs::File, len: u64, content_type: &'static str, file_name: &str) -> Response {
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&file_name));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    headers.insert(header::CONTENT_DISPOSITION, attachment(file_name));
+    (headers, Body::from_stream(ReaderStream::new(file))).into_response()
 }
 
 /// Stream a finished query export (`export_query`) once; the file is removed afterwards.
@@ -1171,17 +1187,9 @@ async fn download(State(state): State<Shared>,
         .downloads
         .take(&id, &download)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "this export was already downloaded or has expired; export again"))?;
-    let opened = tokio::fs::File::open(&d.path).await;
-    // The open handle keeps the bytes readable after the directory is removed.
-    let _ = tokio::fs::remove_dir_all(&d.dir).await;
-    let file = opened.map_err(|e| ApiError::from(anyhow::Error::from(e)))?;
-    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let (file, len) = open_then_unlink(Ok(()), &d.path, &d.dir).await?;
     state.auth.record(&p, "export_downloaded", &space, &id, json!({ "download": download, "bytes": len }));
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
-    headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&d.file_name));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    Ok(file_response(file, len, "application/octet-stream", &d.file_name))
 }
 
 /// Download all sheets of a workbook as one .xlsx file.
@@ -1204,7 +1212,7 @@ async fn export_xlsx(State(state): State<Shared>,
     let _slot = state.job_slot(&space.id).map_err(ApiError::from)?;
     let h = open(&state, &id).await?;
     let name = h.meta.lock().unwrap().name.replace(['"', '/', '\\', '\r', '\n'], "");
-    let scratch = state.scratch_dir(".exports", &id)?;
+    let scratch = state.scratch_dir(crate::state::EXPORTS, &id)?;
     let path = scratch.join("sheets.xlsx");
     let out = path.clone();
     let written = h
@@ -1218,22 +1226,9 @@ async fn export_xlsx(State(state): State<Shared>,
         })))
         .await
         .map_err(ApiError::from);
-    let opened = match written {
-        Ok(()) => tokio::fs::File::open(&path).await.map_err(|e| ApiError::from(anyhow::Error::from(e))),
-        Err(e) => Err(e),
-    };
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    let file = opened?;
-    let len = file.metadata().await.map_err(anyhow::Error::from)?.len();
+    let (file, len) = open_then_unlink(written, &path, &scratch).await?;
     state.auth.record(&p, "data_exported", &space, &id, json!({ "kind": "xlsx", "bytes": len }));
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".parse().unwrap(),
-    );
-    headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    headers.insert(header::CONTENT_DISPOSITION, attachment(&format!("{name}.xlsx")));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    Ok(file_response(file, len, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", &format!("{name}.xlsx")))
 }
 
 async fn websocket(
@@ -1277,12 +1272,16 @@ pub fn attachment(name: &str) -> axum::http::HeaderValue {
         .chars()
         .map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' || c == ' ' { c } else { '_' })
         .collect();
-    let encoded: String = name
-        .bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect();
+    let encoded = percent_encode(name);
     axum::http::HeaderValue::from_str(&format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"))
         .unwrap_or_else(|_| axum::http::HeaderValue::from_static("attachment"))
+}
+
+/// Percent-encode every byte but the RFC 3986 unreserved ones (`A-Z a-z 0-9 - . _ ~`).
+pub(crate) fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 /// Open (or find) a workbook off the async threads: starting an allocation can migrate files.

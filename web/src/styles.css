@@ -333,7 +333,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .toast-success { background: var(--success); color: var(--accent-text); }
 :root[data-theme="dark"] .toast-error { color: #111113; }
 .toast-action { margin-left: 8px; background: transparent; color: inherit; border: 1px solid currentColor; }
-.upload-banner { position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 60; background: var(--text); color: var(--bg); padding: 8px 16px; border-radius: 999px; box-shadow: var(--shadow); }
 
 /* ---------- home / workspace manager ---------- */
 .home-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100%; background: var(--canvas); }
@@ -482,7 +481,6 @@ dialog progress, .dialog progress { width: 100%; }
 .function-field textarea { font: 12.5px/1.5 var(--font-mono); font-weight: 400; }
 .function-field textarea.prose { font: 13px/1.5 var(--font-ui); }
 .function-field input, .function-field select { font-weight: 400; }
-.formula-bar { position: relative; }
 .function-completion { position: absolute; z-index: 12; top: 100%; left: 100px; max-width: min(700px, 80vw); padding: 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); }
 .function-completion .btn { display: block; text-align: left; white-space: normal; margin: 3px 0; }
 .function-completion p { margin: 4px; }
@@ -490,11 +488,6 @@ dialog progress, .dialog progress { width: 100%; }
 .analysis-field { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; font-size: 13px; font-weight: 600; }
 .analysis-field select, .analysis-field input, .analysis-field textarea { font-weight: 400; }
 .analysis-result { max-height: 350px; overflow: auto; margin: 12px 0; }
-.analysis-saved { display: flex; gap: 6px; flex-wrap: wrap; }
-.analysis-chart-row { display: grid; grid-template-columns: minmax(100px, 1fr) 2fr minmax(60px, 1fr); gap: 10px; align-items: center; font-size: 12px; min-height: 24px; }
-.analysis-bar-track { height: 16px; position: relative; background: var(--panel); border-left: 1px solid var(--border); }
-.analysis-bar-track::before { content: ""; position: absolute; left: 50%; height: 100%; border-left: 1px solid var(--border); }
-.analysis-bar { position: absolute; height: 100%; background: var(--accent); }
 .presentation-row { display: grid; grid-template-columns: minmax(100px, 1fr) 100px 120px; align-items: center; gap: 10px; padding: 6px; border-bottom: 1px solid var(--border); }
 
 /* The catalog bounds its list independently of the workbook grid. */
@@ -528,10 +521,6 @@ dialog progress, .dialog progress { width: 100%; }
 .form-error:empty { display: none; }
 .function-completion.help-only { pointer-events: none; }
 
-.analysis-svg { width: 100%; max-width: 600px; height: auto; border: 1px solid var(--border); }
-.analysis-line { fill: none; stroke: var(--accent, currentColor); stroke-width: 2; }
-.analysis-point { fill: var(--accent, currentColor); }
-.analysis-points { font-size: 12px; color: var(--muted); columns: 2; }
 .dashboard-grid { display: grid; grid-template-columns: repeat(12, 1fr); grid-auto-rows: 28px; gap: 8px; }
 .dashboard-tile { border: 1px solid var(--border); border-radius: 6px; padding: 6px; overflow: auto; }
 
@@ -629,7 +618,7 @@ dialog progress, .dialog progress { width: 100%; }
 .filter-popup .fp-sort { flex: 1; justify-content: flex-start; }
 .filter-popup .fp-search { width: 100%; }
 .filter-popup .fp-all, .filter-popup .fp-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.filter-popup .fp-item:hover, .filter-popup .fp-all:hover { background: var(--hover, var(--surface-2, rgba(0,0,0,.04))); }
+.filter-popup .fp-item:hover, .filter-popup .fp-all:hover { background: rgba(0,0,0,.04); }
 .filter-popup .fp-list { flex: 1; min-height: 80px; max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
 .filter-popup .fp-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filter-popup .fp-empty { font-style: italic; color: var(--muted); }
@@ -639,7 +628,6 @@ dialog progress, .dialog progress { width: 100%; }
 .filter-popup .fp-spacer { flex: 1; }
 
 /* U.17 find bar */
-.grid-wrap { position: relative; }
 .find-bar { position: absolute; top: 8px; right: 16px; z-index: 30; display: flex; flex-direction: column; gap: 6px; padding: 6px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); max-width: calc(100% - 32px); }
 .find-bar[hidden] { display: none; }
 .find-main, .find-replace { display: flex; align-items: center; gap: 4px; }
@@ -715,7 +703,7 @@ dialog progress, .dialog progress { width: 100%; }
 .dialog-status { margin: 0; font-size: 12px; color: var(--muted); }
 .pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 200px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
 .pick-item { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-radius: 6px; font-size: 13px; color: var(--text); }
-.pick-item:hover { background: var(--hover, rgba(0,0,0,.04)); }
+.pick-item:hover { background: rgba(0,0,0,.04); }
 .pick-item .muted { margin-left: auto; font-size: 12px; }
 .dashboards-dialog { width: min(980px, 100%); }
 .analysis-dialog .analysis-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
@@ -728,7 +716,7 @@ dialog progress, .dialog progress { width: 100%; }
 .welcome-strip ul { margin: 6px 0 0; padding-left: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 2px 24px; }
 .welcome-actions { display: flex; gap: 6px; flex: none; }
 .empty-hint { color: var(--muted); font-size: 13px; }
-kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); }
+kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; background: var(--bg); }
 @media (max-width: 640px) { .welcome-strip { flex-direction: column; } }
 .analyze-field input, .analyze-field select, .analyze-pane input, .analyze-pane select { color: var(--text); }
 
@@ -758,7 +746,7 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 
 /* S.09: charts placed on a sheet float over the grid body and scroll with it. */
 .sheet-charts { position: absolute; right: 0; bottom: 0; overflow: hidden; pointer-events: none; z-index: 3; }
-.sheet-chart { position: absolute; display: flex; flex-direction: column; pointer-events: auto; background: var(--surface, var(--grid-bg)); border: 1px solid var(--border, var(--grid-line)); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.12); overflow: hidden; }
+.sheet-chart { position: absolute; display: flex; flex-direction: column; pointer-events: auto; background: var(--grid-bg); border: 1px solid var(--border, var(--grid-line)); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.12); overflow: hidden; }
 .sheet-chart-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border-bottom: 1px solid var(--border, var(--grid-line)); cursor: move; user-select: none; touch-action: none; }
 .sheet-chart-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
 .sheet-chart-bar select { font-size: 12px; }
@@ -786,7 +774,7 @@ kbd { font-family: var(--mono, ui-monospace, monospace); font-size: 11px; paddin
 .import-pane .import-column-table select { max-width: 200px; }
 .import-pane .import-samples { color: var(--muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .import-pane .import-preview { overflow: auto; max-height: 40vh; }
-.import-pane .dialog-actions { margin-top: auto; padding-top: 12px; position: sticky; bottom: 0; background: var(--surface, var(--bg)); }
+.import-pane .dialog-actions { margin-top: auto; padding-top: 12px; position: sticky; bottom: 0; background: var(--bg); }
 
 /* M.07: agent connections */
 .agents-dialog .agent-form { display: grid; gap: 8px; }

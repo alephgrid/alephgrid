@@ -36,7 +36,7 @@ use super::{
     AllocationState, ComputePolicy, ComputeProfile, EnsureRequest, FailureKind, OwnershipAssignment, Reservation,
     RuntimeAllocation, RuntimeFailure, RuntimeProvider, RuntimeSpec,
 };
-use crate::state::{read_meta, Lease, WorkbookHandle, WorkbookMeta};
+use crate::state::{read_meta, Lease, WorkbookHandle};
 
 /// Called at each start stage with the workbook id; an error fails or cancels the start.
 pub type StageHook = Arc<dyn Fn(&str, AllocationState) -> std::result::Result<(), RuntimeFailure> + Send + Sync>;
@@ -141,15 +141,11 @@ pub struct Controller {
     pub disk_reserve: Arc<crate::reserve::DiskReserve>,
 }
 
-fn new_id(prefix: &str) -> String {
+pub fn operation_id(kind: &str) -> String {
     use std::sync::atomic::AtomicU64;
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{:x}{:04x}{n:x}", alephgrid_core::storage::now_ms(), std::process::id() & 0xffff)
-}
-
-pub fn operation_id(kind: &str) -> String {
-    new_id(kind)
+    format!("{kind}-{:x}{:04x}{n:x}", alephgrid_core::storage::now_ms(), std::process::id() & 0xffff)
 }
 
 /// How long a workbook started for someone who has not connected yet is spared from being
@@ -357,7 +353,7 @@ impl Controller {
         let spec_id = meta.runtime_spec.clone().unwrap_or_else(|| self.spec_id.clone());
         let spec = if spec_id == self.spec_id { self.spec.clone() } else { super::load_spec(&self.control, &spec_id).map_err(|e| RuntimeFailure::new(FailureKind::Incompatible, format!("{e:#}")))? };
         let record = RuntimeAllocation {
-            id: new_id("al"),
+            id: operation_id("al"),
             workbook: workbook.to_string(),
             spec: spec_id,
             policy: self.policy.id.clone(),
@@ -1037,8 +1033,4 @@ impl StopReason {
             StopReason::Restarting => crate::ws::Event::WorkbookClosed { reason: "restarting".into() },
         }
     }
-}
-
-pub fn meta_of(dir: &Path) -> Result<WorkbookMeta> {
-    read_meta(dir)
 }

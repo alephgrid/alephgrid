@@ -4,18 +4,12 @@
 // size.
 
 import { api, HttpError } from "./api";
+import { bytes } from "./format";
 import type { ComputeProfile, ProfileChoice, RuntimeStatus } from "./protocol";
-import { el, openModal, toast } from "./ui";
+import { el, openModal, toast, toastError } from "./ui";
 
 /** How often the opening screen asks for the status. */
 const POLL_MS = 400;
-
-export function bytes(n: number): string {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = n, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
 
 export function minutes(ms: number): string {
   const m = Math.round(ms / 60_000);
@@ -27,7 +21,7 @@ export function profileLabel(id: string): string {
 }
 
 /** What a profile reserves, in words. */
-export function describeProfile(p: ComputeProfile): string {
+function describeProfile(p: ComputeProfile): string {
   if (p.memory_bytes === undefined) return "an equal share of the server";
   const threads = p.threads ?? 1;
   return `${bytes(p.memory_bytes)} and ${threads} thread${threads === 1 ? "" : "s"}${p.dedicated ? ", dedicated: never closed to make room for others" : ""}`;
@@ -194,7 +188,7 @@ export function computeDialog(workbook: string): void {
         const out = await api.runtimeAction(workbook, { action: "restart", profile: chosen });
         toast(`Running with the ${profileLabel(out.allocation?.profile ?? chosen)} profile.`, "success");
       } catch (e) {
-        toast((e as Error).message, "error");
+        toastError(e);
       }
       await render();
     } }, "Restart with this profile");

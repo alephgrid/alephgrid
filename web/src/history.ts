@@ -1,6 +1,6 @@
 import type { Rpc } from "./api";
 import type { HistoryEntry } from "./protocol";
-import { el, openModal, toast } from "./ui";
+import { el, panelDialog, toast, toastError } from "./ui";
 
 /** How many recent changes the dialog lists. */
 const SHOWN = 200;
@@ -16,14 +16,7 @@ function describe(h: HistoryEntry): string {
  * since. Undone changes say which revision took them back.
  */
 export function historyDialog(rpc: Rpc, onUndone: () => void): void {
-  const body = el("div", { class: "panel-body" });
-  const box = el("div", { class: "dialog wide" },
-    el("h2", {}, "Change history"),
-    el("p", { class: "dialog-lede" }, "Everyone's changes to this workbook. Undo takes a table change back as a new change, unless someone changed the same cells or rows since."),
-    body,
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
-  const modal = openModal(box, () => modal.close());
-  const render = async (): Promise<void> => {
+  panelDialog("Change history", async function render(body: HTMLElement): Promise<void> {
     const after = Math.max(0, rpc.revisions.last - SHOWN);
     const entries = (await rpc.call("history", { after, limit: SHOWN })).reverse();
     if (!entries.length) {
@@ -41,9 +34,9 @@ export function historyDialog(rpc: Rpc, onUndone: () => void): void {
               const out = await rpc.call("undo", { revision: h.revision });
               if (out) toast(`Took back revision ${out.undone} in ${out.table}`, "success");
               onUndone();
-              await render();
+              await render(body);
             } catch (e) {
-              toast((e as Error).message, "error");
+              toastError(e);
             }
           },
         }, "Undo"));
@@ -54,6 +47,5 @@ export function historyDialog(rpc: Rpc, onUndone: () => void): void {
         el("span", { role: "cell" }, describe(h)),
         action);
     })));
-  };
-  render().catch((e) => body.replaceChildren(el("p", { role: "alert" }, (e as Error).message)));
+  }, { lede: "Everyone's changes to this workbook. Undo takes a table change back as a new change, unless someone changed the same cells or rows since." });
 }

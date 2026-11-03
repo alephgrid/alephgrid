@@ -10,7 +10,7 @@ import type {
 } from "./protocol";
 import { completionAt, findParams, isInternal, mentionedNames, quoteIdent, type Completion } from "./sqltext";
 import type { ServerEvent } from "./types";
-import { choiceDialog, confirmDialog, el, formDialog, openModal, showMenu, toast } from "./ui";
+import { choiceDialog, confirmDialog, el, formDialog, openModal, showMenu, toast, toastError } from "./ui";
 
 /** Rows a preview asks for; the server never returns more than 5,000. */
 const PREVIEW_ROWS = 500;
@@ -739,7 +739,7 @@ export class SqlWorkspace {
         toast(fresh ? `Saved “${q.name}” as version ${q.version}` : `No changes since version ${q.version} of “${q.name}”`, "success");
         this.afterSave();
       } catch (e) {
-        toast((e as Error).message, "error");
+        toastError(e);
       }
       return;
     }
@@ -795,7 +795,7 @@ export class SqlWorkspace {
       this.saveDraft();
       await this.loadSaved();
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
     }
   }
 
@@ -804,7 +804,7 @@ export class SqlWorkspace {
     try {
       versions = await this.rpc.call("query_versions", { saved: q.id });
     } catch (e) {
-      toast((e as Error).message, "error");
+      toastError(e);
       return;
     }
     if (this.disposed) return;

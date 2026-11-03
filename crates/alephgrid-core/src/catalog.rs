@@ -211,11 +211,6 @@ impl Shared {
         }
     }
 
-    /// Scratch tables waiting to be dropped (for tests).
-    pub fn pending_drops(&self) -> usize {
-        self.graveyard.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
-
     pub(crate) fn register_view(&self, spec: ViewSpec) -> Result<Arc<ViewEntry>> {
         let mut c = self.catalog();
         if c.views.len() >= MAX_VIEWS {
@@ -247,10 +242,6 @@ impl Shared {
         self.catalog().views.values().cloned().collect()
     }
 
-    pub fn open_view_count(&self) -> usize {
-        self.catalog().views.len()
-    }
-
     /// Drop the materializations of views not used for `idle_ms`; they are rebuilt from
     /// their spec on next use. Returns how many were dropped.
     pub fn expire_views(&self, idle_ms: u64) -> usize {
@@ -269,6 +260,7 @@ impl Shared {
     }
 
     /// Rows held by materialized permutations (an estimate of scratch memory / 16 bytes).
+    #[cfg(test)]
     pub fn materialized_rows(&self) -> u64 {
         self.views()
             .iter()
@@ -336,13 +328,6 @@ impl PosIndex {
 
     pub fn is_dense(&self) -> bool {
         matches!(self.kind, IndexKind::Dense)
-    }
-
-    pub fn chunk_count(&self) -> usize {
-        match &self.kind {
-            IndexKind::Dense => 0,
-            IndexKind::Chunks { lo, .. } => lo.len(),
-        }
     }
 
     /// Read the chunk boundaries of `table` with one ordered scan of `_rf_ord`.

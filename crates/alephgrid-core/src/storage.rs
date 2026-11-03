@@ -72,7 +72,7 @@ pub struct OpenReport {
     pub backup: Option<PathBuf>,
 }
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
     let n: i64 = conn.query_row(
         &format!("SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'main' AND database_name = current_database() AND table_name = {}", lit(name)),
         [],
@@ -693,4 +693,9 @@ fn truncate(s: &str, max: usize) -> &str {
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Seconds since the Unix epoch.
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

@@ -2,7 +2,7 @@
 // reopen and delete. Changes by others arrive as sheet events and the pane reloads.
 
 import type { Rpc } from "./api";
-import { el, toast } from "./ui";
+import { el, toastError } from "./ui";
 import { icon } from "./icons";
 import { columnLetter } from "./format";
 import type { CellComment } from "./protocol";
@@ -36,7 +36,7 @@ export class CommentsPane {
     const sheet = this.host.sheet();
     if (sheet === null || this.closed) return;
     let all: CellComment[];
-    try { all = await this.rpc.call("comments", { sheet }); } catch (e) { toast((e as Error).message, "error"); return; }
+    try { all = await this.rpc.call("comments", { sheet }); } catch (e) { toastError(e); return; }
     this.host.changed(all);
     const threads = all.filter((c) => !c.parent);
     if (!threads.length) { this.list.replaceChildren(el("p", { class: "analyze-hint" }, "No comments on this sheet. Right-click a cell and choose Add comment.")); return; }
@@ -61,7 +61,7 @@ export class CommentsPane {
   }
 
   private async act(run: () => Promise<unknown>): Promise<void> {
-    try { await run(); await this.reload(); } catch (e) { toast((e as Error).message, "error"); }
+    try { await run(); await this.reload(); } catch (e) { toastError(e); }
   }
 
   close(): void {

@@ -310,7 +310,5 @@ impl Oidc {
 
 /// `client_secret_basic` encodes id and secret with the form encoding first (RFC 6749 2.3.1).
 fn form_encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
-        .collect()
+    crate::http::percent_encode(s)
 }

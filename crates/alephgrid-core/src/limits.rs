@@ -1,5 +1,6 @@
 //! Size limits applied before work is done or memory is allocated. Every number a client
-//! sends (row counts, column counts, cell lists) is clamped or checked against these.
+//! sends (row counts, column counts, cell lists) is clamped or checked against these, or
+//! against the server's own protocol limits (in `alephgrid-server`'s `ws.rs` and `mcp.rs`).
 
 use serde_json::Value;
 

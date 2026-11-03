@@ -26,8 +26,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::auth::store::{AgentActivity, AgentConnection, AgentProposal};
-use crate::auth::{Cap, Principal, SpaceRole};
+use crate::auth::{bad_request as bad, Cap, Principal, SpaceRole};
 use crate::http::{blocking, ApiResult};
+use crate::runtime::hex;
 use crate::state::Shared;
 
 /// Prefix of agent connection secrets (distinct from service tokens, so an agent
@@ -93,8 +94,7 @@ fn agent_of(state: &Shared, headers: &HeaderMap) -> Result<Agent> {
     let (id, secret) = rest.split_once('_').ok_or(crate::auth::Denied::Unauthenticated)?;
     let Some((conn, stored)) = state.auth.store.agent(id)? else { bail!(crate::auth::Denied::Unauthenticated) };
     let given = crate::auth::hash(secret);
-    let same = given.len() == stored.len() && given.bytes().zip(stored.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
-    if !same || conn.revoked_at.is_some() || conn.expires_at <= crate::auth::now_ms() {
+    if !crate::auth::same(&given, &stored) || conn.revoked_at.is_some() || conn.expires_at <= crate::auth::now_ms() {
         bail!(crate::auth::Denied::Unauthenticated);
     }
     if state.auth.store.space(&conn.space_id)?.is_none() {
@@ -119,14 +119,6 @@ impl Agent {
     fn policy(&self, state: &Shared) -> String {
         hex(&Sha256::digest(json!({ "space": self.conn.space_id, "workbooks": self.conn.workbooks, "sql": state.config.allow_sql, "expires": self.conn.expires_at }).to_string()))
     }
-}
-
-fn bad(message: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::new(crate::auth::Denied::BadRequest(message.into()))
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 // ------------------------------------------------------------ requests

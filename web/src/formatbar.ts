@@ -13,7 +13,7 @@ export interface FormatHost {
   border(kind: string): Promise<void>;
 }
 
-export const NUMBER_FORMATS: { label: string; code: string }[] = [
+const NUMBER_FORMATS: { label: string; code: string }[] = [
   { label: "General", code: "" },
   { label: "Number (1,234.56)", code: "#,##0.00" },
   { label: "Whole number (1,235)", code: "#,##0" },
@@ -27,7 +27,7 @@ export const NUMBER_FORMATS: { label: string; code: string }[] = [
 ];
 
 /** A number format with one more (or fewer) decimal place. */
-export function stepDecimals(code: string, more: boolean): string {
+function stepDecimals(code: string, more: boolean): string {
   const base = code === "" || code.toLowerCase() === "general" ? "0" : code;
   const m = /0(\.0*)?/.exec(base);
   if (!m) return more ? `${base}.0` : base;
@@ -37,7 +37,7 @@ export function stepDecimals(code: string, more: boolean): string {
   return base.slice(0, m.index) + replacement + base.slice(m.index + m[0].length);
 }
 
-export function formatBar(host: FormatHost): HTMLElement {
+export function formatBar(host: FormatHost): HTMLElement & { sync(): void } {
   const toggle = (label: string, key: "b" | "i" | "u" | "s", text: string, keys?: string) => {
     const b = el("button", { class: "fmt-btn", type: "button", "aria-label": label, title: keys ? `${label} (${keys})` : label, "aria-pressed": "false" }, text);
     b.classList.add(`fmt-${key}`);
@@ -92,7 +92,7 @@ export function formatBar(host: FormatHost): HTMLElement {
     el("span", { class: "fmt-sep" }), align("left", "⇤"), align("center", "↔"), align("right", "⇥"), valign, wrap,
     el("span", { class: "fmt-sep" }), borders, el("span", { class: "fmt-sep" }), fmt, dec(false), dec(true), el("span", { class: "fmt-sep" }), clear);
   /** Show the active cell's format on the controls. */
-  (bar as HTMLElement & { sync?: () => void }).sync = () => {
+  const sync = () => {
     const st = host.current();
     for (const k of ["b", "i", "u", "s"] as const) bar.querySelector(`.fmt-${k}`)?.setAttribute("aria-pressed", String(!!st?.[k]));
     wrap.setAttribute("aria-pressed", String(!!st?.wrap));
@@ -101,5 +101,5 @@ export function formatBar(host: FormatHost): HTMLElement {
     const code = st?.num_fmt ?? "";
     fmt.value = NUMBER_FORMATS.some((f) => f.code === code) ? code : "__custom";
   };
-  return bar;
+  return Object.assign(bar, { sync });
 }

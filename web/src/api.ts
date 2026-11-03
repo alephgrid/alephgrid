@@ -35,7 +35,8 @@ export function isRuntimeFailure(e: unknown): e is HttpError {
   return e instanceof HttpError && (e.status === 409 || e.status === 423 || e.status === 503);
 }
 
-async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
+/** A JSON request; a failure throws HttpError with the server's message. */
+export async function http<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
@@ -56,14 +57,14 @@ async function http<T>(method: string, path: string, body?: unknown): Promise<T>
 }
 
 /** Thrown for an id that is not a plain path segment (SEC.06). */
-export class BadId extends Error {}
+class BadId extends Error {}
 
 /**
  * An id from the server, as one URL path segment. Ids are `[A-Za-z0-9_-]{1,64}`; anything
  * else (`..`, a slash) is refused so it cannot retarget a request (SEC.06).
  */
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-export const isId = (id: string): boolean => ID.test(id);
+const isId = (id: string): boolean => ID.test(id);
 export function seg(id: string | number): string {
   const s = String(id);
   if (!ID.test(s)) throw new BadId(`invalid id ${JSON.stringify(s).slice(0, 80)}`);
@@ -172,9 +173,9 @@ export function stageUpload(
     xhr.open("POST", `/api/workbooks/${seg(workbookId)}/uploads?filename=${encodeURIComponent(file.name)}`);
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
-      let body: any = null;
+      let body: (UploadCreated & { error?: string; problem?: ImportProblem }) | null = null;
       try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as UploadCreated);
       else reject(new HttpError(xhr.status, body?.error ?? `upload failed (${xhr.status})`, body?.problem));
     };
     xhr.onerror = () => reject(new Error("upload failed: network error"));
@@ -184,10 +185,14 @@ export function stageUpload(
   return { done, abort: () => xhr.abort() };
 }
 
-/** Operations that change nothing: never given a mutation id, retried when the server is busy. */
+/** Operations that change nothing: never given a mutation id, retried when the server is busy.
+ *  Keep in step with the reads (`(false, _)`) of classify() in crates/alephgrid-server/src/ws.rs. */
 const READS = new Set<OpName>([
   "tables", "open_view", "update_view", "view_info", "close_view", "fetch", "stats", "query", "sheets", "sheet_fetch",
   "analyze", "analyses", "replace_preview", "presentation", "functions", "test_function", "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
+  "sheet_names", "comments", "sheet_layout", "sheet_charts", "sheet_rules", "hidden_sheets", "column_values", "find_in_view", "sheet_find", "sheet_find_all",
+  "sheet_cell_detail", "sheet_region", "sheet_check_formula", "dashboards", "dashboard", "validations", "preview_transform", "inspect_formula",
+  "xlsx_compatibility", "drill", "sheet_column_texts", "sheet_range_values",
   // Writes a file to download but changes no data: never kept and resent after a reconnect.
   "export_query",
 ]);
@@ -240,7 +245,7 @@ type Pending = {
  * "unsaved" while some wait for the connection, "failed" when one was dropped unsaved (until
  * the next change is acknowledged).
  */
-export type SaveState = "saved" | "saving" | "unsaved" | "failed";
+type SaveState = "saved" | "saving" | "unsaved" | "failed";
 
 /** JSON-RPC-ish client over one WebSocket per workbook, with automatic reconnect. */
 export class Rpc {
@@ -381,11 +386,6 @@ export class Rpc {
 
   get isClosed(): boolean {
     return this.closed;
-  }
-
-  /** Changes waiting to be resent after a reconnect (for tests and status). */
-  get keptCount(): number {
-    return this.kept.length;
   }
 
   /** After a reconnect: a change sent for view `from` goes to the reopened view `to`. */

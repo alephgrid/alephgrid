@@ -3,6 +3,7 @@
 
 import { formatValue, isNumericKind, rawText } from "./format";
 import { applyReferenceLock } from "./references";
+import { THEME_EVENT } from "./theme";
 import type { Align, CellValue, Column, Filter, SortKey } from "./types";
 import type { CellStyle } from "./protocol";
 
@@ -195,7 +196,7 @@ export class Grid {
     // The theme can change by the system or by the user's choice (theme.ts).
     const repaint = () => { this.colors = palette(); this.invalidate(); };
     matchMedia("(prefers-color-scheme: dark)").addEventListener("change", repaint, { signal });
-    window.addEventListener("alephgrid-theme", repaint, { signal });
+    window.addEventListener(THEME_EVENT, repaint, { signal });
     this.scroller.addEventListener("scroll", () => this.onScroll(), { signal });
     this.scroller.addEventListener("wheel", (e) => this.onWheel(e), { passive: false, signal });
     this.scroller.addEventListener("mousedown", (e) => this.onMouseDown(e), { signal });
@@ -247,11 +248,6 @@ export class Grid {
   setReferences(ranges: Range[]): void {
     this.references = ranges.slice(0, 128);
     this.invalidate();
-  }
-
-  /** The polite live region that announces the active cell. */
-  get liveRegion(): HTMLElement {
-    return this.announcer;
   }
 
   /** Accessible name of the grid, e.g. the table or sheet name. */
@@ -1356,15 +1352,13 @@ export class Grid {
   }
 }
 
-export const DEFAULT_ROW_HEIGHT = ROW_H;
-
 function sameRange(a: Range, b: Range): boolean {
   return a.r0 === b.r0 && a.r1 === b.r1 && a.c0 === b.c0 && a.c1 === b.c1;
 }
 
 /** Where dragging the fill handle of `s` to cell (r, c) fills: the selection grown along the
  *  axis the pointer left it furthest on (down/up or right/left), else the selection itself. */
-export function fillTarget(s: Range, r: number, c: number): Range {
+function fillTarget(s: Range, r: number, c: number): Range {
   const rows = r > s.r1 ? r - s.r1 : r < s.r0 ? s.r0 - r : 0;
   const cols = c > s.c1 ? c - s.c1 : c < s.c0 ? s.c0 - c : 0;
   if (rows === 0 && cols === 0) return s;

@@ -1,11 +1,11 @@
 import "./styles.css";
 import "./theme";
-import { accountButton, invitePage, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog, usageDialog } from "./account";
+import { accountButton, invitePage, isOrgAdmin, isUnauthenticated, libraryDialog, loginPage, loginUrl, membersDialog, setupPage, tokensDialog, usageDialog } from "./account";
 import { api, isRuntimeFailure, seg, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
-import { formatCount } from "./format";
+import { bytes, formatCompact, formatCount } from "./format";
 import type { WorkbookListing } from "./types";
-import { confirmDialog, el, formDialog, showMenu, toast, type MenuItem } from "./ui";
+import { confirmDialog, el, formDialog, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
 import { waitForCompute } from "./compute";
 import { brandMark, icon, type IconName } from "./icons";
@@ -133,19 +133,6 @@ function relativeTime(secs?: number): string {
   return new Date(secs * 1000).toLocaleDateString();
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
-}
-
-function compactCount(n: number): string {
-  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
-}
-
 const COMPUTE_LABEL: Record<string, string> = {
   sleeping: "Sleeping", queued: "Waiting for capacity", starting: "Starting", ready: "Ready", stopping: "Stopping",
 };
@@ -187,7 +174,7 @@ function describeContents(w: WorkbookListing): string {
   const parts: string[] = [];
   if (s.tables) parts.push(`${s.tables} table${s.tables === 1 ? "" : "s"}`);
   if (s.sheets) parts.push(`${s.sheets} sheet${s.sheets === 1 ? "" : "s"}`);
-  if (s.rows) parts.push(`${compactCount(s.rows)} rows`);
+  if (s.rows) parts.push(`${formatCompact(s.rows)} rows`);
   return parts.join(" · ");
 }
 
@@ -322,7 +309,7 @@ function renderHome(): void {
         el("span", { role: "cell" }),
         el("span", { role: "cell", class: "wb-name" }, el("strong", {}, w.name)),
         el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
-        el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
+        el("span", { role: "cell", class: "muted hide-sm num" }, bytes(w.size_bytes)),
         el("span", { role: "cell", class: "muted hide-xs" }, relativeTime(w.deleted_at)),
         el("span", { role: "cell", class: "row-actions" },
           el("button", { class: "btn small", onclick: () => restoreWorkbook(w) }, "Restore"),
@@ -361,7 +348,7 @@ function renderHome(): void {
             space ? el("span", { class: "badge" }, space) : null,
             w.role === "viewer" ? el("span", { class: "badge" }, "view only") : null),
           el("span", { role: "cell", class: "muted hide-sm" }, describeContents(w)),
-          el("span", { role: "cell", class: "muted hide-sm num" }, formatBytes(w.size_bytes)),
+          el("span", { role: "cell", class: "muted hide-sm num" }, bytes(w.size_bytes)),
           el("span", { role: "cell", class: "muted hide-xs", title: w.opened_at ? new Date(w.opened_at * 1000).toLocaleString() : "" }, relativeTime(w.opened_at)),
           computeCell(w),
           el("span", { role: "cell", class: "cell-center" },
@@ -471,7 +458,7 @@ async function newWorkbook(): Promise<void> {
     navigate(`/w/${seg((await api.create(v.name, v.space ?? targetSpace())).id)}?start=sheet`);
   } catch (e) {
     // Refused (a quota, a role): say why.
-    toast((e as Error).message, "error");
+    toastError(e);
   }
 }
 
@@ -499,7 +486,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
     { label: "Rename…", disabled: !owner, action: async () => {
       const v = await formDialog("Rename space", [{ name: "name", label: "Name", value: sp.name }], "Rename");
       if (!v) return;
-      try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
+      try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toastError(e); }
     } },
     { label: "New workbook here", disabled: sp.role === "viewer" && "Viewers cannot add workbooks", action: async () => navigate(`/w/${seg((await api.create("Untitled workbook", sp.id)).id)}?start=sheet`) },
     { label: "Library…", action: () => libraryDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, role: w.role ?? undefined })),
@@ -512,10 +499,10 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
   }
   if (owner) items.push("sep", { label: "Agent connections…", hint: "MCP, read-only", action: () => agentsDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name }))) });
   {
-    const admin = home.me?.kind === "local" || home.me?.instance_admin || (home.me?.orgs ?? []).some((o) => o.org.id === sp.org_id && o.role === "admin");
+    const admin = !!home.me && home.me.kind !== "local" && isOrgAdmin(home.me, sp.org_id);
     items.push({ label: "Settings…", action: () => spaceSettingsDialog(sp, home.me ?? null,
       home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, size_bytes: w.size_bytes })),
-      { members: () => membersDialog(sp, () => {}), usage: admin && home.me?.kind !== "local" ? () => usageDialog(sp.org_id) : null }) });
+      { members: () => membersDialog(sp, () => {}), usage: admin ? () => usageDialog(sp.org_id) : null }) });
   }
   items.push("sep", { label: "Delete space", danger: true, disabled: !owner, action: async () => {
     const n = home.workbooks.filter((w) => w.space === sp.id).length;
@@ -528,7 +515,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       await api.removeSpace(sp.id);
       if (home.scope === sp.id) home.scope = "all";
       history.replaceState(null, "", homeUrl());
-    } catch (e) { toast((e as Error).message, "error"); }
+    } catch (e) { toastError(e); }
     await reloadHome();
   } });
   showMenu(items, x, y);
@@ -539,7 +526,7 @@ async function toggleStar(w: WorkbookListing): Promise<void> {
     await api.update(w.id, { starred: !w.starred });
     await reloadHome();
   } catch (e) {
-    toast((e as Error).message, "error");
+    toastError(e);
   }
 }
 
@@ -552,14 +539,14 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
     { label: "Rename…", disabled: viewer, action: async () => {
       const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename");
       if (!v) return;
-      try { await api.update(w.id, { name: v.name }); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
+      try { await api.update(w.id, { name: v.name }); await reloadHome(); } catch (e) { toastError(e); }
     } },
     { label: "Duplicate", disabled: viewer, action: async () => {
       try {
         const copy = await api.duplicate(w.id);
         toast(`Created “${copy.name}”`, "success");
         await reloadHome();
-      } catch (e) { toast((e as Error).message, "error"); }
+      } catch (e) { toastError(e); }
     } },
     { label: "Move to space…", disabled: viewer || writableSpaces().filter((s) => s.id !== w.space).length === 0, action: async () => {
       const v = await formDialog(`Move “${w.name}”`, [{
@@ -567,13 +554,13 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
         options: writableSpaces().map((s) => ({ value: s.id, label: s.name })),
       }], "Move");
       if (!v || v.space === w.space) return;
-      try { await api.update(w.id, { space: v.space }); await reloadHome(); } catch (e) { toast((e as Error).message, "error"); }
+      try { await api.update(w.id, { space: v.space }); await reloadHome(); } catch (e) { toastError(e); }
     } },
     { label: w.starred ? "Unstar" : "Star", disabled: viewer, action: () => toggleStar(w) },
     "sep",
     { label: "Delete", danger: true, disabled: viewer, action: async () => {
       if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash."))) return;
-      try { await api.remove(w.id); } catch (e) { toast((e as Error).message, "error"); }
+      try { await api.remove(w.id); } catch (e) { toastError(e); }
       await reloadHome();
     } },
   ];
@@ -584,20 +571,20 @@ async function restoreWorkbook(w: WorkbookListing): Promise<void> {
   try {
     await api.restore(w.id);
     toast(`Restored “${w.name}”`, "success");
-  } catch (e) { toast((e as Error).message, "error"); }
+  } catch (e) { toastError(e); }
   await reloadHome();
 }
 
 async function purgeWorkbook(w: WorkbookListing): Promise<void> {
-  if (!(await confirmDialog(`Delete “${w.name}” forever?`, `Its tables and sheets (${formatBytes(w.size_bytes)}) are permanently removed from disk. This cannot be undone.`))) return;
-  try { await api.purge(w.id); } catch (e) { toast((e as Error).message, "error"); }
+  if (!(await confirmDialog(`Delete “${w.name}” forever?`, `Its tables and sheets (${bytes(w.size_bytes)}) are permanently removed from disk. This cannot be undone.`))) return;
+  try { await api.purge(w.id); } catch (e) { toastError(e); }
   await reloadHome();
 }
 
 async function emptyTrash(): Promise<void> {
   const n = home.trash.length;
   if (!(await confirmDialog("Empty the trash?", `${n} workbook${n === 1 ? " is" : "s are"} permanently removed from disk. This cannot be undone.`))) return;
-  try { await api.emptyTrash(); } catch (e) { toast((e as Error).message, "error"); }
+  try { await api.emptyTrash(); } catch (e) { toastError(e); }
   await reloadHome();
 }
 
@@ -607,7 +594,7 @@ async function openFile(file: File): Promise<void> {
   try {
     result = await importFile(wb.id, file);
   } catch (e) {
-    toast((e as Error).message, "error");
+    toastError(e);
   }
   if (!result) {
     // The workbook was created only for this file: remove it without a trash entry.

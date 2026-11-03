@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::Conflict;
-use crate::sql::{ident, lit};
+use crate::sql::{id_list, ident, lit};
 use crate::storage::{self, ID, ORD};
 use crate::workbook::Workbook;
 
@@ -328,7 +328,7 @@ impl Workbook {
             }
             let only = match ids {
                 Some(ids) if ids.is_empty() => continue,
-                Some(ids) => format!(" AND a.{ID} IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
+                Some(ids) => format!(" AND a.{ID} IN ({})", id_list(ids)),
                 None => String::new(),
             };
             let n = count(
@@ -364,7 +364,7 @@ impl Workbook {
         for (column, ids) in &e.cells {
             let only = match ids {
                 Some(ids) if ids.is_empty() => continue,
-                Some(ids) => format!(" AND b.{ID} IN ({})", ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
+                Some(ids) => format!(" AND b.{ID} IN ({})", id_list(ids)),
                 None => String::new(),
             };
             changed = changed.max(conn.execute(

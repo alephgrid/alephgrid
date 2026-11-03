@@ -257,10 +257,6 @@ impl ResultCache {
         std::mem::take(&mut *p).into_iter().map(|((function, version, key), args)| PendingCall { function, version, key, args }).collect()
     }
 
-    pub fn has_pending(&self) -> bool {
-        !self.pending.lock().unwrap().is_empty()
-    }
-
     /// Names of the worker functions pinned now.
     pub fn worker_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.active.read().unwrap().keys().cloned().collect();
