@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // Runs the Alephgrid binary for this platform, installed by npm as an optional dependency
-// (@alephgrid/cli-<platform>-<arch>). Arguments, input/output and the exit code pass through.
+// (alephgrid-<platform>-<arch>). Arguments, input/output and the exit code pass through.
 "use strict";
 const { spawn } = require("node:child_process");
 
-const pkg = `@alephgrid/cli-${process.platform}-${process.arch}`;
+const pkg = `alephgrid-${process.platform}-${process.arch}`;
 let bin;
 try {
   bin = require.resolve(`${pkg}/bin/alephgrid`);

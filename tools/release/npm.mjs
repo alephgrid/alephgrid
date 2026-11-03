@@ -3,7 +3,8 @@
 //   node tools/release/npm.mjs VERSION DIST OUT
 //
 // DIST holds alephgrid-VERSION-<target>.tar.gz; OUT receives one folder per package:
-//   cli-<platform>-<arch>/  @alephgrid/cli-<platform>-<arch>: the binary, for that os/cpu only
+//   cli-<platform>-<arch>/  alephgrid-<platform>-<arch>: the binary, for that os/cpu only
+//                           (unscoped: no npm organization is needed)
 //   alephgrid/              alephgrid: the `alephgrid` command, depending on all of them as
 //                           optional dependencies, so npm installs only the matching one.
 // One package serves npm, pnpm, yarn and bun. Publish the platform packages first.
@@ -40,7 +41,7 @@ const optional = {};
 for (const p of PLATFORMS) {
   const tarball = join(dist, `alephgrid-${version}-${p.target}.tar.gz`);
   if (!existsSync(tarball)) throw new Error(`missing ${tarball}`);
-  const name = `@alephgrid/cli-${p.os}-${p.cpu}`;
+  const name = `alephgrid-${p.os}-${p.cpu}`;
   const dir = join(out, `cli-${p.os}-${p.cpu}`);
   mkdirSync(join(dir, "bin"), { recursive: true });
   const tmp = mkdtempSync(join(tmpdir(), "alephgrid-npm-"));
