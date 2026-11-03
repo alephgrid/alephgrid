@@ -4,7 +4,7 @@
 //! moves the anchors with the cells (comments on deleted cells are removed with them).
 
 use anyhow::{anyhow, bail, Result};
-use duckdb::Connection;
+use duckdb::{Connection, OptionalExt};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -141,7 +141,8 @@ impl Workbook {
         })
     }
 
-    /// Change a comment's text.
+    /// Change a comment's text. Only its author may: the text is shown under their name.
+    /// (Any editor may resolve or delete a thread.)
     pub fn edit_comment(&mut self, id: &str, text: &str) -> Result<()> {
         let text = text.trim();
         if text.is_empty() || text.len() > MAX_COMMENT_BYTES {
@@ -149,8 +150,12 @@ impl Workbook {
         }
         self.mutating("edit_comment", None, |wb| {
             ensure(&wb.conn)?;
-            let n = wb.conn.execute("UPDATE _rf_comments SET body = ?, edited_ms = ? WHERE id = ?", duckdb::params![text, crate::storage::now_ms() as i64, id])?;
-            if n == 0 { bail!("no such comment"); }
+            let author: Option<String> = wb.conn.query_row("SELECT author FROM _rf_comments WHERE id = ?", [id], |r| r.get(0)).optional()?;
+            let Some(author) = author else { bail!("no such comment") };
+            if wb.txn_actor.as_ref().or(wb.actor.as_ref()).is_some_and(|me| *me != author) {
+                bail!("only the comment's author can change its text");
+            }
+            wb.conn.execute("UPDATE _rf_comments SET body = ?, edited_ms = ? WHERE id = ?", duckdb::params![text, crate::storage::now_ms() as i64, id])?;
             Ok(())
         })
     }

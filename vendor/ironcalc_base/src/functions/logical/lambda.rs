@@ -11,6 +11,33 @@ use crate::{
 use super::r#let::assign_variable_ids;
 
 impl<'a> Model<'a> {
+    /// Start one LAMBDA call (Alephgrid patch). Calls inside calls, a lambda that calls
+    /// itself say, are limited in number and in stack like nested formulas are, and each
+    /// counts against the evaluation's budget so a deadline or cancel stops a long chain.
+    /// `Err` is the error the call returns instead of running; on `Ok`, pair with
+    /// `leave_lambda`.
+    fn enter_lambda(&mut self, cell: CellReferenceIndex) -> Result<(), CalcResult> {
+        let here = crate::evaluation::stack_address();
+        if self.evaluation.lambda_depth == 0 {
+            self.evaluation.lambda_stack_base = here;
+        }
+        if self.evaluation.lambda_depth >= crate::evaluation::MAX_LAMBDA_DEPTH
+            || self.evaluation.lambda_stack_base.abs_diff(here) >= self.evaluation.max_stack
+        {
+            return Err(CalcResult::new_error(Error::CALC, cell, "LAMBDA calls go too deep (does a lambda call itself?)".to_string()));
+        }
+        if !self.evaluation.spend(1) {
+            let why = self.evaluation.stopped.clone().unwrap_or_default();
+            return Err(CalcResult::new_error(Error::CALC, cell, why));
+        }
+        self.evaluation.lambda_depth += 1;
+        Ok(())
+    }
+
+    fn leave_lambda(&mut self) {
+        self.evaluation.lambda_depth -= 1;
+    }
+
     /// Evaluates the body of a named lambda with the given call-site argument nodes.
     /// Optional parameters not covered by call_args receive EmptyArg.
     pub(crate) fn call_lambda(
@@ -37,6 +64,9 @@ impl<'a> Model<'a> {
         if let Err(e) = check_arg_count(&parameters, call_args.len(), cell) {
             return e;
         }
+        if let Err(e) = self.enter_lambda(cell) {
+            return e;
+        }
 
         let mut patched_body = body;
         let mut bound_ids: Vec<usize> = Vec::with_capacity(parameters.len());
@@ -60,6 +90,7 @@ impl<'a> Model<'a> {
         }
 
         let result = self.evaluate_node_in_context(&patched_body, cell);
+        self.leave_lambda();
 
         for raw_id in bound_ids {
             self.variable_stack.remove(&raw_id);
@@ -94,6 +125,9 @@ impl<'a> Model<'a> {
         if let Err(e) = check_arg_count(&parameters, values.len(), cell) {
             return e;
         }
+        if let Err(e) = self.enter_lambda(cell) {
+            return e;
+        }
 
         let mut patched_body = body;
         let mut bound_ids: Vec<usize> = Vec::with_capacity(parameters.len());
@@ -114,6 +148,7 @@ impl<'a> Model<'a> {
         }
 
         let result = self.evaluate_node_in_context(&patched_body, cell);
+        self.leave_lambda();
 
         for raw_id in bound_ids {
             self.variable_stack.remove(&raw_id);

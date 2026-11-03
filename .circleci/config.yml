@@ -347,9 +347,12 @@ jobs:
           name: Multi-architecture image from the tested binaries, to ghcr.io
           command: |
             v="<< pipeline.parameters.release_version >>"
+            # Third-party images run here by digest, never by a tag someone can move, and
+            # before the registry token is handed to docker. Update the digests deliberately
+            # (docs/CI.md, "Release safety").
+            docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
+            docker buildx create --use --name release --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_USER:?set GITHUB_USER in the release context}" --password-stdin
-            docker run --privileged --rm tonistiigi/binfmt --install arm64
-            docker buildx create --use --name release
             docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 \
               --label org.opencontainers.image.source=https://github.com/alephgrid/alephgrid \
               --label org.opencontainers.image.version="$v" --label org.opencontainers.image.licenses=Apache-2.0 \
@@ -362,14 +365,23 @@ jobs:
       - attach_workspace:
           at: .
       - run:
-          name: npm packages (platform packages first), skipping any already published
+          name: npm packages (platform packages first), skipping only our own earlier publish
           command: |
             v="<< pipeline.parameters.release_version >>"
             node tools/release/npm.mjs "$v" dist npm-out
             echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN:?set NPM_TOKEN in the release context}" > ~/.npmrc
             for d in npm-out/cli-* npm-out/alephgrid; do
               name=$(node -p "require('./$d/package.json').name")
-              if npm view "$name@$v" version >/dev/null 2>&1; then echo "$name@$v is already published"; continue; fi
+              # A version already on npm is skipped only if it is exactly this package (a
+              # re-run). Anything else under that name and version (someone else's upload)
+              # stops the release before the main package can depend on it.
+              published=$(npm view "$name@$v" dist.integrity 2>/dev/null || true)
+              if [ -n "$published" ]; then
+                local=$(cd "$d" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[0].integrity))')
+                if [ "$published" = "$local" ]; then echo "$name@$v is already published (same contents)"; continue; fi
+                echo "$name@$v is on npm with other contents ($published, this build is $local): not publishing on top of it" >&2
+                exit 1
+              fi
               (cd "$d" && npm publish --access public)
             done
 

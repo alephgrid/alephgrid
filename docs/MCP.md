@@ -89,10 +89,13 @@ the result was issued.
   from other sites cannot post to it.
 - Cell contents and query results are data. The server's instructions tell agents so, and
   nothing in a cell can change what a connection may do.
-- At most 4 requests run at once per connection. Jobs live in the server process: they are
-  forgotten after an hour or when the server restarts (stored results and their handles survive).
-  Cancelling a job discards its result; a query that is already running finishes within the
-  server's time limit.
+- At most 4 requests compute at once per connection, counted until they really finish
+  (cancelling or forgetting a job does not free its place early). Agent reads run like the
+  app's bulk reads: through the workbook's queue, under the server's job time limit
+  (`--job-timeout`), in one of the space's job slots (`--space-jobs`), and always leaving a
+  reader for people's interactive work. Jobs live in the server process: they are forgotten
+  after an hour or when the server restarts (stored results and their handles survive).
+  Cancelling a job stops it and discards its result.
 - Time-zone functions (`AT TIME ZONE` and other ICU functions) are not available: DuckDB's ICU
   extension is not in this build, and extensions cannot be loaded. Work in UTC with `epoch_us`.
 - Catalog search matches words in names and SQL. It does not use DuckDB's full-text search

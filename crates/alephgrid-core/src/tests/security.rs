@@ -212,6 +212,32 @@ fn an_xlsx_that_expands_too_far_is_refused_before_parsing() {
     assert!(err.downcast_ref::<crate::limits::TooLarge>().is_some(), "{err:#}");
 }
 
+/// A LAMBDA that calls itself is an error in its cell, not a stack overflow that would end
+/// the server: lambda calls are limited in depth and stack like nested formulas, and count
+/// against the evaluation's budget. Run on a 2 MiB stack, as server threads have.
+#[test]
+fn lambda_recursion_is_an_error_not_a_stack_overflow() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            let mut s = crate::sheets::Sheets::from_bytes(None).unwrap();
+            s.create("S").unwrap();
+            // Lambdas still work, nested a little and called many times.
+            s.set(0, &[sheet_input(0, 0, "=LAMBDA(x,x*2)(LAMBDA(y,y+1)(3))"), sheet_input(0, 1, "=SUM(MAP(SEQUENCE(1000),LAMBDA(v,v)))")]).unwrap();
+            let v = |s: &crate::sheets::Sheets, r: u32, c: usize| s.fetch(0, r, 1, c as u32 + 1).unwrap().rows[0].get(c).cloned().flatten().map(|x| x.0);
+            assert_eq!(v(&s, 0, 0).as_deref(), Some("8"));
+            assert_eq!(v(&s, 0, 1).as_deref(), Some("500500"));
+            for (row, f) in [(1, "=LAMBDA(g,g(g))(LAMBDA(g,g(g)))"), (2, "=LET(f,LAMBDA(g,g(g)),f(f))")] {
+                let _ = s.set(0, &[sheet_input(row, 0, f)]);
+                let got = v(&s, row, 0);
+                assert!(got.as_deref().is_none_or(|x| x.starts_with('#')), "{f}: {got:?}");
+            }
+        })
+        .unwrap()
+        .join()
+        .expect("no stack overflow");
+}
+
 /// SEC.09: both formula parsers bound nesting, operator count and length, so a hostile
 /// formula is an error, not a stack overflow. Run on a 2 MiB stack, as server threads have.
 #[test]
@@ -298,6 +324,18 @@ fn csv_for_spreadsheets_neutralizes_formula_text_and_sheets_keep_it_text() {
     let q = t.dir.path().join("q.csv");
     t.wb.export_query("SELECT s, n FROM t ORDER BY n", &[], &q, ExportFormat::CsvExcel).unwrap();
     assert_eq!(read(&q)[1], vec!["'=1+1", "-5"]);
+    // Column names are in the file too: a name that looks like a formula is neutralized in
+    // the header row, and kept as it is in the faithful CSV.
+    t.wb.rename_column("t", "n", "=HYPERLINK(\"x\")").unwrap();
+    let v = t.wb.open_view(spec("t")).unwrap().view_id;
+    t.wb.export_view(v, &safe, ExportFormat::CsvExcel).unwrap();
+    assert_eq!(read(&safe)[0], vec!["s", "'=HYPERLINK(\"x\")"]);
+    t.wb.export_query("SELECT * FROM t", &[], &q, ExportFormat::CsvExcel).unwrap();
+    assert_eq!(read(&q)[0][1], "'=HYPERLINK(\"x\")", "{}", std::fs::read_to_string(&q).unwrap());
+    t.wb.export_view(v, &faithful, ExportFormat::Csv).unwrap();
+    assert_eq!(read(&faithful)[0][1], "=HYPERLINK(\"x\")");
+    t.wb.rename_column("t", "=HYPERLINK(\"x\")", "n").unwrap();
+    let v = t.wb.open_view(spec("t")).unwrap().view_id;
 
     // Into a sheet: formula-looking text, including a text-valued formula, stays text.
     t.wb.sheet_from_view(v, "S", 100).unwrap();

@@ -4,15 +4,19 @@
 //!
 //! Identity is the pair (issuer, `sub`); an email is never enough to sign in as an existing
 //! user. How claims become users and roles is described in docs/TEAMS.md.
+//!
+//! A sign-in in progress lives in the browser that started it, not on the server: a short-lived
+//! cookie signed with a key of this process holds the state, nonce, PKCE verifier and where to
+//! go next. The callback is accepted only from a browser presenting that cookie, so a callback
+//! link cannot sign someone else's browser in, and anonymous starts fill no table.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use jsonwebtoken::{jwk::JwkSet, Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
+use jsonwebtoken::{jwk::JwkSet, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -20,7 +24,8 @@ use super::Denied;
 
 /// Longest a sign-in may take between leaving for the identity provider and coming back.
 pub const PENDING_TTL: Duration = Duration::from_secs(600);
-const MAX_PENDING: usize = 10_000;
+/// The cookie holding a sign-in in progress (see the module comment).
+pub const FLOW_COOKIE: &str = "alephgrid_sso";
 const MAX_GROUPS: usize = 1000;
 /// Discovery documents and keys are fetched again after this long (and on an unknown key).
 const CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -71,18 +76,23 @@ struct Discovery {
     token_endpoint_auth_methods_supported: Vec<String>,
 }
 
-struct Pending {
+/// A sign-in in progress, as signed into [`FLOW_COOKIE`].
+#[derive(Serialize, Deserialize)]
+struct Flow {
+    state: String,
     nonce: String,
     verifier: String,
     next: String,
-    created: Instant,
+    /// Expiry, seconds since the epoch.
+    exp: u64,
 }
 
 pub struct Oidc {
     pub config: OidcConfig,
     http: reqwest::Client,
     cache: Mutex<Option<(Instant, Discovery, JwkSet)>>,
-    pending: Mutex<HashMap<String, Pending>>,
+    /// Signs [`Flow`] cookies; new on every start, so a restart ends sign-ins in progress.
+    flow_key: [u8; 32],
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -119,7 +129,9 @@ impl Oidc {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("creating the HTTP client for OIDC")?;
-        Ok(Oidc { config, http, cache: Mutex::new(None), pending: Mutex::new(HashMap::new()) })
+        let mut flow_key = [0u8; 32];
+        getrandom::fill(&mut flow_key).map_err(|e| anyhow!("random source: {e}"))?;
+        Ok(Oidc { config, http, cache: Mutex::new(None), flow_key })
     }
 
     async fn fetch_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
@@ -157,41 +169,55 @@ impl Oidc {
         Ok((d, keys))
     }
 
-    /// Start a sign-in: the identity provider's URL to send the browser to.
-    pub async fn begin(&self, next: &str) -> Result<String> {
+    /// Start a sign-in: the identity provider's URL to send the browser to, and the value of
+    /// the [`FLOW_COOKIE`] to give that browser (see [`Oidc::flow_cookie`]).
+    pub async fn begin(&self, next: &str) -> Result<(String, String)> {
         let (d, _) = self.provider(false).await?;
-        let state = super::secret();
-        let nonce = super::secret();
-        let verifier = super::secret();
-        let challenge = b64(&Sha256::digest(verifier.as_bytes()));
-        {
-            let mut p = self.pending.lock().unwrap();
-            p.retain(|_, v| v.created.elapsed() < PENDING_TTL);
-            if p.len() >= MAX_PENDING {
-                bail!("too many sign-ins in progress; try again in a few minutes");
-            }
-            p.insert(state.clone(), Pending { nonce: nonce.clone(), verifier, next: safe_next(next), created: Instant::now() });
-        }
+        let flow = Flow {
+            state: super::secret(),
+            nonce: super::secret(),
+            verifier: super::secret(),
+            next: safe_next(next),
+            exp: super::now_ms() / 1000 + PENDING_TTL.as_secs(),
+        };
+        let challenge = b64(&Sha256::digest(flow.verifier.as_bytes()));
+        let cookie = jsonwebtoken::encode(&Header::new(Algorithm::HS256), &flow, &EncodingKey::from_secret(&self.flow_key)).context("signing the sign-in")?;
         let mut url = reqwest::Url::parse(&d.authorization_endpoint).context("the identity provider's authorization endpoint")?;
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &self.config.client_id)
             .append_pair("redirect_uri", &self.config.redirect_uri)
             .append_pair("scope", &self.config.scopes)
-            .append_pair("state", &state)
-            .append_pair("nonce", &nonce)
+            .append_pair("state", &flow.state)
+            .append_pair("nonce", &flow.nonce)
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
-        Ok(url.to_string())
+        Ok((url.to_string(), cookie))
     }
 
-    /// Finish a sign-in: exchange the code and verify the ID token. Returns the claims and
-    /// where to go next. A `state` is good for one attempt.
-    pub async fn finish(&self, code: &str, state: &str) -> Result<(Claims, String)> {
-        let pending = self.pending.lock().unwrap().remove(state);
-        let Some(p) = pending.filter(|p| p.created.elapsed() < PENDING_TTL) else {
-            bail!(Denied::BadRequest("this sign-in expired or was already used; start again".into()));
-        };
+    /// The `Set-Cookie` value for a sign-in in progress (`None` clears it). Scoped to the
+    /// sign-in routes; `SameSite=Lax` is sent on the identity provider's redirect back.
+    pub fn flow_cookie(&self, value: Option<&str>) -> String {
+        let secure = if self.config.redirect_uri.starts_with("https://") { "; Secure" } else { "" };
+        match value {
+            Some(v) => format!("{FLOW_COOKIE}={v}; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age={}{secure}", PENDING_TTL.as_secs()),
+            None => format!("{FLOW_COOKIE}=; Path=/api/auth/oidc; HttpOnly; SameSite=Lax; Max-Age=0{secure}"),
+        }
+    }
+
+    /// Finish a sign-in: check that this browser started it (`flow` is its [`FLOW_COOKIE`]),
+    /// exchange the code and verify the ID token. Returns the claims and where to go next.
+    pub async fn finish(&self, code: &str, state: &str, flow: Option<&str>) -> Result<(Claims, String)> {
+        let again = || anyhow::Error::new(Denied::BadRequest("this sign-in expired, was already used or was started in another browser; start again".into()));
+        let mut v = Validation::new(Algorithm::HS256);
+        v.leeway = 0;
+        v.validate_aud = false;
+        v.set_required_spec_claims(&["exp"]);
+        let p = flow
+            .and_then(|f| jsonwebtoken::decode::<Flow>(f, &DecodingKey::from_secret(&self.flow_key), &v).ok())
+            .map(|d| d.claims)
+            .filter(|p| super::same(&p.state, state))
+            .ok_or_else(again)?;
         let (d, _) = self.provider(false).await?;
         let mut form = vec![
             ("grant_type", "authorization_code".to_string()),

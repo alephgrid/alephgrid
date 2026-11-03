@@ -225,6 +225,12 @@ fn connect(path: &Path, lock: Option<&Lockdown>) -> Result<Connection> {
     Ok(conn)
 }
 
+/// A connection to any database file (not only a workbook) with the engine locked down
+/// before the file is read: see [`Lockdown`].
+pub fn connect_locked(path: &Path, lock: &Lockdown) -> Result<Connection> {
+    connect(path, Some(lock))
+}
+
 /// Bring a database at `path` to [`FORMAT`], copying it first when it is migrated.
 /// Returns the open connection.
 pub fn open(path: &Path) -> Result<(Connection, OpenReport)> {

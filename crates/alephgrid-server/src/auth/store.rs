@@ -6,7 +6,7 @@
 //! as SHA-256 hashes, passwords only as Argon2id hashes. Workbook data never lives here: a
 //! workbook names its space in its own `workbook.json`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
@@ -356,8 +356,24 @@ fn invite_row(r: &duckdb::Row) -> duckdb::Result<Invite> {
 const INVITE_COLS: &str = "id, org_id, email, org_role, space_id, space_role, created_by, created_at, expires_at, accepted_at, revoked_at";
 
 impl Store {
+    /// Open the control database at `<data dir>/.control/control.duckdb`.
     pub fn open(path: &Path) -> Result<Store> {
-        let conn = Connection::open(path).with_context(|| format!("opening the control database {}", path.display()))?;
+        Store::open_allowing(path, &[])
+    }
+
+    /// [`Store::open`], also allowing backups into `extra` directories. A control database
+    /// may come from a backup archive someone else made, so, like a workbook, it is opened
+    /// with the engine locked down before anything in it is read: no extensions, and files
+    /// only in its own directory and the data directory's `.backups`.
+    pub fn open_allowing(path: &Path, extra: &[PathBuf]) -> Result<Store> {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let mut allowed = vec![dir.to_path_buf()];
+        if let Some(data_dir) = dir.parent() {
+            allowed.push(data_dir.join(".backups"));
+        }
+        allowed.extend(extra.iter().cloned());
+        let lock = alephgrid_core::storage::Lockdown { allowed, settings: Vec::new() };
+        let conn = alephgrid_core::storage::connect_locked(path, &lock).with_context(|| format!("opening the control database {}", path.display()))?;
         conn.execute_batch("SET memory_limit = '128MB'; SET threads = 1;")?;
         conn.execute_batch(DDL)?;
         let version: Option<String> = conn.query_row("SELECT value FROM settings WHERE key = 'schema'", [], |r| r.get(0)).optional()?;

@@ -86,3 +86,14 @@ Regression evidence: alephgrid-core `tests::security`. These are not upstream be
 - `formatter/format.rs`: a value from 1 to 10 formatted with `0.00E+00` showed `E-00`; the
   exponent is negative only below 1. Regression: alephgrid-core
   `tests::sheetformat::number_formats_change_the_display_not_the_value`.
+
+## LAMBDA calls are bounded (security run-2; 2 November 2026)
+
+- `functions/logical/lambda.rs`, `evaluation.rs`: `call_lambda` and `call_lambda_with_values`
+  go through `enter_lambda`, which refuses a call (`#CALC!`) past `MAX_LAMBDA_DEPTH` (1000)
+  calls inside one another or past the evaluation's stack limit measured from the outermost
+  call, and charges one visit (`Evaluation::spend`) so the budget, deadline and cancel stop
+  long chains. Upstream, a lambda that calls itself (`=LAMBDA(g,g(g))(LAMBDA(g,g(g)))`, or a
+  defined name whose LAMBDA calls its own name) recursed until the thread's stack
+  overflowed, which ends the process. Regression: alephgrid-core
+  `tests::security::lambda_recursion_is_an_error_not_a_stack_overflow`.

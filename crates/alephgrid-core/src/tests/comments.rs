@@ -14,7 +14,10 @@ fn comments_thread_and_follow_their_cells() {
     assert_eq!(r.parent.as_deref(), Some(a.id.as_str()));
     assert!(t.wb.add_comment(0, 0, 0, "  ", None).is_err());
     assert!(t.wb.add_comment(0, 0, 0, "x", Some("nope")).is_err());
-    t.wb.edit_comment(&a.id, "Is this total right?").unwrap();
+    // Only the author may change a comment's text (it is shown under their name).
+    let e = t.wb.acting_as("bob@example.com", |wb| wb.edit_comment(&a.id, "Approved")).unwrap_err();
+    assert!(e.to_string().contains("author"), "{e}");
+    t.wb.acting_as("ann@example.com", |wb| wb.edit_comment(&a.id, "Is this total right?")).unwrap();
     t.wb.resolve_comment(&a.id, true).unwrap();
     let all = t.wb.comments(0).unwrap();
     assert_eq!(all.len(), 2);

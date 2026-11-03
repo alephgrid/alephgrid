@@ -94,12 +94,16 @@ impl DiskReserve {
     }
 }
 
-/// Whether an error comes from a full disk, as an I/O error or as DuckDB's message.
+/// Whether an error comes from a full disk: an I/O error saying so, or DuckDB's own I/O
+/// error (its root cause, which starts "IO Error"). Only the root cause is read, never the
+/// messages around it, which may quote what a user typed (a table name, say): a request
+/// must not be able to make the server give its reserve away.
 pub fn is_disk_full(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| {
+    let io = e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>().is_some_and(|io| io.raw_os_error() == Some(libc::ENOSPC) || io.kind() == std::io::ErrorKind::StorageFull)
-            || c.to_string().contains("No space left on device")
-    })
+    });
+    let root = e.root_cause().to_string();
+    io || (root.starts_with("IO Error") && root.contains("No space left on device"))
 }
 
 /// Write `bytes` of data that file systems cannot compress or deduplicate away, so the reserve
@@ -155,6 +159,10 @@ mod tests {
         assert!(is_disk_full(&anyhow::anyhow!("IO Error: Could not write file \"x\": No space left on device")));
         assert!(is_disk_full(&anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ENOSPC)).context("could not record the allocation")));
         assert!(!is_disk_full(&anyhow::anyhow!("permission denied")));
+        // Words a user chose are never a full disk, wherever they appear.
+        assert!(!is_disk_full(&anyhow::anyhow!("unknown table \"No space left on device\"")));
+        assert!(!is_disk_full(&anyhow::anyhow!("Catalog Error: Table with name IO Error No space left on device does not exist")));
+        assert!(!is_disk_full(&anyhow::anyhow!("permission denied").context("IO Error: No space left on device")));
     }
 
     #[test]

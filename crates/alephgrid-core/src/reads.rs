@@ -1338,10 +1338,12 @@ impl Db<'_> {
                 .enumerate()
                 .filter(|(_, c)| !is_internal(&c.name))
                 .map(|(i, c)| {
-                    if format == ExportFormat::CsvExcel && is_text_type(&c.sql_type) {
-                        format!("{} AS {}", neutralized(&format!("_c{i}")), ident(&c.name))
-                    } else {
+                    if format != ExportFormat::CsvExcel {
                         format!("_c{i} AS {}", ident(&c.name))
+                    } else if is_text_type(&c.sql_type) {
+                        format!("{} AS {}", neutralized(&format!("_c{i}")), ident(&neutralized_name(&c.name)))
+                    } else {
+                        format!("_c{i} AS {}", ident(&neutralized_name(&c.name)))
                     }
                 })
                 .collect();
@@ -1388,7 +1390,12 @@ impl Db<'_> {
             let columns = self.describe(select)?;
             let list: Vec<String> = columns
                 .iter()
-                .map(|c| if is_text_type(&c.sql_type) { format!("{} AS {}", neutralized(&ident(&c.name)), ident(&c.name)) } else { ident(&c.name) })
+                .map(|c| {
+                    // The header row is text a spreadsheet reads too: column names get the
+                    // same treatment as values.
+                    let header = ident(&neutralized_name(&c.name));
+                    if is_text_type(&c.sql_type) { format!("{} AS {header}", neutralized(&ident(&c.name))) } else { format!("{} AS {header}", ident(&c.name)) }
+                })
                 .collect();
             wrapped = format!("SELECT {} FROM ({select}) AS _x", list.join(", "));
             wrapped.as_str()
@@ -1428,6 +1435,11 @@ impl Db<'_> {
 /// A text column as written to a CSV for spreadsheets (see [`ExportFormat::CsvExcel`]).
 fn neutralized(column: &str) -> String {
     format!("CASE WHEN left({column}, 1) IN ('=', '+', '-', '@', chr(9), chr(13)) THEN '''' || {column} ELSE {column} END")
+}
+
+/// A column name as written in the header of a CSV for spreadsheets.
+fn neutralized_name(name: &str) -> String {
+    if name.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{name}") } else { name.to_string() }
 }
 
 fn is_text_type(sql_type: &str) -> bool {

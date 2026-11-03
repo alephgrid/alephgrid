@@ -151,8 +151,8 @@ pub struct StartQuery {
 
 pub async fn oidc_start(State(state): State<Shared>, Query(q): Query<StartQuery>) -> ApiResult<Response> {
     let Some(oidc) = state.auth.oidc.as_ref() else { return Err(ApiError::new(StatusCode::NOT_FOUND, "single sign-on is not configured")) };
-    let url = oidc.begin(&q.next).await.map_err(ApiError::from)?;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Redirect::to(&url)).into_response())
+    let (url, flow) = oidc.begin(&q.next).await.map_err(ApiError::from)?;
+    Ok(([(header::SET_COOKIE, oidc.flow_cookie(Some(&flow))), (header::CACHE_CONTROL, "no-store".to_string())], Redirect::to(&url)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -172,13 +172,22 @@ fn to_login(message: &str) -> Response {
     Redirect::to(&format!("/login?error={q}")).into_response()
 }
 
-/// The identity provider sends the browser back here; sign in and go on.
-pub async fn oidc_callback(State(state): State<Shared>, Query(q): Query<CallbackQuery>) -> Response {
+/// The identity provider sends the browser back here; sign in and go on. The sign-in's
+/// cookie is cleared whatever happens: a state is good for one attempt.
+pub async fn oidc_callback(State(state): State<Shared>, Query(q): Query<CallbackQuery>, headers: HeaderMap) -> Response {
     let Some(oidc) = state.auth.oidc.as_ref() else { return to_login("single sign-on is not configured") };
+    let mut reply = oidc_finish(&state, oidc, q, &headers).await;
+    if let Ok(clear) = header::HeaderValue::from_str(&oidc.flow_cookie(None)) {
+        reply.headers_mut().append(header::SET_COOKIE, clear);
+    }
+    reply
+}
+
+async fn oidc_finish(state: &Shared, oidc: &super::oidc::Oidc, q: CallbackQuery, headers: &HeaderMap) -> Response {
     if let Some(e) = q.error {
         return to_login(&format!("the identity provider did not sign you in ({})", q.error_description.unwrap_or(e)));
     }
-    let (claims, next) = match oidc.finish(&q.code, &q.state).await {
+    let (claims, next) = match oidc.finish(&q.code, &q.state, super::cookie(headers, super::oidc::FLOW_COOKIE)).await {
         Ok(v) => v,
         Err(e) => {
             tracing::info!("single sign-on refused: {e:#}");

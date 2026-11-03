@@ -185,3 +185,36 @@ async fn online_backups_are_rate_limited_pruned_and_listed() {
     assert_eq!(code, 409, "{body}");
     server.stop().await;
 }
+
+/// A control database can come from a backup archive someone else made: it is opened with
+/// the engine locked down, so a view stored in it cannot read files on the host. (Here the
+/// crafted `settings` view answers the schema check only if it could read the canary.)
+#[test]
+fn a_control_database_is_opened_locked_down() {
+    let dir = tempfile::tempdir().unwrap();
+    let canary = dir.path().join("canary.txt");
+    std::fs::write(&canary, "canary").unwrap();
+    let control = dir.path().join("data").join(".control");
+    std::fs::create_dir_all(&control).unwrap();
+    let path = control.join("control.duckdb");
+    {
+        let conn = duckdb::Connection::open(&path).unwrap();
+        let sql = format!(
+            "CREATE VIEW settings AS SELECT 'schema' AS key, (SELECT CASE WHEN content = 'canary' THEN '{}' END FROM read_text('{}')) AS value",
+            alephgrid_server::auth::store::SCHEMA,
+            canary.display()
+        );
+        conn.execute_batch(&sql).unwrap();
+    }
+    let opened = alephgrid_server::auth::Store::open(&path);
+    let err = opened.err().expect("the crafted file must not open as a control database");
+    let msg = format!("{err:#}");
+    assert!(msg.contains("Permission") && msg.contains("disabled by configuration"), "{msg}");
+    // And an ordinary control database still opens, and backs up into .backups.
+    let fresh = dir.path().join("ok").join(".control");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let store = alephgrid_server::auth::Store::open(&fresh.join("control.duckdb")).unwrap();
+    let backups = dir.path().join("ok").join(".backups").join("b1");
+    std::fs::create_dir_all(&backups).unwrap();
+    store.backup_to(&backups.join("control.duckdb")).unwrap();
+}

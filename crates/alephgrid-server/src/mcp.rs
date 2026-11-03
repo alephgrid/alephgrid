@@ -43,6 +43,8 @@ pub const MAX_PAGE_ROWS: usize = 500;
 pub const MAX_SHEET_CELLS: u64 = 5_000;
 /// Largest stored result artifact.
 pub const MAX_ARTIFACT_BYTES: usize = 16 << 20;
+/// Requests one connection may have computing at once.
+pub const MAX_RUNNING: usize = 4;
 /// How long results and their handles live.
 pub const RESULT_TTL_MS: u64 = 24 * 3_600_000;
 
@@ -184,18 +186,73 @@ fn range_of(s: &str) -> Option<(u32, u32, u32, u32)> {
     Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
 }
 
-fn compute(state: &Shared, agent: &Agent, req: &Request) -> Result<Computed> {
+/// One of a connection's [`MAX_RUNNING`] computing requests, held while it runs (whether or
+/// not anyone still waits for it).
+struct Running(String);
+
+fn running() -> &'static Mutex<HashMap<String, usize>> {
+    static RUNNING: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    RUNNING.get_or_init(Default::default)
+}
+
+fn running_count(connection: &str) -> usize {
+    running().lock().unwrap().get(connection).copied().unwrap_or(0)
+}
+
+fn admit(agent: &Agent) -> std::result::Result<Running, ToolError> {
+    let mut r = running().lock().unwrap();
+    let n = r.entry(agent.conn.id.clone()).or_insert(0);
+    if *n >= MAX_RUNNING {
+        return Err(tool_err(format!("this connection already has {MAX_RUNNING} running requests"), "wait for one with job_status, or cancel one with cancel_job"));
+    }
+    *n += 1;
+    Ok(Running(agent.conn.id.clone()))
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut r = running().lock().unwrap();
+        if let Some(n) = r.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                r.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Run an agent's read the way the UI runs bulk reads: through the workbook's scheduler
+/// (whose deadline, or `cancel`, interrupts the statement, and which keeps a reader free for
+/// interactive work), holding one of the space's bulk-job slots. Called on a blocking thread.
+fn scheduled<T: Send + 'static>(
+    state: &Shared,
+    agent: &Agent,
+    lease: &crate::state::Lease,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    f: impl FnOnce(&alephgrid_core::Reader) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let _slot = state.job_slot(&agent.conn.space_id)?;
+    let job = crate::http::http_job(crate::sched::Class::Bulk, state);
+    let handle = lease.handle();
+    tokio::runtime::Handle::current().block_on(handle.run(job, cancel, None, crate::state::Work::Read(Box::new(f))))
+}
+
+fn compute(state: &Shared, agent: &Agent, req: &Request, cancel: Option<tokio::sync::watch::Receiver<bool>>) -> Result<Computed> {
     agent.workbook(state, req.workbook())?;
+    let _running = admit(agent).map_err(|e| anyhow!(e.message))?;
     let lease = state.get(req.workbook())?;
     match req {
         Request::Query { sql, params, .. } => {
             if !state.config.allow_sql {
                 bail!("SQL is disabled on this server");
             }
-            let r = lease.with_reader(|r| r.run_query(sql, params, alephgrid_core::limits::MAX_QUERY_ROWS))?;
+            let (sql, params) = (sql.clone(), params.clone());
+            let r = scheduled(state, agent, &lease, cancel, move |r| r.run_query(&sql, &params, alephgrid_core::limits::MAX_QUERY_ROWS))?;
             Ok(Computed { columns: columns_of(&r.columns), rows: r.rows, truncated: r.truncated, total: None, revision: r.revision, sources: json!(r.sources), extra: Value::Null })
         }
-        Request::Table { table, columns, filters, sort, offset, limit, .. } => lease.with_reader(|r| {
+        Request::Table { table, columns, filters, sort, offset, limit, .. } => {
+            let (table, columns, filters, sort, offset, limit) = (table.clone(), columns.clone(), filters.clone(), sort.clone(), *offset, *limit);
+            scheduled(state, agent, &lease, cancel, move |r| {
             let spec: alephgrid_core::ViewSpec = serde_json::from_value(json!({ "table": table, "sort": sort, "filters": filters, "hidden": [] }))?;
             let info = r.open_view(spec)?;
             let out = (|| {
@@ -205,8 +262,8 @@ fn compute(state: &Shared, agent: &Agent, req: &Request) -> Result<Computed> {
                     columns.iter().map(|n| info.columns.iter().position(|c| &c.name == n).ok_or_else(|| crate::auth::not_found(format!("column {n:?} not found in {table}")))).collect::<Result<_, _>>()?
                 };
                 let mut rows = Vec::new();
-                let mut at = *offset;
-                let end = offset.saturating_add(*limit).min(info.row_count);
+                let mut at = offset;
+                let end = offset.saturating_add(limit).min(info.row_count);
                 while at < end {
                     let block = r.fetch(info.view_id, at, end - at, 0, None)?;
                     if block.rows.is_empty() {
@@ -220,15 +277,18 @@ fn compute(state: &Shared, agent: &Agent, req: &Request) -> Result<Computed> {
             })();
             r.close_view(info.view_id);
             out
-        }),
-        Request::Sheet { sheet, range, .. } => lease.with_reader(|r| {
-            let (r0, c0, r1, c1) = range_of(range).ok_or_else(|| anyhow!("write the range as A1:D20"))?;
+            })
+        }
+        Request::Sheet { sheet, range, .. } => {
+            let (sheet, range) = (sheet.clone(), range.clone());
+            scheduled(state, agent, &lease, cancel, move |r| {
+            let (r0, c0, r1, c1) = range_of(&range).ok_or_else(|| anyhow!("write the range as A1:D20"))?;
             let cells = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
             if cells > MAX_SHEET_CELLS {
                 bail!("{cells} cells asked for; read at most {MAX_SHEET_CELLS} at a time (a smaller range)");
             }
             let s = r.sheets();
-            let info = s.list().into_iter().find(|i| i.name.eq_ignore_ascii_case(sheet)).ok_or_else(|| crate::auth::not_found(format!("sheet {sheet:?} not found")))?;
+            let info = s.list().into_iter().find(|i| i.name.eq_ignore_ascii_case(&sheet)).ok_or_else(|| crate::auth::not_found(format!("sheet {sheet:?} not found")))?;
             let block = s.fetch(info.index, r0, r1 - r0 + 1, c1 + 1)?;
             drop(s);
             let mut rows = Vec::new();
@@ -249,12 +309,16 @@ fn compute(state: &Shared, agent: &Agent, req: &Request) -> Result<Computed> {
             }
             let columns = (c0..=c1).map(|c| json!({ "name": alephgrid_core::sheets::column_name(c), "type": "shown text" })).collect();
             Ok(Computed { columns, rows, truncated: false, total: None, revision: r.revision()?, sources: json!([{ "sheet": info.name }]), extra: json!({ "formulas": formulas }) })
-        }),
-        Request::Analysis { analysis, .. } => lease.with_reader(|r| {
-            let saved = r.analyses()?.into_iter().find(|a| &a.id == analysis || a.name.eq_ignore_ascii_case(analysis)).ok_or_else(|| crate::auth::not_found(format!("analysis {analysis:?} not found")))?;
+            })
+        }
+        Request::Analysis { analysis, .. } => {
+            let analysis = analysis.clone();
+            scheduled(state, agent, &lease, cancel, move |r| {
+            let saved = r.analyses()?.into_iter().find(|a| a.id == analysis || a.name.eq_ignore_ascii_case(&analysis)).ok_or_else(|| crate::auth::not_found(format!("analysis {analysis:?} not found")))?;
             let out = r.analyze(&saved.spec)?.result;
             Ok(Computed { columns: columns_of(&out.columns), rows: out.rows, truncated: out.truncated, total: None, revision: out.revision, sources: json!(out.sources), extra: json!({ "analysis": saved.name }) })
-        }),
+            })
+        }
     }
 }
 
@@ -411,6 +475,8 @@ struct Job {
     connection: String,
     created_ms: u64,
     cancelled: bool,
+    /// Tells the running work to stop (the scheduler interrupts its statement).
+    stop: tokio::sync::watch::Sender<bool>,
     result: Option<std::result::Result<Value, (String, &'static str)>>,
     done: Arc<tokio::sync::Notify>,
 }
@@ -425,19 +491,21 @@ fn jobs() -> &'static Mutex<HashMap<String, Job>> {
 async fn run_job(state: &Shared, agent: &Agent, req: Request, wait: Duration) -> std::result::Result<Value, ToolError> {
     let id = crate::state::new_id();
     let done = Arc::new(tokio::sync::Notify::new());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     {
         let mut j = jobs().lock().unwrap();
         let now = crate::auth::now_ms();
         j.retain(|_, x| now.saturating_sub(x.created_ms) < 3_600_000);
-        if j.values().filter(|x| x.connection == agent.conn.id && x.result.is_none()).count() >= 4 {
-            return Err(tool_err("this connection already has 4 running requests", "wait for one with job_status, or cancel one with cancel_job"));
+        // Counted while computing (see `admit`), however the job is cancelled or forgotten.
+        if running_count(&agent.conn.id) >= MAX_RUNNING {
+            return Err(tool_err(format!("this connection already has {MAX_RUNNING} running requests"), "wait for one with job_status, or cancel one with cancel_job"));
         }
-        j.insert(id.clone(), Job { connection: agent.conn.id.clone(), created_ms: now, cancelled: false, result: None, done: done.clone() });
+        j.insert(id.clone(), Job { connection: agent.conn.id.clone(), created_ms: now, cancelled: false, stop: stop_tx, result: None, done: done.clone() });
     }
     let (s, a, r, jid) = (state.clone(), agent.clone(), req, id.clone());
     tokio::spawn(async move {
         let out = tokio::task::spawn_blocking(move || -> std::result::Result<Value, ToolError> {
-            let c = compute(&s, &a, &r)?;
+            let c = compute(&s, &a, &r, Some(stop_rx))?;
             let (receipt, c) = pin(&s, &a, &r, c)?;
             Ok(reply(&receipt, &c))
         })
@@ -549,9 +617,11 @@ fn readable(state: &Shared, agent: &Agent) -> Result<Vec<crate::state::WorkbookM
 
 fn describe(state: &Shared, agent: &Agent, id: &str) -> Result<Value> {
     agent.workbook(state, id)?;
+    let _running = admit(agent).map_err(|e| anyhow!(e.message))?;
     let lease = state.get(id)?;
     let name = lease.meta.lock().unwrap().name.clone();
-    lease.with_reader(|r| {
+    let id = id.to_string();
+    scheduled(state, agent, &lease, None, move |r| {
         let mut tables = Vec::new();
         for t in r.schema()? {
             let mut columns = Vec::new();
@@ -656,7 +726,7 @@ async fn call(state: &Shared, agent: &Agent, name: &str, args: &Value) -> std::r
                 Request::Sheet { workbook: arg(args, "workbook")?.to_string(), sheet: arg(args, "sheet")?.to_string(), range: arg(args, "range")?.to_string() }
             };
             on(Box::new(move |s, a| {
-                let c = compute(s, a, &req)?;
+                let c = compute(s, a, &req, None)?;
                 let (r, c) = pin(s, a, &req, c)?;
                 Ok(reply(&r, &c))
             }))
@@ -718,7 +788,7 @@ async fn call(state: &Shared, agent: &Agent, name: &str, args: &Value) -> std::r
                 if now != receipt.revision {
                     return Ok(json!({ "verified": false, "reason": "stale", "detail": format!("the workbook moved from revision {} to {now}; run the request again for current data", receipt.revision) }));
                 }
-                let c = compute(s, a, &receipt.request)?;
+                let c = compute(s, a, &receipt.request, None)?;
                 let mut c2 = c;
                 if (c2.rows.len() as u64) > receipt.rows {
                     c2.rows.truncate(receipt.rows as usize);
@@ -745,7 +815,7 @@ async fn call(state: &Shared, agent: &Agent, name: &str, args: &Value) -> std::r
             on(Box::new(move |s, a| {
                 // The query must run, read-only, now: the person approving sees a working query.
                 let req = Request::Query { workbook: wb.clone(), sql: sql.clone(), params: params.clone() };
-                let checked = compute(s, a, &req)?;
+                let checked = compute(s, a, &req, None)?;
                 let id = crate::auth::random_id();
                 let payload = json!({ "sql": sql, "params": params, "kind": "query", "columns": checked.columns });
                 let p = s.auth.store.create_proposal(&id, &a.conn.id, op.as_deref(), &wb, "saved_query", &name, &payload, checked.revision)?;
@@ -768,8 +838,9 @@ async fn call(state: &Shared, agent: &Agent, name: &str, args: &Value) -> std::r
             match j.get_mut(id).filter(|x| x.connection == a.conn.id) {
                 Some(job) => {
                     job.cancelled = true;
+                    let _ = job.stop.send(true);
                     job.done.notify_waiters();
-                    Ok(json!({ "job": id, "status": "cancelled", "note": "the result is discarded; a query already running finishes within its time limit" }))
+                    Ok(json!({ "job": id, "status": "cancelled", "note": "the request is stopped and its result discarded" }))
                 }
                 None => Err(tool_err("no such job", "jobs last an hour")),
             }
