@@ -11,19 +11,20 @@ filters and per-function evidence.
 
 ## The catalog
 
-Compatibility is tracked in one versioned catalog of 562 function names, compared against
-competitor listings from official sources:
+Compatibility is tracked in one versioned catalog of 562 function names, compiled from
+official function references:
 
 - **486 names are registered** in the engine under the exact catalog name; 76 are not.
-- **44 priority (P0) functions** have reviewed signatures, descriptions and hand-calculated
-  examples, checked through the actual sheet adapter before and after reopening a workbook.
-  These 44 are what the formula bar offers as suggestions.
-- **277 verification cases** cover those 44 functions: 273 verified, 4 accepted gaps. The
+- **76 functions** (44 priority P0 and 32 P1) have reviewed signatures, descriptions and
+  hand-calculated examples, checked through the actual sheet adapter before and after reopening
+  a workbook. These 76 are what the formula bar offers as suggestions.
+- **351 verification cases** cover them: 344 verified, 7 accepted gaps (the 44 P0 functions
+  alone: 277 cases, 273 verified, 4 gaps). The
   cases span exact and approximate lookups, duplicate matches, conditional-aggregate
   criteria, error handling and lazy `IF` branches, text and Unicode cases, signed rounding,
   and leap days. Expected values are derived independently (the documented Excel rule),
   never copied from the engine's own output.
-- The **518 entries without a reviewed signature** are explicitly marked "Not reviewed" in
+- The **486 entries without a reviewed signature** are explicitly marked "Signature not yet reviewed" in
   the help and are excluded from autocomplete. A registered name is not a parity claim.
 
 A passing case certifies that input only. Not yet covered: locale-specific parsing, the 1904
@@ -32,7 +33,7 @@ results of P0 functions, and numerical precision at extremes.
 
 ## Table formulas
 
-52 functions compile in spreadsheet [table formulas](../../table-formulas/) over DuckDB
+54 functions compile in spreadsheet [table formulas](../../table-formulas/) over DuckDB
 tables, each with recorded modes (for example, exact-match `XLOOKUP`; whole columns for
 `SUMIFS`) and the differential or golden tests that exercise it. The catalog's table status
 refers to spreadsheet syntax over table references, not similarly named SQL functions.

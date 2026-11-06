@@ -9,10 +9,10 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) still apply.
 |---|---|---|
 | **check** | `run_check = true` | web type check and bundle; `cargo test --workspace` (with the protocol drift check and the disk-full tests); clippy with warnings as errors; browser journeys in Chromium |
 | **release** | `run_release = true`, `release_version`, on a tag | binaries, draft release, then (after approval) GitHub release, Docker image and npm; see [RELEASING.md](RELEASING.md) |
-| **full** | `run_full = true` | everything in check, plus browser journeys in Firefox and WebKit, 2,000-case property tests, and the server's integration and crash suites five times |
+| **full** | `run_full = true` | everything in check, plus browser journeys in Firefox and WebKit, 2,000-case property tests of the engine, and every `alephgrid-server` test five times |
 
-The configuration is [.circleci/config.yml](../.circleci/config.yml). One job compiles everything
-(`rust-build`); the Rust tests (run with `--no-fail-fast`, so one run reports every failure),
+The configuration is [.circleci/config.yml](../.circleci/config.yml). After the web build, one job compiles
+everything (`rust-build`); the Rust tests (run with `--no-fail-fast`, so one run reports every failure),
 clippy and the browser tests then run side by side, so one failure does not hide the others. Rust jobs run on an Ubuntu
 24.04 VM (the disk-full tests mount a tmpfs, and Python function tests need bubblewrap). The
 Cargo registry and `target/` are cached by `Cargo.lock` and `rust-toolchain.toml`, so DuckDB's
@@ -21,22 +21,21 @@ browser tests are kept as artifacts.
 
 ## Setting it up (once)
 
-1. **Merge the pull request that adds `.circleci/config.yml`**, so it is on `main`.
-2. **Sign in to CircleCI with GitHub** at <https://circleci.com>, choosing the `alephgrid`
+1. **Sign in to CircleCI with GitHub** at <https://circleci.com>, choosing the `alephgrid`
    organization. If the organization restricts third-party access, an organization owner
    approves CircleCI under GitHub → organization Settings → Third-party access.
-3. **Add the project.** In CircleCI open *Projects*, find `alephgrid`, choose *Set Up Project*,
+2. **Add the project.** In CircleCI open *Projects*, find `alephgrid`, choose *Set Up Project*,
    and pick *Use the `.circleci/config.yml` in my repo* on branch `main`.
-4. **Check that pushes run nothing.** Push any branch: the pipeline appears with no workflows.
+3. **Check that pushes run nothing.** Push any branch: the pipeline appears with no workflows.
    That is expected. To hide even those empty pipelines:
    * Projects connected through the **CircleCI GitHub App**: Project settings → *Triggers*,
      remove the GitHub push trigger. Runs are then started only by hand or through the API.
    * Projects connected through the **GitHub OAuth app**: leave it; empty pipelines cost nothing.
-5. **Create a personal API token** for `tools/ci.sh`: CircleCI → User settings → *Personal API
+4. **Create a personal API token** for `tools/ci.sh`: CircleCI → User settings → *Personal API
    Tokens* → *Create New Token*. Put it in your shell profile, not in the repository:
 
    ```bash
-   echo 'export CIRCLECI_TOKEN=<the token>' >> ~/.zshrc && source ~/.zshrc
+   export CIRCLECI_TOKEN=<the token>   # in your shell profile
    ```
 
    For a GitHub App project, also add the two values from Project settings → *Overview* and
@@ -47,14 +46,13 @@ browser tests are kept as artifacts.
    export CIRCLECI_DEFINITION_ID=<pipeline definition id>
    ```
 
-6. **Start the first run** (it builds DuckDB from scratch, so it is the slowest):
+5. **Start the first run** (it builds DuckDB from scratch, so it is the slowest):
 
    ```bash
    tools/ci.sh check main
    ```
 
-7. **When the repository becomes public**, apply for CircleCI's open-source plan for more free
-   credits.
+6. **Apply for CircleCI's open-source plan** (the repository is public) for more free credits.
 
 ## Running it
 

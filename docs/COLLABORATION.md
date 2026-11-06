@@ -2,7 +2,7 @@
 
 Several people (or tabs, or agents) can edit one workbook at once. Every change runs on the
 workbook's single writer, one at a time, and commits as one revision. This page is the
-contract for what happens when changes overlap (checklist 7.08–7.09). The rule throughout: a
+contract for what happens when changes overlap. The rule throughout: a
 change made from an out-of-date view is **refused, never misapplied**, and refusals are
 reported to the person who made them. Nothing is merged behind anyone's back.
 

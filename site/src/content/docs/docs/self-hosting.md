@@ -8,8 +8,9 @@ people sign in with a password or single sign-on (OpenID Connect), and spaces gr
 owner, editor or viewer roles.
 
 :::note[Pre-release]
-Published container images and a Helm chart are planned after v0.1.0 — the
-[releases page](../../releases/) tracks channel readiness. Today, self-hosting builds from source.
+Container images (`ghcr.io/alephgrid/alephgrid`) are published with v0.1.0; a Helm chart comes
+later. The [releases page](../../releases/) tracks channel readiness. Until the release, build
+from source or with `docker compose up -d` from a checkout.
 :::
 
 ## The short version

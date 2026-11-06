@@ -1,8 +1,11 @@
 # Architecture
 
+How the shipped system is built. Planned work (S3, clusters, extensions) is described at the
+end, under [Planned](#planned-connected-data-clusters-and-extensions).
+
 ```
 ┌──────────────────────── browser ────────────────────────┐
-│  web/ (TypeScript, no framework, ~50 KB)                │
+│  web/ (TypeScript, no framework)                        │
 │   Grid (canvas) ── RowCache (100-row blocks, prefetch)  │
 │        │                     │                          │
 │        └──── Rpc (one WebSocket per workbook) ──────────┼──┐
@@ -10,7 +13,7 @@
 ┌─────────────────── alephgrid (one binary) ──────────────┐  │
 │  alephgrid-server (axum)                                │◀─┘
 │   /ws/{id}        protocol (docs/PROTOCOL.md)           │
-│   /api/…          workbooks, streamed import, export    │
+│   /api/…, /mcp    workbooks, import, export, agents     │
 │   embedded UI     web/dist via rust-embed               │
 │        │ spawn_blocking                                 │
 │  alephgrid-core                                       │
@@ -35,11 +38,13 @@
   search and one `LIMIT 1 OFFSET k` inside a chunk. Inserting takes keys between the neighbours;
   when a gap runs out, only a window around the insert point is re-spread. Nothing renumbers the
   table, so edits addressed by record id stay correct while rows move.
-* Storage format 5 (`storage.rs`): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
+* Storage format 9 (`storage.rs` lists every version): `_rf_meta` (format, revision, bound workbook id), `_rf_tables`
   (next id, density, structure generation, `data_rev`: the revision that last changed the table's
   rows, columns or formulas), `_rf_history` (one entry per committed change), `_rf_queries` and
   `_rf_query_versions` (saved queries, immutable versions), `_rf_materialized` (how a table made
-  from a query was computed). Every
+  from a query was computed), `_rf_views`, `_rf_links` and `_rf_table_cells` (sheet cells and
+  table formulas that read each other), `_rf_undo` (table undo), `_rf_comments`, and the
+  results of Python functions. Every
   change runs in `Workbook::mutate`: one transaction with the change, revision + 1 and its history
   entry; a `mutation_id` already in the history is not applied again. Older files are copied to
   `data.duckdb.v<N>.bak` and migrated in one transaction; newer ones are refused.
@@ -132,12 +137,12 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
   moves it with its cell; after every sheet or formula change the workbook rewrites table
   formulas to match and saves the cells' values in `_rf_links` in the same transaction. Table
   reads use those saved values, never the live model, so they stay snapshot-consistent. See
-  [sheet cells](TABLE_FORMULAS.md#sheet-cells-f09).
+  [sheet cells](TABLE_FORMULAS.md#sheet-cells).
 * Sheet cells can read tables (`=SUMIFS(orders[amount], …)`): the table formula is stored in
   `_rf_table_cells` with a result slot, the sheet engine holds a reference to that slot in column
   B of `_rf_links`, and every commit recomputes the table cells whose inputs changed, in rounds,
   inside the same transaction, after refusing circular references across both engines. See
-  [sheet cells that read tables](TABLE_FORMULAS.md#sheet-cells-that-read-tables-f09).
+  [sheet cells that read tables](TABLE_FORMULAS.md#sheet-cells-that-read-tables).
 * `.xlsx` import and export use the `ironcalc` crate's reader and writer. Importing
   into an empty workbook adopts the model with its styles; otherwise cell inputs
   are copied into new sheets.
@@ -266,21 +271,77 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
   space); the unsaved editor draft stays in the browser that typed it.
 * All workbooks of a server share one process (`shared_process`): resource limits are DuckDB-level,
   not a security boundary between workbooks. See DURABILITY.md for isolation classes.
-* Roles are an authorization boundary, not resource isolation: quotas are 7.07.
+* Roles are an authorization boundary, not resource isolation; per-space quotas limit resources
+  ([TEAMS.md](TEAMS.md#quotas)).
+* The full model (untrusted files, limits, browser protections) is in [SECURITY.md](SECURITY.md).
 
-
-### Workbook functions
+## Workbook functions
 
 `functions.rs` validates expression ASTs, stores immutable versions and active pins in `_rf_meta`,
 and installs SQL macros or IronCalc named LAMBDAs transactionally. The same registry API powers
 the browser editor and protocol clients. Dependencies bind exact versions; runtime components
-must match before reopening or changing pins. See [FUNCTIONS.md](FUNCTIONS.md).
+must match before reopening or changing pins. See [FUNCTIONS.md](FUNCTIONS.md). Python functions
+run in sandboxed worker processes outside the workbook lock, in batches, with results cached in
+the workbook; see [PYTHON_FUNCTIONS.md](PYTHON_FUNCTIONS.md).
 
-
-### No-code analysis
+## No-code analysis
 
 `analysis.rs` compiles typed summary/pivot, join and profile plans into validated queries and
 uses the same snapshot, computed-column, wire-value and resource-control path as SQL. Saved
 plans and table presentation live in `_rf_meta`; format 5 also stores a bounded, revision-guarded
 replacement undo record. Charts consume aggregate previews; frozen grid panes fetch only their
 small column window alongside the visible scrolling window. See [ANALYSIS.md](ANALYSIS.md).
+
+## Agents (MCP)
+
+`mcp.rs` serves the Model Context Protocol at `POST /mcp` (Streamable HTTP) and `alephgrid mcp`
+bridges stdio clients to it. Agent connections are read-only and scoped to one space or chosen
+workbooks; their tokens work only on `/mcp`. Agent reads go through the same scheduler, SQL policy
+and quotas as people's requests. Every result is stored with a receipt (content hash, revision,
+engine and policy versions) that `verify_result` recomputes. See [MCP.md](MCP.md).
+
+## Planned: connected data, clusters and extensions
+
+Not implemented. These are the design constraints for phases 10 (S3), 11 (Kubernetes) and E
+(extensions) in the [checklist](IMPLEMENTATION_CHECKLIST.md); prototypes and tests settle the
+details. What users get, and when, is in [ROADMAP.md](ROADMAP.md).
+
+**Objects.** Organizations and spaces own membership, permissions, quotas and policy; they are not
+machines. A workbook keeps its id, data, revisions and pinned dependencies when its compute is
+replaced. A `RuntimeSpec` is an immutable description of engine and package versions; a
+`ComputePolicy` sets allowed profiles, budgets, isolation and idle behaviour; a runtime
+allocation is replaceable capacity. All of these exist today for the Local provider. Opening a
+workbook stays the default action: the platform finds or starts approved compute, and choosing a
+profile is an advanced option.
+
+**S3 (phase 10).** A workbook's DuckDB runs with external access disabled, and that cannot be
+relaxed inside an open workbook without undoing the SQL policy. Remote reads therefore go through
+a separate reader process: a network-enabled DuckDB with pinned extensions, scoped short-lived
+credentials, restricted egress and no write access to workbook files. Only registered datasets
+can be read. Credentials stay on the server and never appear in workbook files, SQL text, URLs,
+logs or exports. A remote query produces an immutable, bounded result that the grid pages
+through by cursor, so scrolling never re-runs the source query. A row limit caps output, not scan
+work, so time, memory and spill are bounded separately. Snapshot import and refresh stage the
+remote result outside the workbook lock, then commit in one transaction with lineage, a new
+revision and the mutation id; a failed refresh keeps the last good snapshot. Joining local and
+remote data needs an explicit snapshot until transfer and consistency are proven. Caches are keyed
+by authorization scope, source identity and versions, never by SQL text or URL alone.
+
+**Jobs.** `queued → running → succeeded | failed`, or `cancelling → cancelled`. An acknowledged
+cancel means the request was received, not that work stopped. Each job publishes one terminal
+outcome and releases its budget exactly once; committed changes are never replayed
+automatically after a restart.
+
+**Clusters (phase 11).** One mutable workbook has one authoritative owner, and every collaborator
+is routed to it. Cluster mode keeps control metadata in PostgreSQL; standalone mode needs no
+extra service. A lease that expires does not stop an old process writing its DuckDB file, so a
+replacement owner starts only after the old one is proven stopped and its storage handed over
+exclusively; when that cannot be shown, writes are refused. Resizing drains, checkpoints, closes,
+hands over and restarts; it is not live migration. Kubernetes is one provider behind the same
+lifecycle contract as Local, and pod placement is left to Kubernetes. Neither a bespoke
+scheduler nor JupyterHub or a cloud service becomes a dependency.
+
+**Extensions (phase E).** Internal contracts first: RuntimeProvider, DataConnector,
+FunctionRuntime, artifact storage and a public API with events. None may bypass authorization,
+quotas, ownership or durability rules. A contract is published only after real implementations
+and a conformance suite exercise it. Untrusted extension code runs outside the server process.

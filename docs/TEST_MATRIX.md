@@ -1,7 +1,9 @@
 # Test matrix
 
-Maps checklist task IDs ([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)) to their behavior, tests and latest
-results. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
+The historical evidence record for phases 1–8 and F: each checklist task ID
+([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)) with its contract, tests and the
+results recorded when it was completed. Results carry their date and machine; later work records
+its evidence in the checklist. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
 `E` = `crates/alephgrid-core/src/tests/`, `S` = `crates/alephgrid-server/tests/`, `W` = `web/e2e/`.
 
 **Phase 1 verification (2026-10-26, macOS arm64, local).** CI on PR #1 has since run `cargo test --workspace` on Linux: all tests passed; the run then failed only because clippy was missing from the pinned toolchain (fixed in `ec28345`).
@@ -616,7 +618,7 @@ suite **3 passed / 1 explicitly ignored known-gap test**; explicit execution of 
 test reproduced the documented incorrect `#N/A`. All-target Clippy with warnings denied,
 frontend type checking/bundling and server rebuild passed. Final browser suite **52/52 passed**.
 The first completion probe used inline arrays and exposed the engine gap; the final browser
-journey verifies the supported range form. No full Excel/Sheets compatibility or large-table
+journey verifies the supported range form. No full Excel compatibility or large-table
 formula support is claimed. Linux and the small-filesystem disk-full scenario remain CI checks.
 
 ### Phase F reference editor increment
@@ -627,7 +629,7 @@ reference exclusion and coordinate limits. The browser journey drags A1:A3 into 
 for C1, checks that C1 stays the destination, evaluates to 60, checks Escape and reopening,
 and exercises inline F4. Reference labels pass serious/critical axe checks in light/dark modes.
 The initial focused catalog/functions/references run passed all 9 tests. Scope and remaining
-editor limitations are in [FORMULA_EDITOR.md](FORMULA_EDITOR.md). No Rust evaluator or protocol
+editor limitations are in [the formula editor](FORMULA_CATALOG.md#the-formula-editor). No Rust evaluator or protocol
 behavior changed in this increment; the prior 234-test Rust baseline and known ignored
 array-input XLOOKUP regression remain applicable.
 

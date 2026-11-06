@@ -1,122 +1,106 @@
-# Built-in formula catalog (phase F, first increment)
+# Sheet formulas: built-in functions and the formula editor
 
-Choose **Formula help** in a workbook to search the 562-name comparison inventory. Search
-matches names, categories and reviewed descriptions; availability filters distinguish names
-recognized by IronCalc from unrecognized names. Lists contain at most 40 entries per page.
-The help is read-only and available without SQL access.
+Sheets compute with IronCalc 0.9.1 plus a small local patch set (`alephgrid-compat-1`, see
+[`vendor/ironcalc_base/ALEPHGRID_PATCHES.md`](../vendor/ironcalc_base/ALEPHGRID_PATCHES.md)).
+This page covers which built-in functions are available and how they are verified, and how the
+formula editor works. Formulas that read whole tables are in [TABLE_FORMULAS.md](TABLE_FORMULAS.md);
+known differences from Excel are in [FORMULA_GAPS.md](FORMULA_GAPS.md).
 
-The single versioned source is `crates/alephgrid-core/data/function_catalog.json`.
-It records schema/catalog versions, the pinned engine, competitor provenance, priority,
-registration status, table support, signature, argument-mode review, examples, limitations,
-evidence and planned implementation/upstream routes. The browser imports this source directly;
-engine tests check the same artifact against the pinned dependency and evaluate its examples.
-There is no second manually maintained runtime catalog.
+## The function catalog
 
-## What the first increment establishes
+Choose **Formula help** (Shift+F3) in a workbook to search the catalog: 562 function names, with
+categories, descriptions, signatures, examples, limitations and test evidence. Filters show
+names the engine recognizes and, for table formulas, only supported functions. Lists show at
+most 40 entries per page. Help is read-only and works with SQL turned off.
 
-- All 562 names are checked against the English registry in IronCalc 0.9.1. Of these, 486
-  are registered and 76 are not registered under the exact catalog name.
-- All 44 P0 entries have reviewed signatures, original descriptions and hand-calculated
-  examples. The examples use the displayed A1:C4 fixture and are checked through Alephgrid's
-  actual sheet adapter before and after reopening a file-backed workbook.
-- Additional lookup tests cover reverse duplicate selection, exact missing values, a next-larger
-  match, wildcard matching, range/index errors, source recalculation and undo.
-- The formula bar offers the 44 reviewed built-ins when editing a sheet. Tab accepts a
-  suggestion; argument help appears after the opening parenthesis. Workbook functions remain
-  available. Ordinary sheet text and quoted literals/references do not trigger suggestions.
-- Sheet built-ins are not offered as SQL expressions; DuckDB SQL functions and custom functions
-  remain separate capabilities.
-- **Table support** (schema 4): `table_status` is `supported` for the 52 functions spreadsheet
-  table formulas compile ([table formulas](TABLE_FORMULAS.md)), each with `table_modes` (what is
-  supported, e.g. exact-match XLOOKUP only, whole columns for SUMIFS) and `table_evidence`, the
-  differential or golden tests that exercise it. A catalog test checks both directions: every
-  cited test exists and uses the function, and `supported` matches exactly the names the
-  compiler accepts. The help shows the modes and tests, and can list only supported functions.
+The single source is `crates/alephgrid-core/data/function_catalog.json` (schema 4). The browser
+imports it directly, and engine tests check it against the pinned engine and evaluate its
+examples, so there is no second hand-maintained list.
 
-**This is not complete P0 certification.** A registry entry does not certify every argument mode
-or Excel/Google Sheets parity. An example proves only its specified case. Unreviewed signatures
-remain absent and their help says so; those entries are excluded from built-in autocomplete.
-The catalog's table status refers to spreadsheet syntax over DuckDB table references, not the
-availability of similarly named SQL functions.
+| What | Count |
+|---|---|
+| Names in the catalog | 562 |
+| Registered by IronCalc 0.9.1 under that name | 486 (the other 76 are functions from other spreadsheet products with no Excel counterpart; their Excel equivalents, such as `TEXTSPLIT`, cover the need) |
+| Reviewed signature, description and examples (44 P0 + 32 P1) | 76, offered by formula-bar autocomplete |
+| Not reviewed | 486, marked "Signature not yet reviewed" and not suggested |
+| Supported in table formulas | 54, each with its modes and the tests that exercise it |
+| Verification cases | 351: 344 verified, 7 accepted gaps (P0 alone: 277 cases, 273 verified, 4 gaps) |
 
-## Updating the catalog
+**Verification cases.** Each reviewed function has cases that pin one mode: exact and
+approximate lookups, first and last duplicate matches, sorted binary search, missing values,
+invalid ranges, criteria with wildcards and `~` escapes, error handling and lazy `IF` branches,
+text and Unicode, signed rounding, leap days and month rollover. 156 of them form a coercion
+matrix over typed inputs (a number, text `'2`, `TRUE`, an empty cell, `=NA()`, `=""`, Unicode text,
+a negative decimal and wildcard strings): how ranges and direct arguments treat text, logicals,
+blanks and errors. Every expected value comes from hand calculation or a documented Excel rule
+(the case's `oracle`), never from the engine's output. Each case runs through the real sheet
+adapter, before and after reopening a file-backed workbook. **Formula help** shows the cases
+under **Mode evidence**, gaps included.
 
-1. Change schema_version when the data contract changes; increment catalog_version for an
-   evidence/content change. Review engine upgrades explicitly against Cargo.lock.
-2. Update competitor listings from official sources, keeping absent listings separate from
-   a claim that the competitor does not support the function.
-3. Add signature, modes and examples only after review. Examples need independently derived
-   expected values and the documented shared fixture; do not copy outputs from the evaluator
-   and treat them as an independent oracle.
-4. Run the catalog engine tests. Record limitations; fix actual mismatches or mark the entry
-   partial rather than changing expected values merely to match the engine.
-5. Run browser coverage after changing help/completion. Preserve custom-function suggestions,
-   quoted-text behavior, accessibility and the sheet/table boundary.
+A passing case certifies that input only. Binary-search cases use sorted input with unique
+keys; Unicode cases use the Basic Multilingual Plane. Not covered: locale-specific parsing, the
+1904 date system, every optional-argument combination, emoji and grapheme clusters, spilled
+results of P0 functions, and precision at numeric extremes. Accepted gaps keep a test that fails
+if the result changes, so an engine upgrade that fixes one is noticed.
 
-Broader argument-mode coverage, reference picking/locking, named ranges, command shortcuts,
-large-table compilation, cross-engine recalculation and the analyst gate remain unchecked in
-[the implementation checklist](IMPLEMENTATION_CHECKLIST.md). Formulas over large tables are
-specified in [table formulas](TABLE_FORMULAS.md).
+Sheet built-ins are not SQL functions: DuckDB's functions and workbook functions are separate
+(see [FUNCTIONS.md](FUNCTIONS.md)).
 
-## XLOOKUP array-input gap (resolved locally)
+### Updating the catalog
 
-During the first increment the browser evaluated `=XLOOKUP(2,{1;2;2},{10;20;30})` as `#N/A`;
-the independent expected answer is `20`. The local `alephgrid-compat-1` patch now returns `20`
-and `xlookup_inline_arrays_should_find_a_present_key` runs without `--ignored`. The patch covers
-one-dimensional inline lookup arrays with equally shaped inline/range results only; see
-[FORMULA_GAPS.md](FORMULA_GAPS.md). [Upstream issue 1338](https://github.com/ironcalc/IronCalc/issues/1338)
-is related. No upstream issue or PR has been sent, and current upstream has not been reproduced.
+1. Bump `schema_version` when the data contract changes and `catalog_version` for content or
+   evidence changes. Review engine upgrades against `Cargo.lock`.
+2. Keep "not listed by a source" separate from "not supported" when updating source listings.
+3. Add signatures, modes and examples only after review. Expected values are derived
+   independently; never copy them from the evaluator.
+4. Run the catalog tests (`cargo test --workspace --lib tests::catalog`). Fix real mismatches or
+   mark the entry partial; never change an expected value just to match the engine.
+5. After changing help or completion, run the browser tests (`e2e/catalog.spec.ts`) and keep
+   workbook-function suggestions, quoted-text behaviour and accessibility intact.
 
-The next editor increment adds [F4 reference locking, same-sheet range picking and reference hints](FORMULA_EDITOR.md). Broader F.03 capabilities remain pending.
+## The formula editor
 
-## Mode-level certification increment (F.02)
+**Autocomplete.** In a sheet's formula bar or cell editor, typing a function name suggests the
+reviewed built-ins and the workbook's published functions; Tab accepts a suggestion, and
+argument help appears after the opening parenthesis. Plain text and quoted strings do not
+trigger suggestions.
 
-Catalog schema 2 adds `verification_cases` to each entry. Each case has a unique ID,
-mode description, formula, independently calculated expected display text, status
-(`verified` or `known_gap`) and a limitation note. The existing A1:C4 fixture applies;
-A5:A6 are empty. Empty expected strings mean an empty displayed result, not an absent
-formula. The fixture occupies columns A–C and test formulas occupy column D.
+**Picking references.** With the formula bar at an operand position (for example after
+`=SUM(`), click a cell or drag across cells to insert an A1 reference; the destination cell stays
+selected. A selected reference can be replaced by picking again. Clicking another sheet's tab
+shows that sheet without leaving the edit, and picked ranges are inserted as `'Sheet name'!A1:B3`;
+Enter saves to the original cell and returns to its sheet, Escape (or leaving the formula bar)
+discards the draft and returns. Limits: picking works in the formula bar, not the inline cell
+editor; dragging is limited to the visible area (no auto-scroll); whole rows, whole columns and
+table references are typed, not picked.
 
-The 121 cases span all 44 P0 functions. They cover exact/approximate lookups,
-first/last duplicate matches, sorted binary-search examples, missing values and
-invalid ranges; conditional aggregate criteria; error handling and lazy IF branches;
-text/empty-string/Unicode BMP cases; signed rounding; leap days and month/year rollover.
-Tests evaluate the actual sheet adapter and repeat assertions after reopening the
-file-backed workbook. The original 44 examples and source-edit/undo tests remain.
+**Coloured references.** While the formula bar has focus, same-sheet references get coloured
+dashed outlines and matching text labels, so colour is never the only cue. At most 128 ranges
+are drawn, from visible grid geometry only; nothing is downloaded or evaluated for them.
 
-Formula help exposes the exact cases in an expandable **Mode evidence** section,
-including expected results and known gaps. A passing case certifies that input only.
-In particular, the binary-search cases use correctly sorted input and unique search
-keys; they do not promise duplicate tie behavior or correctness on unsorted input.
-BMP examples do not certify emoji/grapheme handling. Locale/date-system parity,
-complete coercion matrices, all optional arguments and broad performance certification
-remain future work. F.02 and F.T01 remain unchecked overall.
+**Anchors.** Press **F4** with the caret on a reference, or with reference text selected, to cycle
+`A1 → $A$1 → A$1 → $A1 → A1`. Several selected references cycle independently. F4 works in both
+editors; quoted strings, sheet names, function names and structured references are left alone.
 
-The local `alephgrid-compat-1` patch resolves the six original gaps: **all 121 cases pass**. This certifies those inputs only; broader P0 mode/coercion coverage remains incomplete.
-The original failures and remaining upstream work are recorded in the
-[minimal reproducers and upstream triage plan](FORMULA_GAPS.md). Known gaps never
-receive a verified label; each has a separately runnable desired-result regression.
+**Named ranges.** **Names** (sheet toolbar) lists named ranges and defines one from the selection;
+"Refers to" starts as the absolute selection, for example `='Q1 data'!$B$1:$B$3`. A name is
+workbook-wide or belongs to one sheet, and on that sheet its own name wins. Names are
+case-insensitive, must refer to cells or ranges, and cannot reuse a built-in function name, a
+workbook function or a cell-like name (`A1`). Renaming a name rewrites the formulas that use it;
+deleting it leaves `#NAME?`. Each change is one undo step and survives reopening.
 
-## Coercion and argument-mode matrix (F.01/F.02, schema 3)
+**Go to** (toolbar, Mod+G or the command palette) accepts `A1`, `B2:C9`, `Sheet1!A1`,
+`'Q1 data'!A1:B4` or a name, and grows the visible grid if the target is beyond it.
 
-Schema 3 adds per-case `group` (`modes` or `coercion`) and `oracle` (the rule the expected
-value comes from), and per-argument documentation for every P0 entry: each argument's
-`rule` cites the verification cases that exercise it. The test checks that argument names
-match the reviewed signature and that every cited case exists for that function. The 518
-entries without a reviewed signature remain explicitly "Not reviewed" with no argument data.
+**Formula problems.** Before a formula is saved, the server parses it as the engine will store it
+(one missing final `)` is completed). A formula that does not parse is not saved: the draft
+stays, a message says what is wrong and at which character, and the caret moves there. Start
+with an apostrophe to enter the text as text. Input after a complete expression (`=1 2`) is an
+error.
 
-Coercion inputs are F1:G8 of the shared fixture: number 2, text `'2`, TRUE, an empty cell,
-`=NA()`, `=""`, `Ärger`, -3.5, and `a*b`/`a?b`/`axb`. A separate test checks these types
-with ISTEXT/ISBLANK/ISLOGICAL/ISNA before and after reopen.
+**Error origins.** Selecting a cell that shows an error displays its message and, when it comes
+from another cell, that cell with a **Go to source** button (`#DIV/0!: Divide by 0 · comes from
+Calc!A1`). It costs one bounded request per selection.
 
-The 156 coercion cases cover: numbers/text/logical/blank/error in ranges versus direct
-arguments for SUM, AVERAGE, COUNT, COUNTA, MIN and MAX; numeric-text and logical conversion
-in scalar functions; logical conditions given text, blanks and errors; criteria with empty
-strings, logical values, error text, numeric text, Unicode case folding, wildcards and `~`
-escapes; text conversion of numbers, logical values and blanks; Unicode character counts;
-date serial boundaries and truncated month arguments; and lookup keys that must not convert
-text to numbers. 152 pass; four are accepted date-system gaps, see [FORMULA_GAPS.md](FORMULA_GAPS.md).
-
-Totals: 277 cases (273 verified, 4 accepted gaps). Still not covered: locale-specific parsing,
-the 1904 date system, all optional-argument combinations, emoji/grapheme clusters,
-array/spill results of P0 functions, and numerical precision at extremes.
+Tests: engine `tests::catalog` and `sheets::editing`, `web/e2e/catalog.spec.ts`,
+`web/e2e/references.spec.ts` and `web/e2e/names.spec.ts`.
