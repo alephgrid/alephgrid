@@ -144,6 +144,11 @@ export class AnalyzePane {
     const out: HTMLElement[] = [];
     out.push(this.fieldList("Rows", this.rows, names, (v) => { this.rows = v; }, 4));
 
+    // The calculated-values hint names the first value, so it follows that value's name.
+    const hint = el("p", { class: "analyze-hint" });
+    const showHint = () => { hint.textContent = this.values.length ? `Refer to values as [@${this.values[0].name}]` : "Add a value first"; };
+    showHint();
+
     // Values: each with its column and aggregate.
     const values = el("div", { class: "analyze-list" }, ...this.values.map((v, i) => {
       const agg = sel(`Aggregate of value ${i + 1}`, AGGREGATES.map((a) => option(a.value, a.label, a.value === v.aggregate)), "analyze-agg");
@@ -153,11 +158,12 @@ export class AnalyzePane {
         v.aggregate = agg.value as Aggregate; v.column = col.value || null;
         if (v.column === null) v.aggregate = "count";
         nm.value = v.name = nm.dataset.typed ? nm.value : `${v.aggregate}_${v.column ?? "rows"}`;
+        showHint();
         this.changed();
       };
       agg.addEventListener("change", () => { sync(); agg.value = v.aggregate; });
       col.addEventListener("change", sync);
-      nm.addEventListener("input", () => { nm.dataset.typed = "1"; v.name = nm.value; this.changed(); });
+      nm.addEventListener("input", () => { nm.dataset.typed = "1"; v.name = nm.value; showHint(); this.changed(); });
       return el("div", { class: "analyze-item" }, agg, el("span", { class: "muted" }, "of"), col, nm, this.removeBtn(`Remove value ${v.name}`, () => { this.values.splice(i, 1); this.changed(); this.render(); }));
     }));
     const addValue = this.button("Add value", async () => {
@@ -175,13 +181,12 @@ export class AnalyzePane {
       f.addEventListener("input", () => { c.formula = f.value; this.changed(); });
       return el("div", { class: "analyze-item" }, nm, f, this.removeBtn(`Remove calculated value ${c.name}`, () => { this.calculated.splice(i, 1); this.changed(); this.render(); }));
     }));
-    const hint = this.values.length ? `Refer to values as [@${this.values[0].name}]` : "Add a value first";
     const addCalc = this.button("Add calculated value", async () => {
       const a = this.values[0]?.name ?? "value", b = this.values[1]?.name;
       this.calculated.push({ name: "calculated", formula: b ? `=[@${a}]/[@${b}]` : `=[@${a}]*1` });
       this.changed(); this.render();
     }, "btn btn-ghost analyze-add");
-    out.push(this.section("Calculated values", calc, el("div", {}, addCalc, el("p", { class: "analyze-hint" }, hint))));
+    out.push(this.section("Calculated values", calc, el("div", {}, addCalc, hint)));
 
     // Columns: a pivot over one column's values, picked from its distinct values.
     const pcol = sel("Pivot column", [option("", "No pivot", !this.pivot), ...names.map((n) => option(n, n, n === this.pivot?.column))]);
