@@ -371,7 +371,7 @@ function renderHome(): void {
         const space = showSpace ? spaceName(w.space) : undefined;
         return el("div", { class: "wb-row", role: "row" },
           el("span", { role: "cell", class: "cell-center" },
-            el("button", { class: `star${w.starred ? " on" : ""}`, title: w.starred ? "Unstar" : "Star", disabled: w.role === "viewer",
+            el("button", { class: `star${w.starred ? " on" : ""}`, title: w.role === "viewer" ? "View only" : w.starred ? "Unstar" : "Star", disabled: w.role === "viewer",
               "aria-label": w.starred ? `Unstar ${w.name}` : `Star ${w.name}`, "aria-pressed": w.starred ? "true" : "false",
               onclick: () => toggleStar(w) }, w.starred ? "★" : "☆")),
           el("a", { role: "cell", class: "wb-name", href: `/w/${seg(w.id)}`, onclick: (e: MouseEvent) => { e.preventDefault(); navigate(`/w/${seg(w.id)}`); } },
@@ -425,7 +425,7 @@ function renderHome(): void {
     trash: "Deleted workbooks stay here until you delete them forever.",
   };
   const actions = home.scope === "trash"
-    ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, onclick: emptyTrash }, "Empty trash")]
+    ? [el("button", { class: "btn btn-danger", disabled: !home.trash.length, title: home.trash.length ? false : "The trash is empty", onclick: emptyTrash }, "Empty trash")]
     : writableSpaces().length
       ? [el("button", { class: "btn", onclick: () => fileInput.click() }, icon("upload"), "Open file"),
         el("button", { class: "btn btn-primary", onclick: newWorkbook }, icon("plus"), "New workbook")]
@@ -515,7 +515,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
   const owner = sp.role === "owner";
   const local = home.me?.kind === "local";
   const items: MenuItem[] = [
-    { label: "Rename…", disabled: !owner, action: async () => {
+    { label: "Rename…", disabled: !owner && "Owners only", action: async () => {
       const v = await formDialog("Rename space", [{ name: "name", label: "Name", value: sp.name }], "Rename");
       if (!v) return;
       try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toastError(e); }
@@ -536,7 +536,7 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, size_bytes: w.size_bytes })),
       { members: () => membersDialog(sp, () => {}), usage: admin ? () => usageDialog(sp.org_id) : null }) });
   }
-  items.push("sep", { label: "Delete space", danger: true, disabled: !owner, action: async () => {
+  items.push("sep", { label: "Delete space", danger: true, disabled: !owner && "Owners only", action: async () => {
     const n = home.workbooks.filter((w) => w.space === sp.id).length;
     if (n) {
       toast(`Move or delete its ${n} workbook${n === 1 ? "" : "s"} first.`, "error");
@@ -568,19 +568,19 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
     { label: "Open", action: () => navigate(`/w/${seg(w.id)}`) },
     { label: "Open in new tab", action: () => window.open(`/w/${seg(w.id)}`, "_blank") },
     "sep",
-    { label: "Rename…", disabled: viewer, action: async () => {
+    { label: "Rename…", disabled: viewer && "View only", action: async () => {
       const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename");
       if (!v) return;
       try { await api.update(w.id, { name: v.name }); await reloadHome(); } catch (e) { toastError(e); }
     } },
-    { label: "Duplicate", disabled: viewer, action: async () => {
+    { label: "Duplicate", disabled: viewer && "View only", action: async () => {
       try {
         const copy = await api.duplicate(w.id);
         toast(`Created “${copy.name}”`, "success");
         await reloadHome();
       } catch (e) { toastError(e); }
     } },
-    { label: "Move to space…", disabled: viewer || writableSpaces().filter((s) => s.id !== w.space).length === 0, action: async () => {
+    { label: "Move to space…", disabled: viewer ? "View only" : writableSpaces().filter((s) => s.id !== w.space).length === 0 && "No other space you can edit", action: async () => {
       const v = await formDialog(`Move “${w.name}”`, [{
         name: "space", label: "Space", type: "select", value: w.space,
         options: writableSpaces().map((s) => ({ value: s.id, label: s.name })),
@@ -588,9 +588,9 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
       if (!v || v.space === w.space) return;
       try { await api.update(w.id, { space: v.space }); await reloadHome(); } catch (e) { toastError(e); }
     } },
-    { label: w.starred ? "Unstar" : "Star", disabled: viewer, action: () => toggleStar(w) },
+    { label: w.starred ? "Unstar" : "Star", disabled: viewer && "View only", action: () => toggleStar(w) },
     "sep",
-    { label: "Delete", danger: true, disabled: viewer, action: async () => {
+    { label: "Delete", danger: true, disabled: viewer && "View only", action: async () => {
       if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash."))) return;
       try { await api.remove(w.id); } catch (e) { toastError(e); }
       await reloadHome();

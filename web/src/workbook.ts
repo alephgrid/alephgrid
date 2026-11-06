@@ -634,8 +634,8 @@ export class WorkbookScreen {
         { label: "Find and replace…", hint: "⌘⇧H", disabled: !this.active && "Open a table or sheet first", action: act.findReplace },
       ]],
       ["View", () => [
-        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
-        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5, action: () => this.setZoom(this.grid.getZoom() - 0.1) },
+        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2 && "Already at 200%", action: () => this.setZoom(this.grid.getZoom() + 0.1) },
+        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5 && "Already at 50%", action: () => this.setZoom(this.grid.getZoom() - 0.1) },
         { label: "Actual size (100%)", action: () => this.setZoom(1) },
         "sep" as const,
         ...(this.isSheet() ? [
@@ -918,7 +918,7 @@ export class WorkbookScreen {
     ];
     if (current) {
       items.push(
-        { label: `Update “${current.name}”`, disabled: !this.savedViewModified(), action: () => this.saveView(current.id, current.name) },
+        { label: `Update “${current.name}”`, disabled: !this.savedViewModified() && "No changes to save", action: () => this.saveView(current.id, current.name) },
         { label: `Rename “${current.name}”…`, action: async () => {
           const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
           if (!v) return;
@@ -1411,24 +1411,32 @@ export class WorkbookScreen {
     }, 250);
   }
 
-  /** Sum/avg/count of the selected sheet cells that are already on screen. */
+  /** Count of the selected sheet cells that are already loaded, then Sum/Avg of their values
+   *  (U.T05): from the cells' numbers on the server, not their display, so a percent, a currency
+   *  or a date counts as the number it holds. */
   private sheetSelectionStats(range: Range): void {
     const cells = (range.r1 - range.r0 + 1) * (range.c1 - range.c0 + 1);
-    if (cells < 2 || cells > 200_000) return;
-    let count = 0, numbers = 0, sum = 0;
+    if (cells < 2 || cells > 200_000 || this.active?.kind !== "sheet") return;
+    let count = 0;
     for (let r = range.r0; r <= range.r1; r++) {
-      for (let c = range.c0; c <= range.c1; c++) {
-        const cell = this.sheetCache.cell(r, c);
-        if (!cell) continue;
-        count++;
-        const n = Number(cell[0].replace(/[, $€£%]/g, ""));
-        if (cell[1] === "right" && Number.isFinite(n)) { numbers++; sum += n; }
-      }
+      for (let c = range.c0; c <= range.c1; c++) if (this.sheetCache.cell(r, c)) count++;
     }
     if (!count) return;
-    const parts = [`Count ${formatCount(count)}`];
-    if (numbers) parts.unshift(`Sum ${formatStat(sum)}`, `Avg ${formatStat(sum / numbers)}`);
-    this.statsEl.textContent = parts.join("  ·  ");
+    const counted = `Count ${formatCount(count)}`;
+    if (!this.statsEl.textContent?.endsWith(counted)) this.statsEl.textContent = counted;
+    const sheet = this.active.index;
+    const seq = ++this.statsSeq;
+    clearTimeout(this.statsTimer);
+    this.statsTimer = window.setTimeout(async () => {
+      try {
+        const area = { row: range.r0, column: range.c0, rows: range.r1 - range.r0 + 1, columns: range.c1 - range.c0 + 1 };
+        const numbers = (await this.rpc.call("sheet_numbers", { sheet, area })).flat().filter((n): n is number => typeof n === "number");
+        if (seq !== this.statsSeq) return;
+        if (!numbers.length) { this.statsEl.textContent = counted; return; }
+        const sum = numbers.reduce((a, b) => a + b, 0);
+        this.statsEl.textContent = [`Sum ${formatStat(sum)}`, `Avg ${formatStat(sum / numbers.length)}`, counted].join("  ·  ");
+      } catch { /* the selection moved on */ }
+    }, 150);
   }
 
   private refreshFormulaValue(): void {
@@ -2616,12 +2624,12 @@ export class WorkbookScreen {
     const items: MenuItem[] = [
       { label: "Sort ascending", hint: "A→Z", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: false }] }) },
       { label: "Sort descending", hint: "Z→A", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: true }] }) },
-      { label: "Then sort by this", disabled: !this.spec.sort.length || this.spec.sort.some((s) => s.column === col.name),
+      { label: "Then sort by this", disabled: !this.spec.sort.length ? "Sort by another column first" : this.spec.sort.some((s) => s.column === col.name) && "Already in the sort",
         action: () => this.setSpec({ ...this.spec, sort: [...this.spec.sort, { column: col.name, desc: false }] }) },
       "sep",
       { label: "Filter by values…", hint: "Alt+↓", action: () => this.headerFilter(c, x, y) },
       { label: "Filter by condition…", action: () => this.filterDialog(c) },
-      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1,
+      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1 && "The last visible column stays",
         action: () => this.setSpec({ ...this.spec, hidden: [...this.spec.hidden, this.view!.columns[c].name] }) },
     ];
     if (activeValue !== undefined && activeValue !== null) {
@@ -2757,11 +2765,11 @@ export class WorkbookScreen {
           catch (e) { toastError(e); }
         };
         return [
-          { label: "Move left", disabled: pos <= 0, action: () => void move(this.sheets[pos - 1].index) },
-          { label: "Move right", disabled: pos < 0 || pos >= this.sheets.length - 1, action: () => void move(this.sheets[pos + 1].index) },
+          { label: "Move left", disabled: pos <= 0 && "Already first", action: () => void move(this.sheets[pos - 1].index) },
+          { label: "Move right", disabled: (pos < 0 || pos >= this.sheets.length - 1) && "Already last", action: () => void move(this.sheets[pos + 1].index) },
         ];
       })(),
-      { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
+      { label: "Hide sheet", disabled: this.sheets.length < 2 && "The only visible sheet stays visible", action: async () => {
         try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
         catch (e) { toastError(e); }
       } },
