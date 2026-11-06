@@ -402,3 +402,16 @@ test("U.T05: a viewer sees which commands their role does not allow, and why", a
   await expect(tools.getByRole("button", { name: "Go to" })).toBeEnabled();
   await vic.context().close();
 });
+
+test("U.T05: Analyze in a workbook without tables says what it needs", async ({ page }) => {
+  const wb = await server.createWorkbook("No tables"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  ws.close();
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await page.getByRole("toolbar", { name: "Workbook tools" }).getByRole("button", { name: "Analyze" }).click();
+  const pane = page.getByRole("complementary", { name: "Analyze" });
+  await expect(pane.getByRole("status")).toHaveText("Analyze summarizes tables, and this workbook has none yet. Import a file, or turn a sheet into a table from its tab menu (Convert to table).");
+  // Nothing to run against: Run is not offered.
+  await expect(pane.getByRole("button", { name: "Run", exact: true })).toHaveCount(0);
+});

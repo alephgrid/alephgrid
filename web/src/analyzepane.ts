@@ -85,6 +85,13 @@ export class AnalyzePane {
     try {
       [this.schema, this.saved] = await Promise.all([this.rpc.call("schema", {}), this.rpc.call("analyses", {})]);
     } catch (e) { this.status.textContent = (e as Error).message; return; }
+    if (!this.schema.length) {
+      // U.T05: no data source yet: say what Analyze needs instead of empty pickers.
+      this.body.replaceChildren();
+      this.status.textContent = "Analyze summarizes tables, and this workbook has none yet. Import a file, or turn a sheet into a table from its tab menu (Convert to table).";
+      this.panel.querySelector<HTMLElement>("button")?.focus();
+      return;
+    }
     this.source = this.host.table() ?? this.schema[0]?.name ?? "";
     this.defaults();
     this.render();
