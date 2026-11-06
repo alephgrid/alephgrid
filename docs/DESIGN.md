@@ -63,7 +63,29 @@ are compact (about 32 px) with 6–8 px radii and a 4/8/12/16/24/32 px spacing s
    views, filter, add column, format and find / replace. Import, Analyze, Functions and Export
    follow; SQL appears only when the server allows it.
 4. **Formula bar**: name box, `fx`, the cell's value or formula.
-5. **Grid**, then the **tab bar** with the selection's statistics and the row count.
+5. **Grid**, then the **tab bar**: new table or sheet, the searchable list of every table and
+   sheet (type to narrow, Enter to open), the tabs, the selection's statistics (Sum and Avg of
+   the cells' values, not their display) and the row count.
+
+A viewer's workbook says **View only** beside the save state; commands that would change it are
+disabled with that reason, and the server refuses them anyway.
+
+### Command inventory
+
+Each command and the task that delivers it; `e2e/commandinventory.spec.ts` runs every visible
+one in a table and a sheet (it opens its tool or is disabled with a reason, and opening and
+closing tools saves nothing).
+
+| Menu | Commands | Tasks |
+| --- | --- | --- |
+| File | New sheet · Import file… · Export CSV / CSV for Excel or Sheets / Parquet / JSON lines · Export .xlsx (compatibility notes first) · Rename workbook… · All workbooks | 2.02 · 2.05, U.07 · 1.05, SEC.13 · 2.03, F.13 · U.02 · U.02 |
+| Edit | Undo, Redo (sheets; tables via Change history) · Paste special… · Go to… · Find… · Find and replace… | 2.04 · F.04d · F.03 · U.17 (tables), S.04 (sheets) |
+| View | Zoom in / out / 100% · Freeze and unfreeze rows and columns · Explorer · Saved views… · Light / Dark / System theme | S.08 · S.05 · U.04 · 2.07 · U.01 |
+| Insert | Sheet · Column… · Named range… · Table from SQL query… · Demo data | 2.02 · F.08 · F.03 · 4.05 · SEC.11 |
+| Format | Sheets: bold, italic, underline · number formats with examples · merge and unmerge · conditional colour, allowed values, rules · clear formatting. Tables: Format table… | S.01 · S.02 · S.05 · S.10 · S.01 · 6.06 |
+| Data | Filter… · Analyze… · Dashboards… · Data tools… | U.16 · U.15 (6.01, 6.03) · 6.02, U.19 · F.12 |
+| Tools | SQL workspace · Functions… · Change history… · Compute and size… · Command palette | U.05 (phase 4) · U.06 · 7.09 · 7.13–7.16, U.09 · F.04, U.12 |
+| Help | Formula help · Keyboard shortcuts | F.03 · F.04, U.12 |
 
 The **explorer** (collapsed by default) lists tables with row counts, sheets, saved queries and
 functions; each opens from there. The **SQL workspace** docks under the grid: drag its top edge
@@ -110,9 +132,9 @@ draft in the grid. Function authoring (Code, Tests, Docs, Versions) is described
 
 | Family | States every instance handles |
 |---|---|
-| Buttons | Primary, secondary, ghost, icon, destructive; hover, focus-visible, pressed, disabled with a reason, busy; icon-only buttons have a label |
-| Inputs and choices | Empty, filled, focus, invalid with linked error text, disabled or read-only; keyboard-operable lists and groups |
-| Menus and popovers | Anchored, kept inside the viewport, dismissed by Escape or outside click, focus returned to the trigger; real shortcuts shown |
+| Buttons | Primary, secondary, ghost, icon, destructive; hover, focus-visible, pressed, disabled with a reason (its tooltip and accessible description, `disabledFor` in `web/src/ui.ts`), busy (`aria-busy`, cannot be pressed twice, `busy`); icon-only buttons have a label |
+| Inputs and choices | Empty, filled, focus, invalid with linked error text (`aria-invalid`, `aria-describedby`, focus moved to the field), disabled or read-only; keyboard-operable lists and groups |
+| Menus and popovers | Anchored, kept inside the viewport, dismissed by Escape or outside click, focus returned to the trigger; real shortcuts shown; a disabled item stays reachable by keyboard (`aria-disabled`) and shows its reason in place of the shortcut |
 | Grid | Active cell, range, copied range, frozen, hidden and read-only cells, editor, errors |
 | Feedback | Saving and saved, progress with cancel, retry, toasts (never the only place an error is shown), empty, loading and denied |
 | Dialogs | Labelled title, focus kept inside, Escape closes, focus returned; used for consequential or necessary decisions only |
@@ -144,12 +166,12 @@ closing the tab gets the browser's own warning.
 
 | Screen | Empty | Loading | Working | Failed / refused |
 | --- | --- | --- | --- | --- |
-| Hub | "No workbooks here yet. Drop a file on this page to start."; no spaces: "Ask an admin to add you to one."; search: "No workbooks match …" with Clear search | — | — | The reason with Try again (search, sort and scope kept); unauthenticated → sign-in page, then back to the same path |
+| Hub | "No workbooks here yet. Drop a file on this page to start."; no spaces: "Ask an admin to add you to one."; search: "No workbooks match …" with Clear search | The sidebar and placeholder rows ("Loading workbooks"), only when loading takes a moment | — | "Workbooks couldn't be loaded" with the reason and Try again (search, sort and scope kept); a workbook that is gone or in another space → "Workbook not found" with Back to workbooks; unauthenticated → sign-in page, then back to the same path |
 | Grid (tables) | Empty table with the append row | Placeholder bars in cells being fetched | Busy overlay for long view changes | Error toast; the view keeps its last good state |
 | Grid (sheets) | "Empty sheet" in the status bar | Placeholder bars in cells being fetched | — | Refused edits explain why (allowed values, covered merged cells, a stale layout, someone else's change) and keep the cell's value |
 | Formula bar | — | — | — | "Formula not saved: … Fix it, press Escape to discard…" with the draft kept |
 | Import | — | Upload progress | Import progress bar with **Stop import**; the pane stays open to retry | The problem and, when known, a one-click fix ("Import “col” as … and try again"); cancelling leaves no staged file |
-| SQL workspace, Analyze | Hints for a first query or analysis | Running indicator with Cancel | Queued and running jobs | The error with its position; results stay until replaced |
+| SQL workspace, Analyze | Hints for a first query or analysis; Analyze without tables says how to get one | Running indicator with Cancel, then "Cancelling…" until the server answers | Queued and running jobs | The error with its position; results stay until replaced |
 | Compute | Sleeping is described as normal | Starting / waiting in line | Running, resizing (restart) | Failed with the reason, Cancel and Restart |
 | Agent requests | — | — | A request that outlives its wait is a job (`job_status`) | Tool errors carry a recovery hint; cancelled jobs are discarded |
 | Dialogs and panes | "No … yet." lines (rules, comments, connections, proposals, backups) | "Loading…" | Buttons disabled while a change is in flight | Errors in the dialog's alert line; input kept |
