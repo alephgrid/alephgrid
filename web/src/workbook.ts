@@ -27,7 +27,8 @@ import type {
 } from "./types";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
-import { closeMenu, confirmDialog, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { closeMenu, confirmDialog, disabledFor, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { sheetList, type SheetListItem } from "./sheetlist";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { closeFilterPopup, filterPopup } from "./filterpopup";
@@ -587,7 +588,7 @@ export class WorkbookScreen {
       } });
     const act = this.act;
     const tool = (name: IconName, label: string, run: (e: MouseEvent) => void, o: { text?: string; title?: string; menu?: boolean } = {}) =>
-      el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label,
+      el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label, "data-title": o.title ?? label,
         "aria-haspopup": o.menu ? "menu" : false, onclick: run },
         icon(name), o.text ? el("span", {}, o.text) : null, o.menu ? icon("chevron", 12) : null);
     const sep = () => el("span", { class: "tool-sep", "aria-hidden": "true" });
@@ -775,6 +776,8 @@ export class WorkbookScreen {
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
           onclick: (e: MouseEvent) => this.newItemMenu(e) }, icon("plus", 15)),
+        el("button", { class: "tab-add", title: "All sheets and tables", "aria-label": "All sheets and tables", "aria-haspopup": "dialog",
+          "aria-expanded": "false", onclick: (e: MouseEvent) => this.openSheetList(e.currentTarget as HTMLElement) }, icon("list", 15)),
         this.tabsEl,
         el("div", { class: "spacer" }),
         this.statsEl,
@@ -994,13 +997,14 @@ export class WorkbookScreen {
     const sheet = this.isSheet();
     this.formatBarEl.hidden = !sheet;
     if (sheet) this.formatBarEl.sync?.();
+    // Controls that cannot run yet say why (U.04a, U.11a).
     for (const b of this.tableButtons) {
       b.hidden = sheet || !this.active;
-      b.disabled = !this.view;
+      disabledFor(b, !this.view && "Loading the table…", b.dataset.title ?? "");
     }
     for (const b of this.sheetButtons) b.hidden = !sheet;
     this.groupSep.hidden = !this.active;
-    if (this.exportBtn) this.exportBtn.disabled = !this.active;
+    if (this.exportBtn) disabledFor(this.exportBtn, !this.active && "Open a table or sheet to export it", this.exportBtn.dataset.title ?? "");
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
 
@@ -1117,6 +1121,17 @@ export class WorkbookScreen {
     all.forEach((t) => (t.tabIndex = t.classList.contains("active") || (!all.some((x) => x.classList.contains("active")) && t === all[0]) ? 0 : -1));
     if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
     this.renderExplorer();
+  }
+
+  /** U.04a: every table and sheet in a searchable list (the tab bar may not show them all). */
+  private openSheetList(anchor: HTMLElement): void {
+    const a = this.active;
+    sheetList(anchor, [
+      ...this.tables.map((t): SheetListItem => ({ kind: "table", name: t.name, detail: `${formatCount(t.row_count)} rows`,
+        active: a?.kind === "table" && a.name === t.name, open: () => void this.openTable(t.name) })),
+      ...this.sheets.map((s): SheetListItem => ({ kind: "sheet", name: s.name,
+        active: a?.kind === "sheet" && a.index === s.index, open: () => void this.openSheet(s.index) })),
+    ]);
   }
 
   private snapshotNote(table: string): string {

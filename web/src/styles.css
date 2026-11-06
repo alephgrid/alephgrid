@@ -887,3 +887,14 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; b
 .skeleton-name { width: 46%; }
 .skeleton-meta { width: 70%; }
 @media (max-width: 760px) { .skeleton-row { grid-template-columns: 24px minmax(0, 1fr); } }
+/* The searchable list of sheets and tables, anchored above the tab bar. */
+.sheet-list { position: fixed; z-index: 50; width: 280px; max-width: calc(100vw - 16px); padding: 6px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); }
+.sheet-list-search { width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.sheet-list-search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sheet-list-options { list-style: none; margin: 6px 0 0; padding: 0; max-height: min(320px, 50vh); overflow: auto; }
+.sheet-list-option { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.sheet-list-option:hover, .sheet-list-option.highlighted { background: var(--control); }
+.sheet-list-option[aria-selected="true"] .sheet-list-name { color: var(--accent-strong); font-weight: 700; }
+.sheet-list-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-list-detail { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.sheet-list-empty { margin: 8px; color: var(--muted); font-size: 13px; }

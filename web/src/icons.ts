@@ -38,6 +38,7 @@ const PATHS: Record<string, string> = {
   maximize: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   restore: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
   query: '<path d="M8 6h12M8 12h12M8 18h8"/><path d="m3 5 2 1-2 1M3 11l2 1-2 1"/>',
 };
 
