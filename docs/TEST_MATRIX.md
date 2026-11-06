@@ -627,7 +627,7 @@ reference exclusion and coordinate limits. The browser journey drags A1:A3 into 
 for C1, checks that C1 stays the destination, evaluates to 60, checks Escape and reopening,
 and exercises inline F4. Reference labels pass serious/critical axe checks in light/dark modes.
 The initial focused catalog/functions/references run passed all 9 tests. Scope and remaining
-editor limitations are in [FORMULA_EDITOR.md](FORMULA_EDITOR.md). No Rust evaluator or protocol
+editor limitations are in [the formula editor](FORMULA_CATALOG.md#the-formula-editor). No Rust evaluator or protocol
 behavior changed in this increment; the prior 234-test Rust baseline and known ignored
 array-input XLOOKUP regression remain applicable.
 

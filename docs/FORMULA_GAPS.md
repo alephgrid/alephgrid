@@ -1,4 +1,4 @@
-# P0 formula compatibility gaps
+# Formula compatibility gaps
 
 Pinned engine: IronCalc 0.9.1 with the local `alephgrid-compat-1` patch (29 October 2026).
 The six original desired-result regressions now pass and run without ignores. The coercion
@@ -34,8 +34,8 @@ Microsoft also documents the
 
 The [TEXTJOIN reference](https://support.microsoft.com/en-gb/excel/functions/textjoin-function)
 describes ignoring empty cells. Alephgrid's desired contract additionally skips explicit
-empty-string arguments with `ignore_empty=TRUE`; this scalar case needs direct Excel/Sheets
-comparison during upstream triage rather than treating the empty-cell documentation alone
+empty-string arguments with `ignore_empty=TRUE`; this scalar case needs direct comparison with
+Excel during upstream triage rather than treating the empty-cell documentation alone
 as proof of scalar parity. The expected result remains an explicit product contract.
 
 ## Reproduce and follow up
@@ -53,8 +53,8 @@ this patch. Binary searches retain IronCalc's sorted-input precondition.
 Before removing the local patch, reproduce on current upstream, check existing issues,
 and prepare focused upstream tests/proposals. Adopt an upstream release only after
 these regressions pass. No upstream issue or PR was submitted by this change.
-TEXTJOIN scalar empty-string behavior remains a Alephgrid contract pending independent
-Excel/Sheets parity evidence. Broader coercion/argument-mode certification remains open.
+TEXTJOIN scalar empty-string behavior remains an Alephgrid contract pending independent
+evidence from Excel. Broader coercion/argument-mode certification remains open.
 
 ## Coercion matrix gaps (30 October 2026)
 
@@ -79,7 +79,7 @@ serial 0. Excel's 1900 system numbers serial 1 as 1900-01-01 and counts the fict
 `DAY` reads it back as 1. A patch limited to DAY/MONTH/YEAR was tried and rejected: it made
 `DAY(DATE(1900,1,1))` return 2 and broke six upstream tests that pin the current numbering on
 purpose. Matching Excel needs one change to IronCalc's date numbering (DATE, DATEVALUE,
-parsing, formatting, financial functions and XLSX), which is upstream work tracked in F.14.
+parsing, formatting, financial functions and XLSX), which is [upstream work](UPSTREAM.md).
 Practical effect: only raw serials 0–60 and dates in January–February 1900 differ; the most
 likely case is `YEAR` of an empty cell, which is `#NUM!` here and 1900 in Excel.
 
@@ -96,13 +96,13 @@ listed explicitly. No ignored tests are used for them.
 
 ## AND and OR with an error after the deciding value
 
-Found by the F.09 sheet-cell comparison (`table_formula::tests::sheet_cells_agree_with_the_sheet_engine`).
+Found by the sheet-cell comparison (`table_formula::tests::sheet_cells_agree_with_the_sheet_engine`).
 `=AND(FALSE, P!A5)` where `P!A5` is `=1/0`: IronCalc returns `FALSE`, because it stops at the
 first `FALSE` (`logical_nary`, `short_circuit_value`); table formulas return `#DIV/0!`, because
 they evaluate every argument and return the first error. `OR` stops at the first `TRUE` the same
 way. Which one Excel does has not been verified here; Excel is generally described as not
 short-circuiting `AND`/`OR`, which would make IronCalc the one to change. Until it is checked
-against Excel (F.14), the difference is documented in [table formulas](TABLE_FORMULAS.md#errors)
+against Excel ([upstream work](UPSTREAM.md)), the difference is documented in [table formulas](TABLE_FORMULAS.md#errors)
 and is the only `AND`/`OR` case the comparison accepts.
 
 ## Sorted lookups over duplicate keys
@@ -113,8 +113,8 @@ engine's binary search (IronCalc `binary_search_on_array`) returns whichever equ
 midpoints reach, so the two engines can return different rows of the run. Excel's documented
 rule ("the largest value that is less than or equal to") does not say which duplicate; the
 choice of the last row is Alephgrid's and is not verified against Excel. Differential tests use
-sorted keys without duplicates; table tests check the documented choice by hand. Proposed for
-F.14: pin the sheet behaviour upstream (last duplicate) and verify against Excel output.
+sorted keys without duplicates; table tests check the documented choice by hand. Proposed
+upstream ([UPSTREAM.md](UPSTREAM.md)): pin the sheet behaviour upstream (last duplicate) and verify against Excel output.
 
 ## INDEX with row 0
 

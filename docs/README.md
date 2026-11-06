@@ -7,9 +7,8 @@
 | [SPREADSHEET_FEATURES.md](SPREADSHEET_FEATURES.md) | Everything a spreadsheet user can do, and what is partial or not planned |
 | [KEYBOARD.md](KEYBOARD.md) | Keyboard shortcuts, the fill handle, copy and paste, commands |
 | [TABLE_FORMULAS.md](TABLE_FORMULAS.md) | Sheet formulas that read whole tables (`XLOOKUP`, `SUMIFS`, …) |
-| [FORMULA_CATALOG.md](FORMULA_CATALOG.md) | Built-in functions with tested examples |
+| [FORMULA_CATALOG.md](FORMULA_CATALOG.md) | Built-in functions, their test evidence, and the formula editor |
 | [FORMULA_GAPS.md](FORMULA_GAPS.md) | Known formula differences from Excel, with reproducible inputs |
-| [FORMULA_EDITOR.md](FORMULA_EDITOR.md) | Picking references, anchors and coloured ranges while editing |
 | [FUNCTIONS.md](FUNCTIONS.md) | Your own functions: formula and SQL, tests, versions |
 | [PYTHON_FUNCTIONS.md](PYTHON_FUNCTIONS.md) | Python functions and their sandbox |
 | [ANALYSIS.md](ANALYSIS.md) | Summaries, pivots, joins, charts and clean-up without SQL |

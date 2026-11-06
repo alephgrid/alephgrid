@@ -29,7 +29,7 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Feature | State | Notes and task |
 | --- | --- | --- |
 | Built-in functions (pinned engine) | Shipped | [FORMULA_CATALOG.md](FORMULA_CATALOG.md), gaps in [FORMULA_GAPS.md](FORMULA_GAPS.md) |
-| Autocomplete, argument help, F4 anchors, coloured references | Shipped | F.03, [FORMULA_EDITOR.md](FORMULA_EDITOR.md) |
+| Autocomplete, argument help, F4 anchors, coloured references | Shipped | F.03, [the formula editor](FORMULA_CATALOG.md#the-formula-editor) |
 | Reference picking by click / drag | Partial | Same sheet only |
 | Named ranges | Shipped | F.03 |
 | Dynamic arrays, LET / LAMBDA | Shipped | F.10 |
