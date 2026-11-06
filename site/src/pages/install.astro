@@ -4,62 +4,98 @@ import releases from '../data/releases.json';
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
+const source = releases.channels.find((c) => c.id === 'source');
 const planned = releases.channels.filter((c) => !c.published);
 ---
 
-<SiteLayout title="Install Alephgrid" description="Build Alephgrid from source today; native binaries, package managers and container images arrive with v0.1.0.">
-  <main>
-    <section class="ag-hero" style="padding-bottom:1rem">
+<SiteLayout title="Install Alephgrid" description="Build Alephgrid from source today on macOS or Linux; native binaries, package managers and container images arrive with v0.1.0.">
+  <main id="main">
+    <header class="ag-pagehead">
       <div class="ag-container">
-        <p class="ag-kicker"><span class="ag-ref"><b>{releases.current.label}</b></span></p>
         <h1>Install Alephgrid</h1>
-        <p class="ag-sub">
-          Alephgrid is pre-release. The ready path today is building from source on macOS or
-          Linux (on Windows, use Docker or WSL). Every channel below flips to ready only when its
-          artifacts exist, are checksummed and have passed a clean-machine install.
+        <p class="ag-lead">
+          Alephgrid is pre-release. Today you build it from source on macOS or Linux; on Windows,
+          use Docker or WSL. Each other channel below is enabled only when its artifacts exist, are
+          checksummed and pass a clean-machine install.
         </p>
+        <p class="ag-status-line"><span>{releases.current.label}</span></p>
       </div>
-    </section>
+    </header>
 
-    <section class="ag-section" style="padding-top:1rem">
+    <section class="ag-page-section" aria-labelledby="source-title">
       <div class="ag-container">
-        <h2>Build from source</h2>
-        <p class="ag-lead">Requires Rust 1.88+ and Node 20+. The first build compiles DuckDB from source, which takes several minutes.</p>
+        <h2 id="source-title">Build from source</h2>
+        <p class="ag-lead">The ready path today. The server embeds the web UI, so you build the UI first.</p>
+        <dl class="ag-dl">
+          <div><dt>Platforms</dt><dd>{source?.platforms?.join(' and ')}</dd></div>
+          <div><dt>Toolchain</dt><dd>{source?.requires} (rustup installs the pinned Rust toolchain)</dd></div>
+          <div><dt>First build</dt><dd>Compiles DuckDB from source, which takes several minutes</dd></div>
+        </dl>
         <div class="ag-code-wrap">
-          <pre class="ag-code">git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
+          <div class="ag-code-bar">
+            <span>Terminal</span>
+            <button class="ag-copy" type="button" data-copy>Copy</button>
+          </div>
+          <pre class="ag-code" tabindex="0"><code>git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
 (cd web &amp;&amp; npm install &amp;&amp; npm run build)
 cargo build --release
-./target/release/alephgrid --demo-rows 10000000</pre>
-          <button class="ag-copy" data-copy>Copy</button>
+./target/release/alephgrid --demo-rows 10000000</code></pre>
         </div>
-        <p class="ag-caption" style="text-align:left">
+        <p class="ag-note">
           The server prints its URL (default <code>http://127.0.0.1:7878</code>) and stores data in
           <code>./alephgrid-data</code>. On your own machine there is no sign-in and it listens on
-          loopback only. First steps: <a href={url('/docs/getting-started/')}>getting started</a>.
+          loopback only. Next: <a href={url('/docs/getting-started/')}>your first workbook</a>.
         </p>
       </div>
     </section>
 
-    <section class="ag-section">
+    <section class="ag-page-section" aria-labelledby="docker-title">
       <div class="ag-container">
-        <h2>Planned channels</h2>
+        <h2 id="docker-title">Run it for a team with Docker Compose</h2>
         <p class="ag-lead">
-          These are tracked on the <a href={url('/releases/')}>releases page</a> and enabled one by
-          one as v0.1.0 artifacts pass verification. No command appears here until it actually works.
+          From a checkout of the repository. The logs print a one-time setup code that creates the
+          first administrator.
         </p>
-        <table class="ag-table">
-          <thead>
-            <tr><th scope="col">Channel</th><th scope="col">Status</th></tr>
-          </thead>
-          <tbody>
-            {planned.map((c) => (
-              <tr>
-                <td>{c.name}</td>
-                <td><span class="ag-status planned">Planned</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div class="ag-code-wrap">
+          <div class="ag-code-bar">
+            <span>Terminal, in the repository</span>
+            <button class="ag-copy" type="button" data-copy>Copy</button>
+          </div>
+          <pre class="ag-code" tabindex="0"><code>docker compose up -d
+docker compose logs alephgrid | grep "setup code"
+open http://localhost:7878/setup</code></pre>
+        </div>
+        <p class="ag-note">
+          Accounts, roles, single sign-on, backups and upgrades:
+          <a href={url('/docs/self-hosting/')}>self-hosting</a> and
+          <a href={url('/docs/operations/')}>operations</a>.
+        </p>
+      </div>
+    </section>
+
+    <section class="ag-page-section" aria-labelledby="planned-title">
+      <div class="ag-container">
+        <h2 id="planned-title">Planned channels</h2>
+        <p class="ag-lead">
+          Enabled one by one as v0.1.0 artifacts pass verification, and tracked on the
+          <a href={url('/releases/')}>releases page</a>. No command appears here until it works.
+        </p>
+        <div class="ag-table-wrap" role="region" aria-label="Planned install channels" tabindex="0">
+          <table class="ag-table">
+            <thead>
+              <tr><th scope="col">Channel</th><th scope="col">Status</th><th scope="col">Notes</th></tr>
+            </thead>
+            <tbody>
+              {planned.map((c) => (
+                <tr>
+                  <td>{c.name}</td>
+                  <td><span class="ag-status planned">Planned</span></td>
+                  <td class="ag-muted">{c.notes ?? 'Arrives with v0.1.0 artifacts'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   </main>

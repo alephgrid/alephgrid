@@ -4,84 +4,86 @@ import releases from '../data/releases.json';
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
+const repo = 'https://github.com/alephgrid/alephgrid';
 ---
 
 <SiteLayout title="Alephgrid releases" description="Release notes, versioning policy and channel readiness for Alephgrid.">
-  <main>
-    <section class="ag-hero" style="padding-bottom:1rem">
+  <main id="main">
+    <header class="ag-pagehead">
       <div class="ag-container">
         <h1>Releases</h1>
-        <p class="ag-sub">
+        <p class="ag-lead">
           Versions follow <a href="https://semver.org">Semantic Versioning</a>. Before 1.0 a minor
           version may change the storage format; such versions migrate workbooks on open and keep
           the old file. Only the latest release receives fixes.
         </p>
       </div>
-    </section>
+    </header>
 
-    <section class="ag-section" style="padding-top:1rem">
+    <section class="ag-page-section" aria-labelledby="next-title">
       <div class="ag-container">
-        <h2>v0.1.0 — in preparation</h2>
+        <h2 id="next-title">v0.1.0, in preparation</h2>
         <p class="ag-lead">
-          The first release is being stabilized on <code>main</code>. The authoritative, always
-          current list is the repository
-          <a href="https://github.com/alephgrid/alephgrid/blob/main/CHANGELOG.md">CHANGELOG</a>;
-          highlights of what it ships:
+          The first release is being stabilized on <code>main</code>. The always-current list is
+          the repository <a href={`${repo}/blob/main/CHANGELOG.md`}>CHANGELOG</a>; these are the
+          highlights.
         </p>
-        <div class="ag-cols">
-          <div class="ag-col">
+        <div class="ag-topics">
+          <div>
             <h3>Sheets</h3>
-            <p>Excel-syntax formulas with cross-sheet references, formatting, merged cells, frozen panes, charts with preview, colour rules, comments, fill handle, find and replace, XLSX round-trip.</p>
+            <p>Excel-syntax formulas with cross-sheet references, formatting, merged cells, frozen panes, charts with preview, colour rules, comments, the fill handle, find and replace, XLSX import and export.</p>
           </div>
-          <div class="ag-col">
+          <div>
             <h3>Big tables</h3>
-            <p>Virtual grid over any number of rows, typed edits, calculated columns, multi-column sort and filters, Analyze pane for pivots and profiles, reviewed streaming imports.</p>
+            <p>A virtual grid that fetches only the rows on screen, typed edits, calculated columns, multi-column sort and filters, the Analyze pane for pivots and profiles, reviewed streaming imports.</p>
           </div>
-          <div class="ag-col">
+          <div>
             <h3>Functions and SQL</h3>
             <p>Reusable functions as formulas, SQL or sandboxed Python with tests and versions; a dockable SQL workspace with autocomplete, parameters and saved queries.</p>
           </div>
-          <div class="ag-col">
+          <div>
             <h3>Teams and agents</h3>
-            <p>Spaces, roles, password or OpenID Connect sign-in, quotas, audit, backups — plus read-only MCP access for AI agents with content-hashed receipts.</p>
+            <p>Spaces, roles, password or OpenID Connect sign-in, quotas, audit, backups, and read-only MCP access for AI agents with content-hashed receipts.</p>
           </div>
-          <div class="ag-col">
+          <div>
             <h3>Security</h3>
-            <p>Ships the remediation from the 31 October 2026 security audit. Reports: <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+            <p>Includes the fixes from the 31 October 2026 security audit. Report issues as described in <a href={`${repo}/blob/main/SECURITY.md`}>SECURITY.md</a>.</p>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="ag-section">
+    <section class="ag-page-section" aria-labelledby="channels-title">
       <div class="ag-container">
-        <h2>Channel readiness</h2>
+        <h2 id="channels-title">Channel readiness</h2>
         <p class="ag-lead">
-          Downloads on this site are generated from a release manifest with artifact URLs and
-          SHA-256 checksums. A channel is marked ready only after a clean-machine install passes.
+          Downloads on this site come from a release manifest with artifact URLs and SHA-256
+          checksums. A channel is marked ready only after a clean-machine install passes.
         </p>
-        <table class="ag-table">
-          <thead>
-            <tr><th scope="col">Channel</th><th scope="col">Status</th><th scope="col">Notes</th></tr>
-          </thead>
-          <tbody>
-            {releases.channels.map((c) => (
-              <tr>
-                <td>{c.name}</td>
-                <td>
-                  {c.published
-                    ? <span class="ag-status ready">Ready</span>
-                    : <span class="ag-status planned">Planned</span>}
-                </td>
-                <td>{c.published ? (c.requires ?? '') : (c.notes ?? 'Arrives with v0.1.0 artifacts')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <p class="ag-caption" style="text-align:left">
-          Upgrade and rollback guidance lives in the
-          <a href="https://github.com/alephgrid/alephgrid/blob/main/docs/OPERATIONS.md">operations guide</a>.
-          Install paths: <a href={url('/install/')}>install page</a>.
+        <div class="ag-table-wrap" role="region" aria-label="Channel readiness" tabindex="0">
+          <table class="ag-table">
+            <thead>
+              <tr><th scope="col">Channel</th><th scope="col">Status</th><th scope="col">Notes</th></tr>
+            </thead>
+            <tbody>
+              {releases.channels.map((c) => (
+                <tr>
+                  <td>{c.name}</td>
+                  <td>
+                    {c.published
+                      ? <span class="ag-status ready">Ready</span>
+                      : <span class="ag-status planned">Planned</span>}
+                  </td>
+                  <td class="ag-muted">{c.published ? (c.requires ?? '') : (c.notes ?? 'Arrives with v0.1.0 artifacts')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="ag-note">
+          Upgrade and rollback guidance is in the
+          <a href={`${repo}/blob/main/docs/OPERATIONS.md`}>operations guide</a>. To install today,
+          see the <a href={url('/install/')}>install page</a>.
         </p>
       </div>
     </section>
