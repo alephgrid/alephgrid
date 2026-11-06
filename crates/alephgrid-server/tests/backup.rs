@@ -137,3 +137,85 @@ async fn offline_backup_fails_closed_while_a_server_runs_and_round_trips_when_st
     assert_eq!(after, before, "byte-identical export after backup and restore");
     restored.stop().await;
 }
+
+/// 9.04: the documented procedure, with the binary's own `--backup-to` and `--restore-from`:
+/// a data directory with accounts, a space, a workbook (table and sheet), a member and a
+/// service token is backed up to another location, the original is lost, the backup is
+/// restored into an empty directory and a server started on it serves the same data to the
+/// same people.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cli_backs_up_accounts_and_workbooks_and_restores_them_on_a_clean_data_directory() {
+    const PASSWORD: &str = "a long enough password";
+    let original = tempfile::tempdir().unwrap();
+    let server = TestServer::start_accounts(original.path(), |_| {}).await;
+    let admin = server.admin().await;
+    let org = admin.me["orgs"][0]["org"]["id"].as_str().unwrap().to_string();
+    let space = admin.ok(Method::POST, "/api/spaces", Some(json!({ "name": "Ops" }))).await["id"].as_str().unwrap().to_string();
+    let wb = admin.ok(Method::POST, "/api/workbooks", Some(json!({ "name": "cities", "space": space }))).await["id"].as_str().unwrap().to_string();
+    let (s, v) = admin.send_bytes(Method::POST, &format!("/api/workbooks/{wb}/import?filename=cities.csv"), b"city,people\nPune,7\nOslo,3\n".to_vec()).await;
+    assert_eq!(s, 200, "{v}");
+    let mut ws = admin.ws(&wb).await.unwrap();
+    ws.ok("sheet_create", json!({ "name": "S" })).await;
+    ws.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 0, "column": 0, "value": "6" }, { "row": 0, "column": 1, "value": "=A1*7" }] })).await;
+    ws.close().await;
+    let code = admin.invite(&org, "editor@example.com", Some(&space), Some("editor")).await;
+    let editor = server.accept(&code, "editor", PASSWORD).await;
+    let token = admin.ok(Method::POST, &format!("/api/spaces/{space}/tokens"), Some(json!({ "name": "reports", "role": "viewer", "days": 30 }))).await["secret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let export = format!("/api/workbooks/{wb}/export?spec={}&format=csv", urlencode(r#"{"table":"cities"}"#));
+    let (s, before) = editor.get(&export).await;
+    assert_eq!(s, 200, "{before}");
+    server.stop().await;
+
+    // Offline backup to another location, with the CLI.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let backup = elsewhere.path().join("backup-1");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_alephgrid"))
+        .args(["--data-dir", original.path().to_str().unwrap(), "--backup-to", backup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "--backup-to: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("backed up 1 workbook(s)"));
+    // The original host is gone.
+    drop(original);
+
+    // Restore into an empty directory on a "clean host", with the CLI.
+    let clean = tempfile::tempdir().unwrap();
+    let data = clean.path().join("data");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_alephgrid"))
+        .args(["--data-dir", data.to_str().unwrap(), "--restore-from", backup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "--restore-from: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // Restoring again over it is refused: restore never writes into a used directory.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_alephgrid"))
+        .args(["--data-dir", data.to_str().unwrap(), "--restore-from", backup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a second restore into the same directory must fail");
+
+    let restored = TestServer::start_accounts(&data, |_| {}).await;
+    assert_eq!(restored.get("/readyz").await.0, 200);
+    // The member signs in with the same password and keeps the role; the data is the same.
+    let editor_again = restored.login("editor@example.com", PASSWORD).await.expect("the restored user signs in");
+    let (s, v) = editor_again.get(&format!("/api/workbooks/{wb}")).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["role"], "editor");
+    assert_eq!(v["workbook"]["space"], space.as_str());
+    assert_eq!(editor_again.get(&export).await, (200, before));
+    let mut ws = editor_again.ws(&wb).await.unwrap();
+    let cells = ws.ok("sheet_fetch", json!({ "sheet": 0, "row_start": 0, "row_count": 1, "column_count": 2 })).await;
+    assert_eq!(cells["rows"][0][1][0], "42");
+    ws.close().await;
+    // The service token carries over, still read-only.
+    let reports = restored.bearer(&token);
+    assert_eq!(reports.get(&format!("/api/workbooks/{wb}")).await.0, 200);
+    assert_eq!(reports.send(Method::PATCH, &format!("/api/workbooks/{wb}"), Some(json!({ "name": "renamed" }))).await.0, 403);
+    // Sign-in sessions are in the control database too: one made before the backup still
+    // works until it expires (or the user is disabled, or signs out).
+    let old = Session { addr: restored.addr, ..editor.clone() };
+    assert_eq!(old.get("/api/me").await.0, 200);
+    restored.stop().await;
+}
