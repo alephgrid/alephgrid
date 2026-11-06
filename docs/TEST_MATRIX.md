@@ -1,7 +1,9 @@
 # Test matrix
 
-Maps checklist task IDs ([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)) to their behavior, tests and latest
-results. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
+The historical evidence record for phases 1–8 and F: each checklist task ID
+([IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)) with its contract, tests and the
+results recorded when it was completed. Results carry their date and machine; later work records
+its evidence in the checklist. Layers A–H are defined in [TEST_STRATEGY.md](TEST_STRATEGY.md). Paths are relative to the repository root.
 `E` = `crates/alephgrid-core/src/tests/`, `S` = `crates/alephgrid-server/tests/`, `W` = `web/e2e/`.
 
 **Phase 1 verification (2026-10-26, macOS arm64, local).** CI on PR #1 has since run `cargo test --workspace` on Linux: all tests passed; the run then failed only because clippy was missing from the pinned toolchain (fixed in `ec28345`).

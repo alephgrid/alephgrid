@@ -6,7 +6,9 @@ values, fault injection, randomized operation sequences checked against a simple
 and recovery checks. It does not claim SQLite's level of assurance. Coverage numbers and
 test counts are indicators, not proof.
 
-The per-task evidence lives in [TEST_MATRIX.md](TEST_MATRIX.md).
+Per-task evidence lives beside each task in the
+[implementation checklist](IMPLEMENTATION_CHECKLIST.md); for phases 1–8 and F the contracts
+and recorded results are also in [TEST_MATRIX.md](TEST_MATRIX.md).
 
 ## Rules for every change
 
@@ -80,9 +82,9 @@ defect: undo history was lost after rejected requests.
 |---|---|---|
 | Per change (CircleCI `check`) | on request, before merging (`tools/ci.sh check`); locally before every PR | web build + type check; `cargo test --workspace` (unit, integration, property with 96 cases, protocol drift, crash, disk-full); clippy with `-D warnings`; Playwright journeys in Chromium |
 | Extended (CircleCI `full`) | on request, before a release or after storage, collaboration or recovery changes (`tools/ci.sh full`) | The check, plus Firefox and WebKit journeys; property tests with 2000 cases; server suites repeated 5× to surface flakiness |
-| Release | manual, before tagging | Everything above, plus a clean install, an upgrade/restore and authorization checks once those exist (phases 3, 7, 9). Not yet defined in automation |
+| Release (CircleCI `release`) | on a version tag (`tools/ci.sh release vX.Y.Z`) | Builds each platform binary and smoke-tests it (starts, serves the UI, creates a workbook, imports a CSV) before anything is published ([RELEASING.md](RELEASING.md)). Run `full` first. A clean-machine install, upgrade/restore and authorization pass is still manual (9.T01, 9.T03) |
 
-"Test implemented" and "test executed successfully" are recorded separately in the matrix.
+"Test implemented" and "test executed successfully" are recorded separately.
 Local runs do not count as extended or release checks having passed. CI never runs on its own; see [CI.md](CI.md).
 
 ## Commands

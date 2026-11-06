@@ -137,12 +137,12 @@ the same DuckDB file, so a workbook is still one file you can copy or back up.
   moves it with its cell; after every sheet or formula change the workbook rewrites table
   formulas to match and saves the cells' values in `_rf_links` in the same transaction. Table
   reads use those saved values, never the live model, so they stay snapshot-consistent. See
-  [sheet cells](TABLE_FORMULAS.md#sheet-cells-f09).
+  [sheet cells](TABLE_FORMULAS.md#sheet-cells).
 * Sheet cells can read tables (`=SUMIFS(orders[amount], …)`): the table formula is stored in
   `_rf_table_cells` with a result slot, the sheet engine holds a reference to that slot in column
   B of `_rf_links`, and every commit recomputes the table cells whose inputs changed, in rounds,
   inside the same transaction, after refusing circular references across both engines. See
-  [sheet cells that read tables](TABLE_FORMULAS.md#sheet-cells-that-read-tables-f09).
+  [sheet cells that read tables](TABLE_FORMULAS.md#sheet-cells-that-read-tables).
 * `.xlsx` import and export use the `ironcalc` crate's reader and writer. Importing
   into an empty workbook adopts the model with its styles; otherwise cell inputs
   are copied into new sheets.
