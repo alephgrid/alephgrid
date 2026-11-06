@@ -1,19 +1,23 @@
 # Workbook functions
 
-Phase 5 adds reusable sheet formulas and SQL scalar expressions. Open a workbook and choose **Functions**.
-Definitions belong to that workbook. Python, space-wide sharing, and an Excel add-in are separate later features.
+Workbook functions are reusable calculations written as a sheet formula, a SQL scalar expression or
+[Python](PYTHON_FUNCTIONS.md). Open a workbook and choose **Functions**: a side panel opens beside
+the grid with **Code**, **Tests**, **Docs** and **Versions** tabs. Definitions belong to that
+workbook. Space libraries share saved queries and views, not functions ([TEAMS.md](TEAMS.md)).
 
 ## Create and call
 
-1. Choose **Sheet formula**, name `MARGIN`, and arguments `revenue, cost`.
-2. Enter `IF(revenue=0,0,(revenue-cost)/revenue)` and describe its purpose in Documentation.
-3. Add test cases, for example `[{"arguments":["100","60"],"expected":"0.4"}]`.
-4. Choose **Run tests**, then **Publish version**. Failed expected values prevent publication.
+1. Choose **New**, set **Language** to **Formula**, name `MARGIN`, and arguments `revenue, cost`.
+2. Enter `IF(revenue=0,0,(revenue-cost)/revenue)` and describe its purpose on the **Docs** tab.
+3. On the **Tests** tab, **Add test** with inputs `100` and `60` and expected result `0.4`. (Tests
+   can also be edited as JSON under Advanced: `[{"arguments":["100","60"],"expected":"0.4"}]`.)
+4. Choose **Run tests** (or Mod+Enter in the panel), then **Publish version**. Failed expected values
+   prevent publication. Opening the panel or an example never runs code.
 5. In a sheet enter `=MARGIN(B2,C2)`. Cells and ranges are passed to IronCalc's named LAMBDA evaluator, with no source substitution.
 
 The formula bar suggests active functions: type `=MAR`, press Tab to insert `MARGIN(`, and see its signature and documentation. Sheet tabs suggest formula functions; table tabs suggest SQL functions. Suggestions refresh when the formula bar receives focus.
 
-For SQL, choose **SQL expression** and use a scalar expression, for example:
+For SQL, set **Language** to **SQL** (offered only when the server allows SQL) and use a scalar expression, for example:
 
 ```sql
 (CAST(revenue AS DOUBLE) - CAST(cost AS DOUBLE)) / CAST(revenue AS DOUBLE)
@@ -25,20 +29,20 @@ Test arguments are literal strings. SQL tests pass quoted strings, with the exac
 
 ## Versions and dependencies
 
-The uppercase function name is its stable identity within a workbook. Names cannot be renamed or deleted in this release. Publishing creates an immutable, sequential version. A new function activates version 1; publishing a subsequent version leaves its existing pin unchanged. Choose a version and **Activate selected version** to upgrade or roll back. Other workbooks never change.
+The uppercase function name is its stable identity within a workbook. Names cannot be renamed or deleted in this release. Publishing creates an immutable, sequential version. A new function activates version 1; publishing a subsequent version leaves its existing pin unchanged. On the **Versions** tab, choose **Activate in this workbook** next to a version to upgrade or roll back. Other workbooks never change.
 
 Calls to workbook functions capture exact dependency versions at publication. Indirect recursion and incompatible dependency graphs are rejected. A dependency cannot be upgraded underneath an active dependent.
 
 For a coordinated upgrade:
 
 1. Publish `BASE` v2 (v1 remains active).
-2. Edit `DERIVED`, set Dependency versions to `{"BASE":2}`, and publish its v2.
-3. Set Active versions to `{"BASE":2,"DERIVED":2}` and choose **Activate version map**.
+2. Edit `DERIVED`, set Dependency versions (Versions tab, Advanced) to `{"BASE":2}`, and publish its v2.
+3. Under Advanced on the **Versions** tab, set Active versions to `{"BASE":2,"DERIVED":2}` and choose **Activate version map**.
 4. Roll back with `{"BASE":1,"DERIVED":1}`.
 
 The map changes all requested pins in one transaction or changes nothing. Registry, persistent SQL macros, sheet definitions, recalculated cells, revision and history commit together. Activating changed sheet definitions resets the cell undo history; use version pins for function rollback. Publishing an inactive version preserves cell undo history.
 
-Each version records the function adapter (`alephgrid-functions-v1/ironcalc-0.9.1`), actual DuckDB version and dependency pins. RuntimeSpec includes the adapter alongside DuckDB and IronCalc. Incompatible runtimes, missing pins or dependencies fail before serving calculations. There is no fallback to the latest available version. Storage format 4 adds this contract; older workbooks migrate with the existing backup procedure. Engine upgrades need an explicit future migration/compatibility process.
+Each version records the function adapter (`alephgrid-functions-v1/ironcalc-0.9.1`), actual DuckDB version and dependency pins. RuntimeSpec includes the adapter alongside DuckDB and IronCalc. Incompatible runtimes, missing pins or dependencies fail before serving calculations. There is no fallback to the latest available version. Older workbooks migrate on open, keeping a copy of the old file. Engine upgrades need an explicit migration and compatibility review.
 
 ## Supported semantics
 
@@ -58,7 +62,7 @@ Formula bodies support operators, constants, declared arguments, named workbook 
 `IF`, `IFERROR`, `IFNA`, `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `AND`, `OR`, `NOT`, `ISBLANK`, `ISNUMBER`, `ISTEXT`, `LEN`, `LOWER`, `UPPER`, `TRIM`, `LEFT`, `RIGHT`, `MID`, `DATE`, `YEAR`, `MONTH`, `DAY`, `SQRT`.
 Nested named-function calls are supported; dynamically invoked or returned LAMBDAs are not. SQL functions permit catalog scalar functions without side effects, subject to the existing SQL policy; current-time functions are refused. Pass the observation date/time as an argument for reproducible calculations.
 
-Limits: 4 MiB total serialized registry, 128 functions per workbook, 100 versions per function, 1–16 arguments, 4 KiB source, 8 KiB documentation, 32 test cases, 4 KiB per test input/expected value, and a conservative 64 KiB expanded expression budget. Test SQL runs with external access disabled, 64 MiB scratch memory, one thread, no disk spill and a two-second interrupt deadline. Formula validation excludes unbounded looping/dynamic evaluation; the current Local provider still shares a process with the server and is intended for trusted users/teams. These limits are not a hostile-code isolation boundary.
+Limits: 4 MiB total serialized registry, 128 functions per workbook, 100 versions per function, 1–16 arguments, 4 KiB source (64 KiB for Python), 8 KiB documentation, 32 test cases, 4 KiB per test input/expected value, and a conservative 64 KiB expanded expression budget. Test SQL runs with external access disabled, 64 MiB scratch memory, one thread, no disk spill and a two-second interrupt deadline. Formula validation excludes unbounded looping/dynamic evaluation; the current Local provider still shares a process with the server and is intended for trusted users/teams. These limits are not a hostile-code isolation boundary.
 
 ## Export and recovery
 

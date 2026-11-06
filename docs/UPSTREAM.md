@@ -1,4 +1,4 @@
-# IronCalc upstream work (F.14)
+# IronCalc upstream work
 
 Alephgrid computes sheets with IronCalc and keeps connectors, UI and the DuckDB table engine in
 Alephgrid. This file triages what IronCalc lacks or gets wrong, tracks the local patch set, and
@@ -12,7 +12,7 @@ unreleased main branch was not reviewed; do that before submitting.
 ## Missing functions
 
 The catalog lists 562 names; IronCalc 0.9.1 registers 486. All 76 it does not register are
-Google Sheets functions without an Excel counterpart in the catalog's sources (`ARRAYFORMULA`,
+functions of other spreadsheet products without an Excel counterpart in the catalog's sources (`ARRAYFORMULA`,
 `SPLIT`, `JOIN`, `REGEXMATCH`, `TO_DATE`, `COUNTUNIQUE`, …). IronCalc targets Excel
 compatibility, so none is proposed upstream; they stay explicit "not registered" entries in the
 help, and the Excel spellings (`TEXTSPLIT`, `TEXTJOIN`, …) cover the same needs. No missing

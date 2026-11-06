@@ -25,8 +25,10 @@ If you change a type that crosses the wire, regenerate the TypeScript bindings:
 `UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol`.
 
 Every behavior change needs tests proportional to what can go wrong; see
-[docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md) and record them in
-[docs/TEST_MATRIX.md](docs/TEST_MATRIX.md). Bug fixes start with a test that fails.
+[docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md). Record the tests beside the task in
+[docs/IMPLEMENTATION_CHECKLIST.md](docs/IMPLEMENTATION_CHECKLIST.md) when there is one, and keep
+[docs/SPREADSHEET_FEATURES.md](docs/SPREADSHEET_FEATURES.md) in step with user-visible changes.
+Bug fixes start with a test that fails.
 
 ## Where things live
 
@@ -37,7 +39,8 @@ Every behavior change needs tests proportional to what can go wrong; see
   `Op` enum in `src/ws.rs`, their result type in `protocol::RESULTS`, and
   `docs/PROTOCOL.md`. Integration tests in `tests/` run the real router in-process.
 - **Web** (`web/src`): `grid.ts` (drawing and input), `cache.ts` (row fetching),
-  `workbook.ts` (screen), `ui.ts` (menus and dialogs).
+  `workbook.ts` (screen), `ui.ts` (menus and dialogs), `workbookcommands.ts` (every command and
+  its shortcut). Interface rules are in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Principles
 

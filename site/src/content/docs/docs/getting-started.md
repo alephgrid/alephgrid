@@ -9,7 +9,7 @@ binaries, package managers and published container images arrive with v0.1.0 —
 
 ## Build from source
 
-Requires **Rust 1.88+** and **Node 20+**.
+Requires **Rust 1.89+** and **Node 20+**.
 
 ```bash
 git clone https://github.com/alephgrid/alephgrid && cd alephgrid

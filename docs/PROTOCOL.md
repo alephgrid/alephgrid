@@ -1,4 +1,4 @@
-# WebSocket protocol (v0.6)
+# WebSocket and HTTP protocol
 
 Connect to `ws(s)://<host>/ws/<workbook-id>`. With `--auth accounts` the upgrade request
 carries the session cookie (browsers) or `Authorization: Bearer agt_…` (service tokens); a
@@ -56,7 +56,7 @@ with `sheet: null` and `origin: 0`. `sheet_delete` is refused while table formul
 cells on other sheets read the sheet. `sheet_set` turns a formula naming a table into a table
 cell, and `sheet_check_formula` checks such formulas as table formulas.
 
-Large tables keep stored formula results (F.09). After a change makes them stale the server
+Large tables keep stored formula results. After a change makes them stale the server
 recalculates them in the background and sends `table_changed` (`origin: 0`) when done, failed
 or cancelled. Until then, views sorted or filtered by formula columns carry `stale` (on
 `ViewInfo` and `RowBlock`: `recalculating`, or `recalculation failed: …`) and keep the last
@@ -112,6 +112,11 @@ The full contract, with undo, is [COLLABORATION.md](COLLABORATION.md).
 | `sql_change` | `query` got an INSERT/UPDATE/DELETE: confirm, then send it with `sql_change` |
 | `bad_parameter` | a `$name` has no value, is not used, or its value does not parse as its type |
 | `schema_changed` | a materialized table's query now produces different columns; nothing changed |
+| `unauthenticated` | no valid credential (or it expired) |
+| `forbidden` | the caller's role does not allow the operation; nothing changed |
+| `not_found` | the workbook, table, sheet or object does not exist or is not visible to the caller |
+| `bad_request` | the request is malformed or names something invalid |
+| `quota` | a space quota (storage, jobs, workbooks) refuses it |
 | `conflict` | the change was based on what someone else changed since (cells, rows, layout); nothing changed. `moved: true`: what it addressed moved or is gone ([COLLABORATION.md](COLLABORATION.md)) |
 
 Error messages never contain the server's data-directory path (it is shown as `<data>`). DuckDB's
@@ -126,6 +131,11 @@ numbers are clamped before anything is allocated. A connection whose unsent repl
 not read until they drain; beyond 64 MiB it is closed.
 
 ## Operations
+
+The tables below cover the core operations. The complete list, with every parameter and result
+type (including dashboards, validation, transforms, comments, find, and the `sheet_*` formatting,
+layout, chart and rule operations), is `Op` and `Results` in
+[`web/src/protocol.ts`](../web/src/protocol.ts).
 
 | op | params | result |
 |----|--------|--------|
@@ -145,7 +155,7 @@ not read until they drain; beyond 64 MiB it is closed.
 | `update_formula` | `table, name, formula` | `null` |
 | `drop_column` | `table, name` | `null`; refused while formula columns use it |
 | `rename_column` | `table, name, new_name` | `null`; formulas that use the column are rewritten in the same transaction |
-| `query` | `sql, params?, limit?` (≤ 5,000, default 500) | `QueryResult {columns, rows, truncated, row_limit, elapsed_ms, revision, sources: [{table, data_rev}]}`; a preview, never the whole result when `truncated` |
+| `query` | `sql, params?, limit?` (≤ 10,000, default 500) | `QueryResult {columns, rows, truncated, row_limit, elapsed_ms, revision, sources: [{table, data_rev}]}`; a preview, never the whole result when `truncated` |
 | `create_table_from_query` | `name, sql, params?, saved?, version?` | `TableInfo`; keeps every row and records provenance (see `materialized`) |
 | `create_demo_table` | `rows?` | `TableInfo` |
 | `drop_table` | `table` | `null` |
@@ -176,7 +186,7 @@ not read until they drain; beyond 64 MiB it is closed.
 | `refresh_materialized` | `table` | `MaterializedTable`; recomputes all rows in one change, or fails without changing anything |
 | `cancel` | `request` | `boolean` (see above) |
 
-Filter `op`: `eq neq gt gte lt lte contains not_contains starts_with is_empty not_empty`.
+Filter `op`: `eq neq gt gte lt lte contains not_contains starts_with is_empty not_empty in`.
 
 ### SQL
 
@@ -231,16 +241,14 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/config` | `{version, auth_required, allow_sql, sheet_copy_rows, max_message_bytes, max_upload_bytes, max_edit_cells}` (no auth) |
-| GET/POST | `/api/workbooks` | list (with `size_bytes`, `summary`, `starred`, `workspace`, `opened_at`, and `compute`: `sleeping`, `queued`, `starting`, `ready` or `stopping`, read from memory without opening the workbook), or create `{name, workspace?}` |
-| GET/PATCH/DELETE | `/api/workbooks/{id}` | info with tables and sheets; patch `{name?, workspace?, starred?}` (`workspace: ""` = unfiled); delete moves it to the trash |
+| GET | `/api/config` | `{version, auth, setup_required, sso, allow_sql, sheet_copy_rows, max_message_bytes, max_upload_bytes, max_edit_cells, profiles}` (no auth) |
+| GET/POST | `/api/workbooks` | list (with `size_bytes`, `summary`, `starred`, `space`, `role`, `opened_at`, and `compute`: `sleeping`, `queued`, `starting`, `ready` or `stopping`, read from memory without opening the workbook), or create `{name, space?}` |
+| GET/PATCH/DELETE | `/api/workbooks/{id}` | info with tables and sheets; patch `{name?, space?, starred?}`; delete moves it to the trash |
 | GET/DELETE | `/api/trash` | list trashed workbooks (with `deleted_at`), or empty the trash permanently |
 | DELETE | `/api/trash/{id}` | delete one trashed workbook permanently |
 | POST | `/api/trash/{id}/restore` | move it back; returns `WorkbookMeta` |
 | POST | `/api/workbooks/{id}/duplicate` | copies tables, formulas and sheets |
 | GET | `/api/workbooks/{id}/export.xlsx` | all sheets as one Excel file |
-| GET/POST | `/api/workspaces` | list, or create `{name}` |
-| PATCH/DELETE | `/api/workspaces/{id}` | rename `{name}`; delete keeps its workbooks (they become unfiled) |
 | POST | `/api/workbooks/{id}/import?filename=x.parquet[&table=name]` | raw body, streamed to a private scratch directory (limited by `--max-upload` and the temp budget); returns `{kind: "table", table}` or `{kind: "sheets", sheets}` for .xlsx. A failed or interrupted upload leaves no file and no table |
 | GET | `/api/workbooks/{id}/export?spec=<json ViewSpec>&format=csv\|csv_excel\|parquet\|json` | honours sort, filters and hidden columns |
 | POST | `/api/workbooks/{id}/uploads?filename=x.csv` | raw body; stages the file and returns `UploadCreated {upload_id, filename, size_bytes, preview}`. Nothing is imported yet. Unclaimed uploads expire after an hour |
@@ -249,7 +257,6 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | DELETE | `/api/workbooks/{id}/uploads/{upload}` | discard a staged upload |
 | GET | `/api/workbooks/{id}/downloads/{download}` | a finished `export_query` file, once; 404 once taken or expired |
 | GET/DELETE | `/api/workbooks/{id}/jobs/{job}` | progress `{running, percentage?, rows_processed, total_rows}` of a running import, or cancel it (only that job; 409 if it is not running) |
-
 | GET | `/api/workbooks/{id}/runtime` | `RuntimeStatus {workbook, spec, spec_id, policy, allocation?, ownership?, sessions, profile, note?, queue_position?, last_activity_ms?, storage_bytes}`; does not start anything and is not activity |
 | POST | `/api/workbooks/{id}/runtime` | `RuntimeRequest {action: "start" \| "stop" \| "cancel" \| "restart", operation_id?, wait?, profile?}` → `RuntimeStatus`. `start` needs view, the others edit; `restart` with a different `profile` needs the space's owner role, the profile granted to the space, and an organization admin for a dedicated one (docs/COMPUTE.md). `wait: false` replies once the start is under way. Unknown fields are refused (400): requests name a profile, never resources. Repeating an `operation_id` that already moved this workbook does nothing. The workbook's data is never affected |
 | GET | `/api/workbooks/{id}/profiles` | `ProfileChoice[] {profile, granted, allowed, reason?}`: the server's profiles as the caller may use them for this workbook |
@@ -267,10 +274,13 @@ compute quota) or **503** (no capacity after waiting in line, or it could not be
 temporary-disk budget, or hit a full disk, fail with **507**. Busy queues give **503**, deadlines
 **504**.
 
-Auth: `Authorization: Bearer <token>` or `?token=<token>`.
+Auth: the session cookie (browsers) or `Authorization: Bearer <token>`; a token in the query
+string is refused. Spaces, organizations, members, invitations, service tokens, libraries, sign-in
+and audit routes are described in [TEAMS.md](TEAMS.md); agent connections (`/api/agents…`) and
+`/mcp` in [MCP.md](MCP.md).
 
 
-## Workbook functions (phase 5)
+## Workbook functions
 
 | Operation | Parameters | Result |
 |---|---|---|
@@ -280,14 +290,14 @@ Auth: `Authorization: Bearer <token>` or `?token=<token>`.
 | `pin_functions` | `pins: Record<string, number>` | `WorkbookFunction[]` |
 | `refresh_functions` | — | `number` (the new refresh epoch): compute volatile Python functions again and retry calls that ran out of time, memory or a worker (needs `edit`) |
 
-Python functions (`kind: "python"`, phase 8, docs/PYTHON_FUNCTIONS.md) also declare `returns`
+Python functions (`kind: "python"`, [PYTHON_FUNCTIONS.md](PYTHON_FUNCTIONS.md)) also declare `returns`
 (`number`, `text`, `boolean`) and may be `volatile`; each version records the `runtime`
 (`RuntimeIdentity {kind, id, version, packages}`) it was published with. Running their tests
 needs `publish`. Their results arrive as `sheet_changed` (sheet `null`) and `table_changed`
 events with origin 0. `GET /api/workbooks/{id}/export.xlsx?values=python` writes cells that call
 them as their current values.
 
-`FunctionDefinition` has `name`, `kind` (`formula` or `sql`), `arguments` (names), `source`,
+`FunctionDefinition` has `name`, `kind` (`formula`, `sql` or `python`), `arguments` (names), `source`,
 `documentation`, `tests` (`{arguments: string[], expected: string}`), and optional `dependencies`
 (a function-name/version map; omitted entries capture the active pin). Replies include canonical
 names, immutable versions, exact dependency pins, adapter/DuckDB versions and the active `pinned` version.
@@ -299,7 +309,7 @@ dependency must match its recorded version. SQL definitions and SQL pin changes 
 enabled; sheet functions remain available when SQL is disabled. See [FUNCTIONS.md](FUNCTIONS.md)
 for input semantics, limits, supported built-ins and export limitations.
 
-## No-code analysis and table presentation (phase 6)
+## No-code analysis and table presentation
 
 | Operation | Parameters | Result |
 |---|---|---|

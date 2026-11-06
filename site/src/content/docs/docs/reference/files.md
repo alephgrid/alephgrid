@@ -31,6 +31,7 @@ columns) are kept through XLSX import and export.
 
 ## Storage
 
-Every workbook is a DuckDB file plus sheet data in a plain directory (`--data-dir`,
-default `./alephgrid-data`). Nothing is uploaded anywhere: backups are file copies, covered in
-the [operations guide](https://github.com/alephgrid/alephgrid/blob/main/docs/OPERATIONS.md).
+Every workbook is one DuckDB file, sheets included, in its own folder of a plain data directory
+(`--data-dir`, default `./alephgrid-data`). Nothing is uploaded anywhere. Back up with
+`--backup-to` or from Administration rather than copying files of a running server; see the
+[operations guide](https://github.com/alephgrid/alephgrid/blob/main/docs/OPERATIONS.md).

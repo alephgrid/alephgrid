@@ -111,7 +111,7 @@ Machine-readable descriptions of this MCP interface, for agent tooling and regis
 
 | URL | What |
 |---|---|
-| `https://alephgrid.dev/.well-known/mcp/server.json` | MCP Registry [`server.json`](https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json) manifest (also served at `/.well-known/mcp.json`) |
+| `https://alephgrid.dev/.well-known/mcp/server.json` | MCP Registry [`server.json`](https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json) manifest (also served at `/.well-known/mcp.json`) |
 | `https://alephgrid.dev/llms.txt` | [llms.txt](https://llmstxt.org/) index of this documentation |
 | `https://alephgrid.dev/llms-full.txt` | The complete documentation as one file |
 
