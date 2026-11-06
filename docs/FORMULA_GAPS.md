@@ -84,7 +84,7 @@ Practical effect: only raw serials 0–60 and dates in January–February 1900 d
 likely case is `YEAR` of an empty cell, which is `#NUM!` here and 1900 in Excel.
 
 **IFERROR/IFNA of an empty cell (corrected).** Microsoft's function reference says an empty
-value is treated as empty text, but observed Excel (and OpenOffice) output is 0, the same as a
+value is treated as empty text, but observed Excel output is 0, the same as a
 direct reference to the empty cell. This was recorded by Microsoft in OASIS OpenFormula issue
 [OFFICE-3468](https://issues.oasis-open.org/browse/OFFICE-3468), and ODF 1.2 removed the
 empty-string rule to match. The expected value is now 0 and both cases are verified; IronCalc

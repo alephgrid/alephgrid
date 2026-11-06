@@ -618,7 +618,7 @@ suite **3 passed / 1 explicitly ignored known-gap test**; explicit execution of 
 test reproduced the documented incorrect `#N/A`. All-target Clippy with warnings denied,
 frontend type checking/bundling and server rebuild passed. Final browser suite **52/52 passed**.
 The first completion probe used inline arrays and exposed the engine gap; the final browser
-journey verifies the supported range form. No full Excel/Sheets compatibility or large-table
+journey verifies the supported range form. No full Excel compatibility or large-table
 formula support is claimed. Linux and the small-filesystem disk-full scenario remain CI checks.
 
 ### Phase F reference editor increment
