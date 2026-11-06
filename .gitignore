@@ -15,6 +15,7 @@ web/playwright-report
 .claude/worktrees/
 
 # Private keys and credentials never belong in the repository
+deploy/**/.env
 *.pem
 *.key
 # MCP registry publishing scratch (the real key lives in ~/.config/mcp-publisher/)

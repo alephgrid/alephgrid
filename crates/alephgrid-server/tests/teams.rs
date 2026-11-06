@@ -806,6 +806,42 @@ async fn backups_restore_identities_and_roles() {
     assert!(format!("{e:#}").contains("control database is damaged"), "{e:#}");
 }
 
+/// A lost instance admin password is reset offline with `alephgrid --reset-password`
+/// (docs/OPERATIONS.md runbook): refused while a server runs, then the new password works,
+/// the old one and the old sessions do not, and the reset is audited.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_admin_password_is_reset_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let reset = |password: &str, email: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_alephgrid"))
+            .args(["--data-dir", dir.path().to_str().unwrap(), "--reset-password", email])
+            .env("ALEPHGRID_NEW_PASSWORD", password)
+            .output()
+            .unwrap()
+    };
+    let server = TestServer::start_accounts(dir.path(), |_| {}).await;
+    let old = server.admin().await;
+    let out = reset("a brand new password", ADMIN_EMAIL);
+    assert!(!out.status.success(), "refused while the server runs");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("stop it first"), "{}", String::from_utf8_lossy(&out.stderr));
+    server.stop().await;
+
+    assert!(!reset("short", ADMIN_EMAIL).status.success(), "the password rules apply");
+    assert!(!reset("a brand new password", "nobody@example.com").status.success());
+    let out = reset("a brand new password", ADMIN_EMAIL);
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+
+    let server = TestServer::start_accounts(dir.path(), |_| {}).await;
+    assert!(server.login(ADMIN_EMAIL, ADMIN_PASSWORD).await.is_err(), "the old password no longer works");
+    let old = Session { addr: server.addr, ..old };
+    assert_eq!(old.get("/api/me").await.0, 401, "sessions made before the reset are ended");
+    let admin = server.login(ADMIN_EMAIL, "a brand new password").await.expect("the new password works");
+    assert_eq!(admin.get("/api/admin/audit").await.0, 200);
+    let events = server.state.auth.store.audit_events(None, None, None, 1000).unwrap();
+    assert!(events.iter().any(|e| e.action == "password_reset" && e.actor == "cli"), "{events:?}");
+    server.stop().await;
+}
+
 // ------------------------------------------------------------- single sign-on
 
 /// A minimal OpenID provider: discovery, keys, and a token endpoint that checks PKCE and the

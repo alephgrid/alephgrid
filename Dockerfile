@@ -17,9 +17,15 @@ COPY --from=web /src/web/dist ./web/dist
 RUN cargo build --release --locked -p alephgrid-server
 
 FROM debian:bookworm-slim
+# The server runs as alephgrid (uid and gid 10001), never root. /data and /backups are created
+# and owned by it, so new named volumes mounted there are writable; a bind-mounted host
+# directory must be owned by 10001 (chown -R 10001:10001 DIR), see docs/OPERATIONS.md.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --uid 10001 alephgrid
+    && groupadd --system --gid 10001 alephgrid \
+    && useradd --system --create-home --uid 10001 --gid alephgrid alephgrid \
+    && mkdir -p /data /backups && chown alephgrid:alephgrid /data /backups
 COPY --from=server /src/target/release/alephgrid /usr/local/bin/alephgrid
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/alephgrid/
 USER alephgrid
 WORKDIR /home/alephgrid
 ENV ALEPHGRID_HOST=0.0.0.0 \
@@ -28,4 +34,6 @@ ENV ALEPHGRID_HOST=0.0.0.0 \
     ALEPHGRID_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 7878
+# GET /readyz through the binary itself (the image has no curl).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 CMD ["alephgrid", "health"]
 ENTRYPOINT ["alephgrid"]

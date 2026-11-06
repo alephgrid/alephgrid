@@ -606,7 +606,11 @@ impl WorkbookHandle {
         };
         let lane = work.lane();
         let h = self.clone();
+        // The job's log span, inside the request or session that started it.
+        let span = tracing::info_span!("job", workbook = self.id.as_str(), job = %format_args!("{}.{}", job.key.0, job.key.1), class = ?job.class, lane = ?lane);
+        let job_span = span.clone();
         let mut task = tokio::task::spawn_blocking(move || {
+            let _span = span.entered();
             // Holding the ticket here frees the slot only after the work is done.
             let _ticket = ticket;
             match work {
@@ -640,6 +644,9 @@ impl WorkbookHandle {
             }
         };
         let result = result.map_err(|e| anyhow!("internal error: {e}"))?;
+        if let Some(why) = &stopped {
+            job_span.in_scope(|| tracing::info!("job stopped: {why}"));
+        }
         match (result, stopped) {
             // Stopped (cancel or deadline) and then failed: report why it was stopped. The
             // interrupt may have hit any statement, not only one that says INTERRUPT. A job

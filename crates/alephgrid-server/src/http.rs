@@ -256,6 +256,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
     // Reachable without signing in.
     let public = Router::new()
         .route("/api/config", get(config))
+        .route("/healthz", get(crate::health::healthz))
+        .route("/readyz", get(crate::health::readyz))
         .route("/api/auth/setup", post(crate::auth::routes::setup))
         .route("/api/auth/login", post(crate::auth::routes::login))
         .route("/api/auth/logout", post(crate::auth::routes::logout))
@@ -278,7 +280,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .layer(middleware::from_fn(browser_headers))
         .with_state(state)
         .layer(tower_http::compression::CompressionLayer::new())
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(crate::health::request_span))
+        .layer(middleware::from_fn(crate::health::request_id))
 }
 
 /// The browser boundary on every response (SEC.03): pages run only this server's own
@@ -1291,7 +1294,9 @@ async fn open(state: &Shared, id: &str) -> ApiResult<crate::state::Lease> {
 }
 
 pub(crate) async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> ApiResult<T> {
-    tokio::task::spawn_blocking(f)
+    // Logs from the blocking work keep the request's span (its correlation id).
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || span.in_scope(f))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(ApiError::from)

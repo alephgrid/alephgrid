@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod backup;
+pub mod health;
 pub mod http;
 pub mod library;
 pub mod mcp;

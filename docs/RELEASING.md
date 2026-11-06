@@ -5,9 +5,14 @@ for a maintainer's approval, and only then becomes public. Nothing runs on a pus
 
 | Channel | What users run | Built by |
 |---|---|---|
-| GitHub Releases | download `alephgrid-VERSION-TARGET.tar.gz` (+ `SHA256SUMS`) | `release-linux-*`, `release-macos` |
+| GitHub Releases | download `alephgrid-VERSION-TARGET.tar.gz` (+ `SHA256SUMS`, SBOMs) | `release-linux-*`, `release-macos`, `release-sbom` |
 | Docker | `docker run -p 7878:7878 ghcr.io/alephgrid/alephgrid` | `release-docker` (`Dockerfile.release`, from the tested binaries) |
 | npm (also pnpm, yarn, bun) | `npx alephgrid` · `npm i -g alephgrid` | `release-npm` (`tools/release/npm.mjs`) |
+
+Every archive, image and npm package holding the binary carries `LICENSE`, `NOTICE` and
+`THIRD-PARTY-NOTICES.md` (written by `tools/licenses.py`; the image keeps them in
+`/usr/share/doc/alephgrid/`). Archives and SBOMs are checksummed but **not yet signed**:
+signatures (for example Sigstore/cosign for the image and the archives) are deferred.
 
 Targets: Linux x86_64 and arm64 (built on Debian 11, so they need glibc 2.31 or newer: Debian
 11+, Ubuntu 20.04+, RHEL 9), macOS Apple silicon and Intel (macOS 11+). Windows: Docker or WSL
@@ -16,8 +21,11 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
 
 ## Once: accounts and secrets
 
-1. **npm:** create the `alephgrid` organization on npmjs.com (it owns the `@alephgrid/cli-*`
-   packages) and a granular access token that can publish `alephgrid` and `@alephgrid/*`.
+1. **npm:** the packages are unscoped, so no npm organization is needed: `alephgrid` (the
+   launcher) and one binary package per platform, `alephgrid-linux-x64`, `alephgrid-linux-arm64`,
+   `alephgrid-darwin-arm64` and `alephgrid-darwin-x64`, all published by the npm user
+   `alephgrid`. Create a granular access token for that user that can publish those five
+   packages.
 2. **GitHub:** a token for the release and the image: a classic personal access token with
    `repo` and `write:packages` (GitHub Container Registry does not take fine-grained tokens).
 3. **CircleCI:** Organization settings → Contexts → create a context named **`release`** with
@@ -29,7 +37,9 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
 ## Each release
 
 1. On `main`, set the version in `Cargo.toml` (`[workspace.package] version`) and rename the
-   changelog's "Unreleased" heading to `## X.Y.Z - YYYY-MM-DD`. Merge that pull request.
+   changelog's "Unreleased" heading to `## X.Y.Z - YYYY-MM-DD`. Run
+   `python3 tools/licenses.py` so `NOTICE` and `THIRD-PARTY-NOTICES.md` match the locked
+   dependencies (the check's clippy job fails when they do not). Merge that pull request.
 2. Run the check: `tools/ci.sh check main`. It must be green.
 3. Tag and push the tag (tags are public):
 
@@ -43,8 +53,12 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
    * builds the four binaries (about 30 minutes; DuckDB is compiled from source), runs a smoke
      test on each native build (start, version, embedded UI, create a workbook, import a CSV)
      and packages them with checksums;
-   * creates a **draft** GitHub release with the archives and `SHA256SUMS` (drafts are visible
-     only to maintainers);
+   * writes CycloneDX SBOMs (`release-sbom`): `alephgrid-VERSION-TARGET.cdx.json` for the Rust
+     crates linked into each binary (cargo-cyclonedx, pinned) and `alephgrid-VERSION-web.cdx.json`
+     for the web bundle (`npm sbom`, production dependencies). The C/C++ libraries inside DuckDB
+     are not in cargo's graph; they are listed in `THIRD-PARTY-NOTICES.md`;
+   * creates a **draft** GitHub release with the archives, the SBOMs and `SHA256SUMS` (drafts
+     are visible only to maintainers);
    * stops at **`approve-publish`**.
 5. Check the draft on GitHub → Releases: notes, files, sizes. Download one archive and run it.
 6. In CircleCI, approve `approve-publish`. Then, in parallel: the release is published, the

@@ -1,0 +1,6 @@
+# HTTPS in front of Alephgrid (deploy/team/compose.yaml). Caddy obtains and renews the
+# certificate for ALEPHGRID_DOMAIN. It keeps the Host header, which Alephgrid checks against
+# ALEPHGRID_PUBLIC_URL, and proxies WebSockets and large uploads as they are.
+{$ALEPHGRID_DOMAIN} {
+	reverse_proxy alephgrid:7878
+}

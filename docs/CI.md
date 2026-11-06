@@ -7,8 +7,8 @@ in [CONTRIBUTING.md](../CONTRIBUTING.md) still apply.
 
 | Run | Parameter | What it does |
 |---|---|---|
-| **check** | `run_check = true` | web type check and bundle; `cargo test --workspace` (with the protocol drift check and the disk-full tests); clippy with warnings as errors; browser journeys in Chromium |
-| **release** | `run_release = true`, `release_version`, on a tag | binaries, draft release, then (after approval) GitHub release, Docker image and npm; see [RELEASING.md](RELEASING.md) |
+| **check** | `run_check = true` | web type check and bundle; `cargo test --workspace` (with the protocol drift check and the disk-full tests); clippy with warnings as errors; licence notices up to date (`tools/licenses.py --check`); browser journeys in Chromium |
+| **release** | `run_release = true`, `release_version`, on a tag | binaries, SBOMs, draft release, then (after approval) GitHub release, Docker image and npm; see [RELEASING.md](RELEASING.md) |
 | **full** | `run_full = true` | everything in check, plus browser journeys in Firefox and WebKit, 2,000-case property tests of the engine, and every `alephgrid-server` test five times |
 
 The configuration is [.circleci/config.yml](../.circleci/config.yml). After the web build, one job compiles
@@ -86,6 +86,8 @@ In the repository:
   docker: `tonistiigi/binfmt` (arm64 emulation) and `moby/buildkit` (the image builder). To
   update one, look up the new digest (`docker buildx imagetools inspect tonistiigi/binfmt:latest`)
   and change it in `.circleci/config.yml` in its own pull request.
+* `release-sbom` installs `cargo-cyclonedx` at a pinned version with `--locked` and holds no
+  secrets. Update the version in its own pull request.
 * npm: a version already on npm is skipped only when its `dist.integrity` equals this build's
   package (a re-run). Anything else under that name and version stops the job before the main
   `alephgrid` package is published, so it can never depend on a package someone else uploaded.
