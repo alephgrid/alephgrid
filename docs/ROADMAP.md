@@ -1,40 +1,38 @@
 # Roadmap
 
-## v0.1: big tables, local-first (this release)
-- [x] DuckDB workbook files; import CSV/TSV/Parquet/JSON; export CSV/Parquet/JSON.
-- [x] Instant open, no rehydration; viewport block cache.
-- [x] Sort, filter, formula columns, SQL console, selection stats.
-- [x] Live multi-user edits over WebSocket; token auth; Docker.
+What v0.1.0 ships is in [CHANGELOG.md](../CHANGELOG.md) and, feature by feature, in
+[SPREADSHEET_FEATURES.md](SPREADSHEET_FEATURES.md). Task-level status and tests are in the
+[implementation checklist](IMPLEMENTATION_CHECKLIST.md); the technical constraints for the
+planned work are in [ARCHITECTURE.md](ARCHITECTURE.md#planned-connected-data-clusters-and-extensions).
+Nothing below is available yet.
 
-## v0.2: spreadsheet parity (in progress)
-- [x] **Sheets**: free-form Excel-formula grids (`=SUM(A1:A10)`, `XLOOKUP`) on [IronCalc](https://github.com/ironcalc/IronCalc), undo/redo, reference shifting on row/column insert.
-- [x] XLSX import/export (via IronCalc, as sheets).
-- [x] SQL result → sheet, sheet → table.
-- [x] Workspace manager: workspaces, starred, recent, search, sort, duplicate, move.
-- [ ] Sheet formulas that read tables (`=TSUM("flights", "fare_usd")` or SQL-linked ranges that refresh).
-- [ ] Sheet formatting toolbar (number formats, bold, colors, borders), backed by IronCalc styles.
-  Why IronCalc rather than HyperFormula: IronCalc is Apache-2.0 and written in Rust, so it embeds in the engine next to DuckDB. HyperFormula is `GPL-3.0-only` (or a paid proprietary license), would relicense the bundled client, and keeps the whole sheet in browser memory.
-- [ ] Undo/redo for tables (operation log in the workbook file) and version history.
-- [ ] Number and date formats per column with locale control.
-- [ ] Find and replace across a table (pushed down to DuckDB).
-- [ ] Pivot tables (DuckDB `PIVOT`), group-by UI.
-- [ ] Charts (aggregated server-side, rendered client-side).
-- [ ] Freeze columns; hide columns; conditional formatting.
+## Next, after v0.1.0
 
-## v0.3: connected data
-- [ ] Connectors through DuckDB extensions: Postgres, MySQL, SQLite, S3/GCS/R2, Iceberg, Delta, BigQuery, Snowflake. Credentials encrypted at rest and never exposed to collaborators.
-- [ ] Linked tables (query in place, no import) and scheduled refresh.
-- [ ] Write-back of edited rows to the source database.
-- [ ] Python cells (sandboxed subprocess with Arrow handoff).
+1. **S3 data** (checklist phase 10). Register a bucket and prefix with a credential, preview and
+   query Parquet in place (read-only), import a snapshot and refresh it. Credentials stay on the
+   server; each space only sees its own connections.
+2. **Postgres, read-only** (10.02), after the S3 gate: attach selected schemas, with scan limits
+   and results served from local snapshots.
+3. **Operations and performance** (phases O and P): per-query diagnostics, background jobs that
+   survive restarts, measured caching and a faster wire format for wide results. Each change ships
+   only with a before/after measurement.
+4. **Kubernetes** (phase 11): workbooks placed on workers automatically, one owner per workbook,
+   a Helm chart, and recovery that refuses writes when ownership is uncertain.
+5. **Extensions** (phase E): published contracts for runtime providers, data connectors and
+   function runtimes, with conformance tests.
 
-## v0.4: teams
-- [ ] OIDC/SAML login, per-workbook roles (viewer/editor/owner), audit log. Free, no "SSO tax".
-- [ ] Pool of read connections per workbook; per-session view schemas.
-- [ ] Presence (cursors, selections) and comments.
-- [ ] `allowed_directories` sandbox for SQL on shared servers.
+Packaging follows the release: Homebrew and WinGet, signed macOS binaries and a native Windows
+build come after v0.1.0.
 
-## Beyond
-- [ ] Desktop app (Tauri) using the same engine, fully offline.
-- [ ] In-browser mode on DuckDB-WASM for zero-install sharing of small and medium files.
-- [ ] Binary wire format (Arrow IPC) for wide tables.
-- [ ] AI assistant with bring-your-own model or key, including local models.
+## Being considered
+
+Each needs demand and an evaluation before it is planned (checklist phase 12): Google Cloud
+Storage and Azure, warehouses through ADBC, DuckLake snapshots (needed to replay agent results
+against old data), writing back to databases, a desktop app, a browser-only mode for small files,
+Python notebooks, and an add-in for using Alephgrid functions in Excel. An in-app AI assistant
+is deliberately not in v1; agents use workbooks through [MCP](MCP.md).
+
+## Not planned
+
+Printing and page setup, and macros or VBA. See
+[SPREADSHEET_FEATURES.md](SPREADSHEET_FEATURES.md#sheets-files-and-collaboration).

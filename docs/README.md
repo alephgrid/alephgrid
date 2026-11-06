@@ -32,7 +32,6 @@
 |---|---|
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Setup, checks before a pull request, where code lives |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the engine, server and client fit together |
-| [HLD.md](HLD.md) · [LLD.md](LLD.md) | High-level and low-level design |
 | [PROTOCOL.md](PROTOCOL.md) | The WebSocket protocol |
 | [DESIGN.md](DESIGN.md) · [UI_IMPLEMENTATION_GUIDE.md](UI_IMPLEMENTATION_GUIDE.md) · [UI_STATES.md](UI_STATES.md) | Interface design, components and states |
 | [TEST_STRATEGY.md](TEST_STRATEGY.md) · [TEST_MATRIX.md](TEST_MATRIX.md) | How changes are tested, and which test covers what |
@@ -49,4 +48,3 @@
 | [ROADMAP.md](ROADMAP.md) | Where the project is going |
 | [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md) | Every task, its tests and its status |
 | [LAUNCH.md](LAUNCH.md) | What remains for the first release, and the release announcement |
-| [ENTERPRISE_ARCHITECTURE_DECISION.md](ENTERPRISE_ARCHITECTURE_DECISION.md) | Why compute is per workbook and managed by policy |
