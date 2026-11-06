@@ -357,6 +357,40 @@ fn decoy_hash() -> &'static str {
     H.get_or_init(|| hash_password("decoy password, never matches").unwrap_or_default())
 }
 
+/// Set a password user's password with the server stopped (`alephgrid --reset-password`), for
+/// an instance admin who lost theirs: there is no other way back in without one. Ends the
+/// user's sessions and records `password_reset` in the audit log. Refuses while a server holds
+/// the data directory, for an unknown email and for a single-sign-on-only account.
+pub fn reset_password_offline(data_dir: &std::path::Path, email: &str, password: &str) -> Result<store::User> {
+    let control = data_dir.join(".control");
+    let db = control.join("control.duckdb");
+    if !db.exists() {
+        bail!("{} holds no Alephgrid accounts", data_dir.display());
+    }
+    let lock = std::fs::File::create(control.join("controller.lock"))?;
+    if lock.try_lock().is_err() {
+        bail!("an Alephgrid server is using {}; stop it first", data_dir.display());
+    }
+    check_password_rules(password)?;
+    let store = Store::open(&db)?;
+    let user = store.user_by_email(email)?.ok_or_else(|| anyhow!("no user has the email {email}"))?;
+    if user.password_hash.is_none() {
+        bail!("{email} signs in with single sign-on only; it has no password to reset");
+    }
+    store.set_password(&user.id, &hash_password(password)?)?;
+    store.delete_sessions_except(&user.id, "")?;
+    store.audit(&store::Audit {
+        actor: "cli",
+        action: "password_reset",
+        org_id: None,
+        space_id: None,
+        workbook: None,
+        denied: false,
+        detail: serde_json::json!({ "user": user.id }),
+    })?;
+    Ok(user)
+}
+
 pub fn check_password_rules(password: &str) -> Result<()> {
     if password.chars().count() < MIN_PASSWORD {
         bail!(Denied::BadRequest(format!("use a password of at least {MIN_PASSWORD} characters")));

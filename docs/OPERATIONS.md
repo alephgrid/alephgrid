@@ -106,42 +106,89 @@ docker compose cp alephgrid:/backups ./alephgrid-backups   # then move it to ano
 - **Online**: Administration → Backups → **Back up now** (instance admins), or
   `POST /api/admin/backups`. This is a consistent copy of every workbook and of the control
   database. Only one backup runs at a time, and only if there is room on the disk. The newest
-  few are kept under `.backups/`.
-- **Offline**: with the server stopped, run `alephgrid --data-dir DATA --backup-to /other/disk/backup-YYYYMMDD`.
+  few are kept under `<data dir>/.backups/` (`GET /api/admin/backups` lists them).
+- **Offline**: with the server stopped, run
+  `alephgrid --data-dir DATA --backup-to /other/disk/backup-YYYYMMDD` (a new directory).
 
-Copy backups to another device or host. A backup on the same disk does not survive the disk.
+A backup is a plain directory: `manifest.json` (version, revisions and SHA-256 checksums),
+`control.duckdb` (accounts, roles, sessions, tokens, audit log) and one folder per workbook.
+Trash, staged uploads, exports and Python scratch space are left out.
+
+**Copy every backup to another device or host**; a backup on the same disk does not survive
+the disk. Any file copy works, because restore checks every checksum and refuses a damaged copy:
+
+```bash
+rsync -a /srv/alephgrid/.backups/ backup-host:/backups/alephgrid/      # online backups
+rsync -a /other/disk/backup-YYYYMMDD backup-host:/backups/alephgrid/   # an offline one
+```
 
 ## Restore
 
-1. Stop the server.
-2. Restore into an empty directory:
-   `alephgrid --data-dir /new/data --restore-from /other/disk/backup-YYYYMMDD`.
-   Checksums are verified, and the restore refuses a directory that is not empty.
-3. Start the server on the new directory. Sessions do not carry over, so people sign in again.
-   Service tokens and agent connections do carry over.
+On the same host or a clean one:
+
+1. Install the same version of Alephgrid that made the backup, or a newer one (a newer one
+   migrates older workbooks when they open; an older one refuses newer files).
+2. Copy the backup directory to the host.
+3. Restore into an empty or missing directory, with no server using it:
+   `alephgrid --data-dir /srv/alephgrid --restore-from /backups/backup-YYYYMMDD`.
+   Every checksum is verified and each workbook is opened and checked before anything is put
+   in place; a directory that is not empty is refused. With Docker, restore into a new volume:
+
+   ```bash
+   docker run --rm -v alephgrid-data:/data -v /backups/backup-YYYYMMDD:/restore:ro \
+     ghcr.io/alephgrid/alephgrid:X.Y.Z --restore-from /restore
+   ```
+
+   (the backup must be readable by uid 10001).
+4. Start the server on that directory. Users, roles, spaces, service tokens and agent
+   connections come back; so do sign-in sessions that had not expired when the backup was made.
+   To end those sessions, disable and re-enable the users concerned, or reset passwords.
+
+`tests/backup.rs` runs this procedure with the binary (accounts, a member, a service token, a
+table and a sheet; back up elsewhere, lose the original, restore into an empty directory, sign
+in and read everything back).
 
 ## Upgrades
 
 1. Make a backup and copy it off the host.
-2. Stop the server, replace the binary (or image) and start it again.
+2. Stop the server, replace the binary (or change the image tag; pin versions in Compose rather
+   than using `latest`) and start it again.
 3. A workbook written in an older storage format is migrated the first time it opens. The old
-   file is kept next to it as `data.duckdb.v<N>.bak`.
+   file is kept next to it as `data.duckdb.v<N>.bak`; delete those once the new version has run
+   well for a while.
 
-Going back to an older version is not supported once a workbook has been migrated: the older
-version refuses files that are newer than it understands. To roll back, restore the backup from
-step 1 with the older binary.
+**Rollback limits.** Going back to an older version is not supported once a workbook has been
+migrated: the older version refuses files that are newer than it understands. To roll back,
+stop the server, restore the backup from step 1 into an empty directory with the older binary,
+and start that. Changes made after the backup are lost, so take the backup just before
+upgrading. Before 1.0, a minor version may migrate the storage format (see CHANGELOG.md).
 
 ## Runbooks
 
-### A workbook will not open or is stuck starting
+### A workbook will not open, or its compute (allocation) is stuck
 
 1. Open it. The Compute panel (toolbar → Compute) shows its state and, when it failed, why.
-2. **Cancel** stops a start that has not finished. **Restart** stops and starts it again; work that
-   was not acknowledged as saved is resent by open clients.
-3. Administration → Workbooks and memory lists the open workbooks with their memory, threads and
-   jobs. Administration → Sessions lists live connections.
-4. If it still fails, stop the server, make an offline backup, and look at the log line naming the
-   workbook. Do not delete its directory.
+2. **Cancel** stops a start that has not finished (or is waiting in line for capacity).
+   **Restart** stops and starts it again; work that was not acknowledged as saved is resent by
+   open clients. The API equivalent is `POST /api/workbooks/{id}/runtime` with
+   `{"action": "cancel"}` or `{"action": "restart"}`.
+3. Administration → Workbooks and memory (`GET /api/admin/resources`) lists the open workbooks
+   with their memory, threads and jobs. Administration → Sessions lists live connections.
+4. If it still fails, stop the server, make an offline backup, and look at the log lines with
+   that `workbook`. Do not delete its directory. On the next start, allocations left by the
+   previous process are marked lost and cleaned up.
+
+### A job is stuck
+
+Bulk jobs (imports, queries, sorts, copies, exports) stop by themselves at `--job-timeout`
+(1 hour by default), interactive requests at `--request-timeout` (30 s).
+
+1. The person who started it cancels it in the UI, or anyone who can edit the workbook calls
+   `DELETE /api/workbooks/{id}/jobs/{job}`. Only that job is interrupted. A job stopped by a
+   cancel or its deadline is logged as `job stopped` with its `workbook` and `job`.
+2. If it does not stop, **Restart** the workbook's compute (above). As a last resort, stop the
+   server: on SIGTERM running work gets `--shutdown-grace` (30 s) and is then interrupted;
+   committed changes are safe.
 
 ### Disk is full
 
@@ -150,25 +197,82 @@ The server keeps a small **disk reserve** (`.control/reserve`, 32 MiB by default
 reserve at once: a rolled-back change's blocks stay inside the workbook file, so without the
 reserve the disk would stay full and the server could not record state or restart. With it, the
 server keeps working well enough for you to free space. Administration → Overview shows the free
-disk and whether the reserve is held; "released" means the disk filled up. The reserve comes back
-by itself once there is room for it and twice as much again.
+disk and whether the reserve is held; `/readyz` answers `degraded` with
+`"disk_reserve": "released"`, and the log says "the disk is full". The reserve comes back by
+itself once there is room for it and twice as much again.
 
 Backups refuse to start without room for them, and a workbook at its size limit
 (`--max-workbook-size`) accepts only changes that remove data. Free space by doing any of:
 
 - empty the trash;
-- delete old backups (Administration → Backups);
-- remove expired `.exports` and `.agent-results` files (the server also sweeps them).
+- delete old backups (Administration → Backups), after copying them off the host;
+- remove expired `.exports` and `.agent-results` files (the server also sweeps them);
+- grow the volume.
+
+Then check that `/readyz` reports `"disk_reserve": "held"` again.
+
+### Lost admin password
+
+Passwords are stored only as hashes, and no one can read or reset another user's password from
+the UI. An instance admin who lost theirs:
+
+1. If another instance admin can sign in, nothing is urgent; still reset the password below.
+2. Stop the server (`docker compose stop alephgrid`).
+3. Set a new password:
+
+   ```bash
+   ALEPHGRID_NEW_PASSWORD='a new long password' alephgrid --data-dir DATA --reset-password admin@example.com
+   # Docker:
+   docker compose run --rm -e ALEPHGRID_NEW_PASSWORD='a new long password' alephgrid --reset-password admin@example.com
+   ```
+
+   Without `ALEPHGRID_NEW_PASSWORD` the password is read from standard input. It refuses
+   while a server uses the directory, ends the user's sessions and records `password_reset`
+   (actor `cli`) in the audit log. It does not enable a disabled account.
+4. Start the server and sign in. Accounts that sign in only with single sign-on have no
+   password; their access is managed at the identity provider.
+
+### Restore from a backup
+
+1. Pick the backup (`GET /api/admin/backups`, or the copies on the backup host). Prefer the
+   newest one taken before the problem.
+2. Stop the server. Do not restore over the live directory: move it aside (or keep the volume)
+   until the restore is checked.
+3. Restore into an empty directory or new volume as in [Restore](#restore), with the same or a
+   newer version, and start the server on it.
+4. Check: `/readyz` is `ok`, an admin signs in, the workbooks open with the expected history.
+5. To recover a single workbook instead, restore into a separate directory, start a second
+   server on it (another `--port`), export what you need and import it into the live server.
+
+### Upgrade, and roll back
+
+1. Read the release notes (CHANGELOG.md) for storage changes.
+2. Back up and copy the backup off the host, then upgrade as in [Upgrades](#upgrades).
+3. Check `/readyz`, sign in and open a few workbooks.
+4. To roll back: stop the server, restore the pre-upgrade backup into an empty directory with
+   the older version and start that. Changes since the backup are lost; an older version
+   cannot open workbooks the newer one migrated.
 
 ### Rotate credentials
 
+- **Single sign-on client secret**: create a second secret for the client at the identity
+  provider, set it as `ALEPHGRID_OIDC_CLIENT_SECRET` (in `.env` with Compose) and restart the
+  server (`docker compose up -d` recreates it). Sign in with SSO once to check, then delete the
+  old secret at the identity provider. People already signed in stay signed in: sessions are
+  the server's own, not the identity provider's.
+- **Single sign-on client**: to move to a new client id, set `ALEPHGRID_OIDC_CLIENT_ID` and the
+  secret together, register `https://<your host>/api/auth/oidc/callback` as its redirect URI,
+  and restart.
 - **Service tokens**: create the new token (space menu → Service tokens…), switch the client,
   then revoke the old one.
 - **Agent connections**: create a new connection, update the MCP client, then revoke the old
   connection.
-- **Single sign-on secret**: set the new `ALEPHGRID_OIDC_CLIENT_SECRET` and restart the server.
+- **Passwords**: users change their own under their account; changing it ends their other
+  sessions. A lost admin password: see above.
 - **A user who should lose access at once**: an instance admin disables the account, which ends
   its sessions, or an organization admin removes them from the organization.
+- **Bootstrap admin password** (`ALEPHGRID_BOOTSTRAP_PASSWORD`): used only while there are no
+  users; remove it from the environment after the first start.
 
 ### Incident: data looks wrong
 
@@ -177,8 +281,8 @@ Backups refuse to start without room for them, and a workbook at its size limit
 2. The audit log (Administration → Audit log, or the organization's Activity) records imports,
    exports, sharing changes and agent tool calls.
 3. If a change cannot be undone, restore the most recent good backup into a new data directory
-   and copy the workbook across. Restoring is per data directory, so do not restore over the live
-   one.
+   and copy the workbook across (see "Restore from a backup", step 5). Restoring is per data
+   directory, so do not restore over the live one.
 
 ## Limits
 

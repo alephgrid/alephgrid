@@ -220,6 +220,12 @@ struct Cli {
     #[arg(long, value_name = "DIR", conflicts_with = "backup_to")]
     restore_from: Option<PathBuf>,
 
+    /// Set a new password for the user with this email in --data-dir, end their sessions,
+    /// then exit. For a lost instance admin password; the server must be stopped. The new
+    /// password is read from ALEPHGRID_NEW_PASSWORD, else from the first line of standard input.
+    #[arg(long, value_name = "EMAIL", conflicts_with_all = ["backup_to", "restore_from"])]
+    reset_password: Option<String>,
+
     /// Serve the web UI from this directory instead of the embedded build.
     #[arg(long, env = "ALEPHGRID_WEB_DIR")]
     web_dir: Option<PathBuf>,
@@ -269,6 +275,23 @@ async fn main() -> Result<()> {
     if let Some(src) = &cli.restore_from {
         let m = alephgrid_server::backup::restore(src, &cli.data_dir)?;
         println!("restored {} workbook(s) into {}", m.workbooks.len(), cli.data_dir.display());
+        return Ok(());
+    }
+
+    if let Some(email) = &cli.reset_password {
+        let password = match std::env::var("ALEPHGRID_NEW_PASSWORD") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).context("reading the new password from standard input")?;
+                line.trim_end_matches(['\r', '\n']).to_string()
+            }
+        };
+        let user = alephgrid_server::auth::reset_password_offline(&cli.data_dir, email, &password)?;
+        println!("set a new password for {} and ended their sessions", user.email);
+        if user.disabled {
+            println!("note: this account is disabled; another instance admin can enable it");
+        }
         return Ok(());
     }
 
