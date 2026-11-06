@@ -219,8 +219,9 @@ kbd { font: 500 11px var(--font-ui); color: var(--muted); border: 1px solid var(
 /* ---------- menus, dialogs, toasts ---------- */
 .menu { position: fixed; z-index: 50; min-width: 220px; max-height: calc(100vh - 16px); overflow: auto; padding: 5px; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); }
 .menu-item { display: flex; justify-content: space-between; align-items: center; gap: 24px; width: 100%; border: 0; background: none; text-align: left; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.menu-item:hover:not(:disabled), .menu-item:focus-visible { background: var(--control); outline: none; }
-.menu-item:disabled { color: var(--muted); opacity: .6; cursor: default; }
+.menu-item:hover:not(:disabled, [aria-disabled="true"]), .menu-item:focus-visible { background: var(--control); outline: none; }
+.menu-item:disabled, .menu-item[aria-disabled="true"] { color: var(--muted); opacity: .6; cursor: default; }
+.menu-item[aria-disabled="true"]:focus-visible { opacity: .85; }
 .menu-item.danger { color: var(--danger); }
 .menu-hint { color: var(--muted); font-size: 12px; }
 .menu-reason { font-style: italic; }
