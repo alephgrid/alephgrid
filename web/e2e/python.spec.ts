@@ -19,8 +19,10 @@ const made = spawnSync(BIN, ["python-runtime", "create", "--python", PYTHON, run
 if (made.status !== 0) throw new Error(`could not make a Python runtime: ${made.stderr}`);
 
 const server = new Server(["--python-runtime", runtime]);
-test.beforeAll(async () => server.start());
-test.afterAll(async () => server.dispose());
+// A short limit, to see a test run out of time (U.T06).
+const quick = new Server(["--python-runtime", runtime, "--python-timeout", "2"]);
+test.beforeAll(async () => { await server.start(); await quick.start(); });
+test.afterAll(async () => { await server.dispose(); await quick.dispose(); });
 
 async function select(page: Page, row: number, column: number): Promise<void> {
   // By address, through Go to: arrow keys right after focusing can land a cell off in Firefox.
@@ -85,4 +87,53 @@ test("define, test, publish, call, recalculate and reopen a Python function", as
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
   await page.getByRole("tab", { name: /Sheet1/ }).click();
   await expect.poll(() => shown(page, 0, 1)).toBe("CD34");
+});
+
+async function spinning(page: Page, url: string, wb: string) {
+  await page.goto(`${url}/w/${wb}`);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await page.getByRole("button", { name: "Functions", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "Functions" });
+  await panel.getByRole("button", { name: "New", exact: true }).click();
+  await panel.getByRole("combobox", { name: "Function engine" }).selectOption("python");
+  await panel.getByRole("textbox", { name: "Function name" }).fill("SPIN");
+  await panel.getByRole("textbox", { name: "Arguments" }).fill("x");
+  await panel.getByRole("textbox", { name: "Function source" }).fill("def spin(x):\n    while True:\n        pass\n");
+  await panel.getByRole("tab", { name: "Tests" }).click();
+  await panel.getByRole("button", { name: "Add test" }).click();
+  await panel.getByRole("textbox", { name: "Test 1 x" }).fill("1");
+  await panel.getByRole("textbox", { name: "Test 1 expected" }).fill("1");
+  return panel;
+}
+
+// U.06d / U.T06: Cancel stops a running test on the server (its worker is killed; the reply
+// arrives only once the run has ended, long before the 30 s limit), and a test that runs out
+// of time says so.
+test("a running Python test can be cancelled, and one that runs too long says so", async ({ page }) => {
+  const wb = await server.createWorkbook("Cancel a test");
+  const panel = await spinning(page, server.url, wb);
+  await panel.getByRole("button", { name: "Run tests", exact: true }).click();
+  const results = panel.getByRole("region", { name: "Test results" });
+  await expect(results.getByRole("status")).toHaveText("Running…");
+  await expect(panel.getByRole("button", { name: "Run tests", exact: true })).toBeHidden();
+  // Let the worker start, then cancel it.
+  await page.waitForTimeout(500);
+  const t = Date.now();
+  await panel.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(results.getByRole("status")).toHaveText("Cancelled", { timeout: 8_000 });
+  expect(Date.now() - t).toBeLessThan(8_000);
+  await expect(results).toContainText("stopped on the server");
+  // A cancelled run proves nothing: still a draft.
+  await expect(panel.locator(".fn-state")).toHaveText("Draft");
+  await expect(panel.getByRole("button", { name: "Run tests", exact: true })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "Publish version", exact: true })).toBeEnabled();
+
+  const slow = await quick.createWorkbook("Too long");
+  const again = await spinning(page, quick.url, slow);
+  await again.getByRole("button", { name: "Run tests", exact: true }).click();
+  await expect(again.getByRole("region", { name: "Test results" })).toContainText("ran for more than 2 s", { timeout: 20_000 });
+  // Nothing was published.
+  const ws = await quick.connect(slow);
+  expect(await ws.call("functions", {})).toEqual([]);
+  ws.close();
 });
