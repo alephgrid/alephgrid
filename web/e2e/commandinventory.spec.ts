@@ -343,3 +343,62 @@ test("U.T05: context menus give a reason for every disabled command; sheet const
   expect((await ws.call<{ name: string }[]>("sheets")).map((s) => s.name)).toEqual(["Only", "Second"]);
   ws.close();
 });
+
+// Its own server with sign-in, the admin created from the environment.
+const ADMIN = { email: "admin@example.com", password: "correct horse battery" };
+const accounts = new Server(["--auth", "accounts"], { ALEPHGRID_BOOTSTRAP_EMAIL: ADMIN.email, ALEPHGRID_BOOTSTRAP_PASSWORD: ADMIN.password });
+test.afterAll(async () => accounts.dispose());
+
+test("U.T05: a viewer sees which commands their role does not allow, and why", async ({ page, browser }) => {
+  await accounts.start();
+  await page.goto(`${accounts.url}/login`);
+  const json = async (path: string, method = "GET", body?: unknown) => page.evaluate(async ({ path, method, body }) => {
+    const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
+    return r.status === 204 ? null : r.json();
+  }, { path, method, body });
+  await json("/api/auth/login", "POST", ADMIN);
+  const me = await json("/api/me");
+  const general = (await json("/api/spaces")).find((s: { name: string }) => s.name === "General").id;
+  const workbook = (await json("/api/workbooks", "POST", { name: "Read me", space: general })).id;
+  await page.evaluate(async (workbook) => new Promise((ok, fail) => {
+    const ws = new WebSocket(`ws://${location.host}/ws/${workbook}`);
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(String(m.data));
+      if (msg.event === "hello") ws.send(JSON.stringify({ id: 1, op: "sheet_create", name: "S" }));
+      else if (msg.id === 1) { ws.close(); msg.ok ? ok(null) : fail(new Error(msg.error)); }
+    };
+  }), workbook);
+  const { code } = await json(`/api/orgs/${me.orgs[0].org.id}/invites`, "POST",
+    { email: "vic@example.com", org_role: "member", space: general, space_role: "viewer", days: 7 });
+
+  const vic = await (await browser.newContext()).newPage();
+  await vic.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await vic.goto(`${accounts.url}/login`);
+  await vic.evaluate(async (code) => {
+    const r = await fetch("/api/invites/accept", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, name: "Vic", password: "a long enough password" }) });
+    if (!r.ok) throw new Error(await r.text());
+  }, code);
+  await vic.goto(`${accounts.url}/w/${workbook}`);
+  await vic.getByRole("tab", { name: /^S/ }).click();
+  await expect(vic.getByText("View only", { exact: true }).first()).toBeVisible();
+
+  // Commands that would change the workbook are disabled with the reason; viewing ones work.
+  await vic.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "File", exact: true }).click();
+  const file = vic.getByRole("menu", { name: "File" });
+  for (const name of [/^New sheet/, /^Import file…/, /^Rename workbook…/]) {
+    await expect(file.getByRole("menuitem", { name })).toHaveAttribute("aria-disabled", "true");
+    await expect(file.getByRole("menuitem", { name })).toHaveAccessibleDescription("View only");
+  }
+  await expect(file.getByRole("menuitem", { name: /^Export Excel workbook/ })).not.toHaveAttribute("aria-disabled", "true");
+  await vic.keyboard.press("Escape");
+  await vic.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "Format", exact: true }).click();
+  await expect(vic.getByRole("menu", { name: "Format" }).getByRole("menuitem", { name: /^Bold/ })).toHaveAccessibleDescription("View only");
+  await vic.keyboard.press("Escape");
+  const tools = vic.getByRole("toolbar", { name: "Workbook tools" });
+  await expect(tools.getByRole("button", { name: "Import" })).toBeDisabled();
+  await expect(tools.getByRole("button", { name: "Import" })).toHaveAccessibleDescription("View only");
+  await expect(tools.getByRole("button", { name: "Go to" })).toBeEnabled();
+  await vic.context().close();
+});

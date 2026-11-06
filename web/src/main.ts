@@ -99,9 +99,9 @@ async function showWorkbook(id: string): Promise<void> {
   const here = location.pathname;
   const ready = await waitForCompute(id, app, () => navigate(homeUrl()), () => location.pathname === here);
   if (!ready || location.pathname !== here) return;
-  const { workbook } = await api.get(id);
+  const { workbook, role } = await api.get(id);
   document.title = `${workbook.name} · Alephgrid`;
-  const screen = new WorkbookScreen(workbook, () => navigate(homeUrl()));
+  const screen = new WorkbookScreen(workbook, () => navigate(homeUrl()), role);
   current = screen;
   app.replaceChildren(screen.root);
   await screen.start();

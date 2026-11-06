@@ -3,7 +3,7 @@ import { applyReferenceLock, referenceInsertion, referenceRanges } from "./refer
 import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
 import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
-import type { CellArea, CellComment, ColumnValues, MaterializedTable, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, StylePatch, Validation, WorkbookFunction } from "./protocol";
+import type { CellArea, CellComment, ColumnValues, MaterializedTable, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { dashboardsDialog } from "./analysis";
 import { AnalyzePane } from "./analyzepane";
@@ -29,6 +29,7 @@ import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
 import { closeMenu, confirmDialog, disabledFor, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { sheetList, type SheetListItem } from "./sheetlist";
+import { forViewer, VIEW_ONLY } from "./roles";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { closeFilterPopup, filterPopup } from "./filterpopup";
@@ -257,7 +258,11 @@ export class WorkbookScreen {
     compute: () => computeDialog(this.meta.id),
   };
 
-  constructor(meta: WorkbookMeta, private goHome: () => void) {
+  /** The caller's role in the workbook's space: a viewer is offered no changes (U.04a). */
+  private roleBadge = el("span", { class: "badge role-badge", hidden: true, title: "Your role in this space lets you view this workbook, not change it" }, "View only");
+  private importBtn: HTMLButtonElement | null = null;
+
+  constructor(meta: WorkbookMeta, private goHome: () => void, private role: SpaceRole = "owner") {
     this.meta = meta;
     this.rpc = new Rpc(meta.id);
     const onLoaded = () => {
@@ -711,7 +716,7 @@ export class WorkbookScreen {
       b.focus({ preventScroll: true });
       const r = b.getBoundingClientRect();
       b.setAttribute("aria-expanded", "true");
-      showMenu(items(), r.left, r.bottom + 2, { label,
+      showMenu(this.role === "viewer" ? forViewer(label, items()) : items(), r.left, r.bottom + 2, { label,
         onArrow: (d) => openMenuAt(menuButtons.indexOf(b) + d),
         onClose: () => b.setAttribute("aria-expanded", "false") });
     };
@@ -735,7 +740,7 @@ export class WorkbookScreen {
       el("header", { class: "appbar" },
         el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks", "aria-label": "Alephgrid — all workbooks" }, brandMark(24)),
         el("div", { class: "appbar-title" },
-          el("div", { class: "appbar-name" }, this.titleEl, el("span", { class: "status" }, this.statusDot, this.statusText)),
+          el("div", { class: "appbar-name" }, this.titleEl, el("span", { class: "status" }, this.statusDot, this.statusText), this.roleBadge),
           menubar),
         el("div", { class: "spacer" }),
         el("button", { class: "command-search", title: "Search all commands (⌘K)", "aria-keyshortcuts": "Meta+K Control+K", onclick: act.commands },
@@ -752,7 +757,7 @@ export class WorkbookScreen {
         ...this.sheetButtons,
         ...this.tableButtons,
         this.groupSep,
-        tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
+        this.importBtn = tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
         sep(),
         tool("chart", "Analyze", act.analyze, { text: "Analyze", title: "Summaries, pivots, charts and joins without SQL" }),
         this.needsSql(tool("database", "SQL", act.sql, { text: "SQL", title: "SQL workspace" })),
@@ -1005,6 +1010,14 @@ export class WorkbookScreen {
     for (const b of this.sheetButtons) b.hidden = !sheet;
     this.groupSep.hidden = !this.active;
     if (this.exportBtn) disabledFor(this.exportBtn, !this.active && "Open a table or sheet to export it", this.exportBtn.dataset.title ?? "");
+    // A viewer: what would change the workbook says why it is not offered (the server refuses it too).
+    const viewer = this.role === "viewer" && VIEW_ONLY;
+    this.roleBadge.hidden = !viewer;
+    if (this.importBtn) disabledFor(this.importBtn, viewer, this.importBtn.dataset.title ?? "");
+    const changing = (b: HTMLElement) => ["Add column", "Format table", "Undo", "Redo"].includes(b.getAttribute("aria-label") ?? "");
+    for (const b of this.sheetButtons) if (b instanceof HTMLButtonElement && changing(b)) disabledFor(b, viewer, b.dataset.title ?? "");
+    if (viewer) for (const b of this.tableButtons) if (changing(b)) disabledFor(b, viewer, b.dataset.title ?? "");
+    if (viewer) this.formatBarEl.hidden = true;
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
 
@@ -3221,6 +3234,8 @@ export class WorkbookScreen {
         location.assign(e.reason === "signed_out" ? `/login?next=${encodeURIComponent(location.pathname)}` : "/");
         break;
       case "role_changed":
+        this.role = e.role;
+        this.updateToolbar();
         toast(e.role === "viewer" ? "You can now only view this workbook." : `Your role in this space is now ${e.role}.`);
         break;
       case "tables_changed": {
