@@ -17,15 +17,15 @@ Ctrl+C still copies when the key types `с`.
 | Command | Keys | Notes |
 |---|---|---|
 | Undo / Redo | Mod+Z / Mod+Shift+Z, Mod+Y | Sheets: the caller's own last step. Tables: the caller's own last table change, and redo of their last undo; refused when someone changed it since ([COLLABORATION.md](COLLABORATION.md)) |
-| Copy | Mod+C | Tables and sheets. Copies displayed values as text to the system clipboard; the copied range is outlined until Escape |
-| Cut | Mod+X | Sheets |
-| Paste | Mod+V | System paste event. Text copied from this workbook pastes the cells (formulas translated, formats kept); other text pastes as values |
-| Paste special… | Mod+Shift+V | A menu at the active cell: all / formulas / values / formats, and all or values transposed. Copied cells only |
+| Copy | Mod+C | Tables and sheets. Copies displayed values as tab-separated text to the system clipboard; the copied range is outlined until Escape. Only shown rows are copied: a sheet's hidden rows and columns (a range filter's included) are left out of the text and of a paste in this workbook, and a filtered table copies the rows its filter keeps (at most 200,000 rows; use Export beyond that) |
+| Cut | Mod+X | Sheets, within one sheet. Refused, with nothing changed, when pasted on another sheet or when the cut range has hidden rows or columns |
+| Paste | Mod+V | System paste event. Cells copied in this workbook paste as cells (formulas translated, formats kept), on this or another sheet. Cells copied from a table paste into a sheet with their types (text stays text, so `007` keeps its zeros). Cells copied in other spreadsheets paste from their HTML table data: raw values, number formats, bold, italic, underline, strikethrough, text colour and fill; their formulas paste as values; in a table only the raw values. Other text pastes as tab-separated values. One undo step |
+| Paste special… | Mod+Shift+V | A menu at the active cell: all / formulas / values / formats, and all or values transposed. Cells copied in this workbook only, not cut cells or text from other apps |
 | Fill down / right | Mod+D / Mod+R | Replace the browser's bookmark and reload keys while the grid has focus |
-| Fill handle | Drag the square at the selection's bottom-right corner | Sheets. Down, up, right or left: two or more numbers continue their trend (1, 2 → 3, 4), one text cell ending in a number counts on (Week 1 → Week 2), anything else repeats with formulas shifted. One undo step. Keyboard alternative: Fill down / right |
+| Fill handle | Drag the square at the selection's bottom-right corner | Sheets. Down, up, right or left: two or more numbers continue their trend (1, 2 → 3, 4); one text cell ending in a number counts on (Week 1 → Week 2); weekday, month and quarter names continue by name in the same case (Mon → Tue, January → February, Q4 → Q1; Mon, Wed → Fri); one date counts on by day, dates on the same day of the month continue by month (Jan 15, Feb 15 → Mar 15; the 31st becomes the month's last day), other dates follow their trend; anything else repeats with formulas shifted. One undo step. Keyboard alternative: Fill down / right |
 | Edit cell | F2, Enter | Handled by the grid |
 | Clear cells | Delete, Backspace | Handled by the grid |
-| Select all | Mod+A | Sheets: first the block of filled cells around the active cell, then the whole sheet; from an empty cell, the whole sheet. Tables: everything |
+| Select all | Mod+A | Sheets: first the block of filled cells around the active cell, then the whole sheet; from an empty cell, the whole sheet. Rows hidden by a filter inside the block are selected but left out of a copy. Tables: every row the current filter keeps |
 | Select whole rows / columns | Shift+Space / Ctrl+Space | macOS uses Ctrl+Space for input sources by default; use the palette there |
 | Go to… | Mod+G | Sheets. Cell, range, other sheet or name |
 | Bold / Italic / Underline | Mod+B / Mod+I / Mod+U | Sheets |
@@ -35,6 +35,23 @@ Ctrl+C still copies when the key types `с`.
 | Command palette | Mod+K | |
 | Keyboard shortcuts | Mod+/ | |
 | Move | Arrows, Tab, Home/End, PageUp/PageDown, Mod+arrows | Handled by the grid |
+
+## Focus
+
+Keys go to whatever has focus, in this order of precedence:
+
+1. **An open menu or dialog.** Menus take Escape first (it closes them); a dialog keeps Tab
+   and Escape inside it even when a click left focus elsewhere, and the dialogs beneath the
+   topmost one are inert. Grid shortcuts do not run.
+2. **The cell editor or the formula bar** while editing. They keep every key, so Mod+A, Mod+C,
+   Mod+V and Mod+Z act on the text, except Enter, Tab, Escape and F4 (below). In the formula
+   bar, Escape and a saved Enter return focus to the grid (a formula that does not parse keeps
+   it there, with the problem shown); leaving the cell editor by clicking elsewhere saves the
+   edit.
+3. **The grid.** The command registry gets each key first, then movement keys; typing a
+   character replaces the active cell. Escape drops the copied outline.
+4. **Other fields** (find bar, side panels, the SQL editor) keep their own keys; grid
+   shortcuts do not run there.
 
 ## While editing (cell editor or formula bar)
 

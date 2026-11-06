@@ -117,8 +117,8 @@ test("a filtered table copies only the rows it shows", async ({ page }) => {
 
 // Hand-written after the HTML a desktop spreadsheet puts on the clipboard: number formats
 // and fonts in class rules (CSS-escaped), raw numbers in x:num, merged cells as colspan.
-const CLASS_RULES_HTML = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
-<head><meta http-equiv=Content-Type content="text/html; charset=utf-8"><meta name=ProgId content=Excel.Sheet>
+const CLASS_RULES_HTML = `<html xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta http-equiv=Content-Type content="text/html; charset=utf-8">
 <style>
 <!--table
 	{mso-displayed-decimal-separator:"\\.";
@@ -167,7 +167,7 @@ const CLASS_RULES_TEXT = "$1,234.50\t12.50%\t2024-01-15\t007\n\"Two\nlines\"\tme
 // Hand-written after the HTML a web spreadsheet puts on the clipboard: inline styles, typed
 // values and number formats as JSON attributes, formulas in R1C1 (not pasted as formulas).
 const q = (o: unknown) => JSON.stringify(o).replace(/"/g, "&quot;");
-const INLINE_HTML = `<meta charset="utf-8"><google-sheets-html-origin><style type="text/css"><!--td {border: 1px solid #cccccc;}br {mso-data-placement:same-cell;}--></style>`
+const INLINE_HTML = `<meta charset="utf-8"><style type="text/css"><!--td {border: 1px solid #cccccc;}br {mso-data-placement:same-cell;}--></style>`
   + `<table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" border="1" style="table-layout:fixed;font-size:10pt;font-family:Arial;width:0px;border-collapse:collapse;border:none" data-sheets-root="1">`
   + `<colgroup><col width="100"/><col width="100"/><col width="100"/></colgroup><tbody>`
   + `<tr style="height:21px;"><td style="overflow:hidden;padding:2px 3px 2px 3px;vertical-align:bottom;font-weight:bold;color:#0000ff;" data-sheets-value="${q({ 1: 2, 2: "007" })}">007</td>`
@@ -275,6 +275,14 @@ test("cells copy between sheets, and from a table into a sheet with their types"
   await expect.poll(async () => (await cells(ws, 1, 2, 2)).content(1, 1)).toBe("=A2*10+$A$1+A$1+$A2+Data!A2+Other!A2");
   // =7*10+5+5+7+0+7
   expect((await cells(ws, 1, 2, 2)).display(1, 1)).toBe("94");
+  // One undo step, redo, and it is still there after reopening.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await cells(ws, 1, 2, 2)).content(1, 1)).toBe("");
+  await page.keyboard.press("ControlOrMeta+Shift+z");
+  await expect.poll(async () => (await cells(ws, 1, 2, 2)).display(1, 1)).toBe("94");
+  await page.reload();
+  await page.getByRole("tab", { name: /^Other/ }).click();
+  await expect.poll(async () => (await cells(ws, 1, 2, 2)).content(1, 1)).toBe("=A2*10+$A$1+A$1+$A2+Data!A2+Other!A2");
   // A cut cannot move cells to another sheet yet: it says so and changes nothing.
   await page.getByRole("tab", { name: /^Data/ }).click();
   await go(page, "A1");
