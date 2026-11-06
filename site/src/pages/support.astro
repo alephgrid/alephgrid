@@ -3,52 +3,51 @@ import SiteLayout from '../components/SiteLayout.astro';
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
+const repo = 'https://github.com/alephgrid/alephgrid';
 ---
 
 <SiteLayout title="Support Alephgrid" description="How to help keep Alephgrid maintained.">
-  <main>
-    <section class="ag-hero" style="padding-bottom:1rem">
+  <main id="main">
+    <header class="ag-pagehead">
       <div class="ag-container">
         <h1>Help keep Alephgrid maintained</h1>
-        <p class="ag-sub">
-          Alephgrid is open source. Contributions fund maintenance, release infrastructure,
-          compatibility testing and documentation. Funding never unlocks features: export,
-          sign-in, teams and everything else stay free for everyone.
+        <p class="ag-lead">
+          Alephgrid is open source. Funding would pay for maintenance, release infrastructure,
+          compatibility testing and documentation. It never unlocks features: export, sign-in,
+          teams and everything else stay free for everyone.
         </p>
       </div>
-    </section>
+    </header>
 
-    <section class="ag-section" style="padding-top:1rem">
+    <section class="ag-page-section" aria-labelledby="ways-title">
       <div class="ag-container">
-        <div class="ag-cols">
-          <div class="ag-col">
-            <span class="ag-soon">Being set up</span>
-            <h3>Sponsorship</h3>
+        <h2 id="ways-title" class="sr-only">Ways to help</h2>
+        <div class="ag-topics">
+          <div>
+            <h3>Sponsorship <span class="ag-tag">Being set up</span></h3>
             <p>
-              A GitHub Sponsors profile is being set up; this page will link it once the recipient
-              is verified. Until then, there is deliberately no payment link here — we would
-              rather you wait than guess.
+              A GitHub Sponsors profile is being set up, and this page will link it once the
+              recipient is verified. Until then there is deliberately no payment link here.
             </p>
           </div>
-          <div class="ag-col">
+          <div>
             <h3>Help without money</h3>
             <p>
-              Bug reports with reproducible files, documentation fixes, tests and design review
-              are direct contributions to the project's health.
-              <a href={url('/contribute/')}>How to contribute</a>.
+              Bug reports with files that reproduce them, documentation fixes, tests and design
+              review keep the project healthy. <a href={url('/contribute/')}>How to contribute</a>.
             </p>
           </div>
-          <div class="ag-col">
-            <h3>Spread it</h3>
+          <div>
+            <h3>Tell people</h3>
             <p>
-              Star the <a href="https://github.com/alephgrid/alephgrid">repository</a>, show a
-              colleague, or write about a workflow Alephgrid replaced for you.
+              Star the <a href={repo}>repository</a>, show a colleague, or write about a workflow
+              Alephgrid replaced for you.
             </p>
           </div>
         </div>
-        <p class="ag-caption" style="text-align:left; margin-top:1.5rem">
-          When sponsorship goes live, this page will state who receives the funds and publish
-          periodic summaries of how they are used. Contributions are not tax-deductible donations.
+        <p class="ag-note" style="margin-top:2rem">
+          When sponsorship goes live, this page will say who receives the funds and publish regular
+          summaries of how they are used. Contributions are not tax-deductible donations.
         </p>
       </div>
     </section>

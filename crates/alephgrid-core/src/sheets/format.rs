@@ -153,7 +153,7 @@ fn color(v: &str) -> Result<String> {
 
 impl StylePatch {
     /// The engine's style paths and values for this patch.
-    fn paths(&self) -> Result<Vec<(&'static str, String)>> {
+    pub(super) fn paths(&self) -> Result<Vec<(&'static str, String)>> {
         let mut out = Vec::new();
         let flag = |b: bool| if b { "true".to_string() } else { "false".to_string() };
         if let Some(b) = self.b { out.push(("font.b", flag(b))); }

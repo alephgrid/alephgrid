@@ -12,15 +12,18 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Type over a cell, F2 / double-click to edit, Enter / Tab / Escape | Shipped | F.03, [KEYBOARD.md](KEYBOARD.md) |
 | Arrows, Shift+arrows, Mod+arrows, Home/End, PageUp/PageDown | Shipped | Grid keys |
 | Select whole rows / columns (Shift+Space / Ctrl+Space), the corner selects all | Shipped | |
-| Mod+A: the filled block first, then the whole sheet | Shipped | F.04a, `e2e/fillhandle.spec.ts` |
+| Mod+A: the filled block first, then the whole sheet | Shipped | F.04a, `e2e/fillhandle.spec.ts`, `e2e/clipboard.spec.ts` |
+| Copy a filtered range or table: only the shown rows | Shipped | F.04a. Hidden rows and columns of a sheet are left out of the copied text and of a paste in this workbook; a filtered table copies the rows its filter keeps (the filter runs on the server; at most 200,000 rows). A cut over hidden rows is refused. `e2e/clipboard.spec.ts`, core `copies_leave_out_hidden_rows_and_columns` |
 | Copy / cut / paste inside a workbook, formulas translated, cut moves cells and their references | Shipped | F.04, `e2e/commands.spec.ts` |
 | Copied-range outline (until Escape) | Shipped | F.04b |
-| Paste text from other apps (tab-separated) | Partial | Pastes as values; formulas and formats from other apps are not kept |
+| Paste from other spreadsheets (HTML table clipboard data) | Partial | F.04b. Raw values, text kept as text, number formats, bold, italic, underline, strikethrough, text colour and fill; merged cells paste as their first cell. Not kept: formulas (their values paste), fonts and sizes, borders, alignment. Tables take the raw values. Without HTML, tab-separated text pastes as values. `e2e/clipboard.spec.ts` |
+| Copy to other apps with formats | Planned | Copies tab-separated displayed values only |
 | Paste special: all / formulas / values / formats, transpose | Shipped | F.04d, a menu at the active cell |
 | Fill down / right (Mod+D / Mod+R) | Shipped | F.04 |
 | Fill handle drag: series, counting text, repeated patterns, any direction | Shipped | F.04c, one undo step |
 | Copy, fill or drag a formula that reads a table (`=XLOOKUP(A2, customers[id], …)`) | Shipped | References shift like any formula; `$` parts stay. Pasted onto another sheet, its cell references keep naming the original sheet. A table formula that spills into several cells cannot be copied yet (refused with a message) |
-| Fill a date or weekday series by name (Mon → Tue, Jan → Feb) | Planned | Dates stored as numbers continue as numbers |
+| Fill a date or weekday series by name (Mon → Tue, Jan → Feb, Q4 → Q1) | Shipped | F.04c, fill handle: names keep their case and wrap; dates by day, or by month when they share the day of the month. Core `drag_fill_continues_named_and_date_series` |
+| Copy cells to another sheet; copy from a table into a sheet | Shipped | F.04d. Unqualified references become relative to the new sheet, `$` parts stay, references naming a sheet keep it; one undo step. Table text stays text. `e2e/clipboard.spec.ts` |
 | Move cells to another sheet | Planned | Refused with an explanation |
 | Undo / redo (own last step) | Shipped | [COLLABORATION.md](COLLABORATION.md) |
 

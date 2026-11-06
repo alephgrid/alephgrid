@@ -2,7 +2,7 @@
 title: "Introducing Alephgrid: room for every row"
 date: 2026-11-01
 authors: alephgrid
-excerpt: An open-source spreadsheet for data that doesn't fit in a spreadsheet — hundreds of millions of rows, real Excel formulas, SQL when you want it, running entirely on your own machine.
+excerpt: An open-source spreadsheet for data that doesn't fit in a spreadsheet — big tables streamed from DuckDB, real Excel formulas, SQL when you want it, running entirely on your own machine.
 ---
 
 Spreadsheets are the most successful data tool ever made, and they stop working the moment your
@@ -10,8 +10,8 @@ data gets big. Databases handle the big data and stop working the moment you wan
 format a column, write `=SUMIFS(...)`, drag a fill handle.
 
 Alephgrid is our attempt to remove that trade-off. It's an open-source (Apache-2.0) spreadsheet
-that opens CSV and Parquet files with hundreds of millions of rows, keeps them scrollable and
-editable in your browser, and puts an ordinary, Excel-compatible spreadsheet right next to them —
+that opens large CSV and Parquet files, keeps them scrollable and editable in your browser
+without loading them into memory, and puts an ordinary, Excel-compatible spreadsheet right next to them —
 with formulas that can read the big tables directly.
 
 ## How it works

@@ -3,7 +3,7 @@ import { applyReferenceLock, referenceInsertion, referenceRanges } from "./refer
 import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
 import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
-import type { CellArea, CellComment, ColumnValues, MaterializedTable, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
+import type { CellArea, CellComment, ColumnValues, MaterializedTable, PastedCell, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { dashboardsDialog } from "./analysis";
 import { AnalyzePane } from "./analyzepane";
@@ -18,6 +18,7 @@ import { computeDialog, pausedText, profileLabel, waitForCompute } from "./compu
 import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCompact, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { parseTsv, tsvCell } from "./tsv";
+import { parseClipboardHtml } from "./clipboardhtml";
 import { store, stored, unstore } from "./storage";
 import { ruleFill, rulesDialog } from "./sheetrules";
 import { areaContains, areaOf, rangeOf } from "./sheetarea";
@@ -183,6 +184,9 @@ export class WorkbookScreen {
    *  (formulas, formats) rather than the displayed values; with the sheet's layout when
    *  copied (a paste is refused once it moved). */
   private clip: { sheet: number; range: Range; text: string; cut: boolean; layout?: number } | null = null;
+  /** Cells last copied from a table, with their types, so pasting them into a sheet keeps
+   *  text as text (leading zeros) and numbers as numbers; kept only up to the edit limit. */
+  private tableClip: { text: string; cells: PastedCell[][] } | null = null;
   /** Sheet changes run one after another in the order the user made them: a formula's parse
    *  check must not let a later edit (or undo) reach the server first. */
   private inSheetOrder = serialQueue();
@@ -313,7 +317,7 @@ export class WorkbookScreen {
         dragFill: (source, target) => void self.dragFill(source, target),
         copyCancelled: () => { self.clip = null; },
         region: (at) => self.sheetRegion(at),
-        paste: (at, text) => self.paste(at, text),
+        paste: (at, text, html) => self.paste(at, text, html),
         columnResized: (c, w) => self.columnResized(c, w),
         rowResized: (r, h) => void self.resizeLines("rows", r, 1, h),
         autoFit: (c) => self.autoFitSheetColumn(c),
@@ -1875,7 +1879,15 @@ export class WorkbookScreen {
     return work;
   }
 
+  /** The hidden rows and columns of the open sheet, read now (a filter may have just run). */
+  private async hiddenLines(): Promise<{ rows: Set<number>; columns: Set<number> }> {
+    if (this.active?.kind !== "sheet") return { rows: new Set(), columns: new Set() };
+    const l = await this.rpc.call("sheet_layout", { sheet: this.active.index });
+    return { rows: new Set(l.rows.filter((x) => x.hidden).map((x) => x.index)), columns: new Set(l.columns.filter((x) => x.hidden).map((x) => x.index)) };
+  }
+
   private async copyNow(range: Range): Promise<void> {
+    if (!this.isSheet() && !this.view) { toast("The table is still opening; copy again in a moment"); return; }
     const last = this.isSheet()
       ? Math.min(range.r1, Math.max(0, (this.sheets.find((s) => this.active?.kind === "sheet" && s.index === this.active.index)?.rows ?? 1) - 1))
       : Math.min(range.r1, (this.view?.row_count ?? 1) - 1);
@@ -1886,22 +1898,54 @@ export class WorkbookScreen {
       return;
     }
     try {
-      const data = await this.fetchRange({ ...range, r1 });
-      const text = data.map((row) => row.slice(range.c0, range.c1 + 1).map(tsvCell).join("\t")).join("\n");
+      // Hidden rows and columns (a filter's included) are left out, as the paste does.
+      const hidden = await this.hiddenLines();
+      const data = (await this.fetchRange({ ...range, r1 })).filter((_, i) => !hidden.rows.has(range.r0 + i));
+      const columns = Array.from({ length: range.c1 - range.c0 + 1 }, (_, i) => range.c0 + i).filter((c) => !hidden.columns.has(c));
+      if (!data.length || !columns.length) { toast("Every selected cell is hidden: show the rows or columns first", "error"); return; }
+      const text = data.map((row) => columns.map((c) => tsvCell(row[c])).join("\t")).join("\n");
       await navigator.clipboard.writeText(text);
       this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined } : null;
+      this.tableClip = null;
+      if (this.active?.kind !== "sheet" && data.length * columns.length <= this.maxEditCells) {
+        const cols = this.view?.columns ?? [];
+        this.tableClip = { text, cells: data.map((row) => columns.map((c) => {
+          const v = row[c];
+          return cols[c]?.kind === "text" && typeof v === "string" ? { value: v, text: true } : { value: rawText(v) };
+        })) };
+      }
       this.grid.setCopied({ ...range, r1 });
-      toast(`Copied ${formatCount(rows * (range.c1 - range.c0 + 1))} cells`);
+      const lines = [data.length < rows ? "rows" : "", columns.length < range.c1 - range.c0 + 1 ? "columns" : ""].filter(Boolean).join(" and ");
+      toast(`Copied ${formatCount(data.length * columns.length)} cells${lines ? ` (hidden ${lines} left out)` : ""}`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
     }
   }
 
-  private async paste(at: Cell, text: string): Promise<void> {
+  private async paste(at: Cell, text: string, html?: string): Promise<void> {
     await this.clipboardWork;
     const same = (a: string) => a.replace(/\r\n/g, "\n").replace(/\n$/, "");
     if (this.isSheet() && this.clip && same(text) === same(this.clip.text)) {
       await this.pasteCells(at, "all", false);
+      return;
+    }
+    if (this.isSheet() && this.tableClip && same(text) === same(this.tableClip.text)) {
+      await this.pasteForeign(at, this.tableClip.cells, false);
+      return;
+    }
+    // Cells copied in another spreadsheet: their HTML holds raw values and formats.
+    const parsed = html ? parseClipboardHtml(html, this.maxEditCells) : null;
+    if (parsed?.tooMany) { toast(`That paste is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
+    if (parsed && this.isSheet()) { await this.pasteForeign(at, parsed.cells, true); return; }
+    if (parsed) {
+      // Tables keep values only, in their raw form (1234.5, not $1,234.50).
+      const cols = this.view?.columns ?? [];
+      const edits: { r: number; c: number; value: string | null }[] = [];
+      parsed.cells.forEach((row, i) => row.forEach((cell, j) => {
+        const c = at.c + j;
+        if (c < cols.length && !cols[c].formula) edits.push({ r: at.r + i, c, value: cell.value === "" ? null : cell.value });
+      }));
+      if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
       return;
     }
     const rows = parseTsv(text.replace(/\n$/, ""));
@@ -1913,6 +1957,28 @@ export class WorkbookScreen {
       if (sheet || (c < cols.length && !cols[c].formula)) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
     }));
     if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
+  }
+
+  /** Paste cells from another app (or a table of this workbook) into the sheet at `at`:
+   *  values, text kept as text, and formats when `formats`; one undo step. */
+  private async pasteForeign(at: Cell, cells: PastedCell[][], formats: boolean): Promise<void> {
+    if (this.active?.kind !== "sheet") return;
+    const sheet = this.active.index;
+    const rows = cells.length, columns = cells.reduce((n, r) => Math.max(n, r.length), 0);
+    if (!rows || !columns) return;
+    const layout = this.shownLayout(sheet, at.r, at.r + rows - 1);
+    if (layout === null) return;
+    const params = { sheet, row: at.r, column: at.c, cells, layout };
+    if (!this.fits(rows * columns, { op: "sheet_paste_cells", ...params })) return;
+    try {
+      const area = await this.inSheetOrder(() => this.rpc.call("sheet_paste_cells", params));
+      await this.refreshSheet();
+      this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
+      const styled = formats && cells.some((r) => r.some((c) => c.style));
+      toast(`Pasted ${formatCount(area.rows * area.columns)} cells${styled ? " with their formats" : ""}`, "success");
+    } catch (e) {
+      await this.sheetConflict(e);
+    }
   }
 
   /** Paste the copied (or cut) cells at `at`: formulas are translated, cut cells move. */
