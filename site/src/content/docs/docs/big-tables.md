@@ -1,18 +1,36 @@
 ---
 title: Big tables
-description: How Alephgrid keeps hundreds of millions of rows responsive, and what you can do with them.
+description: How Alephgrid keeps tables with millions of rows responsive, what was measured, and what you can do with them.
 ---
 
-Open a CSV or Parquet file with hundreds of millions of rows, then scroll, sort, filter, edit
-and add calculated columns in your browser.
+Open a large CSV or Parquet file, then scroll, sort, filter, edit and add calculated columns in
+your browser. The table stays in DuckDB on disk; the grid streams only the rows you look at.
 
 ## Why it stays fast
 
 - Opening a workbook reads nothing into memory; the grid asks only for the rows on screen, so
-  scrolling to row 900,000,000 is a range read.
+  jumping deep into a table is a range read, not a load.
 - Sorts build a permutation, not a copy.
 - Calculated columns (`=[fare_usd] / [distance_mi]`) are computed only for the rows you look at.
 - Everything runs on a DuckDB file on your machine.
+
+## Measured
+
+On a 20-million-row, 9-column table, with a debug build on an 8-core laptop with 8 GB of RAM:
+
+| Operation | Time |
+| --- | --- |
+| Reopen the workbook after a restart | 3 ms |
+| Fetch 100 rows at row 0, 10M or 19.99M | 3–11 ms |
+| Filter `carrier = DL AND origin = SEA` (125k matches) | 34 ms |
+| Sort all 20M rows by a float column | 0.95 s |
+| Sum, average, min and max of a column over all rows | 28 ms |
+| `GROUP BY carrier` in the SQL workspace | 39–57 ms |
+| Edit 1 cell / paste 1,000 cells | 3 ms / 43 ms |
+
+Reproduce with `alephgrid --demo-rows 20000000` and
+[`docs/bench.mjs`](https://github.com/alephgrid/alephgrid/blob/main/docs/bench.mjs). Release-build
+benchmarks over varied data shapes will be published with v0.1.0.
 
 ## Working with tables
 

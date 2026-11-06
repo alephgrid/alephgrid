@@ -21,7 +21,7 @@ export default defineConfig({
     starlight({
       title: 'Alephgrid',
       description:
-        'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Hundreds of millions of rows, real Excel formulas, SQL when you want it. Runs on your machine; your data never leaves it.',
+        'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Big tables stream from DuckDB instead of loading into memory; sheets use Excel formulas; SQL when you want it. Runs on your machine; your data never leaves it.',
       logo: {
         light: './src/assets/alephgrid-horizontal-primary.svg',
         dark: './src/assets/alephgrid-horizontal-inverse.svg',
@@ -61,7 +61,7 @@ export default defineConfig({
         starlightLlmsTxt({
           projectName: 'Alephgrid',
           description:
-            'An open-source, self-hosted spreadsheet for data that does not fit in a spreadsheet: hundreds of millions of rows backed by DuckDB, Excel-compatible formulas, optional SQL, teams, and read-only agent access over MCP. Pre-release; install by building from source.',
+            'An open-source, self-hosted spreadsheet for data that does not fit in a spreadsheet: big tables stored in DuckDB and streamed to the grid a screen at a time (measured on a 20-million-row table), Excel-compatible formulas, optional SQL, teams, and read-only agent access over MCP. Pre-release; install by building from source.',
           details:
             'The documentation below describes shipped behavior of the current pre-release. Canonical site: https://alephgrid.dev — source: https://github.com/alephgrid/alephgrid',
           optionalLinks: [
