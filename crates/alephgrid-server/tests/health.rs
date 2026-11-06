@@ -32,6 +32,9 @@ async fn readiness_reports_each_check_and_fails_when_the_data_directory_is_read_
     // Nothing about where or how big: the endpoint is public.
     let text = body.to_string();
     assert!(!text.contains(&dir.path().display().to_string()), "{text}");
+    // Probes at the same time each use their own file, so none reports a false failure.
+    let probes = futures_util::future::join_all((0..32).map(|_| srv.get("/readyz"))).await;
+    assert!(probes.iter().all(|(status, b)| *status == 200 && b["checks"]["data_dir_writable"] == "ok"), "{probes:?}");
     // The probe leaves nothing behind.
     let control = dir.path().join(".control");
     assert!(!std::fs::read_dir(&control).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".ready-")));

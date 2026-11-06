@@ -92,10 +92,13 @@ pub fn readiness(state: &Shared) -> Readiness {
     }
 }
 
-/// Create, write and remove a small file: what the server needs to record state.
+/// Create, write and remove a small file: what the server needs to record state. Each call
+/// uses its own file, so probes running at the same time do not remove each other's.
 fn probe_write(dir: &std::path::Path) -> bool {
     use std::io::Write;
-    let path = dir.join(format!(".ready-{}", std::process::id()));
+    static PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = PROBE.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!(".ready-{}-{n}", std::process::id()));
     let written = std::fs::File::create(&path).and_then(|mut f| f.write_all(b"ready\n"));
     let removed = std::fs::remove_file(&path);
     written.is_ok() && removed.is_ok()
