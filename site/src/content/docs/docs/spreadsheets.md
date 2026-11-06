@@ -27,8 +27,8 @@ repeats patterns. The complete list lives in the repository's
 ## Formatting and layout
 
 Bold, italic, underline, strikethrough, sizes, colours, borders, alignment, wrap, number
-formats and merged cells; frozen rows and columns, row and column sizes, hide and unhide, and
-zoom 50–200%. All of it is kept through XLSX import and export.
+formats and merged cells; frozen rows and columns, row and column sizes, and hide and unhide, all kept through XLSX import
+and export. Zoom (50–200%) is remembered per workbook in your browser.
 
 ## Sheet data tools
 
