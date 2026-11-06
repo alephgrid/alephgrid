@@ -1019,7 +1019,7 @@ impl Sheets {
             copy.set_user_input(i, row, column, &value).map_err(|e| anyhow!(e))?;
             if notes.len() < 100 {
                 let name = m.get_worksheets_properties().get(i as usize).map(|p| p.name.clone()).unwrap_or_default();
-                notes.push(format!("{name}!{}{}: {formula} is exported as its value {shown:?}", column_name(column as u32), row));
+                notes.push(format!("{name}!{}{}: {formula} is exported as its value {shown:?}", column_name(column as u32 - 1), row));
             }
         }
         let mut notes2 = self.export_model(&copy, path)?;
