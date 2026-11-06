@@ -3,7 +3,7 @@ Copyright 2026 The Alephgrid contributors
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-This product includes third-party software: 277 Rust crates, DuckDB v2.0.0 with the
+This product includes third-party software: 308 Rust crates, DuckDB v2.0.0 with the
 libraries bundled in its source, IronCalc (MIT OR Apache-2.0, vendored in vendor/ironcalc_base,
 with Unicode CLDR locale data under the Unicode License v3), the Manrope font (SIL Open Font
 License 1.1) and a module-preload helper from Vite (MIT). Their licences and copyright notices
