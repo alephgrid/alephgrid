@@ -20,6 +20,10 @@ test("hub: three recent cards, sort by name, search and Clear search, state kept
   await page.goto(server.url);
   const cards = page.getByRole("region", { name: "Recently opened" }).locator(".wb-card");
   await expect(cards).toHaveCount(3);
+  // L.05c (e): the sidebar footer keeps the version note on one line beside Administration.
+  await expect(page.getByRole("button", { name: "Administration" })).toBeVisible();
+  const note = (await page.getByText(/data stays on this server/).boundingBox())!;
+  expect(note.height).toBeLessThan(24);
 
   // Sort by name (case-insensitive).
   await page.getByRole("combobox", { name: "Sort by" }).selectOption("name");

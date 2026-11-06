@@ -286,7 +286,7 @@ function renderHome(): void {
     el("div", { class: "sidebar-foot" }, themeButton(),
       home.me && (home.me.kind === "local" || home.me.instance_admin)
         ? el("button", { class: "btn btn-ghost btn-small", type: "button", onclick: () => adminDialog() }, "Administration") : null,
-      el("span", { class: "muted" }, `v${home.version} · data stays on this server`)),
+      el("span", { class: "muted sidebar-version" }, `v${home.version} · data stays on this server`)),
   );
 
   const spaceName = (id?: string | null) => home.spaces.find((s) => s.id === id)?.name;
