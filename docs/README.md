@@ -50,4 +50,3 @@
 | [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md) | Every task, its tests and its status |
 | [LAUNCH.md](LAUNCH.md) | What remains for the first release, and the release announcement |
 | [ENTERPRISE_ARCHITECTURE_DECISION.md](ENTERPRISE_ARCHITECTURE_DECISION.md) | Why compute is per workbook and managed by policy |
-| [IMPLEMENTATION_HANDOFF.md](IMPLEMENTATION_HANDOFF.md) | Notes for whoever picks up the work next |
