@@ -5,9 +5,14 @@ for a maintainer's approval, and only then becomes public. Nothing runs on a pus
 
 | Channel | What users run | Built by |
 |---|---|---|
-| GitHub Releases | download `alephgrid-VERSION-TARGET.tar.gz` (+ `SHA256SUMS`) | `release-linux-*`, `release-macos` |
+| GitHub Releases | download `alephgrid-VERSION-TARGET.tar.gz` (+ `SHA256SUMS`, SBOMs) | `release-linux-*`, `release-macos`, `release-sbom` |
 | Docker | `docker run -p 7878:7878 ghcr.io/alephgrid/alephgrid` | `release-docker` (`Dockerfile.release`, from the tested binaries) |
 | npm (also pnpm, yarn, bun) | `npx alephgrid` · `npm i -g alephgrid` | `release-npm` (`tools/release/npm.mjs`) |
+
+Every archive, image and npm package holding the binary carries `LICENSE`, `NOTICE` and
+`THIRD-PARTY-NOTICES.md` (written by `tools/licenses.py`; the image keeps them in
+`/usr/share/doc/alephgrid/`). Archives and SBOMs are checksummed but **not yet signed**:
+signatures (for example Sigstore/cosign for the image and the archives) are deferred.
 
 Targets: Linux x86_64 and arm64 (built on Debian 11, so they need glibc 2.31 or newer: Debian
 11+, Ubuntu 20.04+, RHEL 9), macOS Apple silicon and Intel (macOS 11+). Windows: Docker or WSL
@@ -45,8 +50,12 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
    * builds the four binaries (about 30 minutes; DuckDB is compiled from source), runs a smoke
      test on each native build (start, version, embedded UI, create a workbook, import a CSV)
      and packages them with checksums;
-   * creates a **draft** GitHub release with the archives and `SHA256SUMS` (drafts are visible
-     only to maintainers);
+   * writes CycloneDX SBOMs (`release-sbom`): `alephgrid-VERSION-TARGET.cdx.json` for the Rust
+     crates linked into each binary (cargo-cyclonedx, pinned) and `alephgrid-VERSION-web.cdx.json`
+     for the web bundle (`npm sbom`, production dependencies). The C/C++ libraries inside DuckDB
+     are not in cargo's graph; they are listed in `THIRD-PARTY-NOTICES.md`;
+   * creates a **draft** GitHub release with the archives, the SBOMs and `SHA256SUMS` (drafts
+     are visible only to maintainers);
    * stops at **`approve-publish`**.
 5. Check the draft on GitHub → Releases: notes, files, sizes. Download one archive and run it.
 6. In CircleCI, approve `approve-publish`. Then, in parallel: the release is published, the

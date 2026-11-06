@@ -322,6 +322,39 @@ jobs:
           paths:
             - dist/*-apple-darwin.tar.gz*
 
+  # Software bills of materials (CycloneDX JSON), uploaded next to the archives and listed in
+  # SHA256SUMS: one per release target for the Rust dependencies linked into that binary, and
+  # one for the web bundle's production npm dependencies. The C/C++ libraries bundled in DuckDB
+  # are not in cargo's graph; they are listed in THIRD-PARTY-NOTICES.md. Signatures for the
+  # archives and SBOMs are not produced yet (9.11).
+  release-sbom:
+    executor: vm
+    steps:
+      - checkout
+      - rust-setup
+      - node-setup
+      - run:
+          name: CycloneDX SBOMs (cargo-cyclonedx 0.5.9, npm sbom)
+          command: |
+            v="<< pipeline.parameters.release_version >>"
+            # Pinned and installed from the lock file it was published with; update deliberately.
+            cargo install cargo-cyclonedx --version 0.5.9 --locked
+            export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+            mkdir -p dist
+            for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo cyclonedx --manifest-path Cargo.toml --format json --spec-version 1.5 --all \
+                --no-build-deps --target "$t" --override-filename sbom
+              mv crates/alephgrid-server/sbom.json "dist/alephgrid-$v-$t.cdx.json"
+            done
+            (cd web && npm sbom --sbom-format cyclonedx --omit dev --package-lock-only) > "dist/alephgrid-$v-web.cdx.json"
+            cd dist
+            for f in *.cdx.json; do sha256sum "$f" > "$f.sha256"; done
+            ls -l
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist/*.cdx.json*
+
   release-draft:
     executor: node
     steps:
@@ -329,7 +362,7 @@ jobs:
       - attach_workspace:
           at: .
       - run:
-          name: Private draft GitHub release with every archive and the checksums
+          name: Private draft GitHub release with every archive, SBOM and the checksums
           command: |
             cat dist/*.sha256 > dist/SHA256SUMS
             tools/release/github.sh draft "<< pipeline.parameters.release_version >>" dist
@@ -457,9 +490,12 @@ workflows:
       - release-macos:
           requires: [release-check, web]
           filters: *on-tags
+      - release-sbom:
+          requires: [release-check]
+          filters: *on-tags
       - release-draft:
           context: release
-          requires: [release-linux-amd64, release-linux-arm64, release-macos]
+          requires: [release-linux-amd64, release-linux-arm64, release-macos, release-sbom]
           filters: *on-tags
       - approve-publish:
           type: approval
