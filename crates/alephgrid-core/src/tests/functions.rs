@@ -343,6 +343,10 @@ fn formula_tests_tell_blank_cells_empty_text_and_errors_apart() {
     let got = t.wb.test_function(&na).unwrap();
     assert!(got.iter().all(|r| r.passed), "{got:?}");
     assert_eq!(got[1].kind, TestValueKind::Error);
+    // IFNA is in the documented built-in set and tells #N/A from other errors.
+    let ifna = typed("NAONLY", FunctionKind::Formula, r#"IFNA(value,"na")"#, vec![(TestValue::error("#N/A"), "na".into()), (TestValue::error("#VALUE!"), TestValue::error("#VALUE!"))]);
+    let got = t.wb.test_function(&ifna).unwrap();
+    assert!(got.iter().all(|r| r.passed), "{got:?}");
     // Only known error values.
     let bad = typed("BADERROR", FunctionKind::Formula, "value", vec![(TestValue::error("1+1"), "2".into())]);
     assert!(t.wb.test_function(&bad).unwrap_err().to_string().contains("not an error value"));

@@ -454,7 +454,9 @@ fn check_node(n: &Node, calls: &mut BTreeSet<String>, declared: &BTreeSet<String
     use Node::*;
     match n {
         FunctionKind { kind, args } => {
-            let name = kind.to_xlsx_string();
+            // Newer Excel functions are written with their `_xlfn.` prefix (IFNA).
+            let xlsx = kind.to_xlsx_string();
+            let name = xlsx.trim_start_matches("_xlfn.").to_string();
             if ![
                 "IF",
                 "IFERROR",
