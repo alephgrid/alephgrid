@@ -3,7 +3,7 @@ import { applyReferenceLock, referenceInsertion, referenceRanges } from "./refer
 import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
 import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
-import type { CellArea, CellComment, ColumnValues, MaterializedTable, PastedCell, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, StylePatch, Validation, WorkbookFunction } from "./protocol";
+import type { CellArea, CellComment, ColumnValues, MaterializedTable, PastedCell, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { dashboardsDialog } from "./analysis";
 import { AnalyzePane } from "./analyzepane";
@@ -28,7 +28,9 @@ import type {
 } from "./types";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
-import { closeMenu, confirmDialog, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { closeMenu, confirmDialog, disabledFor, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { sheetList, type SheetListItem } from "./sheetlist";
+import { forViewer, VIEW_ONLY } from "./roles";
 import { brandMark, icon, type IconName } from "./icons";
 import { dockPanel } from "./dock";
 import { closeFilterPopup, filterPopup } from "./filterpopup";
@@ -260,7 +262,11 @@ export class WorkbookScreen {
     compute: () => computeDialog(this.meta.id),
   };
 
-  constructor(meta: WorkbookMeta, private goHome: () => void) {
+  /** The caller's role in the workbook's space: a viewer is offered no changes (U.04a). */
+  private roleBadge = el("span", { class: "badge role-badge", hidden: true, title: "Your role in this space lets you view this workbook, not change it" }, "View only");
+  private importBtn: HTMLButtonElement | null = null;
+
+  constructor(meta: WorkbookMeta, private goHome: () => void, private role: SpaceRole = "owner") {
     this.meta = meta;
     this.rpc = new Rpc(meta.id);
     const onLoaded = () => {
@@ -591,7 +597,7 @@ export class WorkbookScreen {
       } });
     const act = this.act;
     const tool = (name: IconName, label: string, run: (e: MouseEvent) => void, o: { text?: string; title?: string; menu?: boolean } = {}) =>
-      el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label,
+      el("button", { class: `tool${o.text ? " tool-text" : ""}`, "aria-label": o.text ?? label, title: o.title ?? label, "data-title": o.title ?? label,
         "aria-haspopup": o.menu ? "menu" : false, onclick: run },
         icon(name), o.text ? el("span", {}, o.text) : null, o.menu ? icon("chevron", 12) : null);
     const sep = () => el("span", { class: "tool-sep", "aria-hidden": "true" });
@@ -637,8 +643,8 @@ export class WorkbookScreen {
         { label: "Find and replace…", hint: "⌘⇧H", disabled: !this.active && "Open a table or sheet first", action: act.findReplace },
       ]],
       ["View", () => [
-        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2, action: () => this.setZoom(this.grid.getZoom() + 0.1) },
-        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5, action: () => this.setZoom(this.grid.getZoom() - 0.1) },
+        { label: "Zoom in", hint: `${Math.round(this.grid.getZoom() * 100)}%`, disabled: this.grid.getZoom() >= 2 && "Already at 200%", action: () => this.setZoom(this.grid.getZoom() + 0.1) },
+        { label: "Zoom out", disabled: this.grid.getZoom() <= 0.5 && "Already at 50%", action: () => this.setZoom(this.grid.getZoom() - 0.1) },
         { label: "Actual size (100%)", action: () => this.setZoom(1) },
         "sep" as const,
         ...(this.isSheet() ? [
@@ -714,7 +720,7 @@ export class WorkbookScreen {
       b.focus({ preventScroll: true });
       const r = b.getBoundingClientRect();
       b.setAttribute("aria-expanded", "true");
-      showMenu(items(), r.left, r.bottom + 2, { label,
+      showMenu(this.role === "viewer" ? forViewer(label, items()) : items(), r.left, r.bottom + 2, { label,
         onArrow: (d) => openMenuAt(menuButtons.indexOf(b) + d),
         onClose: () => b.setAttribute("aria-expanded", "false") });
     };
@@ -738,7 +744,7 @@ export class WorkbookScreen {
       el("header", { class: "appbar" },
         el("button", { class: "brand", onclick: () => this.goHome(), title: "All workbooks", "aria-label": "Alephgrid — all workbooks" }, brandMark(24)),
         el("div", { class: "appbar-title" },
-          el("div", { class: "appbar-name" }, this.titleEl, el("span", { class: "status" }, this.statusDot, this.statusText)),
+          el("div", { class: "appbar-name" }, this.titleEl, el("span", { class: "status" }, this.statusDot, this.statusText), this.roleBadge),
           menubar),
         el("div", { class: "spacer" }),
         el("button", { class: "command-search", title: "Search all commands (⌘K)", "aria-keyshortcuts": "Meta+K Control+K", onclick: act.commands },
@@ -755,7 +761,7 @@ export class WorkbookScreen {
         ...this.sheetButtons,
         ...this.tableButtons,
         this.groupSep,
-        tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
+        this.importBtn = tool("upload", "Import", act.importFile, { text: "Import", title: "Import CSV, Parquet, JSON or XLSX" }),
         sep(),
         tool("chart", "Analyze", act.analyze, { text: "Analyze", title: "Summaries, pivots, charts and joins without SQL" }),
         this.needsSql(tool("database", "SQL", act.sql, { text: "SQL", title: "SQL workspace" })),
@@ -779,6 +785,8 @@ export class WorkbookScreen {
       el("footer", { class: "footer" },
         el("button", { class: "tab-add", title: "New table or sheet", "aria-label": "New table or sheet",
           onclick: (e: MouseEvent) => this.newItemMenu(e) }, icon("plus", 15)),
+        el("button", { class: "tab-add", title: "All sheets and tables", "aria-label": "All sheets and tables", "aria-haspopup": "dialog",
+          "aria-expanded": "false", onclick: (e: MouseEvent) => this.openSheetList(e.currentTarget as HTMLElement) }, icon("list", 15)),
         this.tabsEl,
         el("div", { class: "spacer" }),
         this.statsEl,
@@ -919,7 +927,7 @@ export class WorkbookScreen {
     ];
     if (current) {
       items.push(
-        { label: `Update “${current.name}”`, disabled: !this.savedViewModified(), action: () => this.saveView(current.id, current.name) },
+        { label: `Update “${current.name}”`, disabled: !this.savedViewModified() && "No changes to save", action: () => this.saveView(current.id, current.name) },
         { label: `Rename “${current.name}”…`, action: async () => {
           const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
           if (!v) return;
@@ -998,13 +1006,22 @@ export class WorkbookScreen {
     const sheet = this.isSheet();
     this.formatBarEl.hidden = !sheet;
     if (sheet) this.formatBarEl.sync?.();
+    // Controls that cannot run yet say why (U.04a, U.11a).
     for (const b of this.tableButtons) {
       b.hidden = sheet || !this.active;
-      b.disabled = !this.view;
+      disabledFor(b, !this.view && "Loading the table…", b.dataset.title ?? "");
     }
     for (const b of this.sheetButtons) b.hidden = !sheet;
     this.groupSep.hidden = !this.active;
-    if (this.exportBtn) this.exportBtn.disabled = !this.active;
+    if (this.exportBtn) disabledFor(this.exportBtn, !this.active && "Open a table or sheet to export it", this.exportBtn.dataset.title ?? "");
+    // A viewer: what would change the workbook says why it is not offered (the server refuses it too).
+    const viewer = this.role === "viewer" && VIEW_ONLY;
+    this.roleBadge.hidden = !viewer;
+    if (this.importBtn) disabledFor(this.importBtn, viewer, this.importBtn.dataset.title ?? "");
+    const changing = (b: HTMLElement) => ["Add column", "Format table", "Undo", "Redo"].includes(b.getAttribute("aria-label") ?? "");
+    for (const b of this.sheetButtons) if (b instanceof HTMLButtonElement && changing(b)) disabledFor(b, viewer, b.dataset.title ?? "");
+    if (viewer) for (const b of this.tableButtons) if (changing(b)) disabledFor(b, viewer, b.dataset.title ?? "");
+    if (viewer) this.formatBarEl.hidden = true;
     this.chips.hidden = sheet || this.chips.childElementCount === 0;
   }
 
@@ -1121,6 +1138,17 @@ export class WorkbookScreen {
     all.forEach((t) => (t.tabIndex = t.classList.contains("active") || (!all.some((x) => x.classList.contains("active")) && t === all[0]) ? 0 : -1));
     if (tabsHadFocus) all.find((t) => t.tabIndex === 0)?.focus();
     this.renderExplorer();
+  }
+
+  /** U.04a: every table and sheet in a searchable list (the tab bar may not show them all). */
+  private openSheetList(anchor: HTMLElement): void {
+    const a = this.active;
+    sheetList(anchor, [
+      ...this.tables.map((t): SheetListItem => ({ kind: "table", name: t.name, detail: `${formatCount(t.row_count)} rows`,
+        active: a?.kind === "table" && a.name === t.name, open: () => void this.openTable(t.name) })),
+      ...this.sheets.map((s): SheetListItem => ({ kind: "sheet", name: s.name,
+        active: a?.kind === "sheet" && a.index === s.index, open: () => void this.openSheet(s.index) })),
+    ]);
   }
 
   private snapshotNote(table: string): string {
@@ -1400,24 +1428,32 @@ export class WorkbookScreen {
     }, 250);
   }
 
-  /** Sum/avg/count of the selected sheet cells that are already on screen. */
+  /** Count of the selected sheet cells that are already loaded, then Sum/Avg of their values
+   *  (U.T05): from the cells' numbers on the server, not their display, so a percent, a currency
+   *  or a date counts as the number it holds. */
   private sheetSelectionStats(range: Range): void {
     const cells = (range.r1 - range.r0 + 1) * (range.c1 - range.c0 + 1);
-    if (cells < 2 || cells > 200_000) return;
-    let count = 0, numbers = 0, sum = 0;
+    if (cells < 2 || cells > 200_000 || this.active?.kind !== "sheet") return;
+    let count = 0;
     for (let r = range.r0; r <= range.r1; r++) {
-      for (let c = range.c0; c <= range.c1; c++) {
-        const cell = this.sheetCache.cell(r, c);
-        if (!cell) continue;
-        count++;
-        const n = Number(cell[0].replace(/[, $€£%]/g, ""));
-        if (cell[1] === "right" && Number.isFinite(n)) { numbers++; sum += n; }
-      }
+      for (let c = range.c0; c <= range.c1; c++) if (this.sheetCache.cell(r, c)) count++;
     }
     if (!count) return;
-    const parts = [`Count ${formatCount(count)}`];
-    if (numbers) parts.unshift(`Sum ${formatStat(sum)}`, `Avg ${formatStat(sum / numbers)}`);
-    this.statsEl.textContent = parts.join("  ·  ");
+    const counted = `Count ${formatCount(count)}`;
+    if (!this.statsEl.textContent?.endsWith(counted)) this.statsEl.textContent = counted;
+    const sheet = this.active.index;
+    const seq = ++this.statsSeq;
+    clearTimeout(this.statsTimer);
+    this.statsTimer = window.setTimeout(async () => {
+      try {
+        const area = { row: range.r0, column: range.c0, rows: range.r1 - range.r0 + 1, columns: range.c1 - range.c0 + 1 };
+        const numbers = (await this.rpc.call("sheet_numbers", { sheet, area })).flat().filter((n): n is number => typeof n === "number");
+        if (seq !== this.statsSeq) return;
+        if (!numbers.length) { this.statsEl.textContent = counted; return; }
+        const sum = numbers.reduce((a, b) => a + b, 0);
+        this.statsEl.textContent = [`Sum ${formatStat(sum)}`, `Avg ${formatStat(sum / numbers.length)}`, counted].join("  ·  ");
+      } catch { /* the selection moved on */ }
+    }, 150);
   }
 
   private refreshFormulaValue(): void {
@@ -2667,12 +2703,12 @@ export class WorkbookScreen {
     const items: MenuItem[] = [
       { label: "Sort ascending", hint: "A→Z", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: false }] }) },
       { label: "Sort descending", hint: "Z→A", action: () => this.setSpec({ ...this.spec, sort: [{ column: col.name, desc: true }] }) },
-      { label: "Then sort by this", disabled: !this.spec.sort.length || this.spec.sort.some((s) => s.column === col.name),
+      { label: "Then sort by this", disabled: !this.spec.sort.length ? "Sort by another column first" : this.spec.sort.some((s) => s.column === col.name) && "Already in the sort",
         action: () => this.setSpec({ ...this.spec, sort: [...this.spec.sort, { column: col.name, desc: false }] }) },
       "sep",
       { label: "Filter by values…", hint: "Alt+↓", action: () => this.headerFilter(c, x, y) },
       { label: "Filter by condition…", action: () => this.filterDialog(c) },
-      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1,
+      { label: "Hide column", disabled: (this.view?.columns.length ?? 0) <= 1 && "The last visible column stays",
         action: () => this.setSpec({ ...this.spec, hidden: [...this.spec.hidden, this.view!.columns[c].name] }) },
     ];
     if (activeValue !== undefined && activeValue !== null) {
@@ -2808,11 +2844,11 @@ export class WorkbookScreen {
           catch (e) { toastError(e); }
         };
         return [
-          { label: "Move left", disabled: pos <= 0, action: () => void move(this.sheets[pos - 1].index) },
-          { label: "Move right", disabled: pos < 0 || pos >= this.sheets.length - 1, action: () => void move(this.sheets[pos + 1].index) },
+          { label: "Move left", disabled: pos <= 0 && "Already first", action: () => void move(this.sheets[pos - 1].index) },
+          { label: "Move right", disabled: (pos < 0 || pos >= this.sheets.length - 1) && "Already last", action: () => void move(this.sheets[pos + 1].index) },
         ];
       })(),
-      { label: "Hide sheet", disabled: this.sheets.length < 2, action: async () => {
+      { label: "Hide sheet", disabled: this.sheets.length < 2 && "The only visible sheet stays visible", action: async () => {
         try { await this.rpc.call("sheet_hide", { sheet: s.index }); await this.loadItems(); }
         catch (e) { toastError(e); }
       } },
@@ -3264,6 +3300,8 @@ export class WorkbookScreen {
         location.assign(e.reason === "signed_out" ? `/login?next=${encodeURIComponent(location.pathname)}` : "/");
         break;
       case "role_changed":
+        this.role = e.role;
+        this.updateToolbar();
         toast(e.role === "viewer" ? "You can now only view this workbook." : `Your role in this space is now ${e.role}.`);
         break;
       case "tables_changed": {
