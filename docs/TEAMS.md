@@ -1,6 +1,6 @@
 # Teams: organizations, spaces, sign-in and roles
 
-Phase 7 (7.01–7.06, 7.17). Code: `crates/alephgrid-server/src/auth/` (store, roles, OIDC,
+Code: `crates/alephgrid-server/src/auth/` (store, roles, OIDC,
 routes), the guards in `http.rs` and the per-operation check in `ws.rs`. Tests:
 `crates/alephgrid-server/tests/teams.rs`, `web/e2e/teams.spec.ts`.
 
@@ -20,7 +20,7 @@ routes), the guards in `http.rs` and the per-operation check in `ws.rs`. Tests:
 The control database is `<data-dir>/.control/control.duckdb`. Backups (`backup.rs`, format 2) copy
 it from one transaction after the workbooks, with its checksum in the manifest; restore verifies it.
 
-## Migration from workspaces (7.01)
+## Migration from workspaces
 
 At every start `state::migrate_to_spaces` makes sure each workbook belongs to a space; once done
 it changes nothing:
@@ -57,7 +57,7 @@ Password sign-in gives the same answer for a wrong email and a wrong password, t
 both, and refuses an email for 15 minutes after 5 failures. Passwords have at least 10
 characters.
 
-## Roles (7.03)
+## Roles
 
 A principal's role in a space is the highest of:
 
@@ -75,6 +75,7 @@ role in its own space and nothing elsewhere.
 | export: table, query and XLSX downloads | ✓ | ✓ | ✓ |
 | edit: cells, tables, sheets, saved queries/views/analyses, imports, recalculation, stop a workbook | | ✓ | ✓ |
 | publish: function versions and pins | | ✓ | ✓ |
+| choose compute: resize a workbook to a profile granted to the space | | | ✓ |
 | create workbooks here, duplicate, rename, star, move in | | ✓ | ✓ |
 | delete workbooks (to the trash) and restore them | | ✓ | ✓ |
 | purge trashed workbooks | | | ✓ |
@@ -93,7 +94,7 @@ Rules:
 * Any organization member may create a space and becomes its owner.
 * Starring is shared by everyone who can change the workbook; it is not per user yet.
 
-## Enforcement (7.04)
+## Enforcement
 
 * Every HTTP route names the capability it needs (`http.rs`, `auth/routes.rs`), checked before any
   work. Every WebSocket operation is listed in `ws::required_caps` without a catch-all, so a new
@@ -110,14 +111,14 @@ Rules:
   `access_revoked` and closes the connection; a changed role sends `role_changed` and applies to
   the next request. Each request also checks expiry itself.
 
-## Browser and network protections (7.06)
+## Browser and network protections
 
 * Requests carrying proxy identity headers (`X-Forwarded-User`, `X-Remote-User`, `Remote-User`,
   `X-Auth-Request-User`/`-Email`, `X-Forwarded-Email`, `X-Forwarded-Preferred-Username`,
   `X-Webauth-User`) are refused with 400. Alephgrid never trusts identities asserted by proxies;
   use OIDC.
 * The `Host` header must be a loopback name, or the host of `--public-url`, unless the server is
-  bound to a non-loopback interface without `--public-url` (DNS rebinding).
+  bound to a non-loopback interface without `--public-url` (DNS rebinding); other hosts get 421.
 * A request that changes something, and every WebSocket upgrade, is refused if its `Origin` is not
   this server. A change sent with a session cookie and no `Authorization` must carry `Origin` or
   `Sec-Fetch-Site: same-origin`.
@@ -127,7 +128,7 @@ Rules:
 * Errors and the admin session list never contain cookies, tokens or hashes; error messages have
   the data directory redacted.
 
-## Single sign-on (7.02, 7.17)
+## Single sign-on
 
 OpenID Connect authorization code flow with PKCE (S256), `state` and `nonce`
 (`auth/oidc.rs`). Configure `--public-url`, `--oidc-issuer`, `--oidc-client-id` and, for a
@@ -137,8 +138,9 @@ configured issuer; endpoints must be https (http only for loopback, for tests).
 
 The ID token must be signed with an asymmetric algorithm (RS/PS 256–512, ES256/384, EdDSA) by a key
 in the issuer's JWKS (refetched once for an unknown key), and its `iss`, `aud`, `azp` (when
-several audiences), `exp` (60 s leeway) and `nonce` must match. A `state` is good once and for 10
-minutes.
+several audiences), `exp` (60 s leeway) and `nonce` must match. The sign-in in progress (`state`, nonce
+and PKCE verifier) lives in a short-lived signed cookie of the browser that started it, for 10
+minutes; the callback requires that cookie, so a callback link cannot sign in another browser.
 
 Claim mapping:
 
@@ -161,7 +163,7 @@ Removing someone from the identity provider, or from a group, takes effect at th
 Alephgrid does not poll the identity provider. Removing an organization member or a space role
 takes effect immediately.
 
-## Sharing: space libraries (7.11)
+## Sharing: space libraries
 
 Saved queries, saved views and function versions are shared within a space through its library
 (`library.rs`, *Library…* on a space). Entries live in the control database, so they outlive the
@@ -180,7 +182,7 @@ publication stays separate from editing; owners set it with `PATCH /api/spaces/{
 in. Libraries do not cross spaces: publishing from, or using in, a workbook of another space is
 refused. Publishing, using, changing entries and the publish role are audited.
 
-## Quotas (7.07)
+## Quotas
 
 Each space has five limits (`quota.rs`). A limit is the space's own override, set by an
 organization admin (`PUT /api/spaces/{id}/quota`; owners cannot raise their own), or else the server
@@ -208,7 +210,7 @@ and bulk changes, so a burst of uploads can pass the limit by at most what arriv
 time. Usage with the limits in force: `GET /api/orgs/{id}/usage` (admins; *Usage and limits…* in
 the account menu) and `GET /api/admin/usage`. Quota changes are audited (`space_quota_changed`).
 
-## Audit log (7.10)
+## Audit log
 
 The control database's `audit` table, newest first through `GET /api/orgs/{id}/audit`
 (organization admins; `?workbook=<id>`, `?before=<seq>`, `?limit=`) and `GET /api/admin/audit`
@@ -221,6 +223,7 @@ The control database's `audit` table, newest first through `GET /api/orgs/{id}/a
 | Workbook changes | `workbook_changed` (operation, revision, summary) for every committed change of every connection | batched within 250 ms |
 | Data in and out | `data_imported` (file, bytes, revision), `data_exported` (table/query/xlsx, bytes, rows), `export_downloaded` | batched |
 | Functions | `function_published` (name, version), `functions_pinned` | batched |
+| Other | `backup_deleted`, `agent_connection_created/revoked`, `agent_proposal_approved/rejected`, `agent_<tool>` (each agent tool call), `library_published/changed/used`, `space_python_changed`, `space_publish_role_changed` | — |
 
 Batched records do not delay the change they describe. Shutdown writes what is queued; a crash can
 lose the records of the last quarter second, but the workbook's own history (written in the same

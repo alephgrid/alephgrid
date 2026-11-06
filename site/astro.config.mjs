@@ -13,6 +13,10 @@ const base = process.env.SITE_BASE || '/';
 export default defineConfig({
   site,
   base,
+  // Astro 7 defaults to 'jsx' whitespace rules, which drop line breaks between
+  // inline elements in the .astro pages ("the <a>releases page</a>" becomes
+  // "thereleases page"). Keep the pre-7 HTML compression.
+  compressHTML: true,
   integrations: [
     starlight({
       title: 'Alephgrid',

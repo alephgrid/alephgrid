@@ -34,8 +34,8 @@ execution path. In this release agents only read; the one change they can ask fo
    }
    ```
 
-Revoking a connection ends its access at once, results included. **Activity** lists every tool
-call: what the agent asked for, how many rows it got, the result handle, or the error.
+Revoking a connection ends its access at once, results included. **Activity** lists the tool
+calls (the latest 2,000 per connection): what the agent asked for, how many rows it got, the result handle, or the error.
 
 What an agent reads goes to its model provider under that provider's terms. Give a connection
 only the workbooks it needs.
@@ -55,7 +55,7 @@ only the workbooks it needs.
 | `fetch_result` | More rows of a result, by handle |
 | `verify_result` | Recompute a result and compare it with its receipt |
 | `job_status`, `cancel_job` | Requests still running after `wait_seconds` (default 20) |
-| `propose_saved_query`, `proposal_status` | Ask to save a query; it is saved only when a person approves it (Agent connections → Proposals), as their change noted as proposed by the agent. `operation_id` makes retries safe |
+| `propose_saved_query`, `proposal_status` | Ask to save a query; it is saved only when a person approves it (Agent connections → Proposals), as their change noted as proposed by the agent. `operation_id` makes retries safe; at most 50 proposals wait per connection |
 
 Resources: `alephgrid://guide` and `alephgrid://workbooks/{id}` (the schema cards).
 

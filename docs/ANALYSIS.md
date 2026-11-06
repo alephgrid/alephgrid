@@ -1,9 +1,9 @@
 # No-code analysis
 
-Open a workbook and choose **Analyze**. All data operations run in DuckDB through validated,
+Open a workbook and choose **Analyze**: a side pane opens beside the grid, and its result and
+chart dock under the grid. All data operations run in DuckDB through validated,
 typed plans; the browser receives bounded results rather than downloading source tables.
-The tools are available even when arbitrary SQL is disabled. Python, connectors and shared-space
-authorization are separate later phases.
+The tools are available even when arbitrary SQL is disabled.
 
 ## Summaries, pivots and charts
 
@@ -12,8 +12,9 @@ Count counts rows; other aggregates ignore NULL inputs and return NULL for an em
 Sum and average require numeric columns. Computed columns participate through the same query
 expansion used by SQL.
 
-Optionally select a pivot column and enter up to 24 explicit categories, one per line. `(NULL)`
-selects missing values; other entries match the column's string representation exactly. Unlisted
+Optionally select a pivot column and pick up to 24 of its values from a list of its distinct
+values with counts. Missing values can be picked too; other values match the column's string
+representation exactly. Unlisted
 categories are excluded from pivot measures. Result headers identify each selected category.
 
 Previews contain at most 500 rows, also subject to the normal response byte limit. A truncation
@@ -37,17 +38,17 @@ row order is unspecified.
 Profile up to 32 columns to inspect declared SQL type, total rows, NULL count, exact distinct
 non-NULL values, and duplicate non-NULL occurrences beyond the first occurrence of each value.
 Profiling and grouping may scan the full source; they use the normal query admission, memory,
-deadline and cancellation controls. **Cancel run** cancels the active analysis request.
+deadline and cancellation controls.
 
 ## Saving and refresh
 
-**Save analysis** persists the typed plan and chart choice; **Save as new** creates a separate
-plan. Opening a saved analysis reruns it on current source data. **Run / refresh** reruns on demand.
+**Save** persists the typed plan and chart choice; **Save as new** creates a separate plan.
+Opening a saved analysis reruns it on current source data. **Run** reruns on demand.
 Workbook-change events mark the displayed result stale; they do not silently rerun expensive work.
 Schema changes that invalidate a saved plan report an error instead of silently removing fields.
 There may be up to 128 saved plans and 4 MiB of serialized saved-analysis data per workbook.
 
-**Create result table** creates a snapshot using the plan, with a maximum of 10,000 result rows
+**Result as table** creates a snapshot using the plan, with a maximum of 10,000 result rows
 and the normal byte limit. Larger outputs are refused without creating a partial table. The
 existing materialization metadata records source revisions: the snapshot stays unchanged until
 explicitly refreshed using the workbook's snapshot controls. Saving a plan does not save its
@@ -55,8 +56,8 @@ result rows. Delete removes the saved plan, not its sources or previously create
 
 ## Find and replace
 
-From a table, choose **Find / replace**. The initial release replaces literal, case-sensitive
-substrings in one editable VARCHAR column. It affects the whole table, including rows hidden by
+From a table, open the find bar (Mod+F) and its replace row (Mod+H, or Mod+Shift+H on macOS).
+Replace works on literal, case-sensitive substrings in one editable VARCHAR column. It affects the whole table, including rows hidden by
 filters. NULL cells remain NULL. Find text must be nonempty; regex and multi-column replacement
 are not supported.
 
@@ -79,7 +80,7 @@ transactional and use the existing mutation-id retry protection.
 conditional rules in the workbook. Formats change display, not raw values or editing input.
 Current-view exports continue to honor hidden columns and retain raw values.
 
-The initial format set is general, number, percent, date and timestamp, with 0–12 decimal places;
+The formats are general, number, percent, date and timestamp, with 0–12 decimal places;
 locales are en-US, en-GB, de-DE, fr-FR, hi-IN and ja-JP. Timezones are UTC, Asia/Kolkata,
 America/New_York, Europe/London and Asia/Tokyo. The dialog applies its locale/precision/timezone
 to all non-general formats on save; the protocol can store them per column. Exact decimal and
@@ -102,13 +103,11 @@ migrate table-keyed presentation; re-save presentation under the new name.
 
 ## Storage and test evidence
 
-Storage format 5 adds saved plans, presentation and the bounded replacement undo record in
-`_rf_meta`. Existing databases migrate transactionally with a pre-migration backup. Older binaries
-refuse format 5 rather than editing data without understanding its new metadata.
+Saved plans, presentation and the bounded replacement undo record live in `_rf_meta` (added in
+storage format 5). See the phase 6 section of [TEST_MATRIX.md](TEST_MATRIX.md) for engine, server
+and browser evidence.
 
-See the phase 6 section of [TEST_MATRIX.md](TEST_MATRIX.md) for engine, server and browser evidence.
-
-## Reports, charts and dashboards (F.11)
+## Reports, charts and dashboards
 
 A **report** (`kind: "report"`) extends a summary: up to four group columns (formula columns
 included, so a report can group by a looked-up value), up to eight measures (`revenue =
@@ -118,16 +117,16 @@ compiled by the table-formula compiler, errors shown as blank), optional **total
 a subtotal row per group level and a grand total, marked `row_kind` = `row`, `subtotal` or
 `total`; subtotals follow their rows), up to eight **filters** (the view filter operators), and
 an optional pivot column (one column per measure and value, at most 64). Calculated measures and
-a pivot cannot be combined. Results stay bounded at 500 rows. Summaries now read formula columns
-too.
+a pivot cannot be combined. Results stay bounded at 500 rows. Summaries can group by and
+aggregate formula columns too.
 
 **Drill-down.** Every summary or report row has *Show rows*: `drill` returns a view spec of the
 table filtered by the row's group values (a subtotal leaves out the levels it adds up, a blank
 value filters for blanks), and the grid opens it; rows are paged like any view, never
 materialized.
 
-**Charts.** A saved analysis keeps a `chart_kind`: bars (default), a line, or points (scatter)
-of the first measure over the groups, at most 100 groups; totals are not drawn; a list beside
+**Charts.** A saved analysis keeps a `chart_kind`: column, bar (default), line, area, scatter or
+pie, of the first measure over the groups, at most 100 groups; totals are not drawn; a list beside
 the chart gives every exact value.
 
 **Dashboards.** Saved analyses as tiles on a 12×24 grid (`save_dashboard`): tiles must fit and
@@ -143,7 +142,7 @@ refusals; drill-down; dashboards, slicers, limits, collisions, deleted analyses,
 `every_operation_replies_with_its_declared_type`, `e2e/analysis.spec.ts` (report with totals and
 a line chart, drill-down into the grid, a sliced dashboard).
 
-## Data tools (F.12)
+## Data tools
 
 **Validation.** A table's stored columns can carry rules (`set_validations`): one of a list
 (the grid's editor offers the values as a dropdown), a number between bounds, or not blank;
@@ -154,7 +153,7 @@ them, or fixes earlier ones, goes through). Existing values are not rewritten; s
 reports how many rows break each one. Rules are stored in `_rf_meta` and survive reopening.
 Formula columns are validated through the columns they read.
 
-**Clean-up into a new table.** Deduplicate by key columns (first row kept, in row order), trim
+**Clean-up into a new table.** Deduplicate by one to eight key columns (first row kept, in row order), trim
 spaces (optionally inner runs), split a column by a delimiter into up to 16 new columns, or
 convert a column to BIGINT, DOUBLE, DATE, BOOLEAN or VARCHAR (values that do not convert become
 blank). Each one is previewed first (the first 50 rows, the row count, and how many rows it

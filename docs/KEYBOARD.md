@@ -1,12 +1,13 @@
 # Keyboard shortcuts and commands
 
-All workbook commands live in one registry (`web/src/commands.ts`). The grid gives every key
+All workbook commands live in one registry (`web/src/commands.ts`, with the commands defined in
+`web/src/workbookcommands.ts`). The grid gives every key
 to the registry first; menus, the command palette (**⌘K** / **Ctrl+K**) and the shortcut help
 (**⌘/** / **Ctrl+/**) are generated from it. A test fails if two commands share a key in the
 same context. Keys are ignored while an input method is composing (IME), so composing Japanese,
 Chinese or Korean text never triggers a command.
 
-**Mod** means ⌘ on macOS and Ctrl elsewhere (either is accepted, as before this registry).
+**Mod** means ⌘ on macOS and Ctrl elsewhere (either is accepted).
 Letter shortcuts follow the letter printed on the key for Latin layouts (AZERTY's A is A); on
 layouts that type another script (Cyrillic, Greek, Hebrew) the physical key position is used, so
 Ctrl+C still copies when the key types `с`.
@@ -26,7 +27,10 @@ Ctrl+C still copies when the key types `с`.
 | Clear cells | Delete, Backspace | Handled by the grid |
 | Select all | Mod+A | Sheets: first the block of filled cells around the active cell, then the whole sheet; from an empty cell, the whole sheet. Tables: everything |
 | Select whole rows / columns | Shift+Space / Ctrl+Space | macOS uses Ctrl+Space for input sources by default; use the palette there |
-| Go to… | Mod+G | Cell, range, other sheet or name |
+| Go to… | Mod+G | Sheets. Cell, range, other sheet or name |
+| Bold / Italic / Underline | Mod+B / Mod+I / Mod+U | Sheets |
+| Find… | Mod+F | Tables search every row on the server; sheets this sheet or all sheets |
+| Find and replace… | Mod+H, Mod+Shift+H | macOS keeps ⌘H for hiding the browser; use ⌘⇧H |
 | Formula help | Shift+F3 | |
 | Command palette | Mod+K | |
 | Keyboard shortcuts | Mod+/ | |
@@ -49,6 +53,9 @@ Ctrl+C still copies when the key types `с`.
 | Mod+R | Reload | Used for fill right only while the grid has focus; reload with the browser button or F5 |
 | Mod+G | Find next | Used for Go to while the grid has focus |
 | Mod+K | Focus search (some browsers) | Command palette while the grid has focus |
+| Mod+F | Find in page | Find bar while the grid has focus |
+| Mod+H | Hide the browser (macOS), history (some browsers) | Find and replace; on macOS use Mod+Shift+H |
+| Mod+B, Mod+I, Mod+U | Bookmarks, page info, view source (some browsers) | Cell formatting in sheets while the grid has focus |
 | Mod+Shift+V | Paste as plain text | Paste special while the grid has focus |
 | Ctrl+Space | macOS input source switch | Bound, documented; OS may take it first |
 | Cmd+Space, Mod+T, Mod+W, Mod+N, Mod+Shift+N, Mod+Tab | Spotlight, tabs, windows | Never bound |
@@ -65,7 +72,6 @@ Differences found there, and what users of those browsers should know:
 | Safari | Tab moves only between text fields unless *Settings → Advanced → Press Tab to highlight each item* is on | Option+Tab reaches buttons, checkboxes and the schema tree |
 | Safari | Clicking a button does not focus it | Dialogs keep Escape and Tab working wherever focus is |
 | Safari, Firefox (macOS) | End and Home scroll a text field instead of moving the caret, as in native Mac apps | ⌘→ / ⌘← move to the end or start of the line; ⌘↓ to the end of the SQL editor |
-| All | A panel opened while the page is still connecting used to fail with "not connected" | Requests now wait for the connection that is being made |
 
 Not verified: screen-reader announcements with VoiceOver, NVDA or JAWS (no automated
 assistive-technology run is part of the suite), Windows browsers, physical non-US keyboards

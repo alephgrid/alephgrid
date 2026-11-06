@@ -1,4 +1,4 @@
-# Spreadsheet formulas over tables (F.05)
+# Spreadsheet formulas over tables
 
 A **table formula** is a calculated column written in spreadsheet syntax, evaluated by DuckDB
 over the whole table without copying rows into sheet cells:
@@ -37,7 +37,7 @@ refused with an explanation and the character position, never approximated.
 | Logical | `TRUE`, `FALSE` | Case-insensitive |
 | Errors | `#N/A`, `#DIV/0!`, `#VALUE!`, `#NUM!`, `#REF!`, `#NAME?`, `#NULL!` | |
 | This row | `[@amount]`, `[@[unit price]]`, `[amount]`, `Orders[[#This Row],[amount]]` | `'` escapes `[`, `]`, `#` and `'` inside brackets |
-| Whole column | `Orders[amount]`, `Orders[[amount]]` | Only where a function expects a range (lookups F.06, conditional aggregates F.08) |
+| Whole column | `Orders[amount]`, `Orders[[amount]]` | Only where a function expects a range: whole-column aggregates, conditional aggregates, lookups and spilled results |
 | Whole table | `Customers`, `Customers[#Data]` | Only as VLOOKUP's table; a bare name is a table, as in spreadsheets |
 | Operators | `-x` `x%` `^` `*` `/` `+` `-` `&` `=` `<>` `<` `<=` `>` `>=` | Spreadsheet precedence: negation, percent, power, multiply/divide, add/subtract, join, compare. `-2^2` is 4 |
 | Calls | `NAME(arg, …)` | Allowlisted functions only |
@@ -107,25 +107,29 @@ error argument even after a deciding `FALSE` (`AND`) or `TRUE` (`OR`); IronCalc 
 the deciding value (see [gaps](FORMULA_GAPS.md#and-and-or-with-an-error-after-the-deciding-value)). SQL `NULL` never
 stands for an error. Error cells read back with their code and show it in the grid.
 
-## Functions (first increment)
+## Functions
 
 | Group | Functions |
 |---|---|
 | Logic | `IF` (else branch required unless the result is logical), `IFS`, `IFERROR`, `IFNA`, `AND`, `OR`, `NOT` |
 | Information | `ISBLANK`, `ISNUMBER`, `ISTEXT`, `ISLOGICAL`, `ISERROR`, `ISERR`, `ISNA` |
 | Math | `ABS`, `ROUND`, `ROUNDUP`, `ROUNDDOWN`, `INT`, `MOD`, `SUM`, `MIN`, `MAX`, `AVERAGE` (row values, or whole columns), `COUNT`, `COUNTA` (whole columns) |
+| Conditional aggregates | `SUMIF`, `SUMIFS`, `COUNTIF`, `COUNTIFS`, `AVERAGEIF`, `AVERAGEIFS`, `MINIFS`, `MAXIFS` ([below](#conditional-aggregates)) |
+| Lookups | `XLOOKUP`, `VLOOKUP`, `INDEX`, `MATCH`, `XMATCH` ([below](#lookups)) |
+| Spilled results (sheet cells only) | `FILTER`, `SORT`, `UNIQUE`, `TAKE` ([below](#table-results-in-sheets)) |
 | Text | `LEFT`, `RIGHT`, `MID`, `LEN`, `TRIM`, `UPPER`, `LOWER`, `SUBSTITUTE`, `CONCAT` |
 | Date | `DATE`, `YEAR`, `MONTH`, `DAY`, `EDATE`, `EOMONTH` |
 
 In `SUM`, `MIN`, `MAX`, `AVERAGE`, `AND` and `OR`, a column value is a reference: text and
 blank values are skipped as a sheet skips them in referenced cells, while typed literals are
-converted. Volatile functions (`TODAY`, `NOW`, `RAND`) are refused until F.10 defines a
-calculation epoch.
+converted. Volatile functions (`TODAY`, `NOW`, `RAND`, `RANDBETWEEN`, `RANDARRAY`) are refused;
+see [the decision below](#table-results-in-sheets). These 54 functions are the ones the
+catalog marks as supported in table formulas, and a test keeps the two lists equal.
 
 Conditional aggregates are described below; formulas reading sheet cells under
-[Sheet cells](#sheet-cells-f09).
+[Sheet cells](#sheet-cells).
 
-## Conditional aggregates (F.08)
+## Conditional aggregates
 
 ```text
 =SUMIFS(Orders[amount], Orders[customer_id], [@id])
@@ -181,7 +185,7 @@ Differential-tested against sheet ranges (20 formulas), with hand-checked values
 
 Not available yet, refused with a message: ranges from different tables, and array criteria.
 
-## Lookups (F.06)
+## Lookups
 
 A formula can look up rows of another table (or of its own table's stored columns):
 
@@ -207,7 +211,7 @@ whose key holds an error never match. "First" and "last" mean the table's persis
 (`_rf_ord`), never a view's sort, so a view cannot change a lookup's result.
 
 Approximate, wildcard and positional modes are described under
-[nearest, wildcard and sorted lookups](#nearest-wildcard-and-sorted-lookups-f07). Refused with
+[nearest, wildcard and sorted lookups](#nearest-wildcard-and-sorted-lookups). Refused with
 a message: binary search, `HLOOKUP`, `LOOKUP`, column ranges such as `T[[a]:[c]]`, computed
 column numbers, and several keys with anything but exact match.
 
@@ -230,7 +234,7 @@ the column being computed shows `#REF!` there instead of looping.
 
 A lookup into the formula's own table sees its stored columns only, not its formula columns.
 
-### Nearest, wildcard and sorted lookups (F.07)
+### Nearest, wildcard and sorted lookups
 
 ```text
 =XLOOKUP([@amount], Tiers[min], Tiers[rate], , -1)          largest min at most the amount
@@ -294,14 +298,13 @@ one VLOOKUP column on orders, looking up customers, about 5% of orders without a
 | Rebuild both cached lookups | — | — | 120–420 ms, once per source change |
 | Open a view sorted by a lookup column | 258 ms | 3.1 s | 3.5 s |
 
-Sorting or filtering by a lookup column used to evaluate it for every row; large tables now
-keep [stored formula results](#stored-formula-results-f09) for that.
+Large tables keep [stored formula results](#stored-formula-results) so that sorting or filtering
+by a lookup column does not evaluate it for every row.
 
 ## Storage, reads and editing
 
-Storage format 6 adds `language` (`sql` or `sheet`) to `_rf_columns`; opening an older
-workbook migrates it in one transaction after the usual `.v<N>.bak` copy, and every existing
-formula column stays `sql`. A Alephgrid build that only knows format 5 refuses format-6 files.
+Each formula column records its language (`sql` or `sheet`) in `_rf_columns` (added in storage
+format 6); columns from older workbooks stay `sql`.
 
 A `sheet` column adds two columns to the table's base relation: its typed value and a hidden
 `_rf_e_<name>` error column (names starting with `_rf_e_` are reserved). Formulas are layered
@@ -313,9 +316,8 @@ formulas (other text is kept); deleting a column that a formula reads is refused
 cannot read its own column. **Add column** offers *Spreadsheet formula* (the default) and *SQL
 formula*; the formula bar edits either kind in its own language.
 
-Not yet: exports write blank for error cells (F.13 defines XLSX/CSV error output).
 
-## Sheet cells (F.09)
+## Sheet cells
 
 A table formula can read single sheet cells, typically parameters kept in a sheet:
 
@@ -357,7 +359,7 @@ read them through lookups or conditional aggregates, so those refresh too. Saved
 and live queries count the tables formulas read as sources, so a snapshot made from orders goes
 stale when a customer it looked up changes.
 
-## Sheet cells that read tables (F.09)
+## Sheet cells that read tables
 
 A sheet cell can compute over tables with the same formulas:
 
@@ -405,9 +407,9 @@ column or a sheet they read is refused, naming the cells (`sheet cell Report!B1`
 
 **Export.** XLSX files cannot hold table formulas. A table cell is exported as its current
 value, and the download first lists one note per such cell ("Report!B1: the table formula … is
-exported as its value "80" …"); see [XLSX compatibility](#xlsx-compatibility-f13).
+exported as its value "80" …"); see [XLSX compatibility](#xlsx-compatibility).
 
-## Table results in sheets (F.10)
+## Table results in sheets
 
 A sheet cell can spill rows of a table:
 
@@ -430,7 +432,7 @@ text. Other array functions, `by_col`/`exactly_once`, and TAKE by columns are re
 (`_rf_spill_<slot>`); the user's cell holds a spill reference to it, so the sheet engine spills
 it as any dynamic array: other formulas read it (`=SUM(C1:C2)`, `C1#`), and a cell in the way
 gives `#SPILL!` until it is cleared. It is recomputed with the tables it reads, in the same
-transaction (see [sheet cells that read tables](#sheet-cells-that-read-tables-f09)).
+transaction (see [sheet cells that read tables](#sheet-cells-that-read-tables)).
 
 **Bounded.** At most `MAX_SPILL_CELLS` (10,000) cells. A larger result is refused when entered,
 pointing at the route for big results: sort and filter the table's view, and create a table from
@@ -446,7 +448,7 @@ deterministic: formula functions may call only an allowlist of pure functions an
 functions are refused if they call `NOW`, `CURRENT_DATE` or functions with side effects, so no
 volatile value can enter a table through them either.
 
-## Stored formula results (F.09)
+## Stored formula results
 
 Pages are cheap to compute live, but sorting, filtering or summarizing a view by a formula
 column that reads other tables evaluates that column for every row. Tables of at least
@@ -475,14 +477,14 @@ with fresh results reads the stored results alone. Smaller tables compute everyt
 Measured at 1M orders / 100K customers (release build, `lookup_read_timings`): the first sort by
 a lookup column 303 ms (it stores the results), later sorts 151 ms, a filter by a lookup column
 26 ms, recalculation after a customer edit 165 ms; a sort while results are stale reads the last
-results in 247 ms. 10M-row figures are F.T04.
+results in 247 ms. 10M-row figures are under [benchmarks](#benchmarks-and-budgets).
 
 ## Row identity and order
 
 Rows keep their record id (`_rf_id`) and persisted order key (`_rf_ord`) across edits. A
 row-context formula depends only on its own row, so view sorting and filtering cannot change
 its value. Order-dependent operations (first/last match in lookups) use the persisted order,
-never a view's sort or DuckDB's physical order (F.06).
+never a view's sort or DuckDB's physical order.
 
 ## Verification
 
@@ -496,7 +498,7 @@ key, `0`, `""` and case variants. Workbook tests cover source edits, one result 
 duplicate keys, renames, refused deletes, tables that look each other up and refused circular
 references, before and after reopening.
 
-## XLSX compatibility (F.13)
+## XLSX compatibility
 
 An XLSX file holds sheets, not Alephgrid tables, so before downloading one the workbook lists
 everything the file leaves out or changes (`xlsx_compatibility`), and the download asks for
@@ -515,7 +517,7 @@ Importing XLSX already reports what it cannot keep (unsupported features as warn
 styles and number formats round-trip through the sheet engine's reader and writer (tested in
 `tests::xlsx`). A reproducible sample workbook lives in [docs/samples](samples/README.md).
 
-## Benchmarks and budgets (F.T04)
+## Benchmarks and budgets
 
 `analyst_benchmark` (release build, Apple M-series laptop, 31 October 2026): orders with a
 lookup column (XLOOKUP of the customer's region) and customers with a SUMIFS total of their

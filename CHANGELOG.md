@@ -28,8 +28,8 @@ Docs: [alephgrid.dev/docs](https://alephgrid.dev/docs/getting-started/)
   `XLOOKUP`, `SUMIFS`, dynamic arrays, `LET`, `LAMBDA`, cross-sheet references, named ranges,
   autocomplete and argument help. Compatibility is tracked publicly:
   [formula compatibility](https://alephgrid.dev/docs/reference/formulas/).
-- Formatting (bold to number formats, borders, merged cells), frozen panes, row/column sizing,
-  hide/unhide, zoom — all kept through XLSX import and export.
+- Formatting (bold to number formats, borders, merged cells), frozen panes, row/column sizing
+  and hide/unhide, all kept through XLSX import and export; zoom 50–200%.
 - Charts (column, bar, line, area, scatter, pie) with a preview before they are saved, colour
   rules and scales, allowed-value lists, comments with replies.
 - Keyboard-first editing: fill handle that continues series, paste special, find and replace
@@ -68,8 +68,8 @@ Docs: [alephgrid.dev/docs](https://alephgrid.dev/docs/getting-started/)
 
 ### Collaboration, teams and administration
 
-- Several people on one workbook see each other's edits live, with history and revision
-  restore.
+- Several people on one workbook see each other's edits live, with a change history in which
+  table changes can be taken back.
 - `--auth accounts`: organizations, spaces, owner/editor/viewer roles (also from
   identity-provider groups), invitations, service tokens, password or OpenID Connect sign-in,
   quotas, audit log, backups and an administration screen.

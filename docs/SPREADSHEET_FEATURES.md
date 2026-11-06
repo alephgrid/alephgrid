@@ -1,7 +1,7 @@
 # Spreadsheet feature inventory
 
-F.04e: what a spreadsheet user can do in Alephgrid sheets and tables today, and what is not
-there yet. Full Excel or Google Sheets compatibility is a long-term goal, not a claim. Each
+What a spreadsheet user can do in Alephgrid sheets and tables today, and what is not there
+yet. Full Excel compatibility is a long-term goal, not a claim. Each
 row points at the task that tracks it. **Shipped** means a test exercises it (named in the
 task); **Partial** names what is missing; **Planned** and **Not planned** are not available.
 
@@ -29,8 +29,8 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Feature | State | Notes and task |
 | --- | --- | --- |
 | Built-in functions (pinned engine) | Shipped | [FORMULA_CATALOG.md](FORMULA_CATALOG.md), gaps in [FORMULA_GAPS.md](FORMULA_GAPS.md) |
-| Autocomplete, argument help, F4 anchors, coloured references | Shipped | F.03, [FORMULA_EDITOR.md](FORMULA_EDITOR.md) |
-| Reference picking by click / drag | Partial | Same sheet only |
+| Autocomplete, argument help, F4 anchors, coloured references | Shipped | F.03, [the formula editor](FORMULA_CATALOG.md#the-formula-editor) |
+| Reference picking by click / drag | Partial | In the formula bar, on the same or another sheet; not in the inline cell editor, and no auto-scroll while dragging |
 | Named ranges | Shipped | F.03 |
 | Dynamic arrays, LET / LAMBDA | Shipped | F.10 |
 | Table formulas in spreadsheet syntax (XLOOKUP, SUMIFS, …) at table scale | Shipped | F.05–F.09, [TABLE_FORMULAS.md](TABLE_FORMULAS.md) |
@@ -58,7 +58,7 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Deduplicate, split, trim, type conversion with previews | Shipped | F.12 |
 | Pivots with several measures, totals, drill-down | Shipped | F.11 (Analyze pane, U.15) |
 | Charts: column, bar, line, area, scatter, pie | Shipped | S.09 / U.18 |
-| Chart and rule tools open as drafts and save only on Create / Apply | Planned | U.04b |
+| Chart and rule tools open as drafts and save only on Create / Apply | Shipped | U.04b |
 | Comments with replies, resolve | Shipped | S.11 |
 
 ## Sheets, files and collaboration
@@ -68,7 +68,7 @@ task); **Partial** names what is missing; **Planned** and **Not planned** are no
 | Tabs: add, rename, duplicate, reorder, colour, hide | Shipped | S.07 |
 | XLSX import / export with a compatibility report | Shipped | F.13; charts and some styles are reported, not exported |
 | CSV, Parquet import | Shipped | |
-| Live collaboration, history, revision restore | Shipped | Phase 7 |
+| Live collaboration and a change history; table changes can be taken back | Shipped | [COLLABORATION.md](COLLABORATION.md) |
 | Printing and page setup | Not planned | Export to XLSX and print from there |
 | Macros / VBA | Not planned | Custom functions cover the calculation use |
 | Pivot tables inside the grid (Excel layout) | Not planned for v1 | Pivots live in the Analyze pane |
