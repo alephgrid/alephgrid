@@ -435,3 +435,30 @@ fn xlsx_file_carries_styles_and_layout() {
     assert!(sheet.contains("hidden=\"1\""), "hidden row");
     assert!(sheet.contains("xSplit=\"1\"") && sheet.contains("ySplit=\"1\""), "frozen panes");
 }
+
+#[test]
+fn range_numbers_ignore_number_formats() {
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    s.set(0, &[
+        sheet_input(0, 0, "Region"), sheet_input(0, 1, "Sales"), sheet_input(0, 2, "Share"),
+        sheet_input(1, 0, "West"), sheet_input(1, 1, "=1061840"), sheet_input(1, 2, "=B2/B4"),
+        sheet_input(2, 0, "East"), sheet_input(2, 1, "3200000.5"), sheet_input(2, 2, "=B3/B4"),
+        sheet_input(3, 0, "Total"), sheet_input(3, 1, "=B2+B3"), sheet_input(3, 2, "=1/0"),
+    ]).unwrap();
+    s.set_style(0, area(1, 1, 3, 1), &StylePatch { num_fmt: Some("$#,##0".into()), ..Default::default() }).unwrap();
+    s.set_style(0, area(1, 2, 2, 1), &StylePatch { num_fmt: Some("0.0%".into()), ..Default::default() }).unwrap();
+    // The cells show formatted text...
+    assert_eq!(shown(&s, 1, 1), "$1,061,840");
+    assert_eq!(shown(&s, 1, 2), "24.9%");
+    // ...but the chart reads the numbers. Text, errors and empty cells are None.
+    let n = s.range_numbers(0, &area(0, 0, 4, 4)).unwrap();
+    let total = 1_061_840.0 + 3_200_000.5;
+    assert_eq!(n, vec![
+        vec![None, None, None, None],
+        vec![None, Some(1_061_840.0), Some(1_061_840.0 / total), None],
+        vec![None, Some(3_200_000.5), Some(3_200_000.5 / total), None],
+        vec![None, Some(total), None, None],
+    ]);
+    assert!(s.range_numbers(0, &area(0, 0, 0, 1)).is_err(), "an empty area is refused");
+}

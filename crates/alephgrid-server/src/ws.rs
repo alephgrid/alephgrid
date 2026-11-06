@@ -291,6 +291,7 @@ pub enum Op {
     SheetColumnTexts { sheet: u32, column: u32 },
     /// The distinct shown values of a range's column below its header row (S.06).
     SheetRangeValues { sheet: u32, area: alephgrid_core::CellArea, header: bool, column: u32 },
+    SheetNumbers { sheet: u32, area: alephgrid_core::CellArea },
     /// Show the data rows of a range whose `column` shows one of `keep`, hide the others;
     /// no `keep` shows them all again (S.06). Returns the number of rows hidden.
     SheetFilter { sheet: u32, area: alephgrid_core::CellArea, header: bool, column: u32, #[serde(default)] #[ts(optional, as = "Option<Vec<String>>")] keep: Option<Vec<String>> },
@@ -420,7 +421,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
         | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
-        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames
+        | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Sql => QUERY,
@@ -449,7 +450,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -594,6 +595,7 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::SheetLayout { sheet } => json!(r.sheets().layout(sheet)?),
         Op::SheetColumnTexts { sheet, column } => json!(r.sheets().column_texts(sheet, column)?),
         Op::SheetRangeValues { sheet, area, header, column } => json!(r.sheets().range_values(sheet, &area, header, column)?),
+        Op::SheetNumbers { sheet, area } => json!(r.sheets().range_numbers(sheet, &area)?),
         Op::SheetFind { sheet, search, from, backwards, count } => json!(r.sheets().find(sheet, &search, from, backwards, count)?),
         Op::SheetFindAll { search } => json!(r.sheets().find_all_sheets(&search)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),

@@ -192,7 +192,7 @@ const READS = new Set<OpName>([
   "analyze", "analyses", "replace_preview", "presentation", "functions", "test_function", "saved_views", "history", "cancel", "schema", "saved_queries", "query_versions", "materialized",
   "sheet_names", "comments", "sheet_layout", "sheet_charts", "sheet_rules", "hidden_sheets", "column_values", "find_in_view", "sheet_find", "sheet_find_all",
   "sheet_cell_detail", "sheet_region", "sheet_check_formula", "dashboards", "dashboard", "validations", "preview_transform", "inspect_formula",
-  "xlsx_compatibility", "drill", "sheet_column_texts", "sheet_range_values",
+  "xlsx_compatibility", "drill", "sheet_column_texts", "sheet_range_values", "sheet_numbers",
   // Writes a file to download but changes no data: never kept and resent after a reconnect.
   "export_query",
 ]);
