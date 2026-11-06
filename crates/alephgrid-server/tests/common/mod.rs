@@ -443,6 +443,7 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("sheet_merge", json!({ "sheet": 0, "area": { "row": 70, "column": 0, "rows": 1, "columns": 2 }, "mode": "center" })),
         ("sheet_column_texts", json!({ "sheet": 0, "column": 0 })),
         ("sheet_range_values", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 3, "columns": 1 }, "header": false, "column": 0 })),
+        ("sheet_numbers", json!({ "sheet": 0, "area": { "row": 0, "column": 0, "rows": 3, "columns": 2 } })),
         ("sheet_filter", json!({ "sheet": 0, "area": { "row": 60, "column": 0, "rows": 3, "columns": 1 }, "header": false, "column": 0 })),
         ("sheet_clear_format", json!({ "sheet": 0, "area": { "row": 1, "column": 1, "rows": 1, "columns": 1 } })),
         ("sheet_paste", json!({ "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "sheet": 0, "row": 0, "column": 2, "mode": "values", "transpose": true })),
