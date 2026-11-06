@@ -79,6 +79,19 @@ pub enum PasteMode {
     Formats,
 }
 
+/// A cell pasted from another app (F.04b): its value, whether it stays text however it
+/// reads (`007`), and the formats to give it.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct PastedCell {
+    pub value: String,
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub text: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub style: Option<super::StylePatch>,
+}
+
 /// One source cell, read before anything is written.
 struct Source {
     input: Option<String>,
@@ -646,6 +659,55 @@ impl Sheets {
         Ok(target)
     }
 
+    /// Paste cells that come from another app at `at` (F.04b): each one's value, written as
+    /// typed unless `text` keeps it text, and its formats, which replace the target's.
+    /// Text starting with `=` stays text: formulas are not taken from other apps. Every
+    /// format is checked before the first change; one undo step.
+    pub fn paste_cells(&mut self, index: u32, at: (u32, u32), cells: &[Vec<PastedCell>]) -> Result<CellArea> {
+        self.check_index(index)?;
+        let columns = cells.iter().map(|r| r.len()).max().unwrap_or(0);
+        if columns == 0 {
+            bail!("there is nothing to paste");
+        }
+        let target = CellArea { row: at.0, column: at.1, rows: cells.len() as u32, columns: columns as u32 };
+        target.check("paste")?;
+        let mut patches = Vec::new();
+        let mut inputs = Vec::with_capacity(target.cells() as usize);
+        for (dr, row) in cells.iter().enumerate() {
+            for dc in 0..columns {
+                let (r, c) = (at.0 + dr as u32, at.1 + dc as u32);
+                let (value, text, style) = match row.get(dc) {
+                    Some(p) => (p.value.clone(), p.text || p.value.starts_with('='), p.style.as_ref()),
+                    None => (String::new(), false, None),
+                };
+                if let Some(style) = style {
+                    patches.push((r, c, style.paths()?));
+                }
+                inputs.push((SheetInput { row: r, column: c, value, base: None }, text));
+            }
+        }
+        let groups = self.undo_groups.len();
+        let result = (|| {
+            let plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
+            self.write(index, inputs, Some((target, plain)))?;
+            let m = self.model_mut()?;
+            let mut entries = 0;
+            for (r, c, paths) in &patches {
+                let cell = super::format::area(index, &CellArea { row: *r, column: *c, rows: 1, columns: 1 });
+                for (path, value) in paths {
+                    m.update_range_style(&cell, path, value).map_err(|e| anyhow!(e))?;
+                    entries += 1;
+                }
+            }
+            if entries > 0 {
+                self.record(entries);
+            }
+            Ok(())
+        })();
+        self.merge_groups_since(groups);
+        result.map(|()| target)
+    }
+
     /// Cut and paste within one sheet: cells move with their formats, formulas elsewhere
     /// that refer to them follow, and references inside the moved area keep pointing at
     /// the same cells. Uses IronCalc's own cut/paste.
@@ -808,6 +870,7 @@ fn format_number(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sheets::StylePatch;
     use ironcalc::base::expressions::types::Area;
 
     fn sheets() -> Sheets {
@@ -1145,6 +1208,48 @@ mod tests {
         let e = s.move_cells(0, a(0, 0, 5, 1), (40, 0)).unwrap_err().to_string();
         assert!(e.contains("hidden"), "{e}");
         assert_eq!(content(&s, 0, 2, 0), "y");
+    }
+
+    /// F.04b: cells pasted from another app (its HTML table clipboard data, read by the
+    /// browser) keep raw numbers, text that stays text, number formats, bold, italic and
+    /// colours. Formulas are never made from pasted text. Formats replace the target's.
+    /// One undo step; a bad format changes nothing.
+    #[test]
+    fn pasted_cells_keep_values_text_and_formats() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        let cell = |value: &str, text: bool, style: Option<StylePatch>| PastedCell { value: value.into(), text, style };
+        let fmt = |f: &str| StylePatch { num_fmt: Some(f.into()), ..Default::default() };
+        s.set(0, &[input(1, 1, "old"), input(2, 1, "old")]).unwrap();
+        let bold_b2 = Area { sheet: 0, row: 2, column: 2, width: 1, height: 1 };
+        s.model_mut().unwrap().update_range_style(&bold_b2, "font.b", "true").unwrap();
+        let cells = vec![
+            vec![cell("1234.5", false, Some(StylePatch { b: Some(true), ..fmt("\"$\"#,##0.00") })), cell("007", true, None)],
+            vec![cell("0.125", false, Some(fmt("0.00%"))), cell("=1+1", false, None)],
+            vec![cell("45306", false, Some(StylePatch { i: Some(true), color: Some("#ff0000".into()), fill: Some("#FFFF00".into()), ..fmt("yyyy-mm-dd") })), cell("", false, None)],
+        ];
+        let t = s.paste_cells(0, (0, 0), &cells).unwrap();
+        assert_eq!(t, a(0, 0, 3, 2));
+        let style = |s: &Sheets, r: u32, c: u32| s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap();
+        assert_eq!(display(&s, 0, 0, 0), "$1,234.50");
+        assert!(style(&s, 0, 0).font.b);
+        assert_eq!((content(&s, 0, 0, 1), display(&s, 0, 0, 1)), ("007".into(), "007".into()), "text keeps its leading zeros");
+        assert_eq!(display(&s, 0, 1, 0), "12.50%");
+        assert_eq!(display(&s, 0, 1, 1), "=1+1", "pasted text never becomes a formula");
+        assert!(!style(&s, 1, 1).font.b, "the target's bold is replaced");
+        assert_eq!(display(&s, 0, 2, 0), "2024-01-15");
+        let st = crate::sheets::CellStyle::of(&style(&s, 2, 0));
+        assert!(st.i);
+        assert_eq!((st.color.as_deref(), st.fill.as_deref()), (Some("#FF0000"), Some("#FFFF00")));
+        assert!(content(&s, 0, 2, 1).is_empty(), "an empty pasted cell clears the target");
+        assert!(s.undo().unwrap(), "one undo step");
+        assert_eq!((content(&s, 0, 1, 1), content(&s, 0, 2, 1)), ("old".into(), "old".into()));
+        assert!(style(&s, 1, 1).font.b && content(&s, 0, 0, 0).is_empty());
+        // A colour that is not #RRGGBB is refused before anything is written.
+        let bad = vec![vec![cell("1", false, None), cell("2", false, Some(StylePatch { color: Some("red".into()), ..Default::default() }))]];
+        assert!(s.paste_cells(0, (0, 0), &bad).is_err());
+        assert!(content(&s, 0, 0, 0).is_empty());
+        assert!(s.paste_cells(0, (0, 0), &[]).is_err(), "nothing to paste");
     }
 
     #[test]

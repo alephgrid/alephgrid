@@ -310,6 +310,15 @@ pub enum Op {
         #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
         #[serde(default)] #[ts(optional, as = "Option<u64>")] source_layout: Option<u64>,
     },
+    /// Paste cells copied in another app (read from its HTML table clipboard data) at
+    /// (`row`, `column`): values, text kept as text, and formats. Never makes formulas.
+    SheetPasteCells {
+        sheet: u32,
+        row: u32,
+        column: u32,
+        cells: Vec<Vec<alephgrid_core::PastedCell>>,
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
+    },
     /// Cut and paste within one sheet; references to the moved cells follow them.
     SheetMove { sheet: u32, source: alephgrid_core::CellArea, row: u32, column: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
     /// Copy a query's first rows into a new sheet. Fails with `too_large` when the result has
@@ -439,7 +448,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         | DropColumn { .. } | RenameColumn { .. } | CreateDemoTable { .. } | DropTable { .. } | RenameTable { .. } | SheetCreate { .. }
         | SheetRename { .. } | SheetDelete { .. } | SheetSet { .. } | SheetUndo | SheetRedo | SheetInsertRows { .. }
         | SheetDeleteRows { .. } | SheetInsertColumns { .. } | SheetDeleteColumns { .. } | SheetDefineName { .. }
-        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetDragFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetResize { .. } | SheetSetHidden { .. } | SheetMerge { .. } | SheetFilter { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SetSheetCharts { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetReplaceAll { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetMove { .. }
+        | SheetUpdateName { .. } | SheetDeleteName { .. } | SheetFill { .. } | SheetDragFill { .. } | SheetStyle { .. } | SheetFreeze { .. } | SheetResize { .. } | SheetSetHidden { .. } | SheetMerge { .. } | SheetFilter { .. } | AddComment { .. } | EditComment { .. } | ResolveComment { .. } | DeleteComment { .. } | SheetDuplicate { .. } | SheetHide { .. } | SheetReorder { .. } | SetSheetRules { .. } | SetSheetCharts { .. } | SheetUnhide { .. } | SheetSort { .. } | SheetBorder { .. } | SheetColor { .. } | SheetReplace { .. } | SheetReplaceAll { .. } | SheetClearFormat { .. } | SheetPaste { .. } | SheetPasteCells { .. } | SheetMove { .. }
         | TableToSheet { .. } | SaveView { .. } | RenameSavedView { .. } | DeleteSavedView { .. } | TableFromView { .. }
         | SheetToTable { .. } | SaveQuery { .. } | RenameQuery { .. } | DeleteQuery { .. } | Recalculate { .. }
         | CancelRecalculation { .. } => EDIT,
@@ -935,6 +944,15 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             expect_layout(wb, sheet, layout)?;
             expect_layout(wb, from_sheet, source_layout)?;
             let area = wb.with_sheets(|s| s.paste(from_sheet, source, sheet, (row, column), mode, transpose))?;
+            (json!(area), sheet_changed(sheet))
+        }
+        Op::SheetPasteCells { sheet, row, column, cells, layout } => {
+            expect_layout(wb, sheet, layout)?;
+            let inputs: Vec<alephgrid_core::SheetInput> = cells.iter().enumerate()
+                .flat_map(|(r, line)| line.iter().enumerate().map(move |(c, p)| alephgrid_core::SheetInput { row: row + r as u32, column: column + c as u32, value: p.value.clone(), base: None }))
+                .collect();
+            wb.check_sheet_inputs(sheet, &inputs)?;
+            let area = wb.with_sheets(|s| s.paste_cells(sheet, (row, column), &cells))?;
             (json!(area), sheet_changed(sheet))
         }
         Op::SheetMove { sheet, source, row, column, layout } => {
