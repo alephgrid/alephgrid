@@ -577,25 +577,52 @@ impl Sheets {
         Ok(CellArea { row: r0 as u32, column: c0 as u32, rows: (r1 - r0 + 1) as u32, columns: (c1 - c0 + 1) as u32 })
     }
 
+    /// The rows and columns of `area` that are shown (offsets from its corner): copies
+    /// leave hidden ones out, as filtered rows are in other spreadsheets.
+    fn shown_lines(&self, index: u32, area: &CellArea) -> Result<(Vec<u32>, Vec<u32>)> {
+        let m = self.model()?.get_model();
+        let mut rows = Vec::with_capacity(area.rows as usize);
+        for dr in 0..area.rows {
+            if !m.is_row_hidden(index, (area.row + dr) as i32 + 1).map_err(|e| anyhow!(e))? {
+                rows.push(dr);
+            }
+        }
+        let mut columns = Vec::with_capacity(area.columns as usize);
+        for dc in 0..area.columns {
+            if !m.is_column_hidden(index, (area.column + dc) as i32 + 1).map_err(|e| anyhow!(e))? {
+                columns.push(dc);
+            }
+        }
+        Ok((rows, columns))
+    }
+
     /// Paste the `source` area of sheet `from` at `at` on sheet `index`. Formulas are
-    /// translated as when copying; `transpose` swaps rows and columns.
+    /// translated as when copying; `transpose` swaps rows and columns. Hidden rows and
+    /// columns of the source (a filter's hidden rows included) are left out, so the shown
+    /// cells land next to each other.
     pub fn paste(&mut self, from: u32, source: CellArea, index: u32, at: (u32, u32), mode: PasteMode, transpose: bool) -> Result<CellArea> {
         self.check_index(from)?;
         self.check_index(index)?;
         source.check("copied")?;
+        let (rows, columns) = self.shown_lines(from, &source)?;
+        if rows.is_empty() || columns.is_empty() {
+            bail!("every copied cell is hidden: show the rows or columns first");
+        }
+        let (n_rows, n_columns) = (rows.len() as u32, columns.len() as u32);
         let target = if transpose {
-            CellArea { row: at.0, column: at.1, rows: source.columns, columns: source.rows }
+            CellArea { row: at.0, column: at.1, rows: n_columns, columns: n_rows }
         } else {
-            CellArea { row: at.0, column: at.1, rows: source.rows, columns: source.columns }
+            CellArea { row: at.0, column: at.1, rows: n_rows, columns: n_columns }
         };
         target.check("paste")?;
         let sources = self.read_area(from, &source)?;
         let source_styles = if matches!(mode, PasteMode::All | PasteMode::Formats) { Some(self.style_grid(from, &source)?) } else { None };
         let mut inputs = Vec::new();
         let mut styles = vec![vec![ironcalc::base::types::Style::default(); target.columns as usize]; target.rows as usize];
-        for dr in 0..source.rows {
-            for dc in 0..source.columns {
-                let (tr, tc) = if transpose { (dc, dr) } else { (dr, dc) };
+        for (i, &dr) in rows.iter().enumerate() {
+            for (j, &dc) in columns.iter().enumerate() {
+                let (i, j) = (i as u32, j as u32);
+                let (tr, tc) = if transpose { (j, i) } else { (i, j) };
                 if let Some(st) = &source_styles {
                     styles[tr as usize][tc as usize] = st[dr as usize][dc as usize].clone();
                 }
@@ -627,6 +654,10 @@ impl Sheets {
         source.check("moved")?;
         let target = CellArea { row: at.0, column: at.1, ..source };
         target.check("paste")?;
+        let (rows, columns) = self.shown_lines(index, &source)?;
+        if rows.len() < source.rows as usize || columns.len() < source.columns as usize {
+            bail!("the cut cells include hidden rows or columns, which would move unseen: show them first, or copy the shown cells and clear the originals");
+        }
         if (target.row, target.column) == (source.row, source.column) {
             return Ok(target);
         }
@@ -1078,6 +1109,42 @@ mod tests {
         assert!(s.undo().unwrap());
         assert!(s.undo().unwrap());
         assert!(content(&s, 0, 31, 2).is_empty() && content(&s, 0, 20, 1) == "keep");
+    }
+
+    /// F.04a: a copy of a filtered range pastes only the rows that are shown, one after the
+    /// other, as other spreadsheets do; hidden columns are left out the same way. Formulas
+    /// are translated from where each copied cell really is. A cut cannot move hidden cells
+    /// that the person cannot see.
+    #[test]
+    fn copies_leave_out_hidden_rows_and_columns() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        s.set(0, &[input(0, 0, "kind"), input(0, 1, "n"), input(1, 0, "x"), input(1, 1, "1"), input(2, 0, "y"), input(2, 1, "2"),
+            input(3, 0, "x"), input(3, 1, "=B2+2"), input(4, 0, "y"), input(4, 1, "4")]).unwrap();
+        // Keep the "x" rows of A1:B5: rows 3 and 5 are hidden.
+        assert_eq!(s.filter_range(0, &a(0, 0, 5, 2), true, 0, Some(&["x".to_string()])).unwrap(), 2);
+        let t = s.paste(0, a(0, 0, 5, 2), 0, (0, 3), PasteMode::All, false).unwrap();
+        assert_eq!(t, a(0, 3, 3, 2), "three shown rows");
+        assert_eq!((0..3).map(|r| content(&s, 0, r, 3)).collect::<Vec<_>>(), ["kind", "x", "x"]);
+        assert_eq!((content(&s, 0, 1, 4), content(&s, 0, 2, 4)), ("1".into(), "=E1+2".into()), "B4 lands in E3: up one row, right three columns");
+        assert!(content(&s, 0, 3, 3).is_empty(), "nothing pasted below the shown rows");
+        // Values and transpose skip them too.
+        let t = s.paste(0, a(0, 0, 5, 2), 0, (10, 0), PasteMode::Values, true).unwrap();
+        assert_eq!(t, a(10, 0, 2, 3));
+        assert_eq!((0..3).map(|c| display(&s, 0, 11, c)).collect::<Vec<_>>(), ["n", "1", "3"]);
+        // A hidden column is left out as well: A1:D2 with B hidden copies A, C and D.
+        s.set_hidden(0, crate::sheets::Axis::Columns, 1, 1, true).unwrap();
+        let t = s.paste(0, a(0, 0, 2, 4), 0, (20, 0), PasteMode::All, false).unwrap();
+        assert_eq!(t, a(20, 0, 2, 3));
+        assert_eq!((0..3).map(|c| content(&s, 0, 20, c)).collect::<Vec<_>>(), ["kind", "", "kind"]);
+        assert_eq!((content(&s, 0, 21, 0), content(&s, 0, 21, 2)), ("x".into(), "x".into()));
+        // Only hidden cells: nothing to paste, and nothing changes.
+        let e = s.paste(0, a(2, 1, 1, 1), 0, (30, 0), PasteMode::All, false).unwrap_err().to_string();
+        assert!(e.contains("hidden"), "{e}");
+        // A cut over hidden rows is refused rather than moving cells nobody can see.
+        let e = s.move_cells(0, a(0, 0, 5, 1), (40, 0)).unwrap_err().to_string();
+        assert!(e.contains("hidden"), "{e}");
+        assert_eq!(content(&s, 0, 2, 0), "y");
     }
 
     #[test]
