@@ -186,6 +186,10 @@ async fn tests_take_typed_values_and_errors_say_which_line() {
     assert!(message.contains("ValueError: bad 2.0") && message.contains("line 3"), "{r}");
     let r = ws.ok("test_function", function("BROKEN", &["x"], "number", "def broken(x):\n    return (x\n", json!([{ "arguments": ["2"], "expected": "1" }]))).await;
     assert!(r[0]["message"].as_str().unwrap_or("").contains("line 2"), "{r}");
+    // Activation shows the runtime this server has, to compare with a version's.
+    ws.ok("publish_function", function("KIND", &["x"], "text", "def kind(x):\n    return type(x).__name__\n", json!([]))).await;
+    let usage = ws.ok("function_usage", json!({ "name": "KIND" })).await;
+    assert_eq!(usage["runtime"]["id"], alephgrid_server::python::Manifest::load(runtime()).unwrap().id(), "{usage}");
     ws.close().await;
     server.stop().await;
 }

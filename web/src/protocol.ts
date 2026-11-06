@@ -202,7 +202,16 @@ columns: Array<FunctionUseColumn>,
 /**
  * Active versions of other workbook functions that call it, and the version they call.
  */
-dependents: Array<FunctionDependent>, };
+dependents: Array<FunctionDependent>, 
+/**
+ * The Python runtime this server has: a Python version published with another one
+ * cannot compute here.
+ */
+runtime?: RuntimeIdentity, 
+/**
+ * Why Python functions cannot run in this workbook now (turned off for its space).
+ */
+python_unavailable?: string, };
 
 export type FunctionUseCell = { sheet: string, 
 /**

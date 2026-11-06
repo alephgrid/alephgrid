@@ -204,6 +204,15 @@ pub struct FunctionUsage {
     pub columns: Vec<FunctionUseColumn>,
     /// Active versions of other workbook functions that call it, and the version they call.
     pub dependents: Vec<FunctionDependent>,
+    /// The Python runtime this server has: a Python version published with another one
+    /// cannot compute here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime: Option<crate::external::RuntimeIdentity>,
+    /// Why Python functions cannot run in this workbook now (turned off for its space).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub python_unavailable: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct FunctionUseCell {
@@ -267,7 +276,7 @@ pub(crate) fn formula_calls(formula: &str, name: &str) -> bool {
     false
 }
 
-fn usage(conn: &Connection, sheets: &crate::sheets::Sheets, name: &str) -> Result<FunctionUsage> {
+fn usage(conn: &Connection, sheets: &crate::sheets::Sheets, cache: &crate::external::ResultCache, name: &str) -> Result<FunctionUsage> {
     let name = name.to_uppercase();
     let items = list(conn)?;
     if !items.iter().any(|f| f.name == name) {
@@ -292,6 +301,8 @@ fn usage(conn: &Connection, sheets: &crate::sheets::Sheets, name: &str) -> Resul
         cell_count: cell_count as u32,
         columns,
         dependents,
+        runtime: cache.runtime.read().unwrap().clone(),
+        python_unavailable: cache.disabled.read().unwrap().clone(),
     })
 }
 
@@ -610,7 +621,7 @@ impl Workbook {
         list(&self.conn)
     }
     pub fn function_usage(&self, name: &str) -> Result<FunctionUsage> {
-        usage(&self.conn, &self.sheets(), name)
+        usage(&self.conn, &self.sheets(), &self.shared.functions, name)
     }
     pub fn test_function(&self, definition: &FunctionDefinition) -> Result<Vec<FunctionTestResult>> {
         if definition.kind == FunctionKind::Python {
@@ -961,7 +972,7 @@ impl crate::workbook::Reader {
     /// Where `name` is used in this workbook (U.06e): sheet cells, table columns and the
     /// functions whose versions call it.
     pub fn function_usage(&self, name: &str) -> Result<FunctionUsage> {
-        usage(self.connection(), &self.sheets(), name)
+        usage(self.connection(), &self.sheets(), &self.shared().functions, name)
     }
 
     /// Calls of worker functions that table columns need and the cache lacks: up to `limit`

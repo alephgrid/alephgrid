@@ -451,6 +451,13 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       if (u.columns.length) lines.push(el("p", {}, `Recalculates ${u.columns.length} table column${u.columns.length === 1 ? "" : "s"}: `,
         el("span", { class: "fn-impact-list" }, u.columns.map((c) => `${c.table}.${c.column}`).join(", "))));
       if (!u.cell_count && !u.columns.length) lines.push(el("p", {}, "No cell or table column calls it yet."));
+      // Compatibility: a Python version computes only in the runtime it was published with.
+      const target = f.versions.find((x) => x.version === version);
+      if (u.python_unavailable) lines.push(el("p", { class: "notice" }, `Python functions cannot run in this workbook now: ${u.python_unavailable}. Results already computed still show.`));
+      else if (target?.runtime && target.runtime.id !== u.runtime?.id) {
+        const have = u.runtime ? `runtime ${u.runtime.id.slice(0, 12)} (Python ${u.runtime.version})` : "no Python runtime";
+        lines.push(el("p", { class: "notice" }, `v${version} was published with Python runtime ${target.runtime.id.slice(0, 12)} (Python ${target.runtime.version}); this server has ${have}. Its cells would show #NAME? here.`));
+      } else if (target?.runtime) lines.push(el("p", {}, `Runs in this server's Python ${target.runtime.version} runtime.`));
       for (const d of u.dependents.filter((d) => d.uses !== version)) {
         lines.push(el("p", { class: "notice" }, `${d.name} v${d.version} calls ${f.name} v${d.uses}. Activating v${version} alone is refused; publish ${d.name} against v${version}, then activate both together (Advanced: version map).`));
       }

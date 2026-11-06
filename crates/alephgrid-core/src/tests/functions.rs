@@ -442,4 +442,6 @@ fn usage_lists_cells_columns_and_dependent_functions() {
     assert_eq!(s.columns.len(), 1);
     assert_eq!((s.columns[0].table.as_str(), s.columns[0].column.as_str()), (table.as_str(), "bumped"));
     assert!(t.wb.function_usage("NOPE").is_err());
+    // No Python runtime here, and nothing turned off.
+    assert!(u.runtime.is_none() && u.python_unavailable.is_none());
 }

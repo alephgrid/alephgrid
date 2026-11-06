@@ -137,3 +137,23 @@ test("a running Python test can be cancelled, and one that runs too long says so
   expect(await ws.call("functions", {})).toEqual([]);
   ws.close();
 });
+
+// U.06e: activating a Python version says whether it can compute on this server.
+test("activating a Python version shows its runtime compatibility", async ({ page }) => {
+  const wb = await server.createWorkbook("Python versions");
+  const ws = await server.connect(wb);
+  const def = (body: string) => ({ name: "KIND", kind: "python", arguments: ["x"], returns: "text", source: `def kind(x):\n    return ${body}\n`, documentation: "", tests: [] });
+  await ws.call("publish_function", { definition: def("type(x).__name__") });
+  await ws.call("publish_function", { definition: def("type(x).__name__.upper()") });
+  ws.close();
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await page.getByRole("button", { name: "Functions", exact: true }).click();
+  const panel = page.getByRole("complementary", { name: "Functions" });
+  await panel.getByRole("combobox", { name: "Function", exact: true }).selectOption("KIND");
+  await panel.getByRole("tab", { name: "Versions" }).click();
+  await panel.getByRole("button", { name: "Activate v2 in this workbook" }).click();
+  const impact = panel.getByRole("group", { name: "Activate KIND v2" });
+  await expect(impact).toContainText("Runs in this server's Python");
+  await expect(impact).toContainText("No cell or table column calls it yet.");
+});
