@@ -7,7 +7,7 @@ import { bytes, formatCompact, formatCount } from "./format";
 import type { WorkbookListing } from "./types";
 import { confirmDialog, el, formDialog, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
-import { waitForCompute } from "./compute";
+import { isNotFound, showNotFound, waitForCompute } from "./compute";
 import { brandMark, icon, type IconName } from "./icons";
 import { themeButton } from "./theme";
 import { agentsDialog } from "./agents";
@@ -81,8 +81,13 @@ async function route(): Promise<void> {
           el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks"))));
       return;
     }
+    if (m && isNotFound(e)) {
+      showNotFound(app, () => navigate(homeUrl()));
+      return;
+    }
     // U.03b: a failed load can be retried in place; filters and search are kept (module state).
-    app.replaceChildren(el("div", { class: "fatal", role: "alert" }, el("h2", {}, "Something went wrong"), el("p", {}, (e as Error).message),
+    app.replaceChildren(el("div", { class: "fatal", role: "alert" },
+      el("h2", {}, m ? "This workbook couldn't be loaded" : "Workbooks couldn't be loaded"), el("p", {}, (e as Error).message),
       el("div", { class: "empty-actions" },
         el("button", { class: "btn btn-primary", onclick: () => route() }, "Try again"),
         m ? el("button", { class: "btn", onclick: () => navigate("/") }, "Back to workbooks") : null)));
@@ -92,7 +97,7 @@ async function route(): Promise<void> {
 async function showWorkbook(id: string): Promise<void> {
   // Opening starts its compute; while that takes a moment the page says what it waits for.
   const here = location.pathname;
-  const ready = await waitForCompute(id, app, () => navigate("/"), () => location.pathname === here);
+  const ready = await waitForCompute(id, app, () => navigate(homeUrl()), () => location.pathname === here);
   if (!ready || location.pathname !== here) return;
   const { workbook } = await api.get(id);
   document.title = `${workbook.name} · Alephgrid`;
@@ -222,10 +227,37 @@ function visibleWorkbooks(): WorkbookListing[] {
     });
 }
 
+/** U.03b: the hub's shape while its lists load: the sidebar and placeholder rows. */
+function homeSkeleton(): HTMLElement {
+  const bars = (n: number, cls: string) => Array.from({ length: n }, () => el("span", { class: cls }));
+  return el("div", { class: "home-layout home-loading" },
+    el("aside", { class: "sidebar", "aria-hidden": "true" },
+      el("div", { class: "brand big" }, brandMark(26), el("span", { class: "wordmark" }, "alephgrid")),
+      el("div", { class: "nav" }, ...bars(3, "skeleton-bar skeleton-nav"))),
+    el("main", { class: "home-main" },
+      el("div", { class: "home-top" }, el("span", { class: "skeleton-bar skeleton-search" })),
+      el("div", { class: "home-skeleton", role: "status", "aria-label": "Loading workbooks", "aria-busy": "true" },
+        el("span", { class: "skeleton-bar skeleton-title" }),
+        ...Array.from({ length: 6 }, () => el("div", { class: "skeleton-row" },
+          el("span", { class: "skeleton-bar skeleton-icon" }), el("span", { class: "skeleton-bar skeleton-name" }),
+          el("span", { class: "skeleton-bar skeleton-meta hide-sm" }), el("span", { class: "skeleton-bar skeleton-meta hide-xs" }))))));
+}
+
 async function showHome(): Promise<void> {
   document.title = "Alephgrid";
   home.scope = new URLSearchParams(location.search).get("in") ?? "all";
-  const [workbooks, spaces, config, trash, me] = await Promise.all([api.list(), api.spaces(), api.config(), api.trash(), api.me()]);
+  // A quick load shows the list at once; a slow one shows the placeholder (no flash).
+  let loaded = false;
+  const here = location.href;
+  const placeholder = setTimeout(() => { if (!loaded && location.href === here) app.replaceChildren(homeSkeleton()); }, 120);
+  let lists;
+  try {
+    lists = await Promise.all([api.list(), api.spaces(), api.config(), api.trash(), api.me()]);
+  } finally {
+    loaded = true;
+    clearTimeout(placeholder);
+  }
+  const [workbooks, spaces, config, trash, me] = lists;
   home.workbooks = workbooks;
   home.spaces = spaces;
   home.trash = trash;

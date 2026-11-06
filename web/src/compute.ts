@@ -47,6 +47,23 @@ const FAILURE_HINT: Record<string, string> = {
   cancelled: "Open it again when you are ready.",
 };
 
+/** The workbook does not exist for this person: deleted, in a space they are not in, or a
+ *  wrong link. The server says "not found" for all of these, so nothing is revealed. */
+export function isNotFound(e: unknown): boolean {
+  return e instanceof HttpError && (e.status === 404 || e.status === 410);
+}
+
+/** U.03b: the not-found (and no-access) screen: what may have happened and the way back. */
+export function showNotFound(host: HTMLElement, back: () => void): void {
+  document.title = "Workbook not found · Alephgrid";
+  const button = el("button", { class: "btn btn-primary", onclick: back }, "Back to workbooks");
+  host.replaceChildren(el("div", { class: "fatal workbook-failure", role: "alert" },
+    el("h2", {}, "Workbook not found"),
+    el("p", {}, "It may have been deleted, or it is in a space you are not a member of. Check the link, or ask the person who shared it for access."),
+    el("div", { class: "empty-actions" }, button)));
+  button.focus();
+}
+
 function failureKind(e: unknown): string {
   if (!(e instanceof HttpError)) return "startup_failed";
   return e.status === 429 ? "quota" : e.status === 423 ? "owned_elsewhere" : e.status === 409 ? "incompatible" : "startup_failed";
@@ -100,6 +117,12 @@ export function waitForCompute(workbook: string, host: HTMLElement, leave: () =>
           ? await api.runtimeAction(workbook, { action: "start", wait: false })
           : await api.runtime(workbook);
       } catch (e) {
+        if (isNotFound(e)) {
+          done = true;
+          showNotFound(host, () => { leave(); });
+          resolve(false);
+          return;
+        }
         fail(failureKind(e), (e as Error).message);
         return;
       }

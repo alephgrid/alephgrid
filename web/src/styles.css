@@ -870,3 +870,20 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; b
 .fn-result-list .fail strong { color: var(--danger); }
 .fn-result-list .pass strong { color: var(--accent-strong); }
 @media (max-width: 760px) { .fn-panel { position: fixed; inset: 56px 0 0 0; z-index: 40; flex-basis: auto !important; } .fn-divider { display: none; } }
+
+/* ---------- U.11a / U.03b / U.04a: shared states ---------- */
+/* Busy: pressed and waiting for the server; the label stays, the cursor says it is working. */
+.btn[aria-busy="true"] { cursor: progress; opacity: .7; }
+/* Loading placeholders: the shape of what is coming, no spinner in the content. */
+.skeleton-bar { display: block; height: 10px; border-radius: 5px; background: var(--control); animation: skeleton-pulse 1.4s ease-in-out infinite; }
+@keyframes skeleton-pulse { 50% { opacity: .55; } }
+.home-loading .nav { gap: 10px; padding: 8px 12px; }
+.skeleton-nav { width: 70%; height: 12px; }
+.skeleton-search { width: min(420px, 100%); height: 34px; border-radius: var(--radius); }
+.home-skeleton { border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg); padding: 16px 0 4px; }
+.skeleton-title { width: 160px; height: 14px; margin: 0 16px 14px; }
+.skeleton-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 160px 100px; align-items: center; gap: 16px; padding: 0 16px; min-height: 50px; border-top: 1px solid var(--border); }
+.skeleton-icon { width: 18px; height: 18px; border-radius: 4px; }
+.skeleton-name { width: 46%; }
+.skeleton-meta { width: 70%; }
+@media (max-width: 760px) { .skeleton-row { grid-template-columns: 24px minmax(0, 1fr); } }
