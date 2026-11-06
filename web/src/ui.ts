@@ -56,6 +56,29 @@ export function toast(message: string, kind: "info" | "error" | "success" = "inf
   setTimeout(() => t.remove(), (kind === "error" ? ms * 2 : ms) * (action ? 2 : 1));
 }
 
+/**
+ * U.11a: mark `button` busy while work it started is in flight: disabled (so it cannot be
+ * pressed twice) and `aria-busy`. Returns the function that restores it.
+ */
+export function busy(button: HTMLButtonElement): () => void {
+  const wasDisabled = button.disabled;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  return () => {
+    button.removeAttribute("aria-busy");
+    button.disabled = wasDisabled;
+  };
+}
+
+/**
+ * U.11a: disable `button` with the reason it cannot be used here (its tooltip and accessible
+ * description), or enable it again with `reason` false. `title` is the tooltip it has when enabled.
+ */
+export function disabledFor(button: HTMLButtonElement, reason: string | false, title: string): void {
+  button.disabled = !!reason;
+  button.title = reason || title;
+}
+
 export type MenuItem =
   /** `disabled` as text disables the item and shows why in place of its shortcut (U.04a). */
   | { label: string; action: () => void; danger?: boolean; disabled?: boolean | string; hint?: string }
@@ -92,7 +115,8 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
   menuOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const menu = el("div", { class: "menu", role: "menu", "aria-label": opts.label ?? false });
   menu.addEventListener("keydown", (e) => {
-    const buttons = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item:not(:disabled)")];
+    // Disabled items stay reachable (U.11a): keyboard and screen-reader users hear the reason.
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")];
     const i = buttons.indexOf(document.activeElement as HTMLButtonElement);
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
@@ -116,15 +140,17 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
       menu.append(el("div", { class: "menu-sep" }));
       continue;
     }
+    // A disabled item is aria-disabled rather than disabled, so it keeps focus and its reason
+    // (the title, which becomes its accessible description) is announced; activating it does nothing.
     menu.append(
       el(
         "button",
         {
           class: `menu-item${item.danger ? " danger" : ""}`,
           role: "menuitem",
-          disabled: !!item.disabled,
+          "aria-disabled": item.disabled ? "true" : false,
           title: typeof item.disabled === "string" ? item.disabled : false,
-          onclick: () => { closeMenu(); item.action(); },
+          onclick: () => { if (item.disabled) return; closeMenu(); item.action(); },
         },
         el("span", {}, item.label),
         typeof item.disabled === "string" ? el("span", { class: "menu-hint menu-reason" }, item.disabled)
@@ -137,7 +163,7 @@ export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOpti
   menu.style.left = `${Math.max(8, Math.min(x, innerWidth - r.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
   openMenu = menu;
-  menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")?.focus({ preventScroll: true });
+  (menu.querySelector<HTMLButtonElement>(".menu-item:not([aria-disabled])") ?? menu.querySelector<HTMLButtonElement>(".menu-item"))?.focus({ preventScroll: true });
   // Outside clicks and Escape close the menu; the listeners go away with it however it closes.
   const outside = (e: Event) => !menu.contains(e.target as Node) && closeMenu();
   const esc = (e: KeyboardEvent) => e.key === "Escape" && closeMenu();
@@ -249,7 +275,8 @@ export function formDialog(
 ): Promise<Record<string, string> | null> {
   return new Promise((resolve) => {
     const inputs = new Map<string, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>();
-    const error = el("div", { class: "dialog-error", role: "alert" });
+    const error = el("div", { class: "dialog-error", role: "alert", id: `dialog-error-${++modalSeq}` });
+    const submitButton = el("button", { type: "submit", class: "btn btn-primary" }, submitLabel);
     const form = el("form", { class: "dialog", onsubmit: submit },
       el("h2", {}, title),
       ...fields.map((f) => {
@@ -270,9 +297,11 @@ export function formDialog(
       error,
       el("div", { class: "dialog-actions" },
         el("button", { type: "button", class: "btn", onclick: () => finish(null) }, "Cancel"),
-        el("button", { type: "submit", class: "btn btn-primary" }, submitLabel),
+        submitButton,
       ),
     );
+    // Editing after a refusal clears the invalid state; the message stays until the next try.
+    form.addEventListener("input", () => markInvalid(false));
     const modal = openModal(form, () => finish(null));
     (inputs.values().next().value as HTMLElement | undefined)?.focus();
 
@@ -281,13 +310,34 @@ export function formDialog(
       for (const [k, i] of inputs) out[k] = i.value;
       return out;
     }
+    /** U.11a: a refused value marks the first field invalid, linked to the error text. */
+    function markInvalid(on: boolean): void {
+      const first = inputs.values().next().value as HTMLElement | undefined;
+      if (!first) return;
+      if (on) {
+        first.setAttribute("aria-invalid", "true");
+        first.setAttribute("aria-describedby", error.id);
+      } else {
+        first.removeAttribute("aria-invalid");
+      }
+    }
     async function submit(e: Event) {
       e.preventDefault();
+      if (submitButton.disabled) return;
       const v = values();
       if (validate) {
         error.textContent = "";
-        const msg = await validate(v);
-        if (msg) { error.textContent = msg; return; }
+        markInvalid(false);
+        // Busy while the check runs: it cannot be sent twice.
+        const done = busy(submitButton);
+        let msg: string | null;
+        try { msg = await validate(v); } finally { done(); }
+        if (msg) {
+          error.textContent = msg;
+          markInvalid(true);
+          (inputs.values().next().value as HTMLElement | undefined)?.focus();
+          return;
+        }
       }
       finish(v);
     }

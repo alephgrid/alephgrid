@@ -448,6 +448,7 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("sheet_clear_format", json!({ "sheet": 0, "area": { "row": 1, "column": 1, "rows": 1, "columns": 1 } })),
         ("sheet_paste", json!({ "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2, "columns": 1 }, "sheet": 0, "row": 0, "column": 2, "mode": "values", "transpose": true })),
         ("sheet_move", json!({ "sheet": 0, "source": { "row": 0, "column": 2, "rows": 1, "columns": 2 }, "row": 5, "column": 2 })),
+        ("sheet_paste_cells", json!({ "sheet": 0, "row": 9, "column": 6, "cells": [[{ "value": "007", "text": true }, { "value": "0.5", "style": { "b": true, "num_fmt": "0%" } }]] })),
         ("create_sheet_from_query", json!({ "name": "Q", "sql": "SELECT * FROM t" })),
         ("open_view", json!({ "spec": { "table": "t" } })),
         ("table_to_sheet", json!({ "view_id": 2, "name": "Copy" })),

@@ -79,6 +79,19 @@ pub enum PasteMode {
     Formats,
 }
 
+/// A cell pasted from another app (F.04b): its value, whether it stays text however it
+/// reads (`007`), and the formats to give it.
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct PastedCell {
+    pub value: String,
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub text: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub style: Option<super::StylePatch>,
+}
+
 /// One source cell, read before anything is written.
 struct Source {
     input: Option<String>,
@@ -423,9 +436,13 @@ impl Sheets {
     /// Drag the fill handle: extend `source` to `target`, which contains it and grows it in
     /// one direction (down, up, right or left). Along each line a run of two or more plain
     /// numbers continues as a linear trend (1, 2 → 3, 4; 10, 7 → 4, 1), and a single text
-    /// cell ending in a whole number counts on (Item 1 → Item 2). Anything else repeats
-    /// the source pattern, translating formulas as a copy would. Formats repeat too. One
-    /// undo step; the source cells are not rewritten.
+    /// cell ending in a whole number counts on (Item 1 → Item 2). Weekday, month and
+    /// quarter names continue by name (Mon → Tue, Jan → Feb, Q4 → Q1; two names set the
+    /// step). Dates (numbers with a date format) count on by day from one cell, by month
+    /// when the cells share their day of the month (2024-01-15, 2024-02-15 → 2024-03-15),
+    /// and otherwise follow the trend. Anything else repeats the source pattern,
+    /// translating formulas as a copy would. Formats repeat too. One undo step; the source
+    /// cells are not rewritten.
     pub fn drag_fill(&mut self, index: u32, source: CellArea, target: CellArea) -> Result<()> {
         self.check_index(index)?;
         source.check("fill source")?;
@@ -454,12 +471,36 @@ impl Sheets {
         };
         let lines = if vertical { source.columns } else { source.rows };
         let cell = |line: u32, k: usize| -> &Source { if vertical { &sources[k][line as usize] } else { &sources[line as usize][k] } };
-        enum Plan { Trend(f64, f64), Count(String, u64, usize), Repeat }
+        let style = |line: u32, k: usize| -> &ironcalc::base::types::Style {
+            if vertical { &source_styles[k][line as usize] } else { &source_styles[line as usize][k] }
+        };
+        enum Plan { Trend(f64, f64), Count(String, u64, usize), Names(&'static [&'static str], usize, usize, Case), Months(i64, u32, i64), Repeat }
         let mut plans = Vec::with_capacity(lines as usize);
         for line in 0..lines {
             let numbers: Option<Vec<f64>> = (0..n as usize).map(|k| plain_number(cell(line, k))).collect();
-            let plan = match numbers {
-                Some(ys) if ys.len() >= 2 => {
+            let dates = numbers.is_some()
+                && (0..n as usize).all(|k| ironcalc::base::formatter::lexer::is_likely_date_number_format(&style(line, k).num_fmt));
+            let names: Option<Vec<(&'static [&'static str], usize, Case)>> = (0..n as usize)
+                .map(|k| { let s = cell(line, k); if s.is_text { s.input.as_deref().and_then(series_name) } else { None } })
+                .collect();
+            let plan = match (numbers, names) {
+                (Some(ys), _) if dates && ys.len() == 1 => Plan::Trend(ys[0], 1.0),
+                (Some(ys), _) if dates && month_step(&ys).is_some() => {
+                    let (y, m, d) = civil_from_serial(ys[0] as i64);
+                    Plan::Months(y * 12 + m as i64 - 1, d, month_step(&ys).unwrap_or(1))
+                }
+                (_, Some(names)) => {
+                    let (list, first, case) = names[0];
+                    let len = list.len();
+                    let steps: Vec<usize> = names.windows(2).map(|w| (w[1].1 + len - w[0].1) % len).collect();
+                    let same_list = names.iter().all(|(l, _, _)| std::ptr::eq(*l, list));
+                    match steps.first().copied() {
+                        None => Plan::Names(list, first, 1, case),
+                        Some(step) if same_list && step != 0 && steps.iter().all(|s| *s == step) => Plan::Names(list, first, step, case),
+                        _ => Plan::Repeat,
+                    }
+                }
+                (Some(ys), _) if ys.len() >= 2 => {
                     // Least-squares line through (0, y0), (1, y1), …: exact for evenly spaced runs.
                     let m = ys.len() as f64;
                     let mean_x = (m - 1.0) / 2.0;
@@ -503,6 +544,16 @@ impl Sheets {
                         let v = (*number as i64 + k).unsigned_abs();
                         (format!("{prefix}{v:0width$}"), true)
                     }
+                    Plan::Names(list, first, step, case) => {
+                        let len = list.len() as i64;
+                        let at = (*first as i64 + *step as i64 * k).rem_euclid(len) as usize;
+                        (case.apply(list[at]), true)
+                    }
+                    Plan::Months(first, day, step) => {
+                        let month = first + step * k;
+                        let (y, m) = (month.div_euclid(12), month.rem_euclid(12) as u32 + 1);
+                        (format!("{}", serial_from_civil(y, m, (*day).min(days_in_month(y, m)))), false)
+                    }
                     Plan::Repeat => match s.input.clone() {
                         Some(i) => {
                             let from = (source.row + sr as u32, source.column + sc as u32);
@@ -539,25 +590,52 @@ impl Sheets {
         Ok(CellArea { row: r0 as u32, column: c0 as u32, rows: (r1 - r0 + 1) as u32, columns: (c1 - c0 + 1) as u32 })
     }
 
+    /// The rows and columns of `area` that are shown (offsets from its corner): copies
+    /// leave hidden ones out, as filtered rows are in other spreadsheets.
+    fn shown_lines(&self, index: u32, area: &CellArea) -> Result<(Vec<u32>, Vec<u32>)> {
+        let m = self.model()?.get_model();
+        let mut rows = Vec::with_capacity(area.rows as usize);
+        for dr in 0..area.rows {
+            if !m.is_row_hidden(index, (area.row + dr) as i32 + 1).map_err(|e| anyhow!(e))? {
+                rows.push(dr);
+            }
+        }
+        let mut columns = Vec::with_capacity(area.columns as usize);
+        for dc in 0..area.columns {
+            if !m.is_column_hidden(index, (area.column + dc) as i32 + 1).map_err(|e| anyhow!(e))? {
+                columns.push(dc);
+            }
+        }
+        Ok((rows, columns))
+    }
+
     /// Paste the `source` area of sheet `from` at `at` on sheet `index`. Formulas are
-    /// translated as when copying; `transpose` swaps rows and columns.
+    /// translated as when copying; `transpose` swaps rows and columns. Hidden rows and
+    /// columns of the source (a filter's hidden rows included) are left out, so the shown
+    /// cells land next to each other.
     pub fn paste(&mut self, from: u32, source: CellArea, index: u32, at: (u32, u32), mode: PasteMode, transpose: bool) -> Result<CellArea> {
         self.check_index(from)?;
         self.check_index(index)?;
         source.check("copied")?;
+        let (rows, columns) = self.shown_lines(from, &source)?;
+        if rows.is_empty() || columns.is_empty() {
+            bail!("every copied cell is hidden: show the rows or columns first");
+        }
+        let (n_rows, n_columns) = (rows.len() as u32, columns.len() as u32);
         let target = if transpose {
-            CellArea { row: at.0, column: at.1, rows: source.columns, columns: source.rows }
+            CellArea { row: at.0, column: at.1, rows: n_columns, columns: n_rows }
         } else {
-            CellArea { row: at.0, column: at.1, rows: source.rows, columns: source.columns }
+            CellArea { row: at.0, column: at.1, rows: n_rows, columns: n_columns }
         };
         target.check("paste")?;
         let sources = self.read_area(from, &source)?;
         let source_styles = if matches!(mode, PasteMode::All | PasteMode::Formats) { Some(self.style_grid(from, &source)?) } else { None };
         let mut inputs = Vec::new();
         let mut styles = vec![vec![ironcalc::base::types::Style::default(); target.columns as usize]; target.rows as usize];
-        for dr in 0..source.rows {
-            for dc in 0..source.columns {
-                let (tr, tc) = if transpose { (dc, dr) } else { (dr, dc) };
+        for (i, &dr) in rows.iter().enumerate() {
+            for (j, &dc) in columns.iter().enumerate() {
+                let (i, j) = (i as u32, j as u32);
+                let (tr, tc) = if transpose { (j, i) } else { (i, j) };
                 if let Some(st) = &source_styles {
                     styles[tr as usize][tc as usize] = st[dr as usize][dc as usize].clone();
                 }
@@ -581,6 +659,55 @@ impl Sheets {
         Ok(target)
     }
 
+    /// Paste cells that come from another app at `at` (F.04b): each one's value, written as
+    /// typed unless `text` keeps it text, and its formats, which replace the target's.
+    /// Text starting with `=` stays text: formulas are not taken from other apps. Every
+    /// format is checked before the first change; one undo step.
+    pub fn paste_cells(&mut self, index: u32, at: (u32, u32), cells: &[Vec<PastedCell>]) -> Result<CellArea> {
+        self.check_index(index)?;
+        let columns = cells.iter().map(|r| r.len()).max().unwrap_or(0);
+        if columns == 0 {
+            bail!("there is nothing to paste");
+        }
+        let target = CellArea { row: at.0, column: at.1, rows: cells.len() as u32, columns: columns as u32 };
+        target.check("paste")?;
+        let mut patches = Vec::new();
+        let mut inputs = Vec::with_capacity(target.cells() as usize);
+        for (dr, row) in cells.iter().enumerate() {
+            for dc in 0..columns {
+                let (r, c) = (at.0 + dr as u32, at.1 + dc as u32);
+                let (value, text, style) = match row.get(dc) {
+                    Some(p) => (p.value.clone(), p.text || p.value.starts_with('='), p.style.as_ref()),
+                    None => (String::new(), false, None),
+                };
+                if let Some(style) = style {
+                    patches.push((r, c, style.paths()?));
+                }
+                inputs.push((SheetInput { row: r, column: c, value, base: None }, text));
+            }
+        }
+        let groups = self.undo_groups.len();
+        let result = (|| {
+            let plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
+            self.write(index, inputs, Some((target, plain)))?;
+            let m = self.model_mut()?;
+            let mut entries = 0;
+            for (r, c, paths) in &patches {
+                let cell = super::format::area(index, &CellArea { row: *r, column: *c, rows: 1, columns: 1 });
+                for (path, value) in paths {
+                    m.update_range_style(&cell, path, value).map_err(|e| anyhow!(e))?;
+                    entries += 1;
+                }
+            }
+            if entries > 0 {
+                self.record(entries);
+            }
+            Ok(())
+        })();
+        self.merge_groups_since(groups);
+        result.map(|()| target)
+    }
+
     /// Cut and paste within one sheet: cells move with their formats, formulas elsewhere
     /// that refer to them follow, and references inside the moved area keep pointing at
     /// the same cells. Uses IronCalc's own cut/paste.
@@ -589,6 +716,10 @@ impl Sheets {
         source.check("moved")?;
         let target = CellArea { row: at.0, column: at.1, ..source };
         target.check("paste")?;
+        let (rows, columns) = self.shown_lines(index, &source)?;
+        if rows.len() < source.rows as usize || columns.len() < source.columns as usize {
+            bail!("the cut cells include hidden rows or columns, which would move unseen: show them first, or copy the shown cells and clear the originals");
+        }
         if (target.row, target.column) == (source.row, source.column) {
             return Ok(target);
         }
@@ -620,6 +751,102 @@ fn plain_number(s: &Source) -> Option<f64> {
     s.value.as_deref()?.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// Names that continue as a series when dragged (F.04c).
+const SERIES_NAMES: [&[&str]; 5] = [
+    &["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    &["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    &["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    &["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+    &["Q1", "Q2", "Q3", "Q4"],
+];
+
+/// How a series name was written, so the names after it are written the same way.
+#[derive(Clone, Copy)]
+enum Case { Upper, Lower, AsListed }
+
+impl Case {
+    fn apply(self, name: &str) -> String {
+        match self {
+            Case::Upper => name.to_uppercase(),
+            Case::Lower => name.to_lowercase(),
+            Case::AsListed => name.to_string(),
+        }
+    }
+}
+
+/// `"wed"` → (the short weekday names, 2, lower case).
+fn series_name(text: &str) -> Option<(&'static [&'static str], usize, Case)> {
+    SERIES_NAMES.iter().find_map(|list| {
+        let at = list.iter().position(|n| n.eq_ignore_ascii_case(text))?;
+        let letters = || text.chars().filter(|c| c.is_alphabetic());
+        let case = if text == list[at] {
+            Case::AsListed
+        } else if letters().all(|c| c.is_uppercase()) {
+            Case::Upper
+        } else if letters().all(|c| c.is_lowercase()) {
+            Case::Lower
+        } else {
+            Case::AsListed
+        };
+        Some((*list, at, case))
+    })
+}
+
+/// Serial numbers of the dates the sheet engine numbers like other spreadsheets
+/// (1900-03-01 to 9999-12-31).
+const DATES: std::ops::RangeInclusive<i64> = 61..=2_958_465;
+
+/// The month step of dates that share their day of the month (2024-01-31, 2024-02-29
+/// do not; 2023-12-31, 2024-01-31 do) and are evenly spaced in months.
+fn month_step(serials: &[f64]) -> Option<i64> {
+    if serials.len() < 2 || serials.iter().any(|v| v.fract() != 0.0 || !DATES.contains(&(*v as i64))) {
+        return None;
+    }
+    let dates: Vec<(i64, u32, u32)> = serials.iter().map(|v| civil_from_serial(*v as i64)).collect();
+    if dates.iter().any(|d| d.2 != dates[0].2) {
+        return None;
+    }
+    let months: Vec<i64> = dates.iter().map(|(y, m, _)| y * 12 + *m as i64).collect();
+    let step = months[1] - months[0];
+    (step != 0 && months.windows(2).all(|w| w[1] - w[0] == step)).then_some(step)
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Serial 25569 is 1970-01-01; civil dates from and to days since then use the
+/// proleptic Gregorian algorithms of H. Hinnant ("chrono-Compatible Low-Level Date
+/// Algorithms").
+const SERIAL_1970: i64 = 25_569;
+
+fn civil_from_serial(serial: i64) -> (i64, u32, u32) {
+    let z = serial - SERIAL_1970 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+fn serial_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468 + SERIAL_1970
+}
+
 /// `"Item 07"` → (`"Item "`, 7, 2): text that ends in a whole number, and its digit width.
 fn trailing_number(text: &str) -> Option<(String, u64, usize)> {
     let digits = text.bytes().rev().take_while(|b| b.is_ascii_digit()).count();
@@ -643,6 +870,7 @@ fn format_number(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sheets::StylePatch;
     use ironcalc::base::expressions::types::Area;
 
     fn sheets() -> Sheets {
@@ -820,6 +1048,76 @@ mod tests {
         assert!(s.drag_fill(0, a(0, 0, 1, 1), a(0, 0, MAX_ROWS, 1)).is_err(), "bounded");
     }
 
+    /// F.04c: weekday, month and quarter names continue by name, keeping their case, and
+    /// wrap around; dates (numbers with a date format) continue by day, or by month when
+    /// the cells share their day of the month. Expected values worked out on a calendar.
+    #[test]
+    fn drag_fill_continues_named_and_date_series() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        let shown = |s: &Sheets, rows: std::ops::Range<u32>, column: u32| rows.map(|r| display(s, 0, r, column)).collect::<Vec<_>>();
+        s.set(0, &[input(0, 0, "Mon"), input(0, 1, "Friday"), input(0, 2, "Nov"), input(0, 3, "December"),
+            input(0, 4, "MON"), input(0, 5, "q3"), input(0, 6, "Mon"), input(1, 6, "Wed")]).unwrap();
+        s.drag_fill(0, a(0, 0, 1, 6), a(0, 0, 4, 6)).unwrap();
+        assert_eq!(shown(&s, 1..4, 0), ["Tue", "Wed", "Thu"]);
+        assert_eq!(shown(&s, 1..4, 1), ["Saturday", "Sunday", "Monday"], "wraps after Sunday");
+        assert_eq!(shown(&s, 1..4, 2), ["Dec", "Jan", "Feb"]);
+        assert_eq!(shown(&s, 1..4, 3), ["January", "February", "March"]);
+        assert_eq!(shown(&s, 1..4, 4), ["TUE", "WED", "THU"], "capitals stay capitals");
+        assert_eq!(shown(&s, 1..4, 5), ["q4", "q1", "q2"], "quarters wrap, not Q5");
+        // Two names set the step: Mon, Wed → Fri, Sun, Tue.
+        s.drag_fill(0, a(0, 6, 2, 1), a(0, 6, 5, 1)).unwrap();
+        assert_eq!(shown(&s, 2..5, 6), ["Fri", "Sun", "Tue"]);
+        // Filling up runs backwards; filling right works the same way.
+        s.set(0, &[input(12, 0, "Wed"), input(20, 0, "Mar")]).unwrap();
+        s.drag_fill(0, a(12, 0, 1, 1), a(10, 0, 3, 1)).unwrap();
+        assert_eq!(shown(&s, 10..12, 0), ["Mon", "Tue"]);
+        s.drag_fill(0, a(20, 0, 1, 1), a(20, 0, 1, 3)).unwrap();
+        assert_eq!((display(&s, 0, 20, 1), display(&s, 0, 20, 2)), ("Apr".into(), "May".into()));
+        // Text that only looks like a name still counts on or repeats as before.
+        s.set(0, &[input(30, 0, "Monday 1"), input(30, 1, "Mo")]).unwrap();
+        s.drag_fill(0, a(30, 0, 1, 2), a(30, 0, 2, 2)).unwrap();
+        assert_eq!((display(&s, 0, 31, 0), display(&s, 0, 31, 1)), ("Monday 2".into(), "Mo".into()));
+        assert!(s.undo().unwrap(), "one undo step per drag");
+        assert!(content(&s, 0, 31, 0).is_empty());
+
+        // Dates: serial numbers shown as yyyy-mm-dd (2024-01-30 is serial 45321).
+        let date = |s: &mut Sheets, row: u32, column: u32, serial: &str| {
+            s.set(0, &[input(row, column, serial)]).unwrap();
+            let cell = Area { sheet: 0, row: row as i32 + 1, column: column as i32 + 1, width: 1, height: 1 };
+            s.model_mut().unwrap().update_range_style(&cell, "num_fmt", "yyyy-mm-dd").unwrap();
+        };
+        date(&mut s, 40, 0, "45321");
+        assert_eq!(display(&s, 0, 40, 0), "2024-01-30");
+        // One date counts on by day, across the month end.
+        s.drag_fill(0, a(40, 0, 1, 1), a(40, 0, 4, 1)).unwrap();
+        assert_eq!(shown(&s, 41..44, 0), ["2024-01-31", "2024-02-01", "2024-02-02"]);
+        // 2024-01-15, 2024-02-15 (same day, one month apart) → the 15th of each month.
+        date(&mut s, 40, 1, "45306");
+        date(&mut s, 41, 1, "45337");
+        s.drag_fill(0, a(40, 1, 2, 1), a(40, 1, 5, 1)).unwrap();
+        assert_eq!(shown(&s, 42..45, 1), ["2024-03-15", "2024-04-15", "2024-05-15"]);
+        // 2023-12-31, 2024-01-31: the day is kept where the month has it, else its last day.
+        date(&mut s, 40, 2, "45291");
+        date(&mut s, 41, 2, "45322");
+        s.drag_fill(0, a(40, 2, 2, 1), a(40, 2, 4, 1)).unwrap();
+        assert_eq!(shown(&s, 42..44, 2), ["2024-02-29", "2024-03-31"]);
+        // A year apart: yearly.
+        date(&mut s, 40, 3, "44985");
+        date(&mut s, 41, 3, "45350");
+        assert_eq!((display(&s, 0, 40, 3), display(&s, 0, 41, 3)), ("2023-02-28".into(), "2024-02-28".into()));
+        s.drag_fill(0, a(40, 3, 2, 1), a(40, 3, 3, 1)).unwrap();
+        assert_eq!(display(&s, 0, 42, 3), "2025-02-28");
+        // Upwards from 2024-02-15, 2024-03-15: back one month per row.
+        s.drag_fill(0, a(41, 1, 2, 1), a(39, 1, 4, 1)).unwrap();
+        assert_eq!((display(&s, 0, 39, 1), display(&s, 0, 40, 1)), ("2023-12-15".into(), "2024-01-15".into()));
+        // Dates a week apart continue the week (the trend), still shown as dates.
+        date(&mut s, 50, 0, "45292");
+        date(&mut s, 51, 0, "45299");
+        s.drag_fill(0, a(50, 0, 2, 1), a(50, 0, 3, 1)).unwrap();
+        assert_eq!(display(&s, 0, 52, 0), "2024-01-15");
+    }
+
     #[test]
     fn current_region_stops_at_empty_rows_and_columns() {
         let mut s = sheets();
@@ -874,6 +1172,84 @@ mod tests {
         assert!(s.undo().unwrap());
         assert!(s.undo().unwrap());
         assert!(content(&s, 0, 31, 2).is_empty() && content(&s, 0, 20, 1) == "keep");
+    }
+
+    /// F.04a: a copy of a filtered range pastes only the rows that are shown, one after the
+    /// other, as other spreadsheets do; hidden columns are left out the same way. Formulas
+    /// are translated from where each copied cell really is. A cut cannot move hidden cells
+    /// that the person cannot see.
+    #[test]
+    fn copies_leave_out_hidden_rows_and_columns() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        s.set(0, &[input(0, 0, "kind"), input(0, 1, "n"), input(1, 0, "x"), input(1, 1, "1"), input(2, 0, "y"), input(2, 1, "2"),
+            input(3, 0, "x"), input(3, 1, "=B2+2"), input(4, 0, "y"), input(4, 1, "4")]).unwrap();
+        // Keep the "x" rows of A1:B5: rows 3 and 5 are hidden.
+        assert_eq!(s.filter_range(0, &a(0, 0, 5, 2), true, 0, Some(&["x".to_string()])).unwrap(), 2);
+        let t = s.paste(0, a(0, 0, 5, 2), 0, (0, 3), PasteMode::All, false).unwrap();
+        assert_eq!(t, a(0, 3, 3, 2), "three shown rows");
+        assert_eq!((0..3).map(|r| content(&s, 0, r, 3)).collect::<Vec<_>>(), ["kind", "x", "x"]);
+        assert_eq!((content(&s, 0, 1, 4), content(&s, 0, 2, 4)), ("1".into(), "=E1+2".into()), "B4 lands in E3: up one row, right three columns");
+        assert!(content(&s, 0, 3, 3).is_empty(), "nothing pasted below the shown rows");
+        // Values and transpose skip them too.
+        let t = s.paste(0, a(0, 0, 5, 2), 0, (10, 0), PasteMode::Values, true).unwrap();
+        assert_eq!(t, a(10, 0, 2, 3));
+        assert_eq!((0..3).map(|c| display(&s, 0, 11, c)).collect::<Vec<_>>(), ["n", "1", "3"]);
+        // A hidden column is left out as well: A1:D2 with B hidden copies A, C and D.
+        s.set_hidden(0, crate::sheets::Axis::Columns, 1, 1, true).unwrap();
+        let t = s.paste(0, a(0, 0, 2, 4), 0, (20, 0), PasteMode::All, false).unwrap();
+        assert_eq!(t, a(20, 0, 2, 3));
+        assert_eq!((0..3).map(|c| content(&s, 0, 20, c)).collect::<Vec<_>>(), ["kind", "", "kind"]);
+        assert_eq!((content(&s, 0, 21, 0), content(&s, 0, 21, 2)), ("x".into(), "x".into()));
+        // Only hidden cells: nothing to paste, and nothing changes.
+        let e = s.paste(0, a(2, 1, 1, 1), 0, (30, 0), PasteMode::All, false).unwrap_err().to_string();
+        assert!(e.contains("hidden"), "{e}");
+        // A cut over hidden rows is refused rather than moving cells nobody can see.
+        let e = s.move_cells(0, a(0, 0, 5, 1), (40, 0)).unwrap_err().to_string();
+        assert!(e.contains("hidden"), "{e}");
+        assert_eq!(content(&s, 0, 2, 0), "y");
+    }
+
+    /// F.04b: cells pasted from another app (its HTML table clipboard data, read by the
+    /// browser) keep raw numbers, text that stays text, number formats, bold, italic and
+    /// colours. Formulas are never made from pasted text. Formats replace the target's.
+    /// One undo step; a bad format changes nothing.
+    #[test]
+    fn pasted_cells_keep_values_text_and_formats() {
+        let mut s = sheets();
+        let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
+        let cell = |value: &str, text: bool, style: Option<StylePatch>| PastedCell { value: value.into(), text, style };
+        let fmt = |f: &str| StylePatch { num_fmt: Some(f.into()), ..Default::default() };
+        s.set(0, &[input(1, 1, "old"), input(2, 1, "old")]).unwrap();
+        let bold_b2 = Area { sheet: 0, row: 2, column: 2, width: 1, height: 1 };
+        s.model_mut().unwrap().update_range_style(&bold_b2, "font.b", "true").unwrap();
+        let cells = vec![
+            vec![cell("1234.5", false, Some(StylePatch { b: Some(true), ..fmt("\"$\"#,##0.00") })), cell("007", true, None)],
+            vec![cell("0.125", false, Some(fmt("0.00%"))), cell("=1+1", false, None)],
+            vec![cell("45306", false, Some(StylePatch { i: Some(true), color: Some("#ff0000".into()), fill: Some("#FFFF00".into()), ..fmt("yyyy-mm-dd") })), cell("", false, None)],
+        ];
+        let t = s.paste_cells(0, (0, 0), &cells).unwrap();
+        assert_eq!(t, a(0, 0, 3, 2));
+        let style = |s: &Sheets, r: u32, c: u32| s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap();
+        assert_eq!(display(&s, 0, 0, 0), "$1,234.50");
+        assert!(style(&s, 0, 0).font.b);
+        assert_eq!((content(&s, 0, 0, 1), display(&s, 0, 0, 1)), ("007".into(), "007".into()), "text keeps its leading zeros");
+        assert_eq!(display(&s, 0, 1, 0), "12.50%");
+        assert_eq!(display(&s, 0, 1, 1), "=1+1", "pasted text never becomes a formula");
+        assert!(!style(&s, 1, 1).font.b, "the target's bold is replaced");
+        assert_eq!(display(&s, 0, 2, 0), "2024-01-15");
+        let st = crate::sheets::CellStyle::of(&style(&s, 2, 0));
+        assert!(st.i);
+        assert_eq!((st.color.as_deref(), st.fill.as_deref()), (Some("#FF0000"), Some("#FFFF00")));
+        assert!(content(&s, 0, 2, 1).is_empty(), "an empty pasted cell clears the target");
+        assert!(s.undo().unwrap(), "one undo step");
+        assert_eq!((content(&s, 0, 1, 1), content(&s, 0, 2, 1)), ("old".into(), "old".into()));
+        assert!(style(&s, 1, 1).font.b && content(&s, 0, 0, 0).is_empty());
+        // A colour that is not #RRGGBB is refused before anything is written.
+        let bad = vec![vec![cell("1", false, None), cell("2", false, Some(StylePatch { color: Some("red".into()), ..Default::default() }))]];
+        assert!(s.paste_cells(0, (0, 0), &bad).is_err());
+        assert!(content(&s, 0, 0, 0).is_empty());
+        assert!(s.paste_cells(0, (0, 0), &[]).is_err(), "nothing to paste");
     }
 
     #[test]

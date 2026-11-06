@@ -1,8 +1,10 @@
 ---
 import '../styles/custom.css';
+import '../styles/site.css';
 import { Image } from 'astro:assets';
 import logoLight from '../assets/alephgrid-horizontal-primary.svg';
 import logoDark from '../assets/alephgrid-horizontal-inverse.svg';
+import fontUrl from '../fonts/Manrope-variable.woff2?url';
 
 interface Props {
   title: string;
@@ -11,21 +13,52 @@ interface Props {
 
 const {
   title,
-  description = 'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Runs on your machine; your data never leaves it.',
+  description = 'An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Runs on your laptop or your own server; your data never leaves it.',
 } = Astro.props;
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
 const ogImage = new URL(url('/opengraph.png'), Astro.site);
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const here = Astro.url.pathname.slice(base.length) || '/';
+const repo = 'https://github.com/alephgrid/alephgrid';
 
 const nav = [
-  { href: url('/#product'), label: 'Product' },
-  { href: url('/docs/getting-started/'), label: 'Docs' },
-  { href: url('/install/'), label: 'Install' },
-  { href: url('/releases/'), label: 'Releases' },
-  { href: url('/blog/'), label: 'Blog' },
-  { href: url('/contribute/'), label: 'Contribute' },
-  { href: url('/support/'), label: 'Support' },
+  { href: url('/docs/getting-started/'), label: 'Docs', match: '/docs/' },
+  { href: url('/releases/'), label: 'Releases', match: '/releases/' },
+  { href: url('/blog/'), label: 'Blog', match: '/blog/' },
+  { href: url('/contribute/'), label: 'Contribute', match: '/contribute/' },
+];
+const current = (match: string) => (here.startsWith(match) ? 'page' : undefined);
+
+const footer = [
+  {
+    heading: 'Product',
+    links: [
+      { href: url('/install/'), label: 'Install' },
+      { href: url('/docs/getting-started/'), label: 'Documentation' },
+      { href: url('/releases/'), label: 'Releases' },
+      { href: url('/blog/'), label: 'Blog' },
+    ],
+  },
+  {
+    heading: 'Project',
+    links: [
+      { href: repo, label: 'Source on GitHub' },
+      { href: url('/contribute/'), label: 'Contribute' },
+      { href: url('/support/'), label: 'Support the project' },
+      { href: `${repo}/blob/main/SECURITY.md`, label: 'Security policy' },
+    ],
+  },
+  {
+    heading: 'Machine-readable',
+    links: [
+      { href: url('/docs/agents-mcp/'), label: 'Agents over MCP' },
+      { href: url('/llms.txt'), label: 'llms.txt' },
+      { href: url('/blog/rss.xml'), label: 'Blog RSS feed' },
+      { href: `${repo}/blob/main/LICENSE`, label: 'Apache-2.0 license' },
+    ],
+  },
 ];
 ---
 
@@ -35,12 +68,16 @@ const nav = [
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="preload" href={fontUrl} as="font" type="font/woff2" crossorigin />
     <link rel="icon" href={url('/favicon.svg')} type="image/svg+xml" />
     <link rel="icon" href={url('/favicon-32.png')} sizes="32x32" />
     <link rel="apple-touch-icon" href={url('/apple-touch-icon.png')} />
+    <link rel="alternate" type="application/rss+xml" title="Alephgrid blog" href={url('/blog/rss.xml')} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:image" content={ogImage} />
+    <meta property="og:url" content={canonical} />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <script is:inline>
@@ -49,23 +86,46 @@ const nav = [
         let t = 'auto';
         try { t = localStorage.getItem('starlight-theme') || 'auto'; } catch {}
         const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.dataset.theme =
-          t === 'auto' ? (dark ? 'dark' : 'light') : t;
+        document.documentElement.dataset.theme = t === 'auto' ? (dark ? 'dark' : 'light') : t;
+        document.documentElement.dataset.themeChoice = t;
       })();
     </script>
   </head>
   <body class="ag-page">
+    <a class="ag-skip" href="#main">Skip to content</a>
     <header class="ag-header">
-      <div class="ag-container">
-        <a href={url('/')} aria-label="Alephgrid home">
-          <Image src={logoLight} alt="Alephgrid" class="ag-logo" data-logo="light" />
-          <Image src={logoDark} alt="" class="ag-logo" data-logo="dark" style="display:none" />
+      <div class="ag-container ag-header-row">
+        <a class="ag-brand" href={url('/')} aria-label="Alephgrid home">
+          <Image src={logoLight} alt="" class="ag-logo ag-logo-light" loading="eager" />
+          <Image src={logoDark} alt="" class="ag-logo ag-logo-dark" loading="eager" />
         </a>
+
         <nav class="ag-nav" aria-label="Main">
-          {nav.map((item) => <a href={item.href}>{item.label}</a>)}
-          <a href="https://github.com/alephgrid/alephgrid">GitHub</a>
-          <button class="ag-theme-toggle" data-theme-toggle aria-live="polite">theme:auto</button>
+          {nav.map((item) => <a href={item.href} aria-current={current(item.match)}>{item.label}</a>)}
+          <a href={repo} class="ag-nav-gh">
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            GitHub
+          </a>
         </nav>
+
+        <div class="ag-header-actions">
+          <button class="ag-icon-button" type="button" data-theme-toggle aria-label="Color theme: follow system">
+            <svg class="ag-i ag-i-auto" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+            <svg class="ag-i ag-i-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+            <svg class="ag-i ag-i-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg>
+          </button>
+          <a class="ag-button ag-button-sm" href={url('/install/')}>Install</a>
+          <details class="ag-menu">
+            <summary class="ag-icon-button" aria-label="Menu">
+              <svg class="ag-i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            </summary>
+            <nav class="ag-menu-panel" aria-label="Main, compact">
+              {nav.map((item) => <a href={item.href} aria-current={current(item.match)}>{item.label}</a>)}
+              <a href={url('/support/')} aria-current={current('/support/')}>Support</a>
+              <a href={repo}>GitHub</a>
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
@@ -73,18 +133,26 @@ const nav = [
 
     <footer class="ag-footer">
       <div class="ag-container">
-        <nav class="ag-tabs" aria-label="Footer">
-          <a href="https://github.com/alephgrid/alephgrid">Source</a>
-          <a href={url('/docs/getting-started/')}>Docs</a>
-          <a href={url('/releases/')}>Releases</a>
-          <a href={url('/contribute/')}>Contribute</a>
-          <a href={url('/support/')}>Support</a>
-          <a href="https://github.com/alephgrid/alephgrid/blob/main/SECURITY.md">Security</a>
-          <a href="https://github.com/alephgrid/alephgrid/blob/main/LICENSE">License</a>
-        </nav>
-        <div class="ag-meta">
-          <span>Apache-2.0 · © {new Date().getFullYear()} the Alephgrid contributors</span>
-          <span>No analytics, no trackers. Your data stays on your machine — so does your visit.</span>
+        <div class="ag-footer-grid">
+          <div class="ag-footer-brand">
+            <a href={url('/')} aria-label="Alephgrid home">
+              <Image src={logoLight} alt="" class="ag-logo ag-logo-light" />
+              <Image src={logoDark} alt="" class="ag-logo ag-logo-dark" />
+            </a>
+            <p>An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Pre-release: v0.1.0 is in preparation.</p>
+          </div>
+          {footer.map((col) => (
+            <nav class="ag-footer-col" aria-label={col.heading}>
+              <h2>{col.heading}</h2>
+              <ul>
+                {col.links.map((l) => <li><a href={l.href}>{l.label}</a></li>)}
+              </ul>
+            </nav>
+          ))}
+        </div>
+        <div class="ag-footer-meta">
+          <span>© {new Date().getFullYear()} the Alephgrid contributors. Apache-2.0.</span>
+          <span>This site uses no analytics and no trackers.</span>
         </div>
       </div>
     </footer>
@@ -93,20 +161,19 @@ const nav = [
       (() => {
         const KEY = 'starlight-theme';
         const toggle = document.querySelector('[data-theme-toggle]');
-        const logoL = document.querySelector('[data-logo="light"]');
-        const logoD = document.querySelector('[data-logo="dark"]');
         const order = ['auto', 'light', 'dark'];
+        const names = { auto: 'follow system', light: 'light', dark: 'dark' };
         const stored = () => {
           try { return localStorage.getItem(KEY) || 'auto'; } catch { return 'auto'; }
         };
         const apply = (t) => {
           const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-          const resolved = t === 'auto' ? (dark ? 'dark' : 'light') : t;
-          document.documentElement.dataset.theme = resolved;
-          if (toggle) toggle.textContent = 'theme:' + t;
-          if (logoL && logoD) {
-            logoL.style.display = resolved === 'dark' ? 'none' : '';
-            logoD.style.display = resolved === 'dark' ? '' : 'none';
+          document.documentElement.dataset.theme = t === 'auto' ? (dark ? 'dark' : 'light') : t;
+          document.documentElement.dataset.themeChoice = t;
+          if (toggle) {
+            const next = order[(order.indexOf(t) + 1) % order.length];
+            toggle.setAttribute('aria-label', `Color theme: ${names[t]}. Switch to ${names[next]}`);
+            toggle.title = `Theme: ${names[t]}`;
           }
         };
         apply(stored());
@@ -117,17 +184,29 @@ const nav = [
         });
         matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => apply(stored()));
 
+        const menu = document.querySelector('.ag-menu');
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape' && menu?.open) {
+            menu.open = false;
+            menu.querySelector('summary')?.focus();
+          }
+        });
+        document.addEventListener('click', (e) => {
+          if (menu?.open && !menu.contains(e.target)) menu.open = false;
+        });
+
         document.querySelectorAll('[data-copy]').forEach((btn) => {
           btn.addEventListener('click', async () => {
             const pre = btn.closest('.ag-code-wrap')?.querySelector('pre');
             if (!pre) return;
+            const label = btn.textContent;
             try {
-              await navigator.clipboard.writeText(pre.innerText);
-              btn.textContent = 'copied';
+              await navigator.clipboard.writeText(pre.innerText.replace(/[ \t]+#.*$/gm, ''));
+              btn.textContent = 'Copied';
             } catch {
-              btn.textContent = 'select + copy manually';
+              btn.textContent = 'Select and copy';
             }
-            setTimeout(() => (btn.textContent = 'copy'), 2000);
+            setTimeout(() => (btn.textContent = label), 2000);
           });
         });
       })();

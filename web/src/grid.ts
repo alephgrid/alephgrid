@@ -60,7 +60,8 @@ export interface GridHandlers {
   copyCancelled?(): void;
   /** Sheets: the block of filled cells around a cell, for Ctrl/Cmd+A. */
   region?(at: Cell): Promise<Range | null>;
-  paste(at: Cell, text: string): void;
+  /** A paste: the clipboard's text and, when another app put it there, its HTML. */
+  paste(at: Cell, text: string, html?: string): void;
   columnResized(col: number, width: number): void;
   /** A row's height was dragged or auto-fitted (sheets, S.05). */
   rowResized?(row: number, height: number): void;
@@ -208,10 +209,11 @@ export class Grid {
     this.host.addEventListener("keydown", (e) => this.onKey(e), { signal });
     this.host.addEventListener("paste", (e) => {
       if (this.editing) return;
-      const text = e.clipboardData?.getData("text/plain");
-      if (text) {
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      const html = e.clipboardData?.getData("text/html") ?? "";
+      if (text || html) {
         e.preventDefault();
-        this.handlers.paste(this.active, text);
+        this.handlers.paste(this.active, text, html || undefined);
       }
     }, { signal });
     this.editor.addEventListener("keydown", (e) => this.onEditorKey(e), { signal });

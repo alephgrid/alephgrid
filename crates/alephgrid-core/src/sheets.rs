@@ -25,7 +25,7 @@ pub use format::{CellStyle, StyledCell, StylePatch};
 pub(crate) use format::is_hex_color;
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};
 pub(crate) use links::{slot_input, slot_of};
-pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PasteMode};
+pub use editing::{CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PastedCell, PasteMode};
 
 const LANG: &str = "en";
 /// Hard cap on cells written in one go (paste, query → sheet).
