@@ -21,8 +21,9 @@ export interface ChartsHost {
   bodyOrigin(): { x: number; y: number };
   /** The cell under a viewport point, or null outside the body. */
   cellAt(clientX: number, clientY: number): { r: number; c: number } | null;
-  /** The shown text of the data range's cells (row-major), from the server. */
-  values(area: SheetChart["data"]): Promise<string[][]>;
+  /** The data range's cells (row-major), from the server: the shown text for labels and
+   *  the computed numbers (null where a cell holds no number) for values. */
+  values(area: SheetChart["data"]): Promise<{ text: string[][]; numbers: (number | null)[][] }>;
   save(charts: SheetChart[]): Promise<void>;
 }
 
@@ -207,15 +208,16 @@ export class SheetChartsLayer {
   }
 
   private async drawInto(c: SheetChart, body: HTMLElement, heading: string | null): Promise<void> {
-    let cells: string[][];
+    let cells: { text: string[][]; numbers: (number | null)[][] };
     try { cells = await this.host.values(c.data); } catch (e) { body.replaceChildren(el("p", { class: "chart-empty" }, (e as Error).message)); return; }
-    const head = cells[0] ?? [];
-    const rows = cells.slice(1);
+    const head = cells.text[0] ?? [];
+    const rows = cells.text.slice(1);
+    const numbers = cells.numbers.slice(1);
     const series = [];
     for (let j = 1; j < c.data.columns; j++) {
       series.push({
         name: head[j] || `Column ${columnLetter(c.data.column + j)}`,
-        values: rows.map((r) => { const t = (r[j] ?? "").replace(/,/g, ""); const v = Number(t); return t === "" || Number.isNaN(v) ? null : v; }),
+        values: rows.map((_, i) => numbers[i]?.[j] ?? null),
       });
     }
     renderChart(body, { labels: rows.map((r) => r[0] ?? ""), series, title: heading ?? `Chart of ${rangeText(c.data)}` }, c.kind as ChartType);

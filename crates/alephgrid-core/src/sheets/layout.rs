@@ -269,6 +269,32 @@ impl Sheets {
         Ok((first, end))
     }
 
+    /// The computed numbers of a range, row-major: `None` for text, booleans, errors and
+    /// empty cells. Charts read these rather than the shown text, so number formats such
+    /// as `$1,234.50` or `12%` do not hide a value.
+    pub fn range_numbers(&self, index: u32, area: &CellArea) -> Result<Vec<Vec<Option<f64>>>> {
+        self.check_index(index)?;
+        area.check("chart")?;
+        let m = self.model()?;
+        let base = m.get_model();
+        Ok((area.row..area.row + area.rows)
+            .map(|r| {
+                (area.column..area.column + area.columns)
+                    .map(|c| {
+                        let (row, column) = (r as i32 + 1, c as i32 + 1);
+                        if matches!(m.get_cell_type(index, row, column), Ok(ironcalc::base::types::CellType::ErrorValue)) {
+                            return None;
+                        }
+                        match base.get_cell_value_by_index(index, row, column) {
+                            Ok(ironcalc::base::cell::CellValue::Number(n)) if n.is_finite() => Some(n),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     /// The distinct shown values of `column` within a range's data rows, with counts (at
     /// most 1,000, most frequent first; the empty value is ""), for a range filter's list.
     pub fn range_values(&self, index: u32, area: &CellArea, header: bool, column: u32) -> Result<Vec<crate::ValueCount>> {

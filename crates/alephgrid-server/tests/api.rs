@@ -332,6 +332,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "SheetChart[]" => conforms::<Vec<alephgrid_core::SheetChart>>(op, v),
         "SheetLayout" => conforms::<alephgrid_core::SheetLayout>(op, v),
         "ValueCount[]" => conforms::<Vec<alephgrid_core::ValueCount>>(op, v),
+        "(number | null)[][]" => conforms::<Vec<Vec<Option<f64>>>>(op, v),
         "SheetRules" => conforms::<alephgrid_core::SheetRules>(op, v),
         "CellComment" => conforms::<alephgrid_core::CellComment>(op, v),
         "CellComment[]" => conforms::<Vec<alephgrid_core::CellComment>>(op, v),

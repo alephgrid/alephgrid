@@ -225,6 +225,12 @@ test("S.09: a chart placed on the sheet follows the cells, moves, changes type a
   // The chart follows a collaborator's edit.
   await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 2, column: 1, value: "200" }] });
   await expect(values).toContainText("West200");
+  // L.05c (b): the chart reads computed numbers, so a currency-formatted formula still charts.
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 2, column: 1, value: "=B2*5" }] });
+  await ws.call("sheet_style", { sheet: 0, area: { row: 1, column: 1, rows: 2, columns: 1 }, style: { num_fmt: "$#,##0.00" } });
+  await expect.poll(() => shown(page, 2, 1)).toBe("$250.00");
+  await expect(values).toContainText("East50");
+  await expect(values).toContainText("West250");
   // Change its type, then move it down by dragging its title bar.
   await chart.getByRole("combobox", { name: "Chart type" }).selectOption("line");
   await expect.poll(async () => (await stored())?.kind).toBe("line");
@@ -244,13 +250,13 @@ test("S.09: a chart placed on the sheet follows the cells, moves, changes type a
   await expect.poll(async () => { const c = await stored(); return [c?.width, c?.height]; }).toEqual([580, 340]);
   await page.reload();
   await page.getByRole("tab", { name: /^S/ }).click();
-  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West200");
+  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West250");
   // Deleting removes it from the workbook; Undo in the notice puts it back.
   await page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("button", { name: "Delete chart" }).click();
   await expect.poll(count).toBe(0);
   await page.locator(".toast").getByRole("button", { name: "Undo" }).click();
   await expect.poll(count).toBe(1);
-  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West200");
+  await expect(page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("table", { name: "Chart values" })).toContainText("West250");
   await page.getByRole("region", { name: "Chart of A1:B3" }).getByRole("button", { name: "Delete chart" }).click();
   await expect.poll(count).toBe(0);
   ws.close();

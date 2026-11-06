@@ -78,7 +78,9 @@ test("named ranges: define from the selection, use, rename, go to, delete and un
   await goTo.getByLabel("Cell, range or name").fill("revenue");
   await goTo.getByLabel("Cell, range or name").press("Enter");
   await expect(page.locator(".cell-ref")).toHaveText("B1:B2");
-  await page.getByRole("button", { name: "Go to", exact: true }).click();
+  // L.05c (f): Mod+G opens Go to while the grid has focus.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+g");
   await goTo.getByLabel("Cell, range or name").fill("Data!F5000");
   await goTo.getByLabel("Cell, range or name").press("Enter");
   await expect(page.locator(".cell-ref")).toHaveText("F5000");

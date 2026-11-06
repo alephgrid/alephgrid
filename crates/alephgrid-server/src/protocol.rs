@@ -154,6 +154,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("sheet_merge", "null"),
     ("sheet_column_texts", "string[]"),
     ("sheet_range_values", "ValueCount[]"),
+    ("sheet_numbers", "(number | null)[][]"),
     ("sheet_filter", "number"),
     ("sheet_clear_format", "SheetInfo"),
     ("sheet_paste", "CellArea"),

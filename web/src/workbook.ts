@@ -2266,18 +2266,18 @@ export class WorkbookScreen {
     } catch { /* charts are optional to viewing */ }
   }
 
-  /** The shown text of a chart's data range, read from the server (bounded by the chart). */
-  private async chartValues(a: CellArea): Promise<string[][]> {
-    if (this.active?.kind !== "sheet") return [];
-    const block = await this.rpc.call("sheet_fetch", { sheet: this.active.index, row_start: a.row, row_count: a.rows, column_count: a.column + a.columns });
-    // Labels (first row and column) as shown; values as stored, so number formats
-    // ($1,234.50, 12%) do not hide them from the chart. Formulas chart what they show.
-    return Array.from({ length: a.rows }, (_, i) => Array.from({ length: a.columns }, (_, j) => {
-      const cell = block.rows[i]?.[a.column + j];
-      if (!cell) return "";
-      const input = cell[2];
-      return i > 0 && j > 0 && input !== undefined && input !== "" && !input.startsWith("=") && Number.isFinite(Number(input)) ? input : cell[0];
-    }));
+  /** A chart's data range from the server: shown labels and computed numbers (bounded by the chart). */
+  private async chartValues(a: CellArea): Promise<{ text: string[][]; numbers: (number | null)[][] }> {
+    if (this.active?.kind !== "sheet") return { text: [], numbers: [] };
+    const sheet = this.active.index;
+    // Labels (first row and column) as shown; values as computed, so number formats
+    // ($1,234.50, 12%) do not hide them from the chart.
+    const [block, numbers] = await Promise.all([
+      this.rpc.call("sheet_fetch", { sheet, row_start: a.row, row_count: a.rows, column_count: a.column + a.columns }),
+      this.rpc.call("sheet_numbers", { sheet, area: a }),
+    ]);
+    const text = Array.from({ length: a.rows }, (_, i) => Array.from({ length: a.columns }, (_, j) => block.rows[i]?.[a.column + j]?.[0] ?? ""));
+    return { text, numbers };
   }
 
   /** S.08: zoom the grid; remembered per workbook in this browser. */

@@ -342,3 +342,18 @@ fn copied_table_cells_read_their_own_rows() {
     assert_eq!(value(&t.wb, r, 2, 2), "125.5");
     assert_eq!(value(&t.wb, r, 1, 5), "#N/A");
 }
+
+#[test]
+fn sheet_cells_accept_mixed_references_to_their_own_sheet() {
+    let (mut t, r) = report();
+    t.wb.set_sheet_cells(r, &[
+        sheet_input(0, 0, "West"),
+        sheet_input(0, 1, "=SUMIFS(orders[amount], orders[region], A$1)"),
+        sheet_input(1, 1, "=SUMIFS(orders[amount], orders[region], $A2)"),
+    ]).unwrap();
+    // Two West orders: 100 + 25.5. A2 is empty, so B2 matches no region.
+    assert_eq!(value(&t.wb, r, 0, 1), "125.5");
+    assert_eq!(value(&t.wb, r, 1, 1), "0");
+    assert_eq!(shown(&t.wb, r, 0, 1).1.as_deref(), Some("=SUMIFS(orders[amount], orders[region], A$1)"));
+    assert_eq!(shown(&t.wb, r, 1, 1).1.as_deref(), Some("=SUMIFS(orders[amount], orders[region], $A2)"));
+}

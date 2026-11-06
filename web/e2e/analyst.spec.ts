@@ -52,11 +52,18 @@ test("F.15: the analyst workflow runs end to end without SQL", async ({ page }) 
   await d.getByRole("combobox", { name: "Add field to Rows" }).selectOption("region");
   await d.getByRole("combobox", { name: "Aggregate of value 1" }).selectOption("sum");
   await d.getByRole("combobox", { name: "Column of value 1" }).selectOption("amount");
+  // L.05c (d): the calculated-values hint follows the value's name.
+  await expect(d.getByText("Refer to values as [@sum_amount]")).toBeVisible();
   await d.getByRole("textbox", { name: "Name of value 1" }).fill("revenue");
+  await expect(d.getByText("Refer to values as [@revenue]")).toBeVisible();
   await d.getByRole("combobox", { name: "Chart kind", exact: true }).selectOption("line");
   await d.getByRole("button", { name: "Run", exact: true }).click();
   const res = page.getByRole("region", { name: "Analysis result" });
   await expect(res.getByRole("table", { name: "Chart values" })).toContainText("135");
+  // L.05c (c): the chart is no taller than the results area, so scrolled into view its base
+  // and category labels show together.
+  const area = (await res.boundingBox())!, drawn = (await res.locator("svg.chart").boundingBox())!;
+  expect(drawn.height).toBeLessThanOrEqual(area.height);
   await expect(res.locator("table.result-table").last()).toContainText("185");
   await d.getByRole("textbox", { name: "Analysis name" }).fill("Revenue by region");
   await d.getByRole("button", { name: "Save", exact: true }).click();
