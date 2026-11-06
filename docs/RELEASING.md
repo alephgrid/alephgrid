@@ -21,8 +21,11 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
 
 ## Once: accounts and secrets
 
-1. **npm:** create the `alephgrid` organization on npmjs.com (it owns the `@alephgrid/cli-*`
-   packages) and a granular access token that can publish `alephgrid` and `@alephgrid/*`.
+1. **npm:** the packages are unscoped, so no npm organization is needed: `alephgrid` (the
+   launcher) and one binary package per platform, `alephgrid-linux-x64`, `alephgrid-linux-arm64`,
+   `alephgrid-darwin-arm64` and `alephgrid-darwin-x64`, all published by the npm user
+   `alephgrid`. Create a granular access token for that user that can publish those five
+   packages.
 2. **GitHub:** a token for the release and the image: a classic personal access token with
    `repo` and `write:packages` (GitHub Container Registry does not take fine-grained tokens).
 3. **CircleCI:** Organization settings → Contexts → create a context named **`release`** with
