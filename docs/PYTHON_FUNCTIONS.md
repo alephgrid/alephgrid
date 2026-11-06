@@ -35,7 +35,9 @@ distinct values makes 100 batches, not a million calls (benchmark in TEST_MATRIX
 tests}`. `source` is Python that defines a function with the name in lower case
 (`NORMALIZE_SKU` → `def normalize_sku(sku):`); it may import the standard library and the
 packages of the runtime. `returns` is `number`, `text` or `boolean`. Tests run in the same worker
-as real calls, and publishing needs them to pass, as for other functions.
+as real calls, and publishing needs them to pass, as for other functions. Test inputs can be typed
+(a blank cell is `None`, exact text is `str`, an error input is not called; see
+[FUNCTIONS.md](FUNCTIONS.md#test-values)), and **Cancel** kills a test's worker.
 
 ## Values in and out
 
@@ -61,8 +63,9 @@ as real calls, and publishing needs them to pass, as for other functions.
 | any | `None` | empty text in a sheet, `NULL` in a table |
 | any | anything else | `#VALUE!` "the function returned a list, expected a number" |
 
-An exception becomes `#VALUE!` with the exception's type and first line as the cell's message,
-and is cached like any result (the function is pure). Running out of time, memory or output, or a
+An exception becomes `#VALUE!` with the exception's type, first line and the line of the source
+where it happened (`ValueError: bad sku (line 3)`) as the cell's message, and is cached like any
+result (the function is pure). A test shows the same message, and the editor marks that line. Running out of time, memory or output, or a
 worker crash, becomes `#CALC!` with the reason; those are not cached for good: **Refresh**
 (`refresh_functions`) tries again. In a table, a pending call or an error is `NULL`.
 

@@ -12,10 +12,26 @@ workbook. Space libraries share saved queries and views, not functions ([TEAMS.m
 3. On the **Tests** tab, **Add test** with inputs `100` and `60` and expected result `0.4`. (Tests
    can also be edited as JSON under Advanced: `[{"arguments":["100","60"],"expected":"0.4"}]`.)
 4. Choose **Run tests** (or Mod+Enter in the panel), then **Publish version**. Failed expected values
-   prevent publication. Opening the panel or an example never runs code.
+   prevent publication. Opening the panel or an example never runs code. While tests run, **Cancel**
+   stops them on the server (a Python worker is killed, a SQL test interrupted); the panel says
+   **Cancelled** only once the server has stopped, and a cancelled run leaves the draft a draft.
 5. In a sheet enter `=MARGIN(B2,C2)`. Cells and ranges are passed to IronCalc's named LAMBDA evaluator, with no source substitution.
 
-The formula bar suggests active functions: type `=MAR`, press Tab to insert `MARGIN(`, and see its signature and documentation. Sheet tabs suggest formula functions; table tabs suggest SQL functions. Suggestions refresh when the formula bar receives focus.
+The formula bar suggests active functions: type `=MAR`, press Tab to insert `MARGIN(`, and see its signature, documentation and an example made from its first test (`Example: =MARGIN(100, 60) → 0.4`). Sheet tabs suggest formula functions; table tabs suggest SQL functions. Suggestions refresh when the formula bar receives focus. Calling a function never opens the panel.
+
+### The code editor
+
+The **Code** tab colours the source (keywords, text, numbers, function calls, arguments, comments)
+and lists problems by line in the gutter and under the code: brackets never closed or closed by the
+wrong bracket, text never closed, Python indentation that mixes tabs and spaces, and, after a run,
+the line a Python exception or syntax error points at. Choosing a problem selects its line. Enter
+keeps the line's indentation (one level deeper after a Python `:` or an open bracket), Tab and
+Shift+Tab indent and outdent the line or selection, and press Escape, then Tab, to leave the
+editor. Undo and redo (Mod+Z, Shift+Mod+Z or Mod+Y) are the editor's own and never undo the grid.
+The highlighting is drawn from text nodes: source is never interpreted as markup.
+
+The results strip under the panel resizes by its top edge (drag, or the arrow keys on it) and keeps
+its height.
 
 For SQL, set **Language** to **SQL** (offered only when the server allows SQL) and use a scalar expression, for example:
 
@@ -25,11 +41,30 @@ For SQL, set **Language** to **SQL** (offered only when the server allows SQL) a
 
 Then call `SELECT MARGIN(100, 60)` in the SQL workspace, or `MARGIN([revenue],[cost])` in a calculated table column. SQL and sheet functions use separate evaluators and cannot call across engines. They share a workbook name namespace, so use different names if both implementations are needed.
 
-Test arguments are literal strings. SQL tests pass quoted strings, with the exact marker `NULL` binding SQL NULL; cast arguments explicitly when numeric or date semantics matter. Formula tests enter literal cell inputs into an isolated scratch sheet, so `""` is a blank cell and `"=1+2"` remains literal text. Expected results are exact formatted strings. A formula test previews the anchor cell for array results; verify the full spill range in a sheet. Empty test lists validate syntax and registration but do not prove behavior across argument types; publish meaningful examples.
+### Test values
+
+Each test input and expected result has a type, chosen under it on the **Tests** tab:
+
+| Type | JSON | Formula test | SQL test | Python test |
+|---|---|---|---|---|
+| **As typed** | `"100"` | Entered like a cell input: `100` is a number, `TRUE` a logical, empty is a blank cell, `=1+2` stays text | A quoted string; the exact text `NULL` binds SQL NULL | `100` → `float`, `TRUE` → `bool`, empty → `None`, other text → `str` |
+| **Text** | `{"type":"text","value":"100"}` | Exactly this text; empty is empty text, not a blank cell (`ISBLANK` is FALSE) | This string, even `NULL` | `str` |
+| **Blank** | `{"type":"blank"}` | A blank cell | NULL | `None` |
+| **Error** | `{"type":"error","value":"#N/A"}` | That error value (`#NULL!`, `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#NUM!`, `#N/A`, `#SPILL!`, `#CALC!`), so `IFERROR`/`IFNA` can be tested | Refused: SQL arguments are values or NULL | Not called: the result is that error, as in cells |
+
+An **As typed** expected result compares the displayed text, as before. A typed expected result also
+compares the kind of value: **Text** `#N/A` fails against the error `#N/A`, **Blank** passes only
+for SQL NULL, **Error** only for that error. Results say when the kind matters (`#N/A (error)`,
+`0.4 (text)`, `empty text`). The **Advanced: tests as JSON** view reads and writes the same forms;
+older workbooks, whose tests are all text, load unchanged.
+
+Cast SQL arguments explicitly when numeric or date semantics matter. A formula test previews the
+anchor cell for array results; verify the full spill range in a sheet. Empty test lists validate
+syntax and registration but do not prove behavior across argument types; publish meaningful examples.
 
 ## Versions and dependencies
 
-The uppercase function name is its stable identity within a workbook. Names cannot be renamed or deleted in this release. Publishing creates an immutable, sequential version. A new function activates version 1; publishing a subsequent version leaves its existing pin unchanged. On the **Versions** tab, choose **Activate in this workbook** next to a version to upgrade or roll back. Other workbooks never change.
+The uppercase function name is its stable identity within a workbook. Names cannot be renamed or deleted in this release. Publishing creates an immutable, sequential version. A new function activates version 1; publishing a subsequent version leaves its existing pin unchanged. On the **Versions** tab, choose **Activate in this workbook** next to a version to upgrade or roll back. Before anything changes, the panel shows what the switch affects (`function_usage`): the version it replaces, the sheet cells that call the function (count and the first addresses) and the calculated table columns, other functions whose active version calls a different version of this one (activating alone is then refused; use the version map below), and for Python whether the version's runtime is the one this server has. **Activate vN** confirms; **Cancel** leaves the workbook as it was. Other workbooks never change.
 
 Calls to workbook functions capture exact dependency versions at publication. Indirect recursion and incompatible dependency graphs are rejected. A dependency cannot be upgraded underneath an active dependent.
 
