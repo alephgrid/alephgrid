@@ -249,7 +249,14 @@ impl<'a> Lexer<'a> {
                 if self.peek(0) == Some('!') {
                     self.pos += 1;
                     self.cell(name, start)?
-                } else if let Some(home) = self.home.clone().filter(|_| looks_like_cell(&name) && !matches!(self.peek(0), Some('(' | '['))) {
+                } else if let Some(home) = self.home.clone().filter(|_| {
+                    // `B2`, or `B$2` where the column letters stop at the row's `$`.
+                    let mixed = (1..=3).contains(&name.len())
+                        && name.chars().all(|c| c.is_ascii_alphabetic())
+                        && self.peek(0) == Some('$')
+                        && self.peek(1).is_some_and(|c| c.is_ascii_digit());
+                    (looks_like_cell(&name) || mixed) && !matches!(self.peek(0), Some('(' | '['))
+                }) {
                     self.pos = start;
                     self.cell(home, start)?
                 } else {
@@ -772,6 +779,18 @@ mod tests {
         assert_eq!(p("='It''s'!C3"), "<'It''s'!C3>");
         assert_eq!(p("='A1'!C3"), "<'A1'!C3>");
         assert_eq!(p("='Sheet1'!C3"), "<Sheet1!C3>");
+    }
+
+    #[test]
+    fn mixed_references_in_a_sheet_cell() {
+        let home = |s: &str| shape(&parse_in(s, Some("Report")).unwrap_or_else(|e| panic!("{s}: {e}")));
+        assert_eq!(home("=SUMIFS(orders[amount],orders[month],B$1)"), "SUMIFS(orders[amount],orders[month],<Report!B$1>)");
+        assert_eq!(home("=$A2+B$1+$B$1+C3"), "(Add (Add (Add <Report!$A2> <Report!B$1>) <Report!$B$1>) <Report!C3>)");
+        assert_eq!(home("=b$1"), "<Report!B$1>");
+        // A function or table name followed by `$` is still not a cell.
+        assert!(parse_in("=B$", Some("Report")).is_err());
+        // Without a home sheet, the cell needs its sheet name.
+        assert!(parse("=B$1").unwrap_err().message.contains("sheet name"));
     }
 
     #[test]
