@@ -29,7 +29,9 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
 ## Each release
 
 1. On `main`, set the version in `Cargo.toml` (`[workspace.package] version`) and rename the
-   changelog's "Unreleased" heading to `## X.Y.Z - YYYY-MM-DD`. Merge that pull request.
+   changelog's "Unreleased" heading to `## X.Y.Z - YYYY-MM-DD`. Run
+   `python3 tools/licenses.py` so `NOTICE` and `THIRD-PARTY-NOTICES.md` match the locked
+   dependencies (the check's clippy job fails when they do not). Merge that pull request.
 2. Run the check: `tools/ci.sh check main`. It must be green.
 3. Tag and push the tag (tags are public):
 

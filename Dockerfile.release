@@ -1,5 +1,6 @@
 # The release image, from the binaries the release pipeline built and tested
-# (docs/RELEASING.md). Build context: a folder holding amd64/alephgrid and arm64/alephgrid.
+# (docs/RELEASING.md). Build context: a folder holding amd64/alephgrid, arm64/alephgrid and
+# the notices (LICENSE, NOTICE, THIRD-PARTY-NOTICES.md).
 #   docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 dist/docker
 # (Dockerfile builds from source instead, for docker compose.)
 FROM debian:bookworm-slim
@@ -9,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && useradd --system --create-home --uid 10001 alephgrid \
     && mkdir -p /data && chown alephgrid:alephgrid /data
 COPY --chmod=755 ${TARGETARCH}/alephgrid /usr/local/bin/alephgrid
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/alephgrid/
 USER alephgrid
 WORKDIR /home/alephgrid
 ENV ALEPHGRID_HOST=0.0.0.0 \

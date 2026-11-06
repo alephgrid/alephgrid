@@ -175,6 +175,9 @@ jobs:
           name: Clippy
           command: cargo clippy --workspace --all-targets --locked -- -D warnings
           no_output_timeout: 40m
+      - run:
+          name: Licence notices match Cargo.lock and web/package-lock.json (tools/licenses.py)
+          command: python3 tools/licenses.py --check
 
   e2e:
     executor: vm
@@ -352,6 +355,7 @@ jobs:
             # (docs/CI.md, "Release safety").
             docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
             docker buildx create --use --name release --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            cp LICENSE NOTICE THIRD-PARTY-NOTICES.md docker/
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_USER:?set GITHUB_USER in the release context}" --password-stdin
             docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 \
               --label org.opencontainers.image.source=https://github.com/alephgrid/alephgrid \

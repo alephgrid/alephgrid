@@ -27,6 +27,8 @@ const PLATFORMS = [
   { target: "aarch64-apple-darwin", os: "darwin", cpu: "arm64" },
   { target: "x86_64-apple-darwin", os: "darwin", cpu: "x64" },
 ];
+// Shipped with every package that holds the binary (tools/licenses.py writes the notices).
+const NOTICES = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"];
 const common = {
   version,
   license: "Apache-2.0",
@@ -49,13 +51,13 @@ for (const p of PLATFORMS) {
   copyFileSync(join(tmp, `alephgrid-${version}-${p.target}`, "alephgrid"), join(dir, "bin", "alephgrid"));
   chmodSync(join(dir, "bin", "alephgrid"), 0o755);
   rmSync(tmp, { recursive: true, force: true });
-  copyFileSync(join(root, "LICENSE"), join(dir, "LICENSE"));
+  for (const f of NOTICES) copyFileSync(join(root, f), join(dir, f));
   writeFileSync(join(dir, "README.md"), `# ${name}\n\nThe Alephgrid ${version} binary for ${p.os}-${p.cpu}. Install \`alephgrid\` instead; it picks this package for you.\n`);
   writeFileSync(join(dir, "package.json"), JSON.stringify({
     name, ...common,
     description: `Alephgrid binary for ${p.os}-${p.cpu}`,
     os: [p.os], cpu: [p.cpu], ...(p.libc ? { libc: [p.libc] } : {}),
-    files: ["bin/alephgrid", "LICENSE", "README.md"],
+    files: ["bin/alephgrid", ...NOTICES, "README.md"],
     preferUnplugged: true,
   }, null, 2) + "\n");
   optional[name] = version;

@@ -20,6 +20,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
     && useradd --system --create-home --uid 10001 alephgrid
 COPY --from=server /src/target/release/alephgrid /usr/local/bin/alephgrid
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/alephgrid/
 USER alephgrid
 WORKDIR /home/alephgrid
 ENV ALEPHGRID_HOST=0.0.0.0 \
