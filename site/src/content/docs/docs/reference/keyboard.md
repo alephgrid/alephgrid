@@ -27,7 +27,10 @@ Sheet unless noted.
 | Clear cells | Delete, Backspace | |
 | Select all | Mod+A | Sheets: first the block of filled cells around the active cell, then the whole sheet; from an empty cell, the whole sheet. Tables: everything |
 | Select whole rows / columns | Shift+Space / Ctrl+Space | macOS uses Ctrl+Space for input sources by default; use the palette there |
-| Go to… | Mod+G | Cell, range, other sheet or name |
+| Go to… | Mod+G | Sheets. Cell, range, other sheet or name |
+| Bold / Italic / Underline | Mod+B / Mod+I / Mod+U | Sheets |
+| Find… | Mod+F | Tables search every row on the server; sheets this sheet or all sheets |
+| Find and replace… | Mod+H, Mod+Shift+H | macOS keeps ⌘H for hiding the browser; use ⌘⇧H |
 | Formula help | Shift+F3 | |
 | Command palette | Mod+K | |
 | Keyboard shortcuts | Mod+/ | |
@@ -61,6 +64,8 @@ Keys that browsers or the OS also use, and how Alephgrid handles each:
 | Mod+R | Reload | Fill right, only while the grid has focus; reload with the browser button or F5 |
 | Mod+G | Find next | Go to, while the grid has focus |
 | Mod+K | Focus search (some browsers) | Command palette, while the grid has focus |
+| Mod+F | Find in page | Find bar, while the grid has focus |
+| Mod+H | Hide the browser (macOS), history (some browsers) | Find and replace; on macOS use Mod+Shift+H |
 | Mod+Shift+V | Paste as plain text | Paste special, while the grid has focus |
 | Ctrl+Space | macOS input source switch | Bound and documented; the OS may take it first |
 | Cmd+Space, Mod+T, Mod+W, Mod+N, Mod+Shift+N, Mod+Tab | Spotlight, tabs, windows | Never bound |

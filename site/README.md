@@ -8,7 +8,7 @@ Public site: landing, install, releases, docs and blog. Astro + [Starlight](http
 ```bash
 cd site
 npm install
-npm run dev        # http://localhost:4321/alephgrid/
+npm run dev        # http://localhost:4321/
 npm run build      # static output in dist/
 npm run preview
 ```
@@ -29,13 +29,13 @@ on CircleCI and never builds the site.
 - `SITE_BASE` defaults to `/`; set it only for a host that serves under a subpath (e.g. a
   GitHub Pages project site). Every internal link is base-relative either way.
 
-## Honesty rules (from docs/WEBSITE_LAUNCH_PLAN.md)
+## Honesty rules
 
 - `src/data/releases.json` is the single source of truth for install/download UI. A channel shows
   as ready **only** when `published: true` with real artifacts; never make a channel look ready by
   editing page copy.
 - No fabricated stats, logos, sponsor lists or benchmark counters. Screenshots are real product
-  screenshots from `assets/screenshots/`.
+  screenshots: copies of `assets/screenshots/` in `src/assets/`.
 - The support page carries no payment link until a verified funding recipient exists.
 
 ## Content layout
