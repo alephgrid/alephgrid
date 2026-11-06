@@ -17,7 +17,7 @@ pub mod faults;
 mod formula;
 pub mod external;
 pub mod functions;
-pub use functions::{FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, StoredResults, TestedPython, WorkbookFunction};
+pub use functions::{FunctionDefinition, FunctionDependent, FunctionKind, FunctionTest, FunctionTestResult, FunctionUsage, FunctionUseCell, FunctionUseColumn, FunctionVersion, StoredResults, TestValue, TestValueKind, TestedPython, TypedTestValue, WorkbookFunction};
 pub mod import;
 pub mod limits;
 mod links;

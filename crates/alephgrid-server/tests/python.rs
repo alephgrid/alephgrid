@@ -160,6 +160,70 @@ async fn values_ranges_and_errors_follow_the_contract() {
     server.stop().await;
 }
 
+// ------------------------------------------------------------- U.06b–d
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tests_take_typed_values_and_errors_say_which_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |_| {}).await;
+    let wb = server.create_workbook("typed").await;
+    let mut ws = server.ws(&wb).await;
+    // From the contract: a blank cell is None, text stays text, an error is not passed in.
+    let r = ws.ok("test_function", function("KIND", &["x"], "text", "def kind(x):\n    return type(x).__name__\n", json!([
+        { "arguments": [{ "type": "blank" }], "expected": "NoneType" },
+        { "arguments": [{ "type": "text", "value": "" }], "expected": "str" },
+        { "arguments": [{ "type": "text", "value": "100" }], "expected": "str" },
+        { "arguments": ["100"], "expected": "float" },
+        { "arguments": [{ "type": "error", "value": "#N/A" }], "expected": { "type": "error", "value": "#N/A" } },
+    ]))).await;
+    let rows = r.as_array().unwrap();
+    assert!(rows.iter().all(|t| t["passed"] == true), "{r}");
+    assert_eq!(rows[4]["kind"], "error");
+    // An exception says where it happened.
+    let r = ws.ok("test_function", function("BOOM", &["x"], "number", "def boom(x):\n    y = 1\n    raise ValueError('bad ' + str(x))\n", json!([{ "arguments": ["2"], "expected": "1" }]))).await;
+    assert_eq!(r[0]["actual"], "#VALUE!");
+    let message = r[0]["message"].as_str().unwrap_or("");
+    assert!(message.contains("ValueError: bad 2.0") && message.contains("line 3"), "{r}");
+    let r = ws.ok("test_function", function("BROKEN", &["x"], "number", "def broken(x):\n    return (x\n", json!([{ "arguments": ["2"], "expected": "1" }]))).await;
+    assert!(r[0]["message"].as_str().unwrap_or("").contains("line 2"), "{r}");
+    // Activation shows the runtime this server has, to compare with a version's.
+    ws.ok("publish_function", function("KIND", &["x"], "text", "def kind(x):\n    return type(x).__name__\n", json!([]))).await;
+    let usage = ws.ok("function_usage", json!({ "name": "KIND" })).await;
+    assert_eq!(usage["runtime"]["id"], alephgrid_server::python::Manifest::load(runtime()).unwrap().id(), "{usage}");
+    ws.close().await;
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_test_can_be_cancelled_and_its_worker_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(dir.path(), |c| {
+        c.python_limits.timeout_ms = 30_000;
+        c.python_limits.cpu_ms = 30_000;
+    })
+    .await;
+    let wb = server.create_workbook("cancel").await;
+    let mut ws = server.ws(&wb).await;
+    let before = started(&server);
+    let id = ws.send("test_function", function("SPIN", &["x"], "number", "def spin(x):\n    while True:\n        pass\n", json!([{ "arguments": ["1"], "expected": "1" }]))).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while started(&server) == before {
+        assert!(Instant::now() < deadline, "the worker never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t = Instant::now();
+    assert_eq!(ws.ok("cancel", json!({ "request": id })).await, json!(true));
+    // The reply comes only once the work has ended: the worker was killed, not left running
+    // until its 30 s limit.
+    let reply = ws.reply(id).await.unwrap();
+    assert_eq!(reply["code"], "cancelled", "{reply}");
+    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    // The workbook still answers.
+    ws.ok("functions", json!({})).await;
+    ws.close().await;
+    server.stop().await;
+}
+
 // ------------------------------------------------------------- 8.06, 8.08
 
 #[tokio::test(flavor = "multi_thread")]

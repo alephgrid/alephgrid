@@ -290,7 +290,7 @@ const VIEWER_OPS: &[&str] = &[
     "tables", "open_view", "update_view", "view_info", "fetch", "stats", "find_in_view", "column_values", "sheet_find", "sheet_find_all", "comments", "hidden_sheets", "sheet_rules", "sheet_charts", "sheet_layout", "sheet_column_texts", "sheet_range_values", "sheet_numbers", "query", "sheets", "sheet_fetch", "sheet_names", "sheet_cell_detail",
     "sheet_check_formula", "sheet_region", "close_view", "history", "schema", "saved_views", "query_versions", "saved_queries", "export_query", "materialized",
     "analyze", "analyses", "dashboards", "dashboard", "validations", "preview_transform", "inspect_formula", "xlsx_compatibility", "drill",
-    "presentation", "replace_preview", "functions", "test_function", "cancel",
+    "presentation", "replace_preview", "functions", "function_usage", "test_function", "cancel",
 ];
 
 /// Every WebSocket operation answers a viewer and an editor as the role table says (7.T01).

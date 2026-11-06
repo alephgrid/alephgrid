@@ -3,7 +3,7 @@
 //! (regenerate with `UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol`).
 
 use alephgrid_core::{
-    FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
+    FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction, TestValue, TypedTestValue, TestValueKind, FunctionUsage, FunctionUseCell, FunctionUseColumn, FunctionDependent,
     Align, CellEdit, CellErrorMark, Column, ColumnType, FormulaLanguage, EditOutcome, ExportFormat, FilePreview, Filter, FilterOp, ImportProblem, Imported,
     HistoryEntry, Kind, MaterializedSource, MaterializedTable, ParamType, PreviewColumn, QueryKind, QueryParam, QueryPreview, QueryResult,
     QueryVersion, RowBlock, SavedQuery, SavedView, SheetBlock, CellArea, CellDetail, CellError, FillDirection, FormulaProblem, NamedRange, PastedCell, PasteMode, SheetCopy, SheetInfo, SheetInput, SortKey, SourceRevision, SqlChangeOutcome,
@@ -77,6 +77,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("preview_transform", "TransformPreview"), ("apply_transform", "TableInfo"), ("inspect_formula", "FormulaInspection"), ("xlsx_compatibility", "string[]"), ("drill", "ViewSpec"), ("materialize_analysis", "TableInfo"), ("replace_preview", "ReplacePreview"),
     ("replace_apply", "ReplaceOutcome"), ("replace_undo", "ReplaceOutcome"), ("presentation", "Presentation"), ("save_presentation", "Presentation"),
     ("functions", "WorkbookFunction[]"),
+    ("function_usage", "FunctionUsage"),
     ("test_function", "FunctionTestResult[]"),
     ("publish_function", "WorkbookFunction"),
     ("pin_functions", "WorkbookFunction[]"),
@@ -197,7 +198,7 @@ pub fn bindings() -> String {
         &cfg, out,
         Rule, Validation, ValidationReport, Transform, TransformPreview, FormulaInspection, Aggregate, Pivot, Measure, Calculated, ChartKind, Slicer, Tile, Dashboard, TileResult, DashboardResult, JoinKind, AnalysisSpec, AnalysisResult, SavedAnalysis, ReplaceSpec, ReplacePreview, ReplaceOutcome, DisplayKind, DisplayFormat, Condition, ColorRule, Presentation,
         alephgrid_core::external::ResultType, alephgrid_core::external::RuntimeIdentity, crate::python::Limits,
-        FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction,
+        FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionVersion, WorkbookFunction, TestValue, TypedTestValue, TestValueKind, FunctionUsage, FunctionUseCell, FunctionUseColumn, FunctionDependent,
         Kind, FormulaLanguage, Column, CellErrorMark, TableInfo, SortKey, FilterOp, Filter, ViewSpec, SavedView, ViewInfo, RowBlock, CellEdit, EditOutcome,
         Stats, ColumnValues, ValueCount, FindHit, FindResult, CellStyle, StyledCell, StylePatch, SheetSearch, CellComment, SortBy, SheetColorRule, SheetRules, SheetValidation, SheetChart, SheetMatches, Axis, LineSize, MergeMode, SheetLayout, QueryPreview, ParamType, QueryParam, SourceRevision, QueryResult, TableSchema, QueryKind, SavedQuery, QueryVersion,
         MaterializedSource, MaterializedTable, SqlChangeOutcome, QueryExport, ExportFormat, Align, SheetInfo, SheetBlock, SheetInput, SheetCopy, NamedRange, CellError, CellDetail, FormulaProblem, CellArea, FillDirection, PasteMode, PastedCell, Imported,

@@ -62,6 +62,11 @@ test("define, test, complete, call, upgrade, rollback and reopen a formula funct
   expect(await cell()).toBe("0.4");
   await dialog.getByRole("tab", { name: "Versions" }).click();
   await dialog.getByRole("button", { name: "Activate v2 in this workbook" }).click();
+  // U.06e: the cells it recalculates are shown first; nothing changes until confirmed.
+  const impact = dialog.getByRole("group", { name: "Activate MARGIN v2" });
+  await expect(impact).toContainText("Recalculates 1 cell: Sheet1!A1");
+  expect(await cell()).toBe("0.4");
+  await impact.getByRole("button", { name: "Activate v2", exact: true }).click();
   await expect.poll(cell).toBe("40");
   await expect.poll(() => !!releaseRefresh).toBe(true);
   // While the activation's refresh is in flight, the version buttons wait for it.
@@ -69,6 +74,7 @@ test("define, test, complete, call, upgrade, rollback and reopen a formula funct
   releaseRefresh!();
   await expect(dialog.getByRole("button", { name: "Run tests", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Activate v1 in this workbook" }).click();
+  await dialog.getByRole("group", { name: "Activate MARGIN v1" }).getByRole("button", { name: "Activate v1", exact: true }).click();
   await expect.poll(cell).toBe("0.4");
   ws.close();
   await page.reload();

@@ -142,6 +142,8 @@ pub enum Op {
     Presentation { table: String },
     SavePresentation { table: String, presentation: alephgrid_core::Presentation },
     Functions,
+    /// Where a function is used in this workbook: what activating a version affects.
+    FunctionUsage { name: String },
     TestFunction { definition: alephgrid_core::FunctionDefinition },
     PublishFunction { definition: alephgrid_core::FunctionDefinition },
     PinFunctions { pins: std::collections::BTreeMap<String,u32> },
@@ -429,7 +431,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
     const EDIT_QUERY: &[Cap] = &[Cap::Edit, Cap::Query];
     match op {
         Analyze { .. } | Analyses | Dashboards | Dashboard { .. } | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. }
-        | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | Tables | OpenView { .. }
+        | XlsxCompatibility | Drill { .. } | ReplacePreview { .. } | Presentation { .. } | Functions | FunctionUsage { .. } | Tables | OpenView { .. }
         | UpdateView { .. } | ViewInfo { .. } | CloseView { .. } | Fetch { .. } | Stats { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames
         | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. } | Schema | SavedQueries
         | QueryVersions { .. } | Materialized | Cancel { .. } => VIEW,
@@ -459,7 +461,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
 fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
-        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
+        Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | FunctionUsage { .. } | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
         | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
@@ -530,6 +532,9 @@ struct Ctx {
     /// The workbook's database file and the size it may grow to (SEC.11).
     database: std::path::PathBuf,
     max_workbook_bytes: Option<u64>,
+    /// Set when the client cancels this request: work that runs outside the reader's
+    /// connection (a function's tests, in a worker or a scratch database) stops on it.
+    cancel: Arc<AtomicBool>,
 }
 
 /// Demo tables a workbook may hold, and rows one may have, when made over the protocol
@@ -644,9 +649,10 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::Presentation { table } => json!(r.presentation(&table)?),
         Op::TestFunction { definition } => {
             if definition.kind == alephgrid_core::FunctionKind::Sql { require_sql(ctx)?; }
-            json!(r.test_function(&definition)?)
+            json!(r.test_function(&definition, &ctx.cancel)?)
         }
         Op::Functions => json!(r.functions()?),
+        Op::FunctionUsage { name } => json!(r.function_usage(&name)?),
         Op::Schema => json!(r.schema()?),
         Op::SavedQueries => json!(r.saved_queries()?),
         Op::QueryVersions { saved } => json!(r.query_versions(&saved)?),
@@ -1526,6 +1532,20 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
         };
         let (cancel_tx, cancel_rx) = watch::channel(false);
         cancels.lock().unwrap().insert(id, cancel_tx);
+        // A function's tests see a cancel through a flag. The watcher ends when the request
+        // leaves the cancel table (its sender is dropped).
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        if matches!(envelope.op, Op::TestFunction { .. }) {
+            let (flag, mut rx) = (cancel_flag.clone(), cancel_rx.clone());
+            tokio::spawn(async move {
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+                flag.store(true, Ordering::SeqCst);
+            });
+        }
         let ctx = Ctx {
             session,
             allow_sql: state.config.allow_sql,
@@ -1537,6 +1557,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
             tested: None,
             database: handle.dir.join("data.duckdb"),
             max_workbook_bytes: state.config.max_workbook_bytes,
+            cancel: cancel_flag,
         };
         let data_dir = state.config.data_dir.clone();
         let recalc_timeout = state.config.job_timeout;

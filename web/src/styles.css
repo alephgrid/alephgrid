@@ -486,6 +486,7 @@ dialog progress, .dialog progress { width: 100%; }
 .function-completion { position: absolute; z-index: 12; top: 100%; left: 100px; max-width: min(700px, 80vw); padding: 6px; background: var(--bg); color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: var(--shadow); }
 .function-completion .btn { display: block; text-align: left; white-space: normal; margin: 3px 0; }
 .function-completion p { margin: 4px; }
+.function-completion .function-example { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 .analysis-dialog { width: min(1000px, 92vw); max-height: 90vh; overflow: auto; }
 .analysis-field { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; font-size: 13px; font-weight: 600; }
 .analysis-field select, .analysis-field input, .analysis-field textarea { font-weight: 400; }
@@ -835,16 +836,38 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; b
 .fn-tab-body[hidden] { display: none; }
 .fn-panel .fn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .fn-panel .function-field.grow { flex: 1; min-width: 140px; }
-.fn-editor-box { display: flex; flex: 1; min-height: 180px; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; background: var(--panel); }
+.fn-editor-box { display: flex; flex-direction: column; flex: 1; min-height: 180px; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; background: var(--panel); }
+.fn-editor-main { display: flex; flex: 1; min-height: 0; }
 .fn-editor-box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .fn-gutter { margin: 0; padding: 8px 6px; min-width: 34px; text-align: right; font: 13px/1.5 var(--font-mono); color: var(--muted); background: var(--panel); border-right: 1px solid var(--border); overflow: hidden; user-select: none; }
-.fn-code { font: 13px/1.5 var(--font-mono); tab-size: 2; }
-.fn-editor-box .fn-code { flex: 1; border: 0; outline: none; resize: none; padding: 8px 10px; background: var(--bg); color: var(--text); white-space: pre; overflow: auto; }
+.fn-ln.has-problem { color: var(--danger); font-weight: 700; text-decoration: underline wavy var(--danger); text-underline-offset: 3px; }
+.fn-code { font: 13px/1.5 var(--font-mono); tab-size: 4; }
+/* The textarea takes input; the highlighted copy under it shows the same text, same metrics. */
+.fn-code-wrap { position: relative; flex: 1; min-width: 0; display: flex; background: var(--bg); }
+.fn-highlight { position: absolute; inset: 0; margin: 0; padding: 8px 10px; overflow: hidden; pointer-events: none; font: 13px/1.5 var(--font-mono); tab-size: 4; white-space: pre; color: var(--text); }
+.fn-editor-box .fn-code { position: relative; flex: 1; min-width: 0; border: 0; outline: none; resize: none; padding: 8px 10px; background: transparent; color: transparent; caret-color: var(--text); white-space: pre; overflow: auto; }
+.fn-editor-box .fn-code::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); color: transparent; }
+.tok-keyword { color: var(--reference-1); }
+.tok-string { color: var(--reference-2); }
+.tok-number { color: var(--reference-0); }
+.tok-function { color: var(--reference-3); }
+.tok-name { text-decoration: underline dotted color-mix(in srgb, var(--muted) 70%, transparent); text-underline-offset: 3px; }
+.tok-comment { color: var(--muted); }
+.tok-error { color: var(--danger); }
+.fn-problems { flex: none; list-style: none; margin: 0; padding: 4px 10px; max-height: 5.5em; overflow: auto; display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--border); background: var(--bg); }
+.fn-problems[hidden] { display: none; }
+.fn-problem { border: 0; background: none; padding: 2px 0; color: var(--danger); font: 12px/1.4 var(--font-mono); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.fn-problem:hover { text-decoration: underline; }
+.fn-problem:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
 .fn-hint { margin: 0; font-size: 12px; }
 .fn-tests { width: 100%; border-collapse: collapse; font-size: 13px; }
 .fn-tests th, .fn-tests td { border-bottom: 1px solid var(--border); padding: 4px; text-align: left; vertical-align: middle; }
 .fn-tests thead th { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.fn-tests input { width: 100%; min-width: 60px; font: 13px var(--font-mono); }
+.fn-tests input, .fn-tests .fn-value select { width: 100%; min-width: 0; font: 13px var(--font-mono); }
+.fn-value { min-width: 64px; }
+.fn-tests .fn-value .fn-type { display: block; width: auto; margin-top: 2px; padding: 0 2px; height: 20px; border: 0; background: transparent; color: var(--muted); font: 11px var(--font-ui); cursor: pointer; }
+.fn-tests .fn-value .fn-type:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-radius: 3px; }
+.fn-value-blank input::placeholder, .fn-value-text input::placeholder { font-style: italic; }
 .fn-tests tr.fail .fn-actual { color: var(--danger); }
 .fn-tests tr.pass .fn-actual { color: var(--accent-strong); }
 .fn-actual { font: 12.5px var(--font-mono); white-space: nowrap; }
@@ -858,7 +881,14 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; b
 .fn-badge { font: 700 10px var(--font-ui); text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--accent-strong); }
 .fn-panel .fn-actions { display: flex; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--border); background: var(--panel); }
 .fn-results { flex: 0 0 140px; display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--border); }
-.fn-results.collapsed { flex-basis: auto; }
+.fn-results.collapsed { flex-basis: auto !important; }
+.fn-results.collapsed .fn-results-grip { display: none; }
+.fn-results-grip { flex: 0 0 6px; margin-top: -3px; cursor: row-resize; }
+.fn-results-grip:hover, .fn-results-grip:focus-visible { background: var(--accent-soft); outline: none; box-shadow: inset 0 2px 0 var(--accent); }
+.fn-result-message { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.fn-impact { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.fn-impact p { margin: 0; }
+.fn-impact-list { font-family: var(--font-mono); overflow-wrap: anywhere; }
 .fn-results.collapsed .fn-results-body, .fn-results.collapsed .fn-console { display: none; }
 .fn-results-head { display: flex; align-items: center; gap: 4px; padding: 4px 10px; }
 .fn-rtab { border: 0; background: none; padding: 4px 8px; border-radius: 4px; font: 600 12px var(--font-ui); color: var(--muted); cursor: pointer; }

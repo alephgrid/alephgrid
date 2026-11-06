@@ -462,3 +462,14 @@ fn range_numbers_ignore_number_formats() {
     ]);
     assert!(s.range_numbers(0, &area(0, 0, 0, 1)).is_err(), "an empty area is refused");
 }
+
+#[test]
+fn cached_value_export_notes_name_the_right_cell() {
+    let mut s = Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    // C2 (row 1, column 2 zero-based) calls the function being exported as a value.
+    s.set(0, &[sheet_input(1, 2, "=SUM(1,2)")]).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let notes = s.export_xlsx_cached(&dir.path().join("out.xlsx"), &["SUM".to_string()]).unwrap();
+    assert_eq!(notes, vec!["S!C2: =SUM(1,2) is exported as its value \"3\"".to_string()]);
+}
