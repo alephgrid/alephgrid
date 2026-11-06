@@ -1,8 +1,9 @@
 # Security model and hardening
 
 How Alephgrid treats what it is given, and the limits that keep one request from taking the
-server down. Written from the security remediation phase (SEC, November 2026); the audit's
-findings and their regression tests are listed in the checklist (SEC.01–SEC.14, SEC.T01).
+server down. Each protection here has a regression test (`crates/alephgrid-core/src/tests/security.rs`,
+`crates/alephgrid-server/tests/security.rs`, `web/e2e/security.spec.ts`). To report a problem,
+see [SECURITY.md](../SECURITY.md).
 
 ## Workbook files are untrusted input
 
@@ -30,8 +31,9 @@ archive someone else made or from a data directory someone else could write to.
 * Every response carries `Content-Security-Policy` (scripts and connections only to this
   server, no framing, no plugins), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
   nosniff` and `X-Frame-Options: DENY`.
-* Requests that change something, and WebSocket upgrades, must come from this server's own
-  pages; the `Host` can be restricted (see TEAMS.md). No secret is ever put in a URL.
+* Requests that change something, and WebSocket upgrades, are refused when their `Origin` is
+  another site, and a change sent with a session cookie must show it comes from this server's
+  own pages; the `Host` is checked too ([TEAMS.md](TEAMS.md#browser-and-network-protections)). No secret is ever put in a URL.
 * The web client uses an id from the server in a URL only if it is a plain path segment
   (`[A-Za-z0-9_-]{1,64}`); a listing entry with any other id is not shown at all, so a crafted
   id such as `../trash` cannot turn one request into another.
@@ -43,7 +45,7 @@ archive someone else made or from a data directory someone else could write to.
 | A sheet evaluation | reads at most 20 M cells (`SHEET_EVALUATION_CELLS`); a range may declare at most 120 M cells and may become an array of at most 2 M; functions over ranges walk only the used area. An edit that goes over is taken back whole, with a message. A deadline or cancel stops a running evaluation too. |
 | A formula | at most 8,192 characters, 100 levels of nesting and 1,000 operators, in both the sheet engine and table formulas |
 | LAMBDA calls | at most 1,000 inside one another and within the evaluation's stack limit (a lambda that calls itself is `#CALC!`, not a crash); each call counts against the evaluation's budget |
-| An .xlsx import | parts may expand to at most 256 MiB and 100× the file's size; at most 2 M cells; the preview is parsed off the workbook's writer, two at a time per server, once per upload |
+| An .xlsx import | parts may expand to at most 256 MiB and 100× the file's size (at least 16 MiB is always allowed); at most 2 M cells; the preview is parsed off the workbook's writer, two at a time per server, once per upload |
 | Sheet undo | the newest 200 steps and 500,000 cell changes; the engine keeps no queue of changes for remote copies |
 | A workbook's database | `--max-workbook-size` (no limit by default): past it, operations that add data are refused and deleting stays possible; shown in `/api/admin/resources` |
 | Demo tables | 3 per workbook and 10 M rows each over the protocol (`--demo-rows` is the operator's and not capped) |
@@ -61,14 +63,13 @@ must be one of the import types (`BIGINT`, `VARCHAR`, `DECIMAL(p,s)`, …), neve
 A CSV export is the data as it is: a value such as `-5`, `+1 555` or `=x` round-trips exactly,
 which is what a data tool owes its users. Spreadsheet applications may run text that starts
 with `=`, `+`, `-` or `@` as a formula when such a file is double-clicked, so the export menu
-also offers **CSV for Excel or Sheets** (`csv_excel`): text starting with `=`, `+`, `-`, `@`, a
+also offers a CSV export for spreadsheet apps (`csv_excel`): text starting with `=`, `+`, `-`, `@`, a
 tab or a carriage return gets a leading `'`, column names in the header row included; numbers
 are unchanged. Hand that one to people
 who will open it in a spreadsheet. Text copied from a table into a sheet always stays text,
 even when it looks like a formula.
 
-This default (faithful CSV, neutralized CSV on request) is the project's chosen stance and can
-be revisited; the owner may prefer neutralization by default for shared deployments.
+Faithful CSV by default, neutralized CSV on request, is the project's current stance.
 
 ## Ids
 

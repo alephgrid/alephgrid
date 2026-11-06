@@ -272,7 +272,7 @@ replies are bounded (backpressure, then disconnect). DuckDB parallelizes each qu
 * All workbooks of a server share one process (`shared_process`): resource limits are DuckDB-level,
   not a security boundary between workbooks. See DURABILITY.md for isolation classes.
 * Roles are an authorization boundary, not resource isolation; per-space quotas limit resources
-  ([TEAMS.md](TEAMS.md#quotas-707)).
+  ([TEAMS.md](TEAMS.md#quotas)).
 * The full model (untrusted files, limits, browser protections) is in [SECURITY.md](SECURITY.md).
 
 ## Workbook functions

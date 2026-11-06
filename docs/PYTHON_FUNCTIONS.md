@@ -2,8 +2,7 @@
 
 A workbook can define functions in Python and call them from sheet cells
 (`=NORMALIZE_SKU(A2)`, `=SPREAD(B2:B40)`) and table columns (`=NORMALIZE_SKU([sku])`), like its
-formula and SQL functions (docs/FUNCTIONS.md): defined, tested, published as versions, pinned
-(checklist phase 8). This page is the contract.
+formula and SQL functions ([FUNCTIONS.md](FUNCTIONS.md)): defined, tested, published as versions, pinned. This page is the contract.
 
 ## How a call is computed
 
@@ -15,7 +14,7 @@ is locked.
    (`_rf_fn_results`, storage format 9). The sheet engine asks the cache through a hook
    (Alephgrid patch 2 of IronCalc, see `vendor/ironcalc_base/ALEPHGRID_PATCHES.md`); a table
    column is a lookup in it (a DuckDB macro joined by DuckDB, not one query per row).
-2. **A missing result shows `#CALC!` "calculating"** and the call is queued.
+2. **A missing result shows `#CALC!` "Calculating NAME…"** and the call is queued.
 3. **A background job computes what is missing in batches**: for a sheet, the calls the
    evaluation queued; for a table column, its distinct argument tuples not yet in the cache,
    read from a snapshot, at most 1,000 calls (and 4 MiB) per batch. The job runs the batches in an
@@ -60,7 +59,7 @@ as real calls, and publishing needs them to pass, as for other functions.
 | `text` | `str` | text (at most 32,767 characters, else `#VALUE!`) |
 | `boolean` | `bool` | a logical |
 | any | `None` | empty text in a sheet, `NULL` in a table |
-| any | anything else | `#VALUE!` "returned a list, expected number" |
+| any | anything else | `#VALUE!` "the function returned a list, expected a number" |
 
 An exception becomes `#VALUE!` with the exception's type and first line as the cell's message,
 and is cached like any result (the function is pure). Running out of time, memory or output, or a

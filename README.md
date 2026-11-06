@@ -76,7 +76,7 @@ alephgrid --demo-rows 100000000    # or try it on 100M generated rows
 | **SQL** | Schema browser, autocomplete, `$parameters`, cancellable previews, saved and live queries with versions, tables from queries, complete exports; reads the workbook's own tables only |
 | **Functions** | Define reusable functions as sheet formulas, SQL expressions or sandboxed [Python](docs/PYTHON_FUNCTIONS.md); test them, publish versions, pin and roll back. See [functions](docs/FUNCTIONS.md) |
 | **Export** | CSV, Parquet or JSON lines for any table or filtered view; XLSX for sheets, with a report of anything XLSX cannot hold |
-| **Collaboration** | Several people on one workbook see each other's edits live; history and revision restore |
+| **Collaboration** | Several people on one workbook see each other's edits live; a change history in which table changes can be taken back |
 | **Teams** | Organizations, spaces, owner/editor/viewer roles (also from identity-provider groups), invitations, service tokens, password or OpenID Connect sign-in, quotas, audit log, backups and an administration screen. See [teams](docs/TEAMS.md) |
 | **Compute** | Each open workbook gets its own share of memory and threads, sleeps when idle and wakes when opened; larger sizes (`--profile`) for heavy workbooks. See [compute](docs/COMPUTE.md) |
 | **Agents (MCP)** | Read-only agent connections per space or workbook over Streamable HTTP (`/mcp`) or stdio (`alephgrid mcp`): schema cards, catalog search, reads, read-only SQL, saved queries and analyses, content-hashed receipts, activity per connection |
@@ -101,7 +101,7 @@ or WSL.
 
 ### From source
 
-Requires Rust 1.88+ and Node 20+.
+Requires Rust 1.89+ (rustup installs the pinned toolchain from `rust-toolchain.toml`) and Node 20+.
 
 ```bash
 git clone https://github.com/alephgrid/alephgrid && cd alephgrid
@@ -135,11 +135,11 @@ backups, upgrades and restores are covered in [docs/OPERATIONS.md](docs/OPERATIO
 | `--public-url` | `ALEPHGRID_PUBLIC_URL` | how people reach the server (needed for SSO; https makes cookies Secure) |
 | `--oidc-issuer`, `--oidc-client-id` | `ALEPHGRID_OIDC_*` (secret: `ALEPHGRID_OIDC_CLIENT_SECRET`) | no single sign-on |
 | `--session-hours` | `ALEPHGRID_SESSION_HOURS` | 12 |
-| `--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks` | `ALEPHGRID_SPACE_*` | no limits (admins can set them per space) |
-| `--memory-limit` | `ALEPHGRID_MEMORY_LIMIT` | DuckDB default (80% of RAM, spills to disk) |
+| `--space-storage`, `--space-workbooks`, `--space-jobs`, `--space-open-workbooks`, `--space-compute-memory` | `ALEPHGRID_SPACE_*` | no limits (admins can set them per space) |
+| `--memory-budget` | `ALEPHGRID_MEMORY_BUDGET` | 80% of RAM (or of the container's limit), shared by all open workbooks; spills to disk beyond it |
 | `--threads` | `ALEPHGRID_THREADS` | all cores |
 | `--disk-reserve` | `ALEPHGRID_DISK_RESERVE` | 32MiB kept back so the server can still restart when the disk fills ([operations](docs/OPERATIONS.md#disk-is-full)) |
-| `--idle-timeout` | | seconds without activity before a workbook's compute sleeps |
+| `--idle-timeout` | `ALEPHGRID_IDLE_TIMEOUT` | 600 seconds without activity before a workbook's compute sleeps |
 | `--profile name=MEM:THREADS[:dedicated]` | | extra compute sizes admins can grant to spaces |
 | `--disable-sql` | `ALEPHGRID_DISABLE_SQL` | SQL allowed; when set, every operation that runs user-written SQL is refused |
 | `--demo-rows N` | | generate a demo workbook |

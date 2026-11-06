@@ -68,8 +68,8 @@ Docs: [alephgrid.dev/docs](https://alephgrid.dev/docs/getting-started/)
 
 ### Collaboration, teams and administration
 
-- Several people on one workbook see each other's edits live, with history and revision
-  restore.
+- Several people on one workbook see each other's edits live, with a change history in which
+  table changes can be taken back.
 - `--auth accounts`: organizations, spaces, owner/editor/viewer roles (also from
   identity-provider groups), invitations, service tokens, password or OpenID Connect sign-in,
   quotas, audit log, backups and an administration screen.

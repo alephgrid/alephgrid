@@ -1,14 +1,14 @@
 # Compute for workbooks
 
 Opening a workbook is the default action: the server finds or starts its compute, and every
-collaborator is served by that one allocation (checklist 7.13–7.16). Spaces own budgets and
+collaborator is served by that one allocation. Spaces own budgets and
 entitlements; they are not machines. A workbook's data, identity, revision and pinned runtime
 never depend on its compute, which can stop, restart or change size without changing them.
 
 This page is the contract. Runtime objects (`RuntimeSpec`, `ComputePolicy`, `RuntimeAllocation`,
 `OwnershipAssignment`) are described in ARCHITECTURE.md; HTTP shapes in PROTOCOL.md.
 
-## Profiles (7.13, 7.15)
+## Profiles
 
 A **profile** is a named amount of compute an allocation reserves out of the host budget.
 
@@ -32,7 +32,7 @@ A **profile** is a named amount of compute an allocation reserves out of the hos
   one step, under the controller's lock, together with the allocation record: concurrent starts can
   never pass a space's budget, and a refused start reserves nothing. Refusals are 429 / `quota`.
 
-## Opening, queueing and routing (7.14)
+## Opening, queueing and routing
 
 * The workbook page asks for the workbook's status first (`GET /api/workbooks/{id}/runtime`, which
   starts nothing), then starts it without waiting (`POST … {action: "start", wait: false}`) and
@@ -66,7 +66,7 @@ A **profile** is a named amount of compute an allocation reserves out of the hos
   another server version; `owned_elsewhere`: another server process has it open; `startup_failed`:
   the reason, and Try again.
 
-## Changing profile: controlled restart (7.15)
+## Changing profile: controlled restart
 
 `POST /api/workbooks/{id}/runtime {action: "restart", profile}` checks the entitlement and that the
 new size fits (host and space budget, counting the current allocation as released) before touching
@@ -82,7 +82,7 @@ anything; if it does not fit the workbook keeps running as it was. Otherwise:
 If the new allocation fails to start, the workbook is started again with its previous profile and
 the request reports the failure. A plain `restart` without `profile` restarts at the same size.
 
-## Idle shutdown (7.16)
+## Idle shutdown
 
 A workbook's compute closes after `--idle-timeout` (10 minutes) without **meaningful activity**:
 
