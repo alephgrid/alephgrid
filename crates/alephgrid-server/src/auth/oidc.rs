@@ -275,6 +275,7 @@ impl Oidc {
         v.set_issuer(&[&self.config.issuer]);
         v.set_audience(&[&self.config.client_id]);
         v.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
+        v.validate_nbf = true;
         v.leeway = 60;
         let data = jsonwebtoken::decode::<Value>(id_token, &key, &v).map_err(|e| Denied::Refused(format!("single sign-on: the ID token is not valid ({e})")))?;
         let c = data.claims;
