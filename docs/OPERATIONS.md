@@ -19,6 +19,49 @@ and roles in [TEAMS.md](TEAMS.md).
 
 Back up the whole directory with the tools below, not with `cp` while the server runs.
 
+## Health and readiness
+
+Both need no sign-in and say only which check failed (no paths, sizes or error text).
+
+| Endpoint | Use it for | Answers |
+| --- | --- | --- |
+| `GET /healthz` | liveness: restart the process if it stops answering | `200 {"status":"ok"}` while the process serves HTTP; no disk or database access |
+| `GET /readyz` | readiness: send traffic only when ready; alerting | `200` with `status` `ok` or `degraded`, or `503` with `unavailable`, and each check |
+
+`/readyz` checks:
+
+- `accepting_work`: the server is not shutting down (it turns `failed` on SIGTERM, while
+  running work drains);
+- `data_dir_writable`: a small file can be created, written and removed in
+  `<data dir>/.control/`;
+- `control_db`: the control database answers a query;
+- `disk_reserve`: `held`, `off` (`--disk-reserve 0`) or `released`. Released means the disk
+  filled up (or had no room for the reserve at start). The answer is then `degraded` but still
+  `200`, so administrators can reach the server to free space; alert on it.
+
+The image has no curl: `alephgrid health` requests `/readyz` on `127.0.0.1:$ALEPHGRID_PORT`
+and exits 0 when ready, 1 otherwise (`--live` for `/healthz`, `--url` for another address).
+Both Dockerfiles use it as their `HEALTHCHECK`.
+
+## Logs
+
+Logs go to standard output. `--log-format json` (or `ALEPHGRID_LOG_FORMAT=json`) writes one
+JSON object per line for a log collector; the default `text` is for people. Levels follow
+`RUST_LOG` (default `alephgrid=info,tower_http=warn`; `tower_http=debug` adds one line per
+request with its status and latency).
+
+- Every response carries an `x-request-id` header. A proxy's own id is kept when it is short
+  and plain (letters, digits, `-`, `_`, `.`, at most 64); otherwise the server makes one.
+- Lines written while handling a request carry a `request` span with `request_id`, `method`
+  and `path` (the path holds the workbook id). Bulk jobs add a `job` span with `workbook`,
+  `job`, `class` and `lane`; a job stopped by its deadline or a cancel is logged. Workbook
+  lifecycle lines (start, migration, drain, failure) carry `workbook`, WebSocket lines
+  `session`.
+- Logs never carry passwords, tokens, cookies, request headers, query strings or request
+  bodies, and workbook contents are not logged, except that a warning may quote an engine
+  error message (DuckDB or Python), which can name a value. A support bundle is the log plus `GET /api/admin/resources` and
+  `/api/admin/sessions` (instance admins).
+
 ## Backups
 
 - **Online**: Administration → Backups → **Back up now** (instance admins), or

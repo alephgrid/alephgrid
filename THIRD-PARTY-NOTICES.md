@@ -5,7 +5,7 @@ Apache-2.0 ([LICENSE](LICENSE)). The `alephgrid` binary, its container image and
 packages include the software below. Where a component offers a choice of licences, the
 column *Used under* names the one Alephgrid uses.
 
-## Rust crates (276)
+## Rust crates (277)
 
 | Crate | Version | Licence | Used under | Texts |
 |---|---|---|---|---|
@@ -252,6 +252,7 @@ column *Used under* names the one Alephgrid uses.
 | tracing-attributes | 0.1.31 | MIT | MIT | [c1e08ee9a728](#c1e08ee9a728) |
 | tracing-core | 0.1.36 | MIT | MIT | [c1e08ee9a728](#c1e08ee9a728) |
 | tracing-log | 0.2.0 | MIT | MIT | [c1e08ee9a728](#c1e08ee9a728) |
+| tracing-serde | 0.2.0 | MIT | MIT | [c1e08ee9a728](#c1e08ee9a728) |
 | tracing-subscriber | 0.3.23 | MIT | MIT | [c1e08ee9a728](#c1e08ee9a728) |
 | try-lock | 0.2.5 | MIT | MIT | [381f992f70f7](#381f992f70f7) |
 | ts-rs | 12.0.1 | MIT | MIT | [86d9cdb2a1c6](#86d9cdb2a1c6) |
@@ -7120,7 +7121,7 @@ DEALINGS IN THE SOFTWARE.
 <a id="c1e08ee9a728"></a>
 ### c1e08ee9a728
 
-Used by: tracing 0.1.44, tracing-attributes 0.1.31, tracing-core 0.1.36, tracing-log 0.2.0, tracing-subscriber 0.3.23.
+Used by: tracing 0.1.44, tracing-attributes 0.1.31, tracing-core 0.1.36, tracing-log 0.2.0, tracing-serde 0.2.0, tracing-subscriber 0.3.23.
 
 ````text
 Copyright (c) 2019 Tokio Contributors

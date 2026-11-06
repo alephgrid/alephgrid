@@ -223,20 +223,43 @@ struct Cli {
     /// Serve the web UI from this directory instead of the embedded build.
     #[arg(long, env = "ALEPHGRID_WEB_DIR")]
     web_dir: Option<PathBuf>,
+
+    /// Log format: `text` for people, `json` for log collectors (one object per line, with
+    /// the request id, workbook and job of each line where known). Set levels with RUST_LOG.
+    #[arg(long, env = "ALEPHGRID_LOG_FORMAT", value_enum, default_value = "text")]
+    log_format: LogFormat,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+/// Logs go to standard output. They never carry secrets, tokens, cookies or query strings:
+/// requests are logged by id, method and path only (alephgrid_server::health).
+fn init_logging(format: LogFormat) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "alephgrid=info,tower_http=warn".into());
+    let logs = tracing_subscriber::fmt().with_env_filter(filter);
+    match format {
+        LogFormat::Text => logs.init(),
+        LogFormat::Json => logs.json().flatten_event(true).with_current_span(false).with_span_list(true).init(),
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("mcp") {
-        return mcp_command().await;
-    }
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "alephgrid=info,tower_http=warn".into()))
-        .init();
-    if std::env::args().nth(1).as_deref() == Some("python-runtime") {
-        return python_runtime_command();
+    match std::env::args().nth(1).as_deref() {
+        Some("mcp") => return mcp_command().await,
+        Some("health") => return health_command().await,
+        Some("python-runtime") => {
+            init_logging(LogFormat::Text);
+            return python_runtime_command();
+        }
+        _ => {}
     }
     let cli = Cli::parse();
+    init_logging(cli.log_format);
 
     if let Some(dest) = &cli.backup_to {
         let m = alephgrid_server::backup::backup_offline(&cli.data_dir, dest)?;
@@ -483,6 +506,37 @@ fn python_runtime_command() -> Result<()> {
             }
             println!("Start the server with --python-runtime {}", dir.display());
         }
+    }
+    Ok(())
+}
+
+/// `alephgrid health [--url URL] [--live]`: for container health checks (the image has no curl).
+#[derive(Parser, Debug)]
+#[command(name = "alephgrid health", about = "Check that a running server is ready (GET /readyz); exits 0 when it is, 1 when not.")]
+struct HealthCli {
+    /// The server's address. Default: http://127.0.0.1 on ALEPHGRID_PORT (7878).
+    #[arg(long)]
+    url: Option<String>,
+    /// Check only that the server is up (GET /healthz), not that it is ready.
+    #[arg(long)]
+    live: bool,
+}
+
+async fn health_command() -> Result<()> {
+    let args = std::iter::once("alephgrid health".to_string()).chain(std::env::args().skip(2));
+    let cli = HealthCli::parse_from(args);
+    let base = cli.url.unwrap_or_else(|| {
+        let port = std::env::var("ALEPHGRID_PORT").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "7878".into());
+        format!("http://127.0.0.1:{port}")
+    });
+    let path = if cli.live { "/healthz" } else { "/readyz" };
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?;
+    let res = client.get(&url).send().await.with_context(|| format!("no answer from {url}"))?;
+    let status = res.status();
+    println!("{}", res.text().await.unwrap_or_default());
+    if !status.is_success() {
+        anyhow::bail!("{url} answered {status}");
     }
     Ok(())
 }
