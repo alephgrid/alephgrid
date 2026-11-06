@@ -5,6 +5,9 @@ Public site: landing, install, releases, docs and blog. Astro + [Starlight](http
 
 ## Develop
 
+Requires Node.js 22.23.4 or newer (Astro 7 refuses to start on older versions). Cloudflare
+Workers Builds' default Node (24.x) already satisfies this.
+
 ```bash
 cd site
 npm install
