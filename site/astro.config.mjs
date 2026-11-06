@@ -29,6 +29,27 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      // Code frames take the site's panel tone and hairlines in both themes.
+      expressiveCode: {
+        styleOverrides: {
+          borderRadius: '6px',
+          borderColor: 'var(--sl-color-gray-6)',
+          codeBackground: 'var(--sl-color-gray-7)',
+          codeFontSize: 'var(--sl-text-code)',
+          frames: {
+            frameBoxShadowCssValue: 'none',
+            editorBackground: 'var(--sl-color-gray-7)',
+            editorTabBarBackground: 'var(--sl-color-gray-7)',
+            editorActiveTabBackground: 'var(--sl-color-gray-7)',
+            editorTabBarBorderBottomColor: 'var(--sl-color-gray-6)',
+            terminalBackground: 'var(--sl-color-gray-7)',
+            terminalTitlebarBackground: 'var(--sl-color-gray-7)',
+            terminalTitlebarBorderBottomColor: 'var(--sl-color-gray-6)',
+            terminalTitlebarDotsForeground: 'var(--sl-color-gray-5)',
+            terminalTitlebarDotsOpacity: '1',
+          },
+        },
+      },
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/alephgrid/alephgrid' },
       ],
