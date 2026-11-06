@@ -230,6 +230,12 @@ test("cells copied in other spreadsheets paste with their values and formats", a
   expect(await page.evaluate(() => (window as unknown as { __ran?: number }).__ran)).toBeUndefined();
   expect(await page.locator('img[src="x"]').count()).toBe(0);
 
+  // Larger than the edit limit (1,000,000 cells here): refused before anything is sent.
+  await go(page, "A12");
+  await paste(page, "big", `<table><tr><td colspan=1000 rowspan=1000>big</td><td>one more</td></tr></table>`);
+  await expect(page.locator(".toast").last()).toContainText("That paste is too large");
+  expect((await cells(ws, 0, 12, 1)).content(11, 0)).toBe("");
+
   // HTML without a table: the tab-separated text is pasted.
   await go(page, "A10");
   await paste(page, "7\t8", "<p>7 8</p>");

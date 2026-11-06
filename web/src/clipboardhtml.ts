@@ -54,10 +54,10 @@ export function parseClipboardHtml(html: string, maxCells: number): HtmlCells | 
   let width = 0, height = grid.length;
   for (const l of grid) width = Math.max(width, l?.length ?? 0);
   for (const [r, s] of taken) { height = Math.max(height, r + 1); for (const c of s) width = Math.max(width, c + 1); }
+  if (!width || !height) return null;
+  if (width * height > maxCells) return { cells: [], tooMany: true };
   const cells: PastedCell[][] = [];
   for (let r = 0; r < height; r++) cells.push(Array.from({ length: width }, (_, c) => grid[r]?.[c] ?? { value: "" }));
-  if (!width || !height) return null;
-  if (width * height > maxCells) return { cells, tooMany: true };
   return { cells, tooMany: false };
 }
 
