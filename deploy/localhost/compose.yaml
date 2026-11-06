@@ -1,0 +1,45 @@
+# Alephgrid for one person on this machine (docs/OPERATIONS.md, "Docker").
+#
+#   docker compose -f deploy/localhost/compose.yaml up -d
+#   open http://localhost:7878
+#
+# There is no sign-in. That is safe only because nothing but this machine can reach the
+# server: the port is published on the loopback address alone, the container sits on its own
+# network, and ALEPHGRID_PUBLIC_URL makes the server refuse any other host name (so a web
+# page cannot reach it through DNS rebinding). Inside the container the server must listen on
+# 0.0.0.0 for the published port to work, which is why ALEPHGRID_UNSAFE_NO_AUTH is set.
+# To share it with anyone, use deploy/team instead.
+name: alephgrid-localhost
+
+services:
+  alephgrid:
+    image: ghcr.io/alephgrid/alephgrid:${ALEPHGRID_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7878:7878"
+    environment:
+      ALEPHGRID_AUTH: local
+      ALEPHGRID_UNSAFE_NO_AUTH: "true"
+      ALEPHGRID_PUBLIC_URL: http://localhost:7878
+    volumes:
+      # A named volume: created owned by the server's user (uid 10001), nothing to set up.
+      - alephgrid-data:/data
+      # Or a folder of yours; it must belong to uid 10001 first:
+      #   mkdir -p ~/alephgrid-data && sudo chown -R 10001:10001 ~/alephgrid-data
+      # - ~/alephgrid-data:/data
+    networks:
+      - alephgrid
+    # The image's health check (alephgrid health, GET /readyz) applies; it is repeated here
+    # so it shows in `docker compose ps`.
+    healthcheck:
+      test: ["CMD", "alephgrid", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+networks:
+  alephgrid: {}
+
+volumes:
+  alephgrid-data: {}

@@ -1,0 +1,86 @@
+# Alephgrid for a team: accounts, HTTPS through Caddy, health checks and resource limits
+# (docs/OPERATIONS.md, "Docker").
+#
+#   cd deploy/team
+#   cp .env.example .env        # then set ALEPHGRID_DOMAIN and the rest
+#   docker compose up -d
+#   docker compose logs alephgrid    # the one-time setup code, if no admin was set in .env
+#
+# The domain's DNS must point at this host and ports 80 and 443 must be reachable: Caddy gets
+# and renews the certificate itself. Only Caddy is published; Alephgrid is reachable only on
+# the internal network.
+name: alephgrid-team
+
+services:
+  alephgrid:
+    image: ghcr.io/alephgrid/alephgrid:${ALEPHGRID_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      ALEPHGRID_AUTH: accounts
+      ALEPHGRID_PUBLIC_URL: https://${ALEPHGRID_DOMAIN:?set ALEPHGRID_DOMAIN in .env}
+      # The first instance admin. Optional: without them, the log shows a one-time setup code
+      # for https://<domain>/setup. Used only while there are no users; remove them from .env
+      # once the admin exists.
+      ALEPHGRID_BOOTSTRAP_EMAIL: ${ALEPHGRID_ADMIN_EMAIL:-}
+      ALEPHGRID_BOOTSTRAP_PASSWORD: ${ALEPHGRID_ADMIN_PASSWORD:-}
+      ALEPHGRID_LOG_FORMAT: json
+      # DuckDB's memory defaults to 80% of the container's memory limit (below); set
+      # ALEPHGRID_MEMORY_BUDGET to choose another share.
+      # Single sign-on (docs/TEAMS.md): uncomment, and set the values in .env.
+      # ALEPHGRID_OIDC_ISSUER: ${ALEPHGRID_OIDC_ISSUER}
+      # ALEPHGRID_OIDC_CLIENT_ID: ${ALEPHGRID_OIDC_CLIENT_ID}
+      # ALEPHGRID_OIDC_CLIENT_SECRET: ${ALEPHGRID_OIDC_CLIENT_SECRET}
+    volumes:
+      # Named volumes are created owned by the server's user (uid 10001). For a host folder
+      # instead, chown -R 10001:10001 it first.
+      - alephgrid-data:/data
+      # Offline backups (`--backup-to /backups/...`, see docs/OPERATIONS.md). Copy them off
+      # this host: a backup on the same disk does not survive the disk.
+      - alephgrid-backups:/backups
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: ${ALEPHGRID_MEMORY:-8g}
+          cpus: "${ALEPHGRID_CPUS:-4}"
+    healthcheck:
+      test: ["CMD", "alephgrid", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    stop_grace_period: 60s
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ALEPHGRID_DOMAIN: ${ALEPHGRID_DOMAIN:?set ALEPHGRID_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - internal
+    depends_on:
+      alephgrid:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "1"
+
+networks:
+  internal: {}
+
+volumes:
+  alephgrid-data: {}
+  alephgrid-backups: {}
+  caddy-data: {}
+  caddy-config: {}

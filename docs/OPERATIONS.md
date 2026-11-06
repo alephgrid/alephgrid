@@ -62,6 +62,45 @@ request with its status and latency).
   error message (DuckDB or Python), which can name a value. A support bundle is the log plus `GET /api/admin/resources` and
   `/api/admin/sessions` (instance admins).
 
+## Docker
+
+The image (`ghcr.io/alephgrid/alephgrid`) runs as the user `alephgrid`, uid and gid 10001,
+never as root. Data lives in `/data` (`ALEPHGRID_DATA_DIR`); `/backups` is there for offline
+backups. Both are owned by that user in the image.
+
+- **Named volume** (`-v alephgrid-data:/data`): nothing to set up. Docker creates the volume
+  from the image's `/data`, owned by 10001.
+- **Host folder** (bind mount, `-v /srv/alephgrid:/data`): Docker keeps the folder's owner, so
+  give it to 10001 before the first start, or the server stops with "permission denied":
+
+  ```bash
+  sudo mkdir -p /srv/alephgrid && sudo chown -R 10001:10001 /srv/alephgrid
+  ```
+
+  Or run the container as yourself, with a folder you own:
+  `docker run --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/data:/data" …`.
+
+Ready-made Compose files:
+
+| File | For |
+| --- | --- |
+| [deploy/localhost/compose.yaml](../deploy/localhost/compose.yaml) | one person: no sign-in, published on `127.0.0.1:7878` only, other host names refused |
+| [deploy/team/compose.yaml](../deploy/team/compose.yaml) | a team: accounts, HTTPS through Caddy with `ALEPHGRID_PUBLIC_URL`, health checks on `/readyz`, memory and CPU limits, settings from `.env` ([.env.example](../deploy/team/.env.example)), a backups volume |
+| [docker-compose.yml](../docker-compose.yml) | building the image from a checkout |
+
+Both images set `HEALTHCHECK` to `alephgrid health`. In the team setup Caddy starts once
+Alephgrid is healthy; JSON logs go to `docker compose logs alephgrid`. The server's DuckDB
+memory follows the container's memory limit (80% of it) unless `ALEPHGRID_MEMORY_BUDGET` is set.
+
+Offline backup with Compose (the server is stopped for it; copy the result off the host):
+
+```bash
+docker compose stop alephgrid
+docker compose run --rm alephgrid --backup-to /backups/backup-$(date +%Y%m%d)
+docker compose start alephgrid
+docker compose cp alephgrid:/backups ./alephgrid-backups   # then move it to another machine
+```
+
 ## Backups
 
 - **Online**: Administration → Backups → **Back up now** (instance admins), or
