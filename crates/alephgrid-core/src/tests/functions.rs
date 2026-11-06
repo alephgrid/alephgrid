@@ -310,3 +310,136 @@ fn oversized_definitions_and_expanding_dependency_graphs_are_refused() {
     }
     assert!(refused, "expression expansion is bounded before evaluation");
 }
+
+// ---- U.06c: typed test inputs and expected values -------------------------------------
+// Expected values follow docs/FUNCTIONS.md: a blank cell, empty text and an error value are
+// different inputs; an entered "" is a blank cell and an entered NULL binds SQL NULL.
+
+fn typed(name: &str, kind: FunctionKind, source: &str, cases: Vec<(TestValue, TestValue)>) -> FunctionDefinition {
+    let mut d = unary(name, kind, source);
+    d.tests = cases.into_iter().map(|(a, e)| FunctionTest { arguments: vec![a], expected: e }).collect();
+    d
+}
+
+#[test]
+fn formula_tests_tell_blank_cells_empty_text_and_errors_apart() {
+    let t = TempWb::new();
+    let source = r#"IFERROR(IF(ISBLANK(value),"blank",IF(ISTEXT(value),"text:"&value,IF(ISNUMBER(value),"number",value&""))),"error")"#;
+    let d = typed("WHATIS", FunctionKind::Formula, source, vec![
+        (TestValue::blank(), "blank".into()),
+        (TestValue::text(""), "text:".into()),
+        (TestValue::text("100"), "text:100".into()),
+        ("100".into(), "number".into()),
+        ("".into(), "blank".into()),
+        (TestValue::error("#DIV/0!"), "error".into()),
+        (TestValue::text("=1+2"), "text:=1+2".into()),
+        (TestValue::text("say \"hi\""), "text:say \"hi\"".into()),
+    ]);
+    let got = t.wb.test_function(&d).unwrap();
+    assert_eq!(got.iter().map(|r| r.actual.as_str()).collect::<Vec<_>>(), ["blank", "text:", "text:100", "number", "blank", "error", "text:=1+2", "text:say \"hi\""]);
+    assert!(got.iter().all(|r| r.passed && r.kind == TestValueKind::Text), "{got:?}");
+    // The exact error reaches the function.
+    let na = typed("NAVALUE", FunctionKind::Formula, "value", vec![(TestValue::error("#N/A"), TestValue::error("#N/A")), (TestValue::error("#VALUE!"), TestValue::error("#VALUE!"))]);
+    let got = t.wb.test_function(&na).unwrap();
+    assert!(got.iter().all(|r| r.passed), "{got:?}");
+    assert_eq!(got[1].kind, TestValueKind::Error);
+    // Only known error values.
+    let bad = typed("BADERROR", FunctionKind::Formula, "value", vec![(TestValue::error("1+1"), "2".into())]);
+    assert!(t.wb.test_function(&bad).unwrap_err().to_string().contains("not an error value"));
+}
+
+#[test]
+fn typed_expected_values_compare_the_kind_of_value() {
+    let t = TempWb::new();
+    let d = typed("RATIO", FunctionKind::Formula, "1/value", vec![
+        ("0".into(), TestValue::error("#DIV/0!")),
+        ("0".into(), TestValue::text("#DIV/0!")),
+        ("0".into(), "#DIV/0!".into()),
+        ("4".into(), "0.25".into()),
+        ("4".into(), TestValue::text("0.25")),
+    ]);
+    let got = t.wb.test_function(&d).unwrap();
+    assert_eq!(got.iter().map(|r| r.passed).collect::<Vec<_>>(), [true, false, true, true, false]);
+    assert_eq!(got[3].kind, TestValueKind::Number);
+    let empty = typed("EMPTYTEXT", FunctionKind::Formula, r#"value&"""#, vec![(TestValue::text(""), TestValue::text("")), (TestValue::text(""), TestValue::blank())]);
+    let got = t.wb.test_function(&empty).unwrap();
+    assert_eq!(got.iter().map(|r| r.passed).collect::<Vec<_>>(), [true, false]);
+}
+
+#[test]
+fn sql_tests_tell_null_text_and_the_null_marker_apart() {
+    let t = TempWb::new();
+    let d = typed("SQLWHAT", FunctionKind::Sql, "CASE WHEN value IS NULL THEN 'null' ELSE 'text:' || value END", vec![
+        (TestValue::blank(), "null".into()),
+        (TestValue::text("NULL"), "text:NULL".into()),
+        ("NULL".into(), "null".into()),
+        (TestValue::text(""), "text:".into()),
+    ]);
+    let got = t.wb.test_function(&d).unwrap();
+    assert!(got.iter().all(|r| r.passed && r.kind == TestValueKind::Text), "{got:?}");
+    let blank = typed("SQLBLANK", FunctionKind::Sql, "CASE WHEN value = 'x' THEN NULL ELSE value END", vec![("x".into(), TestValue::blank()), ("x".into(), TestValue::text("NULL")), ("x".into(), "NULL".into())]);
+    let got = t.wb.test_function(&blank).unwrap();
+    assert_eq!(got.iter().map(|r| r.passed).collect::<Vec<_>>(), [true, false, true]);
+    assert_eq!(got[0].kind, TestValueKind::Blank);
+    let error = typed("SQLERROR", FunctionKind::Sql, "value", vec![(TestValue::error("#N/A"), "x".into())]);
+    assert!(t.wb.test_function(&error).unwrap_err().to_string().contains("error values"));
+}
+
+#[test]
+fn stored_text_tests_still_load_and_typed_tests_round_trip() {
+    // A definition written before typed values: every value is text.
+    let old = r#"{"name":"OLD","kind":"formula","arguments":["a"],"source":"a","documentation":"","tests":[{"arguments":[""],"expected":"0"}]}"#;
+    let d: FunctionDefinition = serde_json::from_str(old).unwrap();
+    assert_eq!(d.tests[0].arguments[0], TestValue::Entered(String::new()));
+    let mut t = TempWb::new();
+    let typed = typed("KEEPS", FunctionKind::Formula, "IF(ISBLANK(value),1,2)", vec![(TestValue::blank(), "1".into()), (TestValue::text(""), "2".into())]);
+    t.wb.publish_function(typed).unwrap();
+    t.reopen();
+    let stored = &t.wb.functions().unwrap()[0].versions[0].definition.tests;
+    assert_eq!(stored[0].arguments[0], TestValue::blank());
+    assert_eq!(stored[1].arguments[0], TestValue::text(""));
+    assert_eq!(serde_json::to_value(&stored[1]).unwrap(), serde_json::json!({ "arguments": [{ "type": "text", "value": "" }], "expected": "2" }));
+}
+
+#[test]
+fn cancelled_tests_stop() {
+    let t = TempWb::new();
+    let d = typed("STOPS", FunctionKind::Formula, "value", vec![("1".into(), "1".into())]);
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let err = t.wb.reader().unwrap().test_function(&d, &cancel).unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+}
+
+// ---- U.06e: what activating a version affects -----------------------------------------
+
+#[test]
+fn usage_lists_cells_columns_and_dependent_functions() {
+    let mut t = TempWb::new();
+    t.wb.publish_function(unary("BUMP", FunctionKind::Formula, "value+1")).unwrap();
+    t.wb.publish_function(unary("TWICEBUMP", FunctionKind::Formula, "BUMP(value)*2")).unwrap();
+    t.wb.publish_function(unary("SQLBUMP", FunctionKind::Sql, "value + 1")).unwrap();
+    t.wb.with_sheets(|s| {
+        s.set(0, &[
+            sheet_input(1, 1, "=BUMP(A1)"),
+            sheet_input(4, 2, "=SUM(1, bump (2))"),
+            sheet_input(5, 2, "=\"BUMP(1)\""),
+            sheet_input(6, 2, "=BUMPY(1)"),
+            sheet_input(7, 2, "BUMP(1)"),
+        ])
+    })
+    .unwrap();
+    let table = t.wb.create_demo_table(5).unwrap().name;
+    t.wb.add_formula_column(&table, "bumped", "SQLBUMP(fare_usd)").unwrap();
+    let u = t.wb.function_usage("bump").unwrap();
+    assert_eq!(u.name, "BUMP");
+    assert_eq!(u.cell_count, 2);
+    assert_eq!(u.cells.iter().map(|c| c.cell.as_str()).collect::<Vec<_>>(), ["B2", "C5"]);
+    assert!(u.cells[0].formula.eq_ignore_ascii_case("=BUMP(A1)"), "{:?}", u.cells[0]);
+    assert!(u.columns.is_empty());
+    assert_eq!(u.dependents.len(), 1);
+    assert_eq!((u.dependents[0].name.as_str(), u.dependents[0].version, u.dependents[0].uses), ("TWICEBUMP", 1, 1));
+    let s = t.wb.reader().unwrap().function_usage("SQLBUMP").unwrap();
+    assert_eq!(s.columns.len(), 1);
+    assert_eq!((s.columns[0].table.as_str(), s.columns[0].column.as_str()), (table.as_str(), "bumped"));
+    assert!(t.wb.function_usage("NOPE").is_err());
+}

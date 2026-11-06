@@ -499,6 +499,7 @@ pub fn operation_script() -> Vec<(&'static str, Value)> {
         ("functions", json!({})),
         ("test_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [{"arguments":["2"],"expected":"3"}] } })),
         ("publish_function", json!({ "definition": { "name": "PLUSONE", "kind": "formula", "arguments": ["value"], "source": "value+1", "documentation": "", "tests": [] } })),
+        ("function_usage", json!({ "name": "PLUSONE" })),
         ("pin_functions", json!({ "pins": { "PLUSONE": 1 } })),
         ("refresh_functions", json!({})),
         ("cancel", json!({ "request": 1 })),

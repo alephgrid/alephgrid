@@ -149,7 +149,18 @@ def main():
 
     def describe(e):
         text = str(e).strip().splitlines()
-        return type(e).__name__ + (": " + text[0][:500] if text else "")
+        where = ""
+        # The line of the function's own source where it happened (a syntax error names its
+        # line in its message already).
+        if not isinstance(e, SyntaxError):
+            tb, line = e.__traceback__, None
+            while tb is not None:
+                if tb.tb_frame.f_code.co_filename == "<function>":
+                    line = tb.tb_lineno
+                tb = tb.tb_next
+            if line is not None:
+                where = " (line %d)" % line
+        return type(e).__name__ + (": " + text[0][:500] if text else "") + where
 
     # What the function prints, even straight to file descriptor 1, goes to stderr, never into
     # the results.

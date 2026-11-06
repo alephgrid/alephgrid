@@ -418,16 +418,38 @@ impl Sheets {
         Ok(())
     }
 
-    pub fn test_function_call(&mut self, d: &crate::functions::FunctionDefinition, args: &[String]) -> Result<String> {
+    /// The result of calling `d` with `args` as cell inputs, as displayed, and its kind.
+    pub fn test_function_call(&mut self, d: &crate::functions::FunctionDefinition, args: &[crate::functions::TestValue]) -> Result<(String, crate::functions::TestValueKind)> {
+        use crate::functions::{TestValue, TestValueKind, TypedTestValue, TEST_ERRORS};
         // Scratch model only. Values cannot inject formulas; ranges are entered in real sheets.
         let mut inputs = Vec::new();
         for (i, value) in args.iter().enumerate() {
-            inputs.push(SheetInput { row: 0, column: i as u32, value: if value.starts_with('=') { format!("'{value}") } else { value.clone() }, base: None });
+            let input = match value {
+                TestValue::Entered(v) if v.starts_with('=') => format!("'{v}"),
+                TestValue::Entered(v) => v.clone(),
+                TestValue::Typed(TypedTestValue::Blank) => String::new(),
+                // Empty text is a formula's result (`=""`), which is not a blank cell.
+                TestValue::Typed(TypedTestValue::Text { value }) if value.is_empty() => "=\"\"".into(),
+                TestValue::Typed(TypedTestValue::Text { value }) => format!("'{value}"),
+                // Only a known error literal: `=#N/A` evaluates to that error.
+                TestValue::Typed(TypedTestValue::Error { value }) if TEST_ERRORS.contains(&value.as_str()) => format!("={value}"),
+                TestValue::Typed(TypedTestValue::Error { value }) => bail!("{value:?} is not an error value"),
+            };
+            inputs.push(SheetInput { row: 0, column: i as u32, value: input, base: None });
         }
         let refs = (0..args.len()).map(|i| format!("{}1", column_name(i as u32))).collect::<Vec<_>>().join(",");
         inputs.push(SheetInput { row: 1, column: 0, value: format!("={}({refs})", d.name), base: None });
         self.set(0, &inputs)?;
-        self.model()?.get_formatted_cell_value(0, 2, 1).map_err(|e| anyhow!(e))
+        let m = self.model()?;
+        let shown = m.get_formatted_cell_value(0, 2, 1).map_err(|e| anyhow!(e))?;
+        let kind = match m.get_cell_type(0, 2, 1) {
+            Ok(CellType::Text) => TestValueKind::Text,
+            Ok(CellType::LogicalValue) => TestValueKind::Boolean,
+            Ok(CellType::ErrorValue) => TestValueKind::Error,
+            Ok(CellType::Number) => TestValueKind::Number,
+            _ => TestValueKind::Other,
+        };
+        Ok((shown, kind))
     }
 
     pub fn to_bytes(&self) -> Option<Vec<u8>> {
@@ -962,6 +984,21 @@ impl Sheets {
             }
         }
         out
+    }
+
+    /// Cells whose formula calls `name` outside quoted text: (sheet name, address,
+    /// formula), the first `limit` of them, and how many there are.
+    pub fn cells_using(&self, name: &str, limit: usize) -> (Vec<(String, String, String)>, usize) {
+        let Ok(m) = self.model() else { return (vec![], 0) };
+        let props = m.get_worksheets_properties();
+        let all: Vec<_> = self.cells_calling(&[name.to_uppercase()]).into_iter().filter(|(_, _, _, f)| crate::functions::formula_calls(f, name)).collect();
+        let count = all.len();
+        let cells = all
+            .into_iter()
+            .take(limit)
+            .map(|(i, row, column, formula)| (props.get(i as usize).map(|p| p.name.clone()).unwrap_or_default(), format!("{}{}", column_name(column as u32 - 1), row), formula))
+            .collect();
+        (cells, count)
     }
 
     /// Export with the cells that call `functions` (Python functions, which Excel does not

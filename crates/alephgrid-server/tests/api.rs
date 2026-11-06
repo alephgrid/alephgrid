@@ -321,6 +321,7 @@ fn check_result(op: &str, ty: &str, v: &Value) {
         "WorkbookFunction" => conforms::<alephgrid_core::WorkbookFunction>(op, v),
         "WorkbookFunction[]" => conforms::<Vec<alephgrid_core::WorkbookFunction>>(op, v),
         "FunctionTestResult[]" => conforms::<Vec<alephgrid_core::FunctionTestResult>>(op, v),
+        "FunctionUsage" => conforms::<alephgrid_core::FunctionUsage>(op, v),
         "TableInfo[]" => conforms::<Vec<TableInfo>>(op, v),
         "TableInfo" => conforms::<TableInfo>(op, v),
         "ViewInfo" => conforms::<ViewInfo>(op, v),

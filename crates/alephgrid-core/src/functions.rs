@@ -30,10 +30,97 @@ pub enum FunctionKind {
     /// Python, run by isolated workers (phase 8, docs/PYTHON_FUNCTIONS.md).
     Python,
 }
+/// One test input or expected result (U.06c). Text is read like a cell input: numbers,
+/// `TRUE`/`FALSE`, and `""` is a blank cell (`NULL` binds SQL NULL). The typed forms say
+/// exactly what is meant: a blank cell, text even when it looks like a number (`""` is then
+/// empty text), or an error value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum TestValue {
+    Entered(String),
+    Typed(TypedTestValue),
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TypedTestValue {
+    /// A blank cell: SQL NULL, Python `None`.
+    Blank,
+    /// Exactly this text.
+    Text { value: String },
+    /// A spreadsheet error value, such as `#N/A` (one of [`TEST_ERRORS`]).
+    Error { value: String },
+}
+/// The error values a test can pass or expect.
+pub const TEST_ERRORS: &[&str] = &["#NULL!", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#N/A", "#SPILL!", "#CALC!"];
+impl From<&str> for TestValue {
+    fn from(s: &str) -> Self {
+        TestValue::Entered(s.to_string())
+    }
+}
+impl From<String> for TestValue {
+    fn from(s: String) -> Self {
+        TestValue::Entered(s)
+    }
+}
+impl TestValue {
+    pub fn blank() -> Self {
+        TestValue::Typed(TypedTestValue::Blank)
+    }
+    pub fn text(v: &str) -> Self {
+        TestValue::Typed(TypedTestValue::Text { value: v.into() })
+    }
+    pub fn error(v: &str) -> Self {
+        TestValue::Typed(TypedTestValue::Error { value: v.into() })
+    }
+    fn len(&self) -> usize {
+        match self {
+            TestValue::Entered(s) | TestValue::Typed(TypedTestValue::Text { value: s } | TypedTestValue::Error { value: s }) => s.len(),
+            TestValue::Typed(TypedTestValue::Blank) => 0,
+        }
+    }
+    /// Refuse an unknown error value.
+    fn check(&self) -> Result<()> {
+        if let TestValue::Typed(TypedTestValue::Error { value }) = self {
+            if !TEST_ERRORS.contains(&value.as_str()) {
+                bail!("{value:?} is not an error value; use one of {}", TEST_ERRORS.join(" "));
+            }
+        }
+        Ok(())
+    }
+    /// The value as the results list writes it.
+    fn display(&self) -> String {
+        match self {
+            TestValue::Entered(s) | TestValue::Typed(TypedTestValue::Text { value: s } | TypedTestValue::Error { value: s }) => s.clone(),
+            TestValue::Typed(TypedTestValue::Blank) => String::new(),
+        }
+    }
+    /// Whether a result of `kind` written `actual` is this expected value. Entered text
+    /// compares what is displayed; typed values also compare the kind of value.
+    fn matches(&self, actual: &str, kind: TestValueKind) -> bool {
+        match self {
+            TestValue::Entered(s) => s == actual,
+            TestValue::Typed(TypedTestValue::Blank) => kind == TestValueKind::Blank,
+            TestValue::Typed(TypedTestValue::Text { value }) => kind == TestValueKind::Text && value == actual,
+            TestValue::Typed(TypedTestValue::Error { value }) => kind == TestValueKind::Error && value == actual,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct FunctionTest {
-    pub arguments: Vec<String>,
-    pub expected: String,
+    pub arguments: Vec<TestValue>,
+    pub expected: TestValue,
+}
+/// What kind of value a function returned in a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TestValueKind {
+    Blank,
+    Number,
+    Text,
+    Boolean,
+    Error,
+    /// Another SQL type (a date, a list…), compared as text.
+    Other,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct FunctionDefinition {
@@ -79,6 +166,133 @@ pub struct FunctionTestResult {
     pub actual: String,
     pub expected: String,
     pub passed: bool,
+    /// What kind of value `actual` is.
+    pub kind: TestValueKind,
+    /// Why an error result is an error, when known (Python: the exception and its line).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+}
+impl FunctionTestResult {
+    fn of(expected: &TestValue, actual: String, kind: TestValueKind, message: Option<String>) -> Self {
+        FunctionTestResult { passed: expected.matches(&actual, kind), actual, expected: expected.display(), kind, message }
+    }
+}
+/// Size and error-value checks of a definition's tests.
+fn check_tests(d: &FunctionDefinition) -> Result<()> {
+    if d.tests.len() > 32 || d.tests.iter().any(|t| t.arguments.len() != d.arguments.len() || t.arguments.iter().any(|a| a.len() > 4096) || t.expected.len() > 4096) {
+        bail!("invalid test arguments or size");
+    }
+    for t in &d.tests {
+        for v in t.arguments.iter().chain([&t.expected]) {
+            v.check()?;
+        }
+    }
+    Ok(())
+}
+
+/// Where a function is used in its workbook, shown before a version is activated (U.06e).
+/// Functions belong to one workbook: activating a version changes no other workbook.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FunctionUsage {
+    pub name: String,
+    /// Sheet cells whose formula calls it, the first [`USAGE_CELLS`].
+    pub cells: Vec<FunctionUseCell>,
+    /// All such cells.
+    pub cell_count: u32,
+    /// Calculated table columns whose formula calls it.
+    pub columns: Vec<FunctionUseColumn>,
+    /// Active versions of other workbook functions that call it, and the version they call.
+    pub dependents: Vec<FunctionDependent>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FunctionUseCell {
+    pub sheet: String,
+    /// The cell's address, `B2`.
+    pub cell: String,
+    pub formula: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FunctionUseColumn {
+    pub table: String,
+    pub column: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct FunctionDependent {
+    pub name: String,
+    /// Its active version.
+    pub version: u32,
+    /// The version of the function in question that it was published against.
+    pub uses: u32,
+}
+pub const USAGE_CELLS: usize = 200;
+
+/// Whether `formula` calls `name` (a word followed by `(`), outside quoted text and quoted
+/// names. Case-insensitive, as function names are.
+pub(crate) fn formula_calls(formula: &str, name: &str) -> bool {
+    let f = formula.as_bytes();
+    let n = name.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.';
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < f.len() {
+        let c = f[i];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' || c == b'\'' {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if (i == 0 || !word(f[i - 1])) && f.len() - i >= n.len() && f[i..i + n.len()].eq_ignore_ascii_case(n) {
+            let mut j = i + n.len();
+            if j < f.len() && word(f[j]) {
+                i += 1;
+                continue;
+            }
+            while j < f.len() && f[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < f.len() && f[j] == b'(' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn usage(conn: &Connection, sheets: &crate::sheets::Sheets, name: &str) -> Result<FunctionUsage> {
+    let name = name.to_uppercase();
+    let items = list(conn)?;
+    if !items.iter().any(|f| f.name == name) {
+        bail!("unknown function {name}");
+    }
+    let (cells, cell_count) = sheets.cells_using(&name, USAGE_CELLS);
+    let mut columns = Vec::new();
+    let mut stmt = conn.prepare("SELECT table_name, name, formula FROM _rf_columns ORDER BY table_name, position")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+        let (table, column, formula) = row?;
+        if formula_calls(&formula, &name) {
+            columns.push(FunctionUseColumn { table, column });
+        }
+    }
+    let dependents = active(&items)?
+        .into_iter()
+        .filter_map(|v| v.dependencies.get(&name).map(|uses| FunctionDependent { name: v.definition.name.clone(), version: v.version, uses: *uses }))
+        .collect();
+    Ok(FunctionUsage {
+        name,
+        cells: cells.into_iter().map(|(sheet, cell, formula)| FunctionUseCell { sheet, cell, formula }).collect(),
+        cell_count: cell_count as u32,
+        columns,
+        dependents,
+    })
 }
 
 pub(crate) fn list(conn: &Connection) -> Result<Vec<WorkbookFunction>> {
@@ -395,13 +609,16 @@ impl Workbook {
     pub fn functions(&self) -> Result<Vec<WorkbookFunction>> {
         list(&self.conn)
     }
+    pub fn function_usage(&self, name: &str) -> Result<FunctionUsage> {
+        usage(&self.conn, &self.sheets(), name)
+    }
     pub fn test_function(&self, definition: &FunctionDefinition) -> Result<Vec<FunctionTestResult>> {
         if definition.kind == FunctionKind::Python {
             let runtime = self.function_runtime.clone().ok_or_else(|| anyhow!(NO_RUNTIME))?;
             validate(&self.conn, &upper(definition), &self.functions()?)?;
             return Ok(test_python(definition, runtime.as_ref(), &std::sync::atomic::AtomicBool::new(false))?.results);
         }
-        test_definition(&self.conn, definition)
+        test_definition(&self.conn, definition, &std::sync::atomic::AtomicBool::new(false))
     }
     pub fn publish_function(&mut self, definition: FunctionDefinition) -> Result<WorkbookFunction> {
         self.publish_function_tested(definition, None)
@@ -547,9 +764,15 @@ pub fn test_python(definition: &FunctionDefinition, runtime: &dyn crate::externa
         bail!("not a Python function");
     }
     let returns = d.returns.ok_or_else(|| anyhow!("a Python function declares what it returns: number, text or boolean"))?;
-    if d.tests.len() > 32 || d.tests.iter().any(|t| t.arguments.len() != d.arguments.len() || t.arguments.iter().any(|a| a.len() > 4096) || t.expected.len() > 4096) {
-        bail!("invalid test arguments or size");
-    }
+    check_tests(&d)?;
+    // A test with an error argument is not called: its result is that error (as in cells).
+    let error_of = |t: &FunctionTest| {
+        t.arguments.iter().find_map(|a| match a {
+            TestValue::Typed(TypedTestValue::Error { value }) => Some(value.clone()),
+            _ => None,
+        })
+    };
+    let called: Vec<&FunctionTest> = d.tests.iter().filter(|t| error_of(t).is_none()).collect();
     let job = WorkerJob {
         function: d.name.clone(),
         version: 0,
@@ -558,17 +781,36 @@ pub fn test_python(definition: &FunctionDefinition, runtime: &dyn crate::externa
         arguments: d.arguments.clone(),
         returns,
         context: CallContext::Sheet,
-        calls: d.tests.iter().map(|t| t.arguments.iter().map(|a| test_value(a)).collect()).collect(),
+        calls: called
+            .iter()
+            .map(|t| {
+                t.arguments
+                    .iter()
+                    .map(|a| match a {
+                        TestValue::Entered(s) => test_value(s),
+                        TestValue::Typed(TypedTestValue::Text { value }) => crate::external::WorkerValue::Text(value.clone()),
+                        TestValue::Typed(_) => crate::external::WorkerValue::Null,
+                    })
+                    .collect()
+            })
+            .collect(),
     };
-    let results = if job.calls.is_empty() { vec![] } else { runtime.run(&job, cancel).map_err(|e| anyhow!("the tests could not run: {e}"))? };
-    let results = results
-        .into_iter()
-        .zip(&d.tests)
-        .map(|(r, t)| {
-            let actual = check_result(r, returns, CallContext::Sheet).display();
-            FunctionTestResult { passed: actual == t.expected, actual, expected: t.expected.clone() }
-        })
-        .collect();
+    let mut ran = if job.calls.is_empty() { vec![] } else { runtime.run(&job, cancel).map_err(|e| anyhow!("the tests could not run: {e}"))? }.into_iter();
+    let mut results = Vec::with_capacity(d.tests.len());
+    for t in &d.tests {
+        let r = match error_of(t) {
+            Some(code) => crate::external::CallResult::error(&code, "an argument is this error", false),
+            None => check_result(ran.next().ok_or_else(|| anyhow!("the worker returned too few results"))?, returns, CallContext::Sheet),
+        };
+        let (kind, message) = match &r {
+            crate::external::CallResult::Number(_) => (TestValueKind::Number, None),
+            crate::external::CallResult::Text(_) => (TestValueKind::Text, None),
+            crate::external::CallResult::Boolean(_) => (TestValueKind::Boolean, None),
+            crate::external::CallResult::Empty => (TestValueKind::Text, None),
+            crate::external::CallResult::Error { message, .. } => (TestValueKind::Error, Some(message.clone())),
+        };
+        results.push(FunctionTestResult::of(&t.expected, r.display(), kind, message));
+    }
     Ok(TestedPython { definition: serde_json::to_string(&d)?, runtime: runtime.identity(), results })
 }
 
@@ -705,13 +947,21 @@ impl crate::workbook::Reader {
     }
 
     /// Run a definition's tests; Python ones in the workbook's runtime, without the writer.
-    pub fn test_function(&self, definition: &FunctionDefinition) -> Result<Vec<FunctionTestResult>> {
+    /// Setting `cancel` stops them: a Python worker is killed, a SQL test interrupted, and
+    /// formula tests stop before the next one.
+    pub fn test_function(&self, definition: &FunctionDefinition, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<FunctionTestResult>> {
         if definition.kind == FunctionKind::Python {
             let runtime = self.shared().functions.runtime_impl().ok_or_else(|| anyhow!(NO_RUNTIME))?;
             validate(self.connection(), &upper(definition), &list(self.connection())?)?;
-            return Ok(test_python(definition, runtime.as_ref(), &std::sync::atomic::AtomicBool::new(false))?.results);
+            return Ok(test_python(definition, runtime.as_ref(), cancel)?.results);
         }
-        test_definition(self.connection(), definition)
+        test_definition(self.connection(), definition, cancel)
+    }
+
+    /// Where `name` is used in this workbook (U.06e): sheet cells, table columns and the
+    /// functions whose versions call it.
+    pub fn function_usage(&self, name: &str) -> Result<FunctionUsage> {
+        usage(self.connection(), &self.sheets(), name)
     }
 
     /// Calls of worker functions that table columns need and the cache lacks: up to `limit`
@@ -751,7 +1001,7 @@ fn cache_suffix(cache: &crate::external::ResultCache, volatile: bool) -> String 
     }
 }
 
-pub(crate) fn test_definition(source_conn: &Connection, definition: &FunctionDefinition) -> Result<Vec<FunctionTestResult>> {
+pub(crate) fn test_definition(source_conn: &Connection, definition: &FunctionDefinition, cancel: &std::sync::atomic::AtomicBool) -> Result<Vec<FunctionTestResult>> {
     let mut definition = definition.clone();
     definition.name = definition.name.to_uppercase();
     let definition = &definition;
@@ -798,12 +1048,33 @@ pub(crate) fn test_definition(source_conn: &Connection, definition: &FunctionDef
     conn.execute_batch("SET enable_external_access=false; SET memory_limit='64MB'; SET threads=1; SET max_temp_directory_size='0B';")?;
     let interrupt = conn.interrupt_handle();
     let (finished, wait) = std::sync::mpsc::channel::<()>();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
     let timer = std::thread::spawn(move || {
-        if wait.recv_timeout(std::time::Duration::from_secs(2)) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
-            interrupt.interrupt();
+        // Interrupt at the deadline, or as soon as the tests are cancelled.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match wait.recv_timeout(std::time::Duration::from_millis(20)) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if stopped.load(std::sync::atomic::Ordering::SeqCst) || std::time::Instant::now() >= deadline {
+                        interrupt.interrupt();
+                        return;
+                    }
+                }
+                _ => return,
+            }
         }
     });
     let _deadline = TestDeadline { finished: Some(finished), timer: Some(timer) };
+    // The caller's flag, seen by the timer thread through `stop`.
+    let cancelled = || {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    };
     let mut sheets = crate::sheets::Sheets::from_bytes(None)?;
     sheets.create("Tests")?;
     for v in versions {
@@ -813,27 +1084,57 @@ pub(crate) fn test_definition(source_conn: &Connection, definition: &FunctionDef
             FunctionKind::Python => bail!("Python functions run in a worker; see test_python"),
         }
     }
+    check_tests(definition)?;
     let mut results = vec![];
     for t in &definition.tests {
+        if cancelled() {
+            bail!("the tests were cancelled");
+        }
         if started.elapsed() > std::time::Duration::from_secs(2) {
             bail!("function tests exceeded the time limit");
         }
-        if t.arguments.len() != definition.arguments.len() || t.arguments.iter().any(|a| a.len() > 4096) || t.expected.len() > 4096 {
-            bail!("invalid test arguments or size");
-        }
-        let actual = match definition.kind {
+        let (actual, kind) = match definition.kind {
             FunctionKind::Formula => sheets.test_function_call(definition, &t.arguments)?,
             FunctionKind::Python => bail!("Python functions run in a worker; see test_python"),
             FunctionKind::Sql => {
-                // Test values are strings (or the explicit NULL marker), never SQL fragments.
-                let args = t.arguments.iter().map(|a| if a == "NULL" { "NULL".into() } else { lit(a) }).collect::<Vec<_>>().join(",");
-                conn.query_row(&format!("SELECT CAST({}({args}) AS VARCHAR)", ident(&definition.name)), [], |r| {
-                    r.get::<_, Option<String>>(0)
-                })?
-                .unwrap_or("NULL".into())
+                // Test values are SQL literals (or NULL), never SQL fragments.
+                let mut args = Vec::new();
+                for a in &t.arguments {
+                    args.push(match a {
+                        TestValue::Entered(s) if s == "NULL" => "NULL".to_string(),
+                        TestValue::Entered(s) | TestValue::Typed(TypedTestValue::Text { value: s }) => lit(s),
+                        TestValue::Typed(TypedTestValue::Blank) => "NULL".to_string(),
+                        TestValue::Typed(TypedTestValue::Error { .. }) => {
+                            bail!("SQL functions do not receive error values: a SQL argument is a value or NULL (blank)")
+                        }
+                    });
+                }
+                let sql = format!("SELECT CAST(v AS VARCHAR), typeof(v) FROM (SELECT {}({}) AS v)", ident(&definition.name), args.join(","));
+                let run = conn.query_row(&sql, [], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)));
+                let (value, ty) = match run {
+                    Ok(v) => v,
+                    Err(_) if cancelled() => bail!("the tests were cancelled"),
+                    Err(e) => return Err(e.into()),
+                };
+                match value {
+                    None => ("NULL".to_string(), TestValueKind::Blank),
+                    Some(v) => {
+                        let ty = ty.to_ascii_uppercase();
+                        let kind = if ty == "VARCHAR" {
+                            TestValueKind::Text
+                        } else if ty == "BOOLEAN" {
+                            TestValueKind::Boolean
+                        } else if ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "UHUGEINT", "FLOAT", "DOUBLE"].contains(&ty.as_str()) || ty.starts_with("DECIMAL") {
+                            TestValueKind::Number
+                        } else {
+                            TestValueKind::Other
+                        };
+                        (v, kind)
+                    }
+                }
             }
         };
-        results.push(FunctionTestResult { passed: actual == t.expected, actual, expected: t.expected.clone() });
+        results.push(FunctionTestResult::of(&t.expected, actual, kind, None));
     }
     Ok(results)
 }

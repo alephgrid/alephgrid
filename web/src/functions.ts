@@ -3,7 +3,7 @@ import { builtinFunctions } from "./catalog";
 import { icon } from "./icons";
 import { el, pointerDrag, toast } from "./ui";
 import { store, stored } from "./storage";
-import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, WorkbookFunction } from "./protocol";
+import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, TestValue, WorkbookFunction } from "./protocol";
 
 /** U.06a–e: workbook functions in a resizable side panel beside the grid, with Code, Tests,
  *  Docs and Versions tabs and a compact results strip. Running tests never publishes;
@@ -42,6 +42,11 @@ function normalize(d: FunctionDefinition): string {
     tests: d.tests.map((t) => ({ arguments: t.arguments, expected: t.expected })),
     returns: d.kind === "python" ? d.returns ?? "number" : null, volatile: d.kind === "python" ? !!d.volatile : null,
   });
+}
+
+/** A test value as text (typed values show their text). */
+function shown(v: TestValue): string {
+  return typeof v === "string" ? v : v.type === "blank" ? "" : v.value;
 }
 
 function argList(args: string): string[] {
@@ -283,8 +288,8 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       const r = ran?.[i];
       return el("tr", { class: r ? (r.passed ? "pass" : "fail") : "" },
         el("th", { scope: "row" }, String(i + 1)),
-        ...names.map((a, j) => cell(`Test ${i + 1} ${a}`, t.arguments[j] ?? "", (v) => { t.arguments[j] = v; })),
-        cell(`Test ${i + 1} expected`, t.expected, (v) => { t.expected = v; }),
+        ...names.map((a, j) => cell(`Test ${i + 1} ${a}`, shown(t.arguments[j] ?? ""), (v) => { t.arguments[j] = v; })),
+        cell(`Test ${i + 1} expected`, shown(t.expected), (v) => { t.expected = v; }),
         el("td", { class: "fn-actual" }, r ? `${r.passed ? "✓" : "✗"} ${r.actual}` : ""),
         el("td", {}, el("button", { class: "icon-btn", type: "button", "aria-label": `Remove test ${i + 1}`, onclick: () => { draft.tests.splice(i, 1); render(); renderTests(); } }, icon("x"))));
     }));
