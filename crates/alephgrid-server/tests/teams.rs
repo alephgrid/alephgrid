@@ -1003,6 +1003,16 @@ async fn single_sign_on_maps_claims_to_users_and_roles() {
     let mut c = base();
     c["exp"] = json!(alephgrid_server::auth::now_ms() / 1000 - 3600);
     cases.push(("expired", c, "idp"));
+    // Time claims of the wrong JSON type are refused, not skipped (GHSA-h395-gr6q-cpjc).
+    let mut c = base();
+    c["exp"] = json!((alephgrid_server::auth::now_ms() / 1000 - 3600).to_string());
+    cases.push(("expiry as text", c, "idp"));
+    let mut c = base();
+    c["nbf"] = json!(alephgrid_server::auth::now_ms() / 1000 + 3600);
+    cases.push(("not yet valid", c, "idp"));
+    let mut c = base();
+    c["nbf"] = json!((alephgrid_server::auth::now_ms() / 1000 + 3600).to_string());
+    cases.push(("not-before as text", c, "idp"));
     let mut c = base();
     c["nonce"] = json!("replayed");
     cases.push(("nonce", c, "idp"));
