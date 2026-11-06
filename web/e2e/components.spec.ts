@@ -2,7 +2,7 @@
 // by keyboard), refused form values are linked error text, and buttons are busy while waiting.
 
 import { expect, test } from "@playwright/test";
-import { Server } from "./server";
+import { Server, menuCommand } from "./server";
 
 const server = new Server();
 test.beforeAll(async () => server.start());
@@ -79,4 +79,68 @@ test("U.11a / U.04a: toolbar controls that cannot run here say why", async ({ pa
   const exportBtn = tools.getByRole("button", { name: "Export" });
   await expect(exportBtn).toBeDisabled();
   await expect(exportBtn).toHaveAccessibleDescription("Open a table or sheet to export it");
+});
+
+test("U.11a: a cancel stays pending until the server acknowledges it", async ({ page }) => {
+  const wb = await server.createWorkbook("Cancelling");
+  // Hold the server's answer to the long query, so the moment between asking to cancel and
+  // the server confirming it can be seen.
+  let queryId = -1;
+  let release: (() => void) | undefined;
+  await page.routeWebSocket(/\/ws\//, (ws) => {
+    const srv = ws.connectToServer();
+    ws.onMessage((m) => {
+      const msg = JSON.parse(String(m));
+      if (msg.op === "query" && String(msg.sql).includes("range(100000000000)")) queryId = msg.id;
+      srv.send(m);
+    });
+    srv.onMessage((m) => {
+      const msg = JSON.parse(String(m));
+      if (queryId !== -1 && msg.id === queryId) release = () => ws.send(m);
+      else ws.send(m);
+    });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible({ timeout: 60_000 });
+  await menuCommand(page, "Tools", "SQL workspace");
+  const sql = page.getByRole("region", { name: "SQL" });
+  await sql.getByRole("combobox", { name: "SQL query" }).fill("SELECT sum(i) FROM range(100000000000) r(i)");
+  await sql.getByRole("button", { name: "Run", exact: true }).click();
+  await expect(sql.locator(".sql-status")).toContainText("Running");
+  const cancel = sql.getByRole("button", { name: "Cancel", exact: true });
+  await cancel.click();
+  await expect.poll(() => !!release, { timeout: 30_000 }).toBe(true);
+  // The server stopped it; until its answer arrives the cancel is pending, not done.
+  await expect(sql.locator(".sql-status")).toHaveText("Cancelling…");
+  await expect(cancel).toBeDisabled();
+  await expect(cancel).toHaveAttribute("aria-busy", "true");
+  release!();
+  await expect(sql.locator(".sql-status")).toHaveText("Cancelled.");
+  await expect(cancel).toBeHidden();
+});
+
+test("U.11a: dialogs and panels return focus to what opened them", async ({ page }) => {
+  const wb = await server.createWorkbook("Focus"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "S" });
+  ws.close();
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^S/ }).click();
+  const tools = page.getByRole("toolbar", { name: "Workbook tools" });
+  // A dialog from the toolbar: Escape closes it and focus is back on its button.
+  for (const name of ["Go to", "Names"]) {
+    const button = tools.getByRole("button", { name, exact: true });
+    await button.click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(button).toBeFocused();
+  }
+  // A dialog from a menu returns focus to the menu bar button that led there.
+  const help = page.getByRole("navigation", { name: "Workbook menus" }).getByRole("button", { name: "Help", exact: true });
+  await help.click();
+  await page.getByRole("menuitem", { name: /^Keyboard shortcuts/ }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(help).toBeFocused();
 });

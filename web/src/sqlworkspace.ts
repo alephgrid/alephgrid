@@ -55,7 +55,7 @@ type Draft = { sql: string; params: ({ name: string } & ParamState)[]; saved?: s
 /** The saved query (and version) loaded into the editor. */
 type Loaded = { id: string; name: string; kind: QueryKind; version: number; latest: number; sql: string; params: QueryParam[] };
 /** The request the workspace is waiting for. */
-type Job = { seq: number; id: number; label: string; kind: "query" | "other" };
+type Job = { seq: number; id: number; label: string; kind: "query" | "other"; cancelling?: boolean };
 type Shown = { sql: string; params: QueryParam[]; result: QueryResult; live: boolean };
 type Suggestion = { label: string; insert: string; detail: string };
 
@@ -367,10 +367,12 @@ export class SqlWorkspace {
     this.job = job;
     this.status.textContent = `${label}…`;
     this.cancelBtn.hidden = false;
+    this.cancelBtn.disabled = false;
+    this.cancelBtn.removeAttribute("aria-busy");
     try {
       const value = await work({
         onSent: (id) => { job.id = id; },
-        onProgress: (pct) => { if (this.job === job) this.status.textContent = `${label}… ${Math.round(pct)}%`; },
+        onProgress: (pct) => { if (this.job === job && !job.cancelling) this.status.textContent = `${label}… ${Math.round(pct)}%`; },
       });
       return { seq, value };
     } catch (error) {
@@ -396,8 +398,16 @@ export class SqlWorkspace {
     return false;
   }
 
+  /** U.11a: a cancel is pending until the server answers the request (with "cancelled", or
+   *  its result if it finished first): until then it says Cancelling… and cannot be repeated. */
   private cancel(): void {
-    if (this.job?.id) this.rpc.cancel(this.job.id).catch(() => {});
+    const job = this.job;
+    if (!job?.id || job.cancelling) return;
+    job.cancelling = true;
+    this.status.textContent = "Cancelling…";
+    this.cancelBtn.disabled = true;
+    this.cancelBtn.setAttribute("aria-busy", "true");
+    this.rpc.cancel(job.id).catch(() => {});
   }
 
   private current(seq: number): boolean {
