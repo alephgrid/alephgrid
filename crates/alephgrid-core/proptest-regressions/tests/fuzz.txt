@@ -6,3 +6,7 @@
 # everyone who runs the test benefits from these saved cases.
 cc defd101303e5f5e362058a5ea0d5deac73b6d387c78aa8a3736aa746924b3ec2 # shrinks to ([[PastedCell { value: "-\"", text: false, style: None }]], 0, 0)
 cc d77c17e9b4fa4b8f8a020d10dd361529891557362d7ecd2cd1b8c58704a2f034 # shrinks to ([[PastedCell { value: "'", text: true, style: None }]], 0, 0)
+cc ee5af7249abedc63d0dc801c3bc3d1df9831442e49797cbb603f572db3001c97 # shrinks to ([[PastedCell { value: "+\"\"", text: true, style: None, formula: None }]], 0, 0)
+cc e10bbea5ec7d841d4b1077d6d5e7cff1e1f032a6a0fcf56035ce3c48d6bf69d9 # shrinks to PastedCell { value: "'=", text: false, style: None, formula: None }
+cc 9a6c48e57562ca13f7b22e44043b05a53e94f1cd1f2debaa87af7a3fc9018fa2 # shrinks to ("=gaaAaAA$", 0, 0)
+cc 117d0f96c453fa958b700b89c9eaebff6b7950c7073f0ac584905a552372797c # shrinks to [[" ", "\t"], ["\t;", "a"]]

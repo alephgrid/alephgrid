@@ -117,3 +117,14 @@ Regression: alephgrid-core `sheets::editing::tests::cut_to_another_sheet_moves_c
 (fails without this patch: `=C1+A1` moved from Data to Other read `=C1+D5`, the wrong C1).
 The upstream test suite was not rerun for this patch (it needs a copy outside the workspace and
 its own build); rerun it with the next review.
+
+## Long column names do not overflow (fuzz finding; 7 November 2026)
+
+- `expressions/utils/mod.rs`: `column_to_number` accumulates with checked arithmetic and
+  returns its existing "Column is not valid." error when the letters overflow `i32`.
+  Upstream, a reference-like token with seven or more letters (`=gaaAaAA$`, read as column
+  `GAAAAAA`) overflowed `column_number * 26`, which panics in debug builds (the bounded fuzz
+  target `sheet_formula_check_is_total_on_any_text` found it) and wraps silently in release
+  builds. Upstream status: not reported yet. Remove when upstream checks the overflow.
+  Regression: alephgrid-core `tests::fuzz::sheet_formula_check_is_total_on_any_text` (fixed
+  cases; panicked without this patch). The upstream test suite was not rerun for this patch.

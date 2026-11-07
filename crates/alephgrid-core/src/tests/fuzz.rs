@@ -129,11 +129,15 @@ fn generated_formulas_parse_and_shift_exactly() {
 }
 
 /// The sheet formula checker (IronCalc's parser, as used when a cell is typed) answers for
-/// any text.
+/// any text. Found by this target on 7 Nov 2026: `=gaaAaAA$` (a seven-letter column)
+/// overflowed in IronCalc's `column_to_number`; fixed in the vendored copy.
 #[test]
 fn sheet_formula_check_is_total_on_any_text() {
     let mut wb = Workbook::open_in_memory().unwrap();
     wb.with_sheets(|s| s.create("Data").map(|_| ())).unwrap();
+    for f in ["=gaaAaAA$", "=GAAAAAA1", "=ZZZZZZZZZZZZ1+1", "=A1:ZZZZZZZZ2"] {
+        assert!(wb.sheets().check_formula(0, 0, 0, f).is_ok(), "{f:?}");
+    }
     let input = prop_oneof![FORMULA_CHARS.prop_map(String::from), "=\\PC{0,48}".prop_map(String::from), formula_expr()];
     fuzz("sheet_formula_check", (input, 0u32..50, 0u32..20), |(f, row, column)| {
         let s = wb.sheets();
@@ -151,12 +155,14 @@ fn csv_quote(v: &str) -> String {
 /// A CSV file written with standard quoting imports exactly the values written, in order:
 /// delimiters, quotes, newlines, formula-like text and non-ASCII inside quoted values are
 /// data. The first column is a row number so the header is recognisable; the others are
-/// imported as text.
+/// imported as text. Found by this target on 7 Nov 2026: with a tab and a `;` only inside
+/// quoted values, DuckDB's sniffer took `;` as the delimiter; fixed in
+/// `import::csv_delimiter`.
 #[test]
 fn quoted_csv_imports_exactly_what_was_written() {
     let value = "[a-zA-Z0-9 ,;\t\"'\n=+@.%é漢😀-]{1,12}";
     let table = (1usize..5).prop_flat_map(move |columns| prop::collection::vec(prop::collection::vec(value, columns), 1..20));
-    fuzz("csv_round_trip", table, |rows| {
+    let check = |rows: Vec<Vec<String>>| -> Result<(), TestCaseError> {
         let columns = rows[0].len();
         let dir = tempfile::tempdir().unwrap();
         let mut text = String::from("n");
@@ -187,7 +193,12 @@ fn quoted_csv_imports_exactly_what_was_written() {
         let v = wb.open_view(spec("fuzz")).unwrap().view_id;
         prop_assert_eq!(all_rows(&wb, v), expected, "{}", text);
         Ok(())
-    });
+    };
+    let strings = |rows: &[&[&str]]| rows.iter().map(|r| r.iter().map(|v| v.to_string()).collect()).collect::<Vec<Vec<String>>>();
+    for fixed in [strings(&[&[" ", "\t"], &["\t;", "a"]]), strings(&[&["a;b", "c\td"], &["e|f", ";"]])] {
+        check(fixed).unwrap();
+    }
+    fuzz("csv_round_trip", table, check);
 }
 
 /// Any bytes named `.csv` either import (and the table holds the rows reported) or fail
@@ -226,13 +237,15 @@ fn pasted_cell() -> impl Strategy<Value = PastedCell> {
 }
 
 /// Cells pasted from another app (F.04b): text cells and anything starting with `=` keep
-/// exactly the pasted characters and never become formulas; missing cells of a ragged row
-/// clear the target; one undo step empties it again. Two findings of this target are
-/// quarantined below until they are fixed.
+/// exactly the pasted characters, a typed value's leading apostrophe is a quote prefix, and
+/// no pasted value becomes a formula (no input starts with `=`); missing cells of a ragged
+/// row clear the target; one undo step empties it again. Found by this target on 7 Nov
+/// 2026: the text `+""` stayed the formula `=+""` (its result is text, which passed the
+/// text check); fixed in `Sheets::set_values`.
 #[test]
 fn pasted_cells_keep_text_and_clear_and_undo() {
     let grid = prop::collection::vec(prop::collection::vec(pasted_cell(), 1..4), 1..4);
-    fuzz("paste_cells", (grid, 0u32..5, 0u32..5), |(cells, row, column)| {
+    let check = |(cells, row, column): (Vec<Vec<PastedCell>>, u32, u32)| -> Result<(), TestCaseError> {
         let mut wb = Workbook::open_in_memory().unwrap();
         wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
         let width = cells.iter().map(|r| r.len()).max().unwrap() as u32;
@@ -242,13 +255,14 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
         for (dr, line) in cells.iter().enumerate() {
             for dc in 0..width as usize {
                 let d = s.cell_detail(0, row + dr as u32, column + dc as u32).unwrap();
+                prop_assert!(!d.input.starts_with('='), "pasted {:?} became the formula {:?}", line.get(dc), d.input);
                 match line.get(dc) {
                     None => prop_assert!(d.input.is_empty() && d.display.is_empty(), "a missing cell was not cleared: {:?}", d),
                     Some(p) if p.value.is_empty() => prop_assert!(d.display.is_empty(), "{:?}", d),
-                    // A leading apostrophe: pasted_text_keeps_a_leading_apostrophe (quarantined).
-                    Some(p) if p.value.starts_with('\'') => {}
                     Some(p) if p.text || p.value.starts_with('=') => prop_assert_eq!(&d.display, &p.value, "pasted {:?}", p),
-                    Some(_) => {} // pasted_values_never_become_formulas (quarantined)
+                    // A typed value: the apostrophe is a quote prefix, the rest is the text.
+                    Some(p) if p.value.starts_with('\'') => prop_assert_eq!(&d.display, &p.value[1..], "pasted {:?}", p),
+                    Some(_) => {} // numbers, dates and so on are read as typed
                 }
             }
         }
@@ -261,21 +275,33 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
             }
         }
         Ok(())
-    });
+    };
+    let cell = |value: &str, text: bool| PastedCell { value: value.into(), text, style: None, formula: None };
+    check((vec![vec![cell("+\"\"", true)]], 0, 0)).unwrap();
+    check((vec![vec![cell("-\"a\"&\"b\"", true), cell("'=A1", false), cell("'", false)]], 1, 1)).unwrap();
+    fuzz("paste_cells", (grid, 0u32..5, 0u32..5), check);
 }
 
 /// "Formulas are never made from pasted text" (`Sheets::paste_cells`): a value pasted as a
 /// typed value (not text) that starts with `+`, `-` or `@` must not become a formula either.
 /// Found by this target on 7 Nov 2026 (`-"` and `+A1` were stored as formulas); fixed in
-/// `Sheets::set_values`.
+/// `Sheets::set_values`. Found again the same day: `'=` (a quote prefix, then `=`) showed
+/// the input `=`, because replacing the target's formats also dropped the quote prefix,
+/// which IronCalc keeps in the style; fixed in `Sheets::paste_cells`. A typed `'=A1` is
+/// the text `=A1`, and its input keeps the apostrophe so editing it again keeps it text.
 #[test]
 fn pasted_values_never_become_formulas() {
     let mut wb = Workbook::open_in_memory().unwrap();
     wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
-    for value in ["-\"", "+A1", "-A1", "@SUM(1)"] {
+    for value in ["-\"", "+A1", "-A1", "@SUM(1)", "'=", "'=A1"] {
         wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: false, style: None, formula: None }]], PasteMode::All)).unwrap();
         let d = wb.sheets().cell_detail(0, 0, 0).unwrap();
         assert!(!d.input.starts_with('='), "{value:?} became the formula {:?}", d.input);
+    }
+    for (value, display, input) in [("'=", "=", "'="), ("'=A1", "=A1", "'=A1"), ("'00123", "00123", "'00123")] {
+        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: false, style: None, formula: None }]], PasteMode::All)).unwrap();
+        let d = wb.sheets().cell_detail(0, 0, 0).unwrap();
+        assert_eq!((d.display.as_str(), d.input.as_str()), (display, input), "pasted {value:?}");
     }
     fuzz("paste_values_not_formulas", pasted_cell(), |p| {
         let mut wb = Workbook::open_in_memory().unwrap();

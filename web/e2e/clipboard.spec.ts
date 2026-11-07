@@ -225,7 +225,9 @@ test("cells copied in other spreadsheets paste with their values and formats", a
   expect([got.display(0, 1), got.content(0, 1)]).toEqual(["12.50%", "0.125"]);
   expect(got.display(0, 2)).toBe("2024-01-15");
   expect(got.style(0, 2)).toMatchObject({ i: true, color: "#C00000" });
-  expect([got.display(0, 3), got.content(0, 3)]).toEqual(["007", "007"]);
+  // Text that would read as a number keeps its quote prefix in its input, so editing it
+  // again keeps it text.
+  expect([got.display(0, 3), got.content(0, 3)]).toEqual(["007", "'007"]);
   expect(got.style(0, 3)).toMatchObject({ fill: "#FFFF00" });
   expect(got.display(1, 0)).toBe("Two\nlines");
   expect(got.style(1, 0)).toEqual({});
@@ -241,7 +243,7 @@ test("cells copied in other spreadsheets paste with their values and formats", a
   await paste(page, INLINE_TEXT, INLINE_HTML);
   await expect(page.locator(".cell-ref")).toHaveText("B5:D6");
   got = await cells(ws, 0, 6, 4);
-  expect([got.display(4, 1), got.content(4, 1)]).toEqual(["007", "007"]);
+  expect([got.display(4, 1), got.content(4, 1)]).toEqual(["007", "'007"]);
   expect(got.style(4, 1)).toMatchObject({ b: true, color: "#0000FF" });
   expect([got.display(4, 2), got.content(4, 2)]).toEqual(["25%", "0.25"]);
   expect(got.style(4, 2)).toMatchObject({ fill: "#FFFF00", num_fmt: "0%" });
@@ -377,7 +379,8 @@ test("cells copy between sheets, and from a table into a sheet with their types"
   await paste(page, await copied(page));
   await expect.poll(async () => (await cells(ws, 1, 5, 5)).display(3, 3)).toBe("007");
   const got = await cells(ws, 1, 5, 5);
-  expect([got.content(3, 3), got.content(4, 3), got.content(3, 4), got.content(4, 4)]).toEqual(["007", "010", "12", "3"]);
+  // The text cells' inputs keep their quote prefix, so editing them again keeps them text.
+  expect([got.content(3, 3), got.content(4, 3), got.content(3, 4), got.content(4, 4)]).toEqual(["'007", "'010", "12", "3"]);
   ws.close();
 });
 
@@ -449,7 +452,7 @@ test("copying sheet cells writes an HTML table with raw values and formats; cell
   expect(got.style(0, 1)).toMatchObject({ i: true, u: true, s: true, color: "#FF0000" });
   expect(got.content(1, 0)).toBe(`say "hi" & bye`);
   expect(got.style(1, 0)).toMatchObject({ fill: "#FFFF00" });
-  expect([got.display(1, 1), got.content(1, 1)]).toEqual(["007", "007"]);
+  expect([got.display(1, 1), got.content(1, 1)]).toEqual(["007", "'007"]);
   expect(got.content(2, 0)).toBe("2469");
   ws.close(); ws2.close();
 });

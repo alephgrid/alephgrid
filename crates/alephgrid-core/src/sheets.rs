@@ -710,12 +710,13 @@ impl Sheets {
     /// literal text use [`literal_text`]). A value not starting with `=` never becomes a formula either: IronCalc reads `+A1`
     /// or `-A1` as one, so such a value is written as text.
     pub fn set_values(&mut self, index: u32, inputs: &[(SheetInput, bool)]) -> Result<()> {
-        // Text that looks like a formula is written as text from the start: written as it
-        // is, a formula whose result is text would stay a live formula (SEC.13).
+        // Text that IronCalc could read as a formula (`=…`, and `+…`/`-…` that are not
+        // numbers) is written as text from the start: written as it is, a formula whose
+        // result is text (`+""`) would stay a live formula (SEC.13).
         let plain: Vec<SheetInput> = inputs
             .iter()
             .map(|(i, text)| {
-                if *text && i.value.starts_with('=') {
+                if *text && i.value.starts_with(['=', '+', '-']) {
                     SheetInput { value: format!("'{}", i.value), ..i.clone() }
                 } else {
                     i.clone()
@@ -730,6 +731,7 @@ impl Sheets {
                 let (row, column) = (i.row as i32 + 1, i.column as i32 + 1);
                 if *text {
                     !matches!(m.get_cell_type(index, row, column), Ok(CellType::Text))
+                        || m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('='))
                 } else {
                     !i.value.starts_with('=') && m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('='))
                 }
