@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc defd101303e5f5e362058a5ea0d5deac73b6d387c78aa8a3736aa746924b3ec2 # shrinks to ([[PastedCell { value: "-\"", text: false, style: None }]], 0, 0)
+cc d77c17e9b4fa4b8f8a020d10dd361529891557362d7ecd2cd1b8c58704a2f034 # shrinks to ([[PastedCell { value: "'", text: true, style: None }]], 0, 0)

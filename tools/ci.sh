@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Run CircleCI on demand (docs/CI.md). Nothing runs on push; this starts a pipeline.
 #
-#   tools/ci.sh check [branch]     build, Rust tests, clippy, Chromium browser journeys
-#   tools/ci.sh full  [branch]     the check plus WebKit, Firefox and the long runs
+#   tools/ci.sh check   [branch]   the PR tier: build, Rust tests, clippy, licence notices,
+#                                  test gate, Chromium browser journeys
+#   tools/ci.sh nightly [branch]   the nightly tier (also run by the CircleCI schedule): the PR
+#                                  tier plus Firefox, WebKit, the install check, long property
+#                                  and fuzz runs, repeated server suites, mutation testing
+#                                  ("full" is the earlier name and still works)
 #   tools/ci.sh status [number]    the workflows of a pipeline (default: the latest)
 #   tools/ci.sh release vX.Y.Z     build, test and package a release from tag vX.Y.Z (pushed);
 #                                  publishes only after approval in CircleCI (docs/RELEASING.md)
@@ -37,10 +41,10 @@ app_url() { # pipeline number
 }
 
 case "${1:-}" in
-  check|full)
+  check|pr|nightly|full)
     need
     branch=${2:-$(git rev-parse --abbrev-ref HEAD)}
-    if [ "$1" = check ]; then params='{"run_check":true}'; else params='{"run_full":true}'; fi
+    case "$1" in check|pr) params='{"run_check":true}' ;; *) params='{"run_nightly":true}' ;; esac
     if [ -n "${CIRCLECI_DEFINITION_ID:-}" ]; then
       body=$(jq -n --arg d "$CIRCLECI_DEFINITION_ID" --arg b "$branch" --argjson p "$params" \
         '{definition_id:$d, config:{branch:$b}, checkout:{branch:$b}, parameters:$p}')
@@ -93,7 +97,7 @@ case "${1:-}" in
     app_url "$number"
     ;;
   *)
-    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

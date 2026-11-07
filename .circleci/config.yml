@@ -1,14 +1,18 @@
-# CircleCI runs only when asked (docs/CI.md). Pushes and pull requests start a pipeline whose
-# parameters are all false, so no workflow runs and nothing is billed. Trigger a run from the
-# CircleCI app ("Trigger Pipeline", add a boolean parameter) or with tools/ci.sh:
+# CircleCI never runs on a push (docs/CI.md, owner decision 9.16). Pushes and pull requests start
+# a pipeline whose parameters are all false, so no workflow runs and nothing is billed. The test
+# tiers of docs/TEST_STRATEGY.md:
 #
-#   run_check = true   build, Rust tests, clippy, browser journeys in Chromium   (~ the PR tier)
-#   run_full  = true   the check, plus WebKit and Firefox and the long randomized/repeated runs
-#   run_release = true, release_version = X.Y.Z, on tag vX.Y.Z (tools/ci.sh release vX.Y.Z):
-#                      build, test and package every platform, make a private draft GitHub
-#                      release, wait for approval in CircleCI, then publish (docs/RELEASING.md)
+#   pr       run_check = true (tools/ci.sh check): build, Rust tests, clippy, licence notices,
+#            the test gate, browser journeys in Chromium
+#   nightly  run_nightly = true (tools/ci.sh nightly), or a CircleCI schedule (set up once by the
+#            owner, docs/CI.md): the PR tier plus Firefox and WebKit, the install check, long
+#            property and fuzz runs, repeated server suites and mutation testing
+#   release  run_release = true, release_version = X.Y.Z, on tag vX.Y.Z (tools/ci.sh release
+#            vX.Y.Z): everything in nightly, then build, smoke-test and package every platform,
+#            check the artifacts, make a private draft GitHub release, wait for approval in
+#            CircleCI, then publish (docs/RELEASING.md)
 #
-# Tiers follow docs/TEST_STRATEGY.md.
+# A failing test fails its job in every tier: no retries, no "|| true" (tools/test_gate.py checks).
 
 version: 2.1
 
@@ -16,6 +20,10 @@ parameters:
   run_check:
     type: boolean
     default: false
+  run_nightly:
+    type: boolean
+    default: false
+  # The earlier name of run_nightly; still accepted.
   run_full:
     type: boolean
     default: false
@@ -178,6 +186,9 @@ jobs:
       - run:
           name: Licence notices match Cargo.lock and web/package-lock.json (tools/licenses.py)
           command: python3 tools/licenses.py --check
+      - run:
+          name: Test gate (skips listed with a reason, required suites present; tools/test_gate.py)
+          command: python3 tools/test_gate.py
 
   e2e:
     executor: vm
@@ -202,12 +213,15 @@ jobs:
           working_directory: web
           command: |
             chmod +x ../target/debug/alephgrid
-            npx playwright test
+            npx playwright test --reporter=list,junit
           no_output_timeout: 30m
           environment:
             E2E_BROWSER: << parameters.browser >>
             # Playwright's own Chromium build instead of Google Chrome.
             E2E_BROWSER_CHANNEL: chromium
+            PLAYWRIGHT_JUNIT_OUTPUT_NAME: e2e-results/junit.xml
+      - store_test_results:
+          path: web/e2e-results
       - store_artifacts:
           path: web/test-results
           destination: playwright-<< parameters.browser >>
@@ -230,12 +244,51 @@ jobs:
           environment:
             PROPTEST_CASES: "2000"
       - run:
+          name: Fuzz targets (formula parsers, CSV import, pasted cells), 200,000 cases or 5 minutes each
+          command: cargo test --locked -p alephgrid-core --lib tests::fuzz -- --nocapture
+          no_output_timeout: 40m
+          environment:
+            FUZZ_CASES: "200000"
+            FUZZ_SECONDS: "300"
+      - run:
           name: Integration and crash suites, five times to surface flakiness
           command: for i in 1 2 3 4 5; do cargo test --locked -p alephgrid-server || exit 1; done
           no_output_timeout: 40m
+      # Shrunk failing inputs of the property and fuzz targets: commit them to replay them on
+      # every later run (docs/TEST_STRATEGY.md).
       - store_artifacts:
           path: crates/alephgrid-core/proptest-regressions
           destination: proptest-regressions
+
+  # The built binary starts on an empty data directory, serves the UI, creates a workbook and
+  # imports a CSV: the release smoke test, on every nightly run.
+  install-check:
+    executor: vm
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Install check (tools/release/smoke.sh)
+          command: |
+            chmod +x target/debug/alephgrid
+            tools/release/smoke.sh target/debug/alephgrid "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+
+  # Disables one engine safeguard at a time; the engine tests must catch each (tools/mutants.py).
+  mutation:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          name: Targeted mutation testing (every mutant must be killed)
+          command: python3 tools/mutants.py
+          no_output_timeout: 40m
 
   # ------------------------------------------------------------------ release (docs/RELEASING.md)
   release-check:
@@ -355,6 +408,17 @@ jobs:
           paths:
             - dist/*.cdx.json*
 
+  # The artifacts match the tagged source before anything is drafted (tools/release/verify.sh).
+  release-verify:
+    executor: node
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Archives, SBOMs, checksums, notices and the reported version
+          command: tools/release/verify.sh "<< pipeline.parameters.release_version >>" dist
+
   release-draft:
     executor: node
     steps:
@@ -423,11 +487,14 @@ jobs:
             done
 
 workflows:
-  check:
+  pr:
     when:
       and:
         - << pipeline.parameters.run_check >>
+        - not: << pipeline.parameters.run_nightly >>
         - not: << pipeline.parameters.run_full >>
+        - not:
+            equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     jobs:
       - web
       - rust-build:
@@ -441,8 +508,13 @@ workflows:
           browser: chromium
           requires: [rust-build]
 
-  full:
-    when: << pipeline.parameters.run_full >>
+  # Started by a CircleCI schedule (set run_nightly = true in it; docs/CI.md) or by hand.
+  nightly:
+    when:
+      or:
+        - << pipeline.parameters.run_nightly >>
+        - << pipeline.parameters.run_full >>
+        - equal: [scheduled_pipeline, << pipeline.trigger_source >>]
     jobs:
       - web
       - rust-build:
@@ -457,11 +529,16 @@ workflows:
             parameters:
               browser: [chromium, firefox, webkit]
           requires: [rust-build]
+      - install-check:
+          requires: [rust-build]
       - long-runs:
-          requires: [web]
+          requires: [rust-build]
+      - mutation:
+          requires: [rust-build]
 
-  # On a tag only, started by tools/ci.sh release vX.Y.Z. Nothing is public until someone
-  # approves the "approve-publish" step in CircleCI after checking the draft release.
+  # On a tag only, started by tools/ci.sh release vX.Y.Z. Every nightly check runs on the tagged
+  # commit first; nothing is public until someone approves the "approve-publish" step in
+  # CircleCI after checking the draft release.
   release:
     when: << pipeline.parameters.run_release >>
     jobs:
@@ -472,6 +549,31 @@ workflows:
             branches:
               ignore: /.*/
       - web:
+          filters: *on-tags
+      - rust-build:
+          requires: [web]
+          filters: *on-tags
+      - rust-test:
+          requires: [rust-build]
+          filters: *on-tags
+      - clippy:
+          requires: [rust-build]
+          filters: *on-tags
+      - e2e:
+          name: e2e-<< matrix.browser >>
+          matrix:
+            parameters:
+              browser: [chromium, firefox, webkit]
+          requires: [rust-build]
+          filters: *on-tags
+      - install-check:
+          requires: [rust-build]
+          filters: *on-tags
+      - long-runs:
+          requires: [rust-build]
+          filters: *on-tags
+      - mutation:
+          requires: [rust-build]
           filters: *on-tags
       - release-linux:
           name: release-linux-amd64
@@ -493,9 +595,21 @@ workflows:
       - release-sbom:
           requires: [release-check]
           filters: *on-tags
+      - release-verify:
+          requires: [release-linux-amd64, release-linux-arm64, release-macos, release-sbom]
+          filters: *on-tags
       - release-draft:
           context: release
-          requires: [release-linux-amd64, release-linux-arm64, release-macos, release-sbom]
+          requires:
+            - release-verify
+            - rust-test
+            - clippy
+            - e2e-chromium
+            - e2e-firefox
+            - e2e-webkit
+            - install-check
+            - long-runs
+            - mutation
           filters: *on-tags
       - approve-publish:
           type: approval

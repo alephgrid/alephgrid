@@ -6,6 +6,8 @@ web/dist
 *.duckdb.wal
 .DS_Store
 web/test-results
+web/e2e-results
+/bench-results
 web/playwright-report
 
 # Test fixtures written by older versions (migration tests) are data, not build output.
