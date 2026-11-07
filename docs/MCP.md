@@ -96,8 +96,10 @@ the result was issued.
   reader for people's interactive work. Jobs live in the server process: they are forgotten
   after an hour or when the server restarts (stored results and their handles survive).
   Cancelling a job stops it and discards its result.
-- Time-zone functions (`AT TIME ZONE` and other ICU functions) are not available: DuckDB's ICU
-  extension is not in this build, and extensions cannot be loaded. Work in UTC with `epoch_us`.
+- Time-zone functions (`AT TIME ZONE`, `timezone()`, `date_trunc` and `extract` on
+  `TIMESTAMPTZ`) are not available: DuckDB's ICU extension is not in this build, and extensions
+  cannot be loaded. Work in UTC: `ts::TIMESTAMP` is the UTC time, `ts::TIMESTAMP::DATE` the UTC
+  day, `epoch_us(ts)` the microseconds. The error an agent gets says so.
 - Catalog search matches words in names and SQL. It does not use DuckDB's full-text search
   extension, because extension installs are refused (see SECURITY.md).
 
@@ -109,3 +111,32 @@ the result was issued.
   header is refused with 400.
 - `initialize` returns an `Mcp-Session-Id`.
 - `GET /mcp` returns 405: the server sends no messages of its own.
+
+## Tested clients
+
+Tested 7 November 2026 against a local server (debug build), a hand-written workbook (decimals,
+NULLs, timestamps with offsets, an instruction to agents in a cell and in a sheet) and a connection
+scoped to that one workbook.
+
+| Client | Version | Transport | Result |
+| --- | --- | --- | --- |
+| MCP Inspector CLI | 2.14.0 | Streamable HTTP | `tools/list`, every tool, `resources/list`, `resources/read`, `resources/templates/list`, `prompts/list` work; another workbook is "not found"; `COPY` refused; a job is started, polled and cancelled |
+| MCP Inspector CLI | 2.14.0 | stdio (`alephgrid mcp`) | The same calls, same results |
+| Claude Code | 2.1.316 | Streamable HTTP | 4 analytical questions and 1 adversarial task: all answers correct; the instruction in the cells was reported as data and not followed (no proposal) |
+| Claude Code | 2.1.316 | stdio (`alephgrid mcp`) | The same 5 tasks, all correct, nothing proposed |
+| Claude Code + MCP Inspector | 2.1.316, 2.14.0 | stdio | Claude Code found the workbook, analyzed it and proposed a saved query; after approval, Inspector ran it and got the same rows |
+
+Both clients ask for protocol 2025-11-25 and continue with 2025-06-18. Before `initialize` they
+try `server/discover` with protocol 2026-07-28; the server refuses it (400 over HTTP, "method not
+supported" over stdio) and the clients fall back. Claude Code opens `GET /mcp` and accepts 405.
+
+Known limits:
+
+- Protocol 2026-07-28 (`server/discover`, stateless) is not spoken; Inspector's `--protocol-era
+  modern` fails, `legacy` and `auto` work.
+- No server-to-client messages: no `listChanged` notifications, no progress over a stream; long
+  queries become jobs instead.
+- The stdio bridge forwards one message at a time.
+- Not tested from here: Claude Desktop (needs the desktop app) and ChatGPT (needs a public HTTPS
+  endpoint). These are owner checks.
+
