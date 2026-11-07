@@ -270,11 +270,18 @@ impl PythonRuntime {
         unsafe {
             use std::os::unix::process::CommandExt;
             cmd.pre_exec(move || {
-                let set = |resource, value: u64| {
-                    let lim = libc::rlimit { rlim_cur: value as libc::rlim_t, rlim_max: value as libc::rlim_t };
+                let set_both = |resource, soft: u64, hard: u64| {
+                    let lim = libc::rlimit { rlim_cur: soft as libc::rlim_t, rlim_max: hard as libc::rlim_t };
                     libc::setrlimit(resource, &lim);
                 };
-                set(libc::RLIMIT_CPU, limits.cpu_ms.div_ceil(1000).max(1));
+                let set = |resource, value: u64| set_both(resource, value, value);
+                // The CPU limit backs up the wall-clock watchdog below. With soft and hard equal,
+                // Linux sends SIGKILL right as the limit is reached, which for a busy loop is the
+                // same moment the watchdog's timeout falls due, so the kill read as a crash. A
+                // second of headroom lets the watchdog answer first, and a hard limit above the
+                // soft one makes the kernel send SIGXCPU (recognised below) before SIGKILL.
+                let cpu = limits.cpu_ms.div_ceil(1000).max(1) + 1;
+                set_both(libc::RLIMIT_CPU, cpu, cpu + 1);
                 set(libc::RLIMIT_CORE, 0);
                 set(libc::RLIMIT_NOFILE, 256);
                 // Enforced by Linux; macOS ignores it, and the watchdog samples instead.
@@ -368,9 +375,8 @@ impl PythonRuntime {
         match status {
             Some(s) if s.success() => Ok(out),
             Some(s) => {
-                use std::os::unix::process::ExitStatusExt;
-                if s.signal() == Some(libc::SIGXCPU) {
-                    return Err(failure(WorkerFailureKind::Timeout, format!("the function used more than {} s of CPU", self.limits.cpu_ms as f64 / 1000.0)));
+                if cpu_limit_hit(&s) {
+                    return Err(failure(WorkerFailureKind::Timeout, format!("the function used more than {} s of CPU", (self.limits.cpu_ms.div_ceil(1000).max(1) + 1) as f64)));
                 }
                 let text = String::from_utf8_lossy(&err);
                 let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
@@ -511,4 +517,24 @@ fn seatbelt_profile(m: &Manifest, work: &Path) -> String {
         reads = read_rules.join(" "),
         meta = meta_rules.join(" "),
     )
+}
+
+/// Whether the worker was stopped by its CPU-time limit: SIGXCPU directly, or through the
+/// sandbox wrapper, which exits with 128 + the signal number.
+fn cpu_limit_hit(s: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    s.signal() == Some(libc::SIGXCPU) || s.code() == Some(128 + libc::SIGXCPU)
+}
+
+#[cfg(test)]
+mod cpu_limit_tests {
+    #[test]
+    fn the_cpu_limit_is_recognised_directly_and_through_the_sandbox() {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(super::cpu_limit_hit(&std::process::ExitStatus::from_raw(libc::SIGXCPU)));
+        assert!(super::cpu_limit_hit(&std::process::ExitStatus::from_raw((128 + libc::SIGXCPU) << 8)));
+        assert!(!super::cpu_limit_hit(&std::process::ExitStatus::from_raw(1 << 8)));
+        assert!(!super::cpu_limit_hit(&std::process::ExitStatus::from_raw((128 + libc::SIGKILL) << 8)));
+        assert!(!super::cpu_limit_hit(&std::process::ExitStatus::from_raw(libc::SIGKILL)));
+    }
 }

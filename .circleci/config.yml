@@ -230,6 +230,9 @@ jobs:
   # job time limit (together they need far more than one hour).
   long-props:
     executor: vm
+    # 2,000 cases in all, as four shards of 500 with different seeds: one machine cannot run
+    # them within the one-hour job limit (pipeline 22 ran out at exactly 1:00:00).
+    parallelism: 4
     environment:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -241,11 +244,16 @@ jobs:
       - run:
           # Each case opens a workbook on disk, so file I/O, not the CPU, sets the pace
           # (measured: a release build is no faster). The scratch workbooks live in RAM.
-          name: Property and state-machine tests, 2000 cases (workbooks on a RAM disk)
-          command: cargo test --locked -p alephgrid-core --lib props
+          name: Property and state-machine tests, 2000 cases over four machines (workbooks on a RAM disk)
+          # A new seed every night (still four distinct shards); printed so a failure can be
+          # replayed locally with PROPTEST_RNG_SEED and PROPTEST_CASES=500.
+          command: |
+            export PROPTEST_RNG_SEED=$(( << pipeline.number >> * 10 + CIRCLE_NODE_INDEX ))
+            echo "shard $((CIRCLE_NODE_INDEX + 1)) of $CIRCLE_NODE_TOTAL: PROPTEST_CASES=$PROPTEST_CASES PROPTEST_RNG_SEED=$PROPTEST_RNG_SEED"
+            cargo test --locked -p alephgrid-core --lib props
           no_output_timeout: 50m
           environment:
-            PROPTEST_CASES: "2000"
+            PROPTEST_CASES: "500"
             TMPDIR: /dev/shm
       # Shrunk failing inputs of the property targets: commit them to replay them on every
       # later run (docs/TEST_STRATEGY.md).

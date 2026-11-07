@@ -1508,6 +1508,16 @@ export class WorkbookScreen {
 
   /** Sheet `index`'s layout for rows [r0, r1] as shown (see `SheetInfo.layout`), or null
    *  while a refresh mixes layouts (or the sheet is unknown). */
+  /** [`shownLayout`] for a paste, which waits instead of giving up: when the shown rows come
+   *  from two layouts (an undo or a change by someone else is still arriving), the sheet is
+   *  refreshed first and the layout looked up again. */
+  private async pasteLayout(index: number, r0: number, r1: number): Promise<number | null> {
+    if (this.active?.kind === "sheet" && this.active.index === index && this.sheetCache.layoutsIn(r0, Math.max(r0, r1)).size > 1) {
+      await this.refreshSheet();
+    }
+    return this.shownLayout(index, r0, r1);
+  }
+
   private shownLayout(index: number, r0: number, r1: number): number | null {
     const info = this.sheets.find((s) => s.index === index);
     if (this.active?.kind !== "sheet" || this.active.index !== index) return info?.layout ?? null;
@@ -2087,7 +2097,7 @@ export class WorkbookScreen {
     const rows = cells.length, columns = cells.reduce((n, r) => Math.max(n, r.length), 0);
     if (!rows || !columns) return;
     if (rows * columns > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
-    const layout = this.shownLayout(sheet, at.r, at.r + rows - 1);
+    const layout = await this.pasteLayout(sheet, at.r, at.r + rows - 1);
     if (layout === null) return;
     const params = { sheet, row: at.r, column: at.c, cells, mode, layout };
     if (!this.fitsMessage(rows * columns, { op: "sheet_paste_cells", ...params })) return;
@@ -2128,8 +2138,8 @@ export class WorkbookScreen {
         if (mode !== "all" || transpose) { this.refuse("Nothing was pasted: paste special applies to copied cells. Cut cells move as they are."); return; }
         const other = clip.sheet !== sheet;
         const layout = other
-          ? this.shownLayout(sheet, at.r, at.r + source.rows - 1)
-          : this.shownLayout(sheet, Math.min(source.row, at.r), Math.max(source.row, at.r) + source.rows - 1);
+          ? await this.pasteLayout(sheet, at.r, at.r + source.rows - 1)
+          : await this.pasteLayout(sheet, Math.min(source.row, at.r), Math.max(source.row, at.r) + source.rows - 1);
         if (layout === null) return;
         area = await this.inSheetOrder(() => this.rpc.call("sheet_move", {
           sheet, source, row: at.r, column: at.c, layout,
@@ -2138,7 +2148,7 @@ export class WorkbookScreen {
         this.clip = null;
         this.grid.setCopied(null);
       } else {
-        const layout = this.shownLayout(sheet, at.r, at.r + (transpose ? source.columns : source.rows) - 1);
+        const layout = await this.pasteLayout(sheet, at.r, at.r + (transpose ? source.columns : source.rows) - 1);
         if (layout === null) return;
         area = await this.inSheetOrder(() => this.rpc.call("sheet_paste", {
           from_sheet: clip.sheet, source, sheet, row: at.r, column: at.c, mode, transpose, layout,

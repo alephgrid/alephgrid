@@ -16,8 +16,9 @@ tier) refuses unlisted skips and forgiving test commands.
 | **release** | `run_release = true`, `release_version`, on a tag (`tools/ci.sh release vX.Y.Z`) | every nightly job on the tagged commit, then binaries, SBOMs and the artifact check (`tools/release/verify.sh`); the draft release waits for all of them, then (after approval) GitHub release, Docker image, npm and PyPI; see [RELEASING.md](RELEASING.md) |
 
 The nightly long runs are three jobs side by side, each well inside the job time limit:
-`long-props` (2,000-case property tests, scratch workbooks on a RAM disk, since each case
-opens a workbook and file I/O sets the pace), `long-fuzz` and `long-server` (every
+`long-props` (2,000-case property tests as four shards of 500 with nightly-changing seeds
+printed in the log, scratch workbooks on a RAM disk, since each case opens a workbook and
+file I/O sets the pace), `long-fuzz` and `long-server` (every
 `alephgrid-server` test once on each of five machines). Together they need well over an hour,
 which one job could not hold (the first nightly run, 7 November, timed out that way).
 
