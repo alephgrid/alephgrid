@@ -10,3 +10,4 @@ cc ee5af7249abedc63d0dc801c3bc3d1df9831442e49797cbb603f572db3001c97 # shrinks to
 cc e10bbea5ec7d841d4b1077d6d5e7cff1e1f032a6a0fcf56035ce3c48d6bf69d9 # shrinks to PastedCell { value: "'=", text: false, style: None, formula: None }
 cc 9a6c48e57562ca13f7b22e44043b05a53e94f1cd1f2debaa87af7a3fc9018fa2 # shrinks to ("=gaaAaAA$", 0, 0)
 cc 117d0f96c453fa958b700b89c9eaebff6b7950c7073f0ac584905a552372797c # shrinks to [[" ", "\t"], ["\t;", "a"]]
+cc 645ea582782b9093d4e073d6584a972002600f79992e35cfa6edeaa65dba2efb # shrinks to rows = [["'"], [",A"]]

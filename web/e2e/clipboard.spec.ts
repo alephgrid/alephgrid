@@ -330,6 +330,64 @@ test("a paste while the table is still opening waits for it; a paste with nowher
   ws.close();
 });
 
+// A slow server (CI) can answer a paste after the user has already moved to another cell.
+// The reply then leaves the selection where the user put it instead of pulling it back to
+// the pasted cells: for cells from another app and for cells copied in the workbook.
+test("a paste answered after the user moved on keeps the user's selection", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Late paste"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "p" }, { row: 0, column: 1, value: "q" }] });
+  // Hold the server's answers to pastes until released.
+  let release!: () => void;
+  let released = new Promise<void>((r) => (release = r));
+  const pasteIds = new Set<number>();
+  await page.routeWebSocket(/\/ws\//, (route) => {
+    const srv = route.connectToServer();
+    route.onMessage((m) => {
+      try { const f = JSON.parse(String(m)); if (f.op === "sheet_paste" || f.op === "sheet_paste_cells") pasteIds.add(f.id); } catch { /* */ }
+      srv.send(m);
+    });
+    srv.onMessage(async (m) => {
+      try { const f = JSON.parse(String(m)); if (pasteIds.has(f.id)) await released; } catch { /* */ }
+      route.send(m);
+    });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.getByRole("tab", { name: /Data/ })).toHaveAttribute("aria-selected", "true");
+
+  // From another app, pasted at A3; the user goes to D5 before the answer.
+  await go(page, "A3");
+  await paste(page, "x\ty");
+  await expect.poll(() => pasteIds.size).toBe(1);
+  await go(page, "D5");
+  release();
+  await expect(page.locator(".toast").last()).toContainText("Pasted 2 cells");
+  await expect(page.locator(".cell-ref")).toHaveText("D5");
+  expect((await cells(ws, 0, 3, 2)).content(2, 1)).toBe("y");
+
+  // Copied in the workbook (A1:B1), pasted at A6; the user goes to E2 before the answer.
+  released = new Promise<void>((r) => (release = r));
+  await go(page, "A1");
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("ControlOrMeta+c");
+  await expect(page.locator(".toast").last()).toContainText("Copied 2 cells");
+  await go(page, "A6");
+  await paste(page, await page.evaluate(() => (window as unknown as { __copied?: string }).__copied ?? ""));
+  await expect.poll(() => pasteIds.size).toBe(2);
+  await go(page, "E2");
+  release();
+  await expect.poll(async () => (await cells(ws, 0, 6, 2)).content(5, 1)).toBe("q");
+  await expect(page.locator(".toast").last()).toContainText("Pasted 2 cells");
+  await expect(page.locator(".cell-ref")).toHaveText("E2");
+
+  // Without moving, the pasted cells are selected as before.
+  await go(page, "A8");
+  await paste(page, "m\tn");
+  await expect(page.locator(".cell-ref")).toHaveText("A8:B8");
+  ws.close();
+});
+
 test("cells copy between sheets, and from a table into a sheet with their types", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Between sheets"), ws = await server.connect(wb);

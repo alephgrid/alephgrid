@@ -195,7 +195,7 @@ fn quoted_csv_imports_exactly_what_was_written() {
         Ok(())
     };
     let strings = |rows: &[&[&str]]| rows.iter().map(|r| r.iter().map(|v| v.to_string()).collect()).collect::<Vec<Vec<String>>>();
-    for fixed in [strings(&[&[" ", "\t"], &["\t;", "a"]]), strings(&[&["a;b", "c\td"], &["e|f", ";"]])] {
+    for fixed in [strings(&[&[" ", "\t"], &["\t;", "a"]]), strings(&[&["a;b", "c\td"], &["e|f", ";"]]), strings(&[&["'"], &[",A"]])] {
         check(fixed).unwrap();
     }
     fuzz("csv_round_trip", table, check);
