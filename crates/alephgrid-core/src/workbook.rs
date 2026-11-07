@@ -341,8 +341,16 @@ impl Workbook {
         };
         // SQL changes may not add validation violations (F.12); edits are checked per value.
         let before = if m.op == "sql_change" { crate::tools::all_violations(&self.conn).ok() } else { None };
+        // A panic inside the change (a bug reached by stored or typed content) is taken back
+        // like a failed change; left to unwind, it would leave this connection inside an open
+        // transaction that every later change joins and none commits (audit run-3).
+        let mut panicked = false;
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))).unwrap_or_else(|_| {
+            panicked = true;
+            Err(anyhow!("internal error: the change stopped unexpectedly and was taken back"))
+        });
         // Table cells follow whatever the change did to the tables they read.
-        let result = f(self)
+        let result = ran
             .and_then(|out| match &before { Some(b) => crate::tools::refuse_new_violations(&self.conn, b).map(|_| out), None => Ok(out) })
             .and_then(|out| self.sync_links().map(|_| out)).and_then(|out| {
             let encoded = encode(&out);
@@ -363,7 +371,8 @@ impl Workbook {
             Err(e) => {
                 let _ = self.conn.execute_batch("ROLLBACK;");
                 self.after_commit.clear();
-                if self.sheet_epoch != epoch {
+                // After a panic the sheet model may be half changed whatever its epoch says.
+                if self.sheet_epoch != epoch || panicked {
                     match self.load_sheets() {
                         Ok(s) => *self.shared.sheets.lock().unwrap_or_else(|e| e.into_inner()) = s,
                         Err(re) => eprintln!("alephgrid-core: could not reload sheets after a failed change: {re:#}"),

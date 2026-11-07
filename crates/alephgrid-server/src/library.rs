@@ -313,6 +313,19 @@ pub async fn use_entry(State(state): State<Shared>, Extension(p): Extension<Prin
             Some(n) => versions(&s.auth.store, &e.id)?.into_iter().find(|v| v.version == n).ok_or_else(|| not_found(format!("version {n} not found")))?,
             None => e.latest.clone(),
         };
+        // A saved query and a SQL function are SQL: --disable-sql refuses them here as it
+        // does on the WebSocket (save_query, publish_function). Unknown kinds count as SQL.
+        let sql = match e.kind {
+            LibraryKind::Query => true,
+            LibraryKind::Function => !matches!(
+                serde_json::from_value(v.payload["definition"]["kind"].clone()),
+                Ok(alephgrid_core::FunctionKind::Formula | alephgrid_core::FunctionKind::Python)
+            ),
+            LibraryKind::View => false,
+        };
+        if sql && !s.config.allow_sql {
+            return Err(bad("SQL is disabled on this server"));
+        }
         Ok((space, e, v))
     })
     .await?;

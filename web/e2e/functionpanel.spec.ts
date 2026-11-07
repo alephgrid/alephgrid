@@ -304,3 +304,144 @@ for (const theme of ["light", "dark"]) {
     }
   });
 }
+
+// U.T06: the connection drops while a draft is open. The panel says so, keeps the draft
+// (still editable), and Run tests / Publish wait for the connection with the reason; after
+// the reconnect the same draft runs and publishes.
+test("reconnect: the panel keeps its draft, says why it cannot run or publish, and recovers", async ({ page }) => {
+  const wb = await server.createWorkbook("Function reconnect");
+  // A switch for the network: while off, the socket is closed and new ones are refused.
+  let offline = false;
+  const live: import("@playwright/test").WebSocketRoute[] = [];
+  const ops: string[] = [];
+  await page.routeWebSocket(/\/ws\//, (ws) => {
+    if (offline) { void ws.close(); return; }
+    live.push(ws);
+    const srv = ws.connectToServer();
+    ws.onMessage((m) => { try { ops.push(JSON.parse(String(m)).op); } catch { /* */ } srv.send(m); });
+    srv.onMessage((m) => ws.send(m));
+  });
+  const panel = await openPanel(page, wb);
+  await panel.getByRole("button", { name: "Start from an example" }).click();
+  const source = panel.getByRole("textbox", { name: "Function source" });
+  await source.fill("IF(revenue=0,0,(revenue-cost)/revenue)*1");
+  const run = panel.getByRole("button", { name: "Run tests", exact: true });
+  const publish = panel.getByRole("button", { name: "Publish version", exact: true });
+  await expect(run).toBeEnabled();
+
+  offline = true;
+  for (const ws of live.splice(0)) await ws.close();
+  await expect(page.locator(".status-dot.status-closed")).toBeVisible();
+  // The panel says what happened and what is kept; the actions say why they wait.
+  await expect(panel.getByRole("status").filter({ hasText: "Connection lost" })).toContainText("draft is kept");
+  for (const b of [run, publish]) {
+    await expect(b).toBeDisabled();
+    await expect(b).toHaveAccessibleDescription("Not connected: waiting for the server to reconnect");
+  }
+  // Mod+Enter does not run either, and the draft can still be edited.
+  await source.focus();
+  await page.keyboard.press("ControlOrMeta+Enter");
+  await source.fill("IF(revenue=0,0,(revenue-cost)/revenue)");
+  await expect(panel.locator(".fn-state")).toHaveText("Draft");
+  expect(ops.filter((o) => o === "test_function" || o === "publish_function")).toEqual([]);
+
+  offline = false;
+  await expect(page.locator(".status-dot.status-open")).toBeVisible({ timeout: 30_000 });
+  await expect(panel.getByRole("status").filter({ hasText: "Connection lost" })).toHaveCount(0);
+  await expect(run).toBeEnabled();
+  await expect(run).toHaveAccessibleDescription("Run tests (⌘↵ / Ctrl+Enter)");
+  await expect(source).toHaveValue("IF(revenue=0,0,(revenue-cost)/revenue)");
+  await run.click();
+  await expect(panel.getByRole("region", { name: "Test results" })).toContainText("Passed · test 1 · actual 0.4");
+  await publish.click();
+  await expect(panel.locator(".fn-state")).toHaveText("Published · v1 · active");
+  // The server has exactly the draft that was kept across the reconnect.
+  const ws = await server.connect(wb);
+  const fns = await ws.call("functions", {});
+  ws.close();
+  expect(fns.map((f: { name: string }) => f.name)).toEqual(["MARGIN"]);
+  expect(fns[0].versions.map((v: { definition: { source: string } }) => v.definition.source)).toEqual(["IF(revenue=0,0,(revenue-cost)/revenue)"]);
+});
+
+// U.T06: a viewer reads the functions panel but cannot change, run or publish anything, and
+// is told why. The server refuses a publish from them anyway.
+const ADMIN = { email: "admin@example.com", password: "correct horse battery" };
+const accounts = new Server(["--auth", "accounts"], { ALEPHGRID_BOOTSTRAP_EMAIL: ADMIN.email, ALEPHGRID_BOOTSTRAP_PASSWORD: ADMIN.password });
+test.afterAll(async () => accounts.dispose());
+
+test("denied: a viewer sees the code, tests and docs read-only, with the reason", async ({ page, browser }) => {
+  await accounts.start();
+  await page.goto(`${accounts.url}/login`);
+  const json = async (path: string, method = "GET", body?: unknown) => page.evaluate(async ({ path, method, body }) => {
+    const r = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+    if (!r.ok) throw new Error(`${path}: ${r.status} ${await r.text()}`);
+    return r.status === 204 ? null : r.json();
+  }, { path, method, body });
+  await json("/api/auth/login", "POST", ADMIN);
+  const me = await json("/api/me");
+  const general = (await json("/api/spaces")).find((s: { name: string }) => s.name === "General").id;
+  const workbook = (await json("/api/workbooks", "POST", { name: "Shared functions", space: general })).id;
+  /** One WebSocket operation as whoever `p` is signed in as. */
+  const op = (p: import("@playwright/test").Page, name: string, params: Record<string, unknown>) => p.evaluate(async ({ workbook, name, params }) => new Promise<{ ok: boolean; result?: any; error?: string }>((ok) => {
+    const ws = new WebSocket(`ws://${location.host}/ws/${workbook}`);
+    ws.onmessage = (m) => {
+      const msg = JSON.parse(String(m.data));
+      if (msg.event === "hello") ws.send(JSON.stringify({ id: 1, op: name, ...params }));
+      else if (msg.id === 1) { ws.close(); ok(msg); }
+    };
+  }), { workbook, name, params });
+  const definition = { name: "MARGIN", kind: "formula", arguments: ["revenue", "cost"], source: "IF(revenue=0,0,(revenue-cost)/revenue)",
+    documentation: "Profit as a fraction of revenue.", tests: [{ arguments: ["100", "60"], expected: "0.4" }], dependencies: {} };
+  expect((await op(page, "publish_function", { definition })).ok).toBe(true);
+  const { code } = await json(`/api/orgs/${me.orgs[0].org.id}/invites`, "POST",
+    { email: "vic@example.com", org_role: "member", space: general, space_role: "viewer", days: 7 });
+
+  const vic = await (await browser.newContext()).newPage();
+  await vic.addInitScript(() => { try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ } });
+  await vic.goto(`${accounts.url}/login`);
+  await vic.evaluate(async (code) => {
+    const r = await fetch("/api/invites/accept", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, name: "Vic", password: "a long enough password" }) });
+    if (!r.ok) throw new Error(await r.text());
+  }, code);
+  await vic.goto(`${accounts.url}/w/${workbook}`);
+  await expect(vic.locator(".status-dot.status-open")).toBeVisible();
+  await vic.getByRole("button", { name: "Functions", exact: true }).click();
+  const panel = vic.getByRole("complementary", { name: "Functions" });
+  await expect(panel.getByRole("note").filter({ hasText: "View only" })).toBeVisible();
+  // The published function is there to read.
+  await panel.getByRole("combobox", { name: "Function", exact: true }).selectOption("MARGIN");
+  const source = panel.getByRole("textbox", { name: "Function source" });
+  await expect(source).toHaveValue(definition.source);
+  for (const name of ["Function name", "Arguments", "Function source"]) {
+    await expect(panel.getByRole("textbox", { name, exact: true })).not.toBeEditable();
+  }
+  await expect(panel.getByRole("combobox", { name: "Function engine" })).toBeDisabled();
+  // Typing changes nothing.
+  await source.focus();
+  await vic.keyboard.type("+1");
+  await vic.keyboard.press("Enter");
+  await expect(source).toHaveValue(definition.source);
+  for (const name of ["Run tests", "Publish version", "New"]) {
+    const b = panel.getByRole("button", { name, exact: true });
+    await expect(b).toBeDisabled();
+    await expect(b).toHaveAccessibleDescription("View only");
+  }
+  await vic.keyboard.press("ControlOrMeta+Enter");
+  await panel.getByRole("tab", { name: "Tests" }).click();
+  await expect(panel.getByRole("textbox", { name: "Test 1 revenue" })).toHaveValue("100");
+  await expect(panel.getByRole("textbox", { name: "Test 1 revenue" })).not.toBeEditable();
+  await expect(panel.getByRole("button", { name: "Add test" })).toBeDisabled();
+  await expect(panel.getByRole("button", { name: "Remove test 1" })).toBeDisabled();
+  await panel.getByRole("tab", { name: "Docs" }).click();
+  await expect(panel.getByRole("textbox", { name: "Function documentation" })).toHaveValue(definition.documentation);
+  await expect(panel.getByRole("textbox", { name: "Function documentation" })).not.toBeEditable();
+  // Nothing ran on opening or on Mod+Enter, and the server still has one version.
+  await expect(panel.getByRole("region", { name: "Test results" })).not.toContainText("Passed");
+  const fns = (await op(page, "functions", {})).result;
+  expect(fns.map((f: { name: string; versions: unknown[] }) => [f.name, f.versions.length])).toEqual([["MARGIN", 1]]);
+  // The server refuses the viewer's publish too.
+  const refused = await op(vic, "publish_function", { definition: { ...definition, source: "1" } });
+  expect(refused.ok).toBe(false);
+  await vic.context().close();
+});

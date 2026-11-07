@@ -54,7 +54,8 @@ archive someone else made or from a data directory someone else could write to.
 ## `--disable-sql`
 
 Refuses every operation that runs user-written SQL: the SQL console, saved queries, tables from
-queries, SQL formula columns (adding or changing one) and SQL functions (testing or publishing).
+queries, SQL formula columns (adding or changing one) and SQL functions (testing or publishing),
+also when a saved query or SQL function is taken in from a space library.
 Spreadsheet formulas, no-code analysis and Python functions stay available. A new column's type
 must be one of the import types (`BIGINT`, `VARCHAR`, `DECIMAL(p,s)`, …), never an expression.
 

@@ -136,7 +136,7 @@ draft in the grid. Function authoring (Code, Tests, Docs, Versions) is described
 | Inputs and choices | Empty, filled, focus, invalid with linked error text (`aria-invalid`, `aria-describedby`, focus moved to the field), disabled or read-only; keyboard-operable lists and groups |
 | Menus and popovers | Anchored, kept inside the viewport, dismissed by Escape or outside click, focus returned to the trigger; real shortcuts shown; a disabled item stays reachable by keyboard (`aria-disabled`) and shows its reason in place of the shortcut |
 | Grid | Active cell, range, copied range, frozen, hidden and read-only cells, editor, errors |
-| Feedback | Saving and saved, progress with cancel, retry, toasts (never the only place an error is shown), empty, loading and denied |
+| Feedback | Saving and saved, progress with cancel, retry, toasts (never the only place an error of a form, dialog, panel or pane is shown: it also goes into that surface's alert line, `toastError(e, near)`; confirmations wait for the server and keep a refusal), empty, loading and denied |
 | Dialogs | Labelled title, focus kept inside, Escape closes, focus returned; used for consequential or necessary decisions only |
 
 Progress reflects measured work, or is indeterminate when the total is unknown. A cancel is

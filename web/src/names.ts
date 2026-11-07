@@ -96,7 +96,7 @@ export async function namesDialog(ctx: NamesContext): Promise<() => void> {
         el("td", {},
           el("button", { class: "btn", "aria-label": `Go to ${n.name}`, onclick: async () => {
             const target = parseAddress(n.refers_to.replace(/^=/, ""));
-            if (!target) { toast(`${n.name} does not refer to a valid range (${n.refers_to})`, "error"); return; }
+            if (!target) { problem.textContent = `${n.name} does not refer to a valid range (${n.refers_to})`; return; }
             modal.close(); await ctx.goTo(target);
           } }, "Go to"),
           el("button", { class: "btn", "aria-label": `Edit ${n.name}`, onclick: () => {
