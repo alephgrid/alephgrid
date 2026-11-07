@@ -64,7 +64,9 @@ request with its status and latency).
 
 ## Docker
 
-The image (`ghcr.io/alephgrid/alephgrid`) runs as the user `alephgrid`, uid and gid 10001,
+The image (`ghcr.io/alephgrid/alephgrid`) is published with the first release; until then,
+build it from a checkout with `docker build -t ghcr.io/alephgrid/alephgrid .` (the Compose
+files below then use it). It runs as the user `alephgrid`, uid and gid 10001,
 never as root. Data lives in `/data` (`ALEPHGRID_DATA_DIR`); `/backups` is there for offline
 backups. Both are owned by that user in the image.
 

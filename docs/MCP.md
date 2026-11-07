@@ -19,7 +19,7 @@ execution path. In this release agents only read; the one change they can ask fo
      --header "Authorization: Bearer agc_…"
    ```
 
-   **stdio** (Claude Desktop and other clients that start a program): the `alephgrid` program
+   **stdio** (clients that start a program; Claude Desktop is not tested yet): the `alephgrid` program
    forwards stdio to a running server.
 
    ```json

@@ -7,7 +7,7 @@ docs/OPERATIONS.md, Upgrades). Only the latest release receives fixes.
 ## Unreleased
 
 The first release of Alephgrid: an open-source, self-hosted spreadsheet for data that doesn't
-fit in a spreadsheet. Open a CSV or Parquet file with hundreds of millions of rows, scroll,
+fit in a spreadsheet. Open a CSV or Parquet file with tens of millions of rows, scroll,
 sort, filter and edit it in your browser, and build ordinary Excel-style sheets next to it —
 with formulas that read the big tables directly. Everything runs in one Apache-2.0 binary on a
 DuckDB file on your machine; your data never leaves it. There are no seats, tiers or paywalls.

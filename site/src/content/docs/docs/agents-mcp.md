@@ -24,7 +24,7 @@ person to approve it.
      --header "Authorization: Bearer agc_…"
    ```
 
-   **stdio** (Claude Desktop and other clients that start a program): the `alephgrid`
+   **stdio** (clients that start a program; Claude Desktop is not tested yet): the `alephgrid`
    program forwards stdio to a running server.
 
    ```json
@@ -96,6 +96,8 @@ when the workbook has changed since the result was issued.
   connection may do.
 - At most 4 requests run at once per connection. Jobs live in the server process and are
   forgotten after an hour or on restart; stored results and their handles survive.
+- Tested with MCP Inspector and Claude Code over both transports (7 November 2026); Claude
+  Desktop and ChatGPT are not tested yet.
 - Time-zone functions (`AT TIME ZONE` and other ICU functions) are not available, since
   DuckDB extensions cannot be loaded; work in UTC with `epoch_us`. Catalog search
   matches words in names and SQL, without full-text search, for the same reason.
