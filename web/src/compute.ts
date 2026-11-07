@@ -6,7 +6,7 @@
 import { api, HttpError } from "./api";
 import { bytes } from "./format";
 import type { ComputeProfile, ProfileChoice, RuntimeStatus } from "./protocol";
-import { el, openModal, toast, toastError } from "./ui";
+import { clearError, el, openModal, toast, toastError } from "./ui";
 
 /** How often the opening screen asks for the status. */
 const POLL_MS = 400;
@@ -177,10 +177,12 @@ export function pausedText(s: RuntimeStatus | null): string {
  */
 export function computeDialog(workbook: string): void {
   const body = el("div", { class: "panel-body" });
-  const box = el("div", { class: "dialog wide" },
+  // A refused restart says why here, not only in a toast (U.11a).
+  const box = el("div", { class: "dialog wide", "data-errors": true },
     el("h2", {}, "Compute"),
     el("p", { class: "dialog-lede" }, "Where this workbook runs, how much memory and how many threads it has, and what it is doing now. Sleeping when nobody has it open is normal."),
     body,
+    el("p", { class: "dialog-error inline-error", role: "alert" }),
     el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
   const modal = openModal(box, () => modal.close());
   const render = async (): Promise<void> => {
@@ -207,11 +209,12 @@ export function computeDialog(workbook: string): void {
       if (!chosen) return;
       apply.disabled = true;
       apply.textContent = "Restarting…";
+      clearError(box);
       try {
         const out = await api.runtimeAction(workbook, { action: "restart", profile: chosen });
         toast(`Running with the ${profileLabel(out.allocation?.profile ?? chosen)} profile.`, "success");
       } catch (e) {
-        toastError(e);
+        toastError(e, box);
       }
       await render();
     } }, "Restart with this profile");

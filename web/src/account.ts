@@ -4,7 +4,7 @@
 
 import { api, HttpError, type InviteInfo, type Me, type SpaceListing } from "./api";
 import type { AuditEvent, Invite, LibraryKind, OrgMember, OrgRole, SpaceMember, SpaceRole, Token } from "./types";
-import { confirmDialog, el, formDialog, panelDialog, showMenu, toast, toastError } from "./ui";
+import { confirmDialog, el, formDialog, panelDialog, refusal, showMenu, toast, toastError } from "./ui";
 import { brandMark } from "./icons";
 import { bytes } from "./format";
 
@@ -220,7 +220,7 @@ export function membersDialog(space: SpaceListing, onChange: () => void): void {
     const rows = members.map((m) => {
       const who = m.kind === "group" ? `Group: ${m.principal}` : (m.user ? `${m.user.name} <${m.user.email}>` : m.principal);
       const act = async (f: () => Promise<void>) => {
-        try { await f(); onChange(); await render(body); } catch (e) { toastError(e); }
+        try { await f(); onChange(); await render(body); } catch (e) { toastError(e, body); }
       };
       return el("div", { class: "member-row", role: "row" },
         el("span", { role: "cell" }, who),
@@ -278,8 +278,8 @@ export function tokensDialog(space: SpaceListing): void {
       el("span", { role: "cell" }, ROLE_LABEL[t.role]),
       el("span", { role: "cell", class: "muted" }, t.revoked_at ? "revoked" : `expires ${new Date(t.expires_at).toLocaleDateString()}`),
       el("span", { role: "cell" }, t.revoked_at ? null : el("button", { class: "btn small", onclick: async () => {
-        if (!(await confirmDialog(`Revoke “${t.name}”?`, "Anything using it stops working at once.", "Revoke"))) return;
-        try { await api.revokeToken(space.id, t.id); await render(body); } catch (e) { toastError(e); }
+        if (!(await confirmDialog(`Revoke “${t.name}”?`, "Anything using it stops working at once.", "Revoke", () => api.revokeToken(space.id, t.id)))) return;
+        await render(body);
       } }, "Revoke"))));
     body.replaceChildren(fresh,
       rows.length ? el("div", { class: "member-table", role: "table", "aria-label": "Tokens" }, ...rows) : el("p", {}, "No tokens."),
@@ -292,7 +292,7 @@ function peopleDialog(org: string, orgName: string, me: Me): void {
   panelDialog(`People of ${orgName}`, async function render(body) {
     const [members, invites, spaces] = await Promise.all([api.orgMembers(org), api.invites(org), api.spaces()]);
     const act = async (f: () => Promise<unknown>) => {
-      try { await f(); await render(body); } catch (e) { toastError(e); }
+      try { await f(); await render(body); } catch (e) { toastError(e, body); }
     };
     const rows = members.map((m: OrgMember) => el("div", { class: "member-row", role: "row" },
       el("span", { role: "cell" }, `${m.user.name} <${m.user.email}>`, m.user.disabled ? el("span", { class: "badge" }, "disabled") : null),
@@ -384,14 +384,16 @@ export function usageDialog(org: string): void {
           { name: "open", label: "Workbooks open at once", value: num(o.open_workbooks) },
           { name: "compute", label: "Compute memory (GB)", value: gb(o.compute_memory_bytes), hint: "Memory the space's open workbooks are guaranteed, summed: standard counts its minimum share, other profiles their size." },
           ...(offered.length ? [{ name: "profiles", label: "Profiles granted besides standard", value: u.profiles.join(", "), hint: `Offered by this server: ${offered.join(", ")}. Space owners choose among them for a workbook.` }] : []),
-        ], "Save", (vals) => Object.entries(vals).every(([k, x]) => k === "profiles" || x.trim() === "" || Number(x) >= 0) ? null : "Use numbers, or leave empty.");
-        if (!v) return;
-        const opt = (x: string, scale = 1) => (x.trim() === "" ? undefined : Math.round(Number(x) * scale));
-        try {
-          await api.setQuota(u.space.id, { storage_bytes: opt(v.storage, 2 ** 30), workbooks: opt(v.workbooks), jobs: opt(v.jobs), open_workbooks: opt(v.open), compute_memory_bytes: opt(v.compute, 2 ** 30) });
-          if (offered.length) await api.setSpaceProfiles(u.space.id, (v.profiles ?? "").split(",").map((x) => x.trim()).filter(Boolean));
-          await render(body);
-        } catch (e) { toastError(e); }
+        ], "Save", (vals) => {
+          if (!Object.entries(vals).every(([k, x]) => k === "profiles" || x.trim() === "" || Number(x) >= 0)) return "Use numbers, or leave empty.";
+          const opt = (x: string, scale = 1) => (x.trim() === "" ? undefined : Math.round(Number(x) * scale));
+          // Saved while the dialog waits, so a refusal shows in it (U.11a).
+          return refusal(async () => {
+            await api.setQuota(u.space.id, { storage_bytes: opt(vals.storage, 2 ** 30), workbooks: opt(vals.workbooks), jobs: opt(vals.jobs), open_workbooks: opt(vals.open), compute_memory_bytes: opt(vals.compute, 2 ** 30) });
+            if (offered.length) await api.setSpaceProfiles(u.space.id, (vals.profiles ?? "").split(",").map((x) => x.trim()).filter(Boolean));
+          });
+        });
+        if (v) await render(body);
       } }, "Limits…"))));
     fill(body, el("p", { class: "muted" }, "Storage counts each space's workbooks and its trash. Limits left empty use the server's defaults."),
       el("div", { class: "member-table", role: "table", "aria-label": "Usage" }, ...rows));
@@ -407,7 +409,7 @@ export function libraryDialog(space: SpaceListing, workbooks: { id: string; name
   panelDialog(`Library of “${space.name}”`, async function render(body) {
     const entries = await api.library(space.id);
     const act = async (f: () => Promise<unknown>, done?: string) => {
-      try { await f(); if (done) toast(done, "success"); await render(body); } catch (e) { toastError(e); }
+      try { await f(); if (done) toast(done, "success"); await render(body); } catch (e) { toastError(e, body); }
     };
     const rows = entries.map((e) => el("div", { class: "member-row", role: "row" },
       el("span", { role: "cell" }, el("strong", {}, e.name), el("span", { class: "badge" }, KIND_LABEL[e.kind]), ` v${e.latest.version}`),

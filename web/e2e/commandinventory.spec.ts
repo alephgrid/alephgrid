@@ -339,7 +339,9 @@ test("U.T05: context menus give a reason for every disabled command; sheet const
   const dialog = page.getByRole("dialog", { name: "Rename sheet" });
   await dialog.getByRole("textbox", { name: "Name" }).fill("Only");
   await dialog.getByRole("button", { name: "Rename" }).click();
-  await expect(page.locator(".toast-error")).toBeVisible();
+  // U.11a: the reason shows in the dialog, on the field, not only in a toast.
+  await expect(dialog.getByRole("alert")).not.toBeEmpty();
+  await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveAttribute("aria-invalid", "true");
   expect((await ws.call<{ name: string }[]>("sheets")).map((s) => s.name)).toEqual(["Only", "Second"]);
   ws.close();
 });

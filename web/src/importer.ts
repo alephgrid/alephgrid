@@ -5,7 +5,7 @@
 import { api, HttpError, stageUpload } from "./api";
 import { formatValue } from "./format";
 import type { ColumnType, FilePreview, Imported, ImportProblem, Kind, UploadCreated } from "./types";
-import { el, openModal } from "./ui";
+import { busy, el, markInvalid, openModal } from "./ui";
 
 /** Friendly names for the type choices. */
 const TYPE_LABELS: Record<string, string> = {
@@ -54,11 +54,15 @@ function upload(workbookId: string, file: File): Promise<UploadCreated | null> {
   return new Promise((resolve, reject) => {
     const bar = el("progress", { max: 1, value: 0, "aria-label": `Uploading ${file.name}` }) as HTMLProgressElement;
     const label = el("p", { class: "muted" }, `Uploading ${file.name} (${bytes(file.size)})…`);
-    const cancel = el("button", { class: "btn", type: "button", onclick: () => job.abort() }, "Cancel");
+    // A failed upload says why in this dialog (U.11a) and is reported once it is closed.
+    let failure: unknown = null;
+    const stop = () => { if (failure) { modal.close(); reject(failure); } else job.abort(); };
+    const error = el("div", { class: "dialog-error", role: "alert" });
+    const cancel = el("button", { class: "btn", type: "button", onclick: stop }, "Cancel");
     const modal = openModal(
-      el("div", { class: "dialog", "data-testid": "upload-dialog" }, el("h2", {}, "Import a file"), label, bar,
+      el("div", { class: "dialog", "data-testid": "upload-dialog" }, el("h2", {}, "Import a file"), label, bar, error,
         el("div", { class: "dialog-actions" }, cancel)),
-      () => job.abort(),
+      stop,
     );
     cancel.focus();
     const job = stageUpload(workbookId, file, (f) => {
@@ -68,9 +72,13 @@ function upload(workbookId: string, file: File): Promise<UploadCreated | null> {
     job.done.then(
       (staged) => { modal.close(); resolve(staged); },
       (e) => {
-        modal.close();
-        if (e instanceof DOMException && e.name === "AbortError") resolve(null);
-        else reject(e);
+        if (e instanceof DOMException && e.name === "AbortError") { modal.close(); resolve(null); return; }
+        failure = e;
+        bar.hidden = true;
+        label.textContent = `${file.name} could not be uploaded.`;
+        error.textContent = (e as Error).message;
+        cancel.textContent = "Close";
+        cancel.focus();
       },
     );
   });
@@ -86,8 +94,11 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
       el("progress", { max: 100, "aria-label": "Import progress" }), el("span", { class: "muted" }));
     const importBtn = el("button", { class: "btn btn-primary", type: "submit" }, preview.kind === "sheets" ? "Import sheets" : "Import table");
     const cancelBtn = el("button", { class: "btn", type: "button" }, "Cancel");
-    let busy = false;
+    let importing = false;
     let job: string | null = null;
+    /** The column whose type the last refusal is about (U.11a), until it is changed. */
+    let invalid: HTMLSelectElement | null = null;
+    const clearInvalid = () => { if (invalid) { markInvalid(invalid, false); invalid = null; } };
     let closed = false;
 
     const body = el("div", { class: "import-body" });
@@ -128,7 +139,7 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
           const choices = [...p.type_choices];
           if (!choices.includes(c.detected)) choices.unshift(c.detected);
           select = el("select", { "aria-label": `Type for column ${c.name}`, "data-column": c.name,
-            onchange: () => repreview() },
+            onchange: () => { clearInvalid(); void repreview(); } },
           ...choices.map((t) => el("option", { value: t },
             `${TYPE_LABELS[t] ?? t}${t === c.detected ? " (detected)" : ""}`))) as HTMLSelectElement;
           select.value = c.sql_type;
@@ -181,17 +192,22 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
         const column = problem.column, type = problem.suggested_type;
         fixes.append(el("button", { class: "btn", type: "button", onclick: () => {
           selects.get(column)!.value = type;
+          clearInvalid();
           fixes.replaceChildren();
           submit(new Event("submit"));
         } }, `Import “${column}” as ${TYPE_LABELS[type] ?? type} and try again`));
       }
+      // The column's type is the refused field: marked, described by the error, focused.
+      clearInvalid();
+      const select = problem?.column ? selects.get(problem.column) : undefined;
+      if (select) { invalid = select; markInvalid(select, error); }
     }
 
     async function pollProgress(id: string): Promise<void> {
       const bar = progress.querySelector("progress") as HTMLProgressElement;
       const text = progress.querySelector("span")!;
       const started = performance.now();
-      while (busy && job === id && !closed) {
+      while (importing && job === id && !closed) {
         try {
           const st = await api.jobStatus(workbookId, id);
           if (st.running && st.percentage !== undefined) {
@@ -207,11 +223,12 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
 
     async function submit(e: Event): Promise<void> {
       e.preventDefault();
-      if (busy) return;
-      busy = true;
+      if (importing) return;
+      importing = true;
       error.textContent = "";
       fixes.replaceChildren();
-      importBtn.disabled = true;
+      // Busy while the server imports: it cannot be pressed twice (U.11a).
+      const restore = busy(importBtn);
       for (const s of selects.values()) s.disabled = true;
       if (nameInput) nameInput.disabled = true;
       job = `import-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -225,11 +242,11 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
         });
         finish(result);
       } catch (err) {
-        busy = false;
+        importing = false;
         job = null;
         progress.hidden = true;
         cancelBtn.textContent = "Cancel";
-        importBtn.disabled = false;
+        restore();
         for (const s of selects.values()) s.disabled = false;
         if (nameInput) nameInput.disabled = false;
         showError(err);
@@ -239,14 +256,14 @@ function review(workbookId: string, staged: UploadCreated): Promise<Imported | n
     function finish(result: Imported | null): void {
       if (closed) return;
       closed = true;
-      busy = false;
+      importing = false;
       modal.close();
       if (!result) api.cancelUpload(workbookId, staged.upload_id).catch(() => {});
       resolve(result);
     }
 
     function cancel(): void {
-      if (busy && job) {
+      if (importing && job) {
         // Stop the running import; the dialog stays open so the user can retry or leave.
         api.cancelJob(workbookId, job).catch(() => {});
         return;

@@ -114,6 +114,50 @@ async fn disable_sql_refuses_sql_formulas_columns_and_functions() {
     server.stop().await;
 }
 
+/// Audit run-3: `--disable-sql` also refuses taking a saved query or a SQL function in from
+/// the space library (views stay available).
+#[tokio::test(flavor = "multi_thread")]
+async fn disable_sql_refuses_sql_library_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let (wb, other) = (server.create_workbook("library").await, server.create_workbook("other").await);
+    for w in [&wb, &other] {
+        assert_eq!(server.upload(w, "t.csv", b"x\n1\n2\n".to_vec()).await.0, 200);
+    }
+    let mut ws = server.ws(&wb).await;
+    let q = ws.ok("save_query", json!({ "name": "Q", "sql": "SELECT x FROM t" })).await;
+    let v = ws.ok("save_view", json!({ "name": "V", "spec": { "table": "t", "sort": [], "filters": [] } })).await;
+    let f = json!({ "name": "TWICE", "kind": "sql", "arguments": ["v"], "source": "v * 2", "documentation": "", "tests": [] });
+    ws.ok("publish_function", json!({ "definition": f })).await;
+    ws.close().await;
+    let space = server.get(&format!("/api/workbooks/{wb}")).await.1["workbook"]["space"].as_str().unwrap().to_string();
+    let mut entries = Vec::new();
+    for (kind, object) in [("query", q["id"].clone()), ("function", json!("TWICE")), ("view", v["id"].clone())] {
+        let (code, e) = server.send(Method::POST, &format!("/api/spaces/{space}/library"), Some(json!({ "workbook": wb, "kind": kind, "object": object }))).await;
+        assert_eq!(code, 200, "{e}");
+        entries.push(e["id"].as_str().unwrap().to_string());
+    }
+    server.stop().await;
+
+    let server = TestServer::start_with(dir.path(), |c| c.allow_sql = false).await;
+    let take = |entry: String| {
+        let (server, other) = (&server, &other);
+        async move { server.send(Method::POST, &format!("/api/workbooks/{other}/library"), Some(json!({ "entry": entry }))).await }
+    };
+    for entry in &entries[..2] {
+        let (code, body) = take(entry.clone()).await;
+        assert_eq!(code, 400, "{body}");
+        assert!(body.to_string().contains("SQL is disabled"), "{body}");
+    }
+    let (code, body) = take(entries[2].clone()).await;
+    assert_eq!(code, 200, "a view is not SQL: {body}");
+    // Nothing SQL arrived in the other workbook.
+    let mut ws = server.ws(&other).await;
+    assert_eq!(ws.ok("functions", json!({})).await, json!([]));
+    ws.close().await;
+    server.stop().await;
+}
+
 /// SEC.11: demo tables are capped over the protocol, a workbook at its size limit refuses
 /// new data but still lets data be deleted, and the limit shows in the admin resources.
 #[tokio::test(flavor = "multi_thread")]

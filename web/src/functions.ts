@@ -2,7 +2,8 @@ import { Rpc, RpcError } from "./api";
 import { codeEditor, lineOf, type Problem } from "./codeeditor";
 import { builtinFunctions } from "./catalog";
 import { icon } from "./icons";
-import { currentOpener, el, pointerDrag, toast } from "./ui";
+import { busy, currentOpener, disabledFor, el, markInvalid, pointerDrag, toast } from "./ui";
+import { VIEW_ONLY } from "./roles";
 import { store, stored } from "./storage";
 import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionUsage, TestValue, TestValueKind, WorkbookFunction } from "./protocol";
 
@@ -15,7 +16,16 @@ export interface FunctionPanel {
   open(): void;
   close(): void;
   readonly isOpen: boolean;
+  /** U.T06: the workbook's connection. While it is down the draft is kept (and can be edited)
+   *  but nothing that needs the server can start. */
+  setConnection(state: "open" | "closed" | "paused"): void;
+  /** U.T06: a viewer reads the functions but cannot change, run or publish them. */
+  setViewOnly(viewOnly: boolean): void;
 }
+
+const RUN_TITLE = "Run tests (⌘↵ / Ctrl+Enter)";
+const OFFLINE = "Not connected: waiting for the server to reconnect";
+const PAUSED = "Paused: work in the workbook to resume it";
 
 const WIDTH_KEY = "alephgrid-fn-panel-width";
 const RESULTS_KEY = "alephgrid-fn-results-height";
@@ -101,6 +111,11 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   /** The version whose activation is being confirmed, with what it affects. */
   let impactFor: { version: number; usage: FunctionUsage | null; error?: string } | null = null;
   let width = savedWidth(), expanded = false, isOpen = false;
+  let connection: "open" | "closed" | "paused" = "open", viewOnly = false;
+  /** Why nothing that needs the server can start now, or false. */
+  const blocked = (): string | false => viewOnly ? VIEW_ONLY : connection === "closed" ? OFFLINE : connection === "paused" ? PAUSED : false;
+  /** The field the last refusal pointed at (U.11a), until it is edited. */
+  let invalid: HTMLElement | null = null;
   const log: string[] = [];
 
   // ---- header -------------------------------------------------------------------------
@@ -108,6 +123,8 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   const newBtn = el("button", { class: "btn small", type: "button" }, "New");
   const signature = el("code", { class: "fn-signature" });
   const state = el("span", { class: "fn-state" });
+  const connNote = el("p", { class: "notice fn-access", role: "status" });
+  const viewNote = el("p", { class: "notice fn-access", role: "note" });
   const expandBtn = el("button", { class: "icon-btn", type: "button" });
   const closeBtn = el("button", { class: "icon-btn", type: "button", "aria-label": "Close functions panel", title: "Close (Esc)" }, icon("x"));
 
@@ -191,12 +208,14 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   });
 
   // ---- results strip ------------------------------------------------------------------
-  const runBtn = el("button", { class: "btn", type: "button", title: "Run tests (⌘↵ / Ctrl+Enter)" }, "Run tests");
+  const runBtn = el("button", { class: "btn", type: "button", title: RUN_TITLE }, "Run tests");
   const cancelBtn = el("button", { class: "btn", type: "button", hidden: true }, "Cancel");
   const publishBtn = el("button", { class: "btn btn-primary", type: "button" }, "Publish version");
   const runState = el("span", { class: "fn-run-state", role: "status" });
   const resultsBody = el("div", { class: "fn-results-body" });
   const consoleBody = el("pre", { class: "fn-console", role: "log", "aria-label": "Console" });
+  /** A refused run or publication; the refused field points here (U.11a). */
+  const errorLine = el("p", { class: "dialog-error", role: "alert", id: "fn-error" });
   const resultsTabs = [el("button", { type: "button", class: "fn-rtab", "aria-pressed": "true" }, "Results"), el("button", { type: "button", class: "fn-rtab", "aria-pressed": "false" }, "Console")];
   const collapse = el("button", { class: "icon-btn", type: "button", "aria-expanded": "true", "aria-label": "Hide results" }, icon("chevron"));
   const resultsGrip = el("div", { class: "fn-results-grip", role: "separator", tabindex: "0", "aria-orientation": "horizontal", "aria-label": "Resize results", title: "Drag, or use the arrow keys, to resize" });
@@ -241,12 +260,14 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       heading,
       el("div", { class: "fn-panel-head" }, switcher, newBtn, el("div", { class: "spacer" }), expandBtn, closeBtn),
       el("div", { class: "fn-title" }, signature, state),
+      connNote, viewNote,
       tabList, ...bodies,
       el("div", { class: "fn-actions" }, runBtn, cancelBtn, publishBtn),
       results$));
 
   // ---- model --------------------------------------------------------------------------
   const read = () => {
+    if (invalid) { markInvalid(invalid, false); invalid = null; }
     draft = { ...draft, name: name.value.trim(), kind: kind.value as FunctionKind, args: args.value, source: source.value,
       documentation: documentation.value, returns: returns.value as Draft["returns"], volatile: volatile.checked, dependencies: dependencies.value };
   };
@@ -265,6 +286,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   const fill = (d: Draft) => {
     draft = { ...d, tests: d.tests.map((t) => ({ arguments: [...t.arguments], expected: t.expected })) };
     impactFor = null;
+    if (invalid) { markInvalid(invalid, false); invalid = null; }
     name.value = d.name; kind.value = d.kind; args.value = d.args; editor.setValue(d.source); documentation.value = d.documentation;
     returns.value = d.returns; volatile.checked = d.volatile; dependencies.value = d.dependencies;
     results = null;
@@ -313,8 +335,22 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     renderResults();
     if (tab === 1) renderTests();
     if (tab === 3) renderVersions();
-    runBtn.disabled = running; publishBtn.disabled = running;
+    // Nothing that needs the server starts while it is unreachable or the role does not allow it;
+    // the buttons say why (U.T06).
+    const why = blocked();
+    disabledFor(runBtn, why, RUN_TITLE);
+    disabledFor(publishBtn, why, "Publish this definition as a new version");
+    if (running) runBtn.disabled = publishBtn.disabled = true;
+    disabledFor(newBtn, viewOnly && VIEW_ONLY, "Start a new function");
     runBtn.hidden = testing; cancelBtn.hidden = !testing; cancelBtn.disabled = cancelling;
+    connNote.textContent = connection === "open" ? ""
+      : `${connection === "paused" ? "This workbook is paused." : "Connection lost: reconnecting…"} Your draft is kept here; Run tests and Publish come back with the connection.`;
+    viewNote.textContent = viewOnly ? "View only: your role lets you read this workbook's functions, not change, run or publish them." : "";
+    for (const f of [name, args, documentation, dependencies, pins, testsJson, source]) f.readOnly = viewOnly;
+    kind.disabled = returns.disabled = volatile.disabled = viewOnly;
+    disabledFor(addTest, viewOnly && VIEW_ONLY, "");
+    disabledFor(jsonApply, viewOnly && VIEW_ONLY, "");
+    disabledFor(pinMap, why, "");
     expandBtn.replaceChildren(icon(expanded ? "restore" : "maximize"));
     expandBtn.setAttribute("aria-label", expanded ? "Narrow functions panel" : "Widen functions panel");
     expandBtn.setAttribute("aria-pressed", String(expanded));
@@ -325,7 +361,11 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     if (!results) { resultsBody.replaceChildren(el("p", { class: "muted" }, "Run the tests to see results here.")); return; }
     const stale = results.key !== now;
     if (results.cancelled) { resultsBody.replaceChildren(el("p", {}, "Cancelled: the run was stopped on the server. Nothing was published.")); return; }
-    if (results.error) { resultsBody.replaceChildren(el("p", { class: "dialog-error" }, results.error)); return; }
+    if (results.error) {
+      errorLine.textContent = results.error;
+      if (resultsBody.firstChild !== errorLine || resultsBody.childNodes.length !== 1) resultsBody.replaceChildren(errorLine);
+      return;
+    }
     const tests = results.tests;
     resultsBody.replaceChildren(
       ...(stale ? [el("p", { class: "notice" }, "Edited since this run: run the tests again.")] : []),
@@ -345,7 +385,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     const mismatch = draft.tests.filter((t) => t.arguments.length !== names.length).length;
     testNotice.hidden = !mismatch;
     testNotice.replaceChildren(`${mismatch} test${mismatch === 1 ? "" : "s"} do not match the ${names.length} argument${names.length === 1 ? "" : "s"}. `,
-      el("button", { class: "btn small", type: "button", onclick: () => {
+      el("button", { class: "btn small", type: "button", disabled: viewOnly, title: viewOnly ? VIEW_ONLY : "", onclick: () => {
         draft.tests = draft.tests.map((t) => ({ ...t, arguments: names.map((_, i) => t.arguments[i] ?? "") }));
         render(); renderTests();
       } }, "Match the arguments"));
@@ -357,18 +397,18 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     /** A test value: its type (as typed, exact text, blank cell, error value) and its text. */
     const valueCell = (label: string, v: TestValue, set: (v: TestValue) => void) => {
       const type = typeOf(v);
-      const typeSelect = el("select", { "aria-label": `${label} type`, class: "fn-type", title: "As typed: read like a cell entry. Text: exactly this text. Blank: an empty cell (NULL, None). Error: an error value." },
+      const typeSelect = el("select", { "aria-label": `${label} type`, class: "fn-type", disabled: viewOnly, title: "As typed: read like a cell entry. Text: exactly this text. Blank: an empty cell (NULL, None). Error: an error value." },
         ...typeNames.map(([value, text]) => el("option", { value }, text)));
       typeSelect.value = type;
       typeSelect.addEventListener("change", () => { set(asType(v, typeSelect.value as ValueType)); render(); renderTests(); });
       let field: HTMLElement;
       if (type === "error") {
-        const codes = el("select", { "aria-label": label }, ...TEST_ERRORS.map((c) => el("option", { value: c }, c)));
+        const codes = el("select", { "aria-label": label, disabled: viewOnly }, ...TEST_ERRORS.map((c) => el("option", { value: c }, c)));
         codes.value = shown(v);
         codes.addEventListener("change", () => { set({ type: "error", value: codes.value }); render(); });
         field = codes;
       } else {
-        const input = el("input", { "aria-label": label, value: shown(v), spellcheck: false, disabled: type === "blank",
+        const input = el("input", { "aria-label": label, value: shown(v), spellcheck: false, disabled: type === "blank", readOnly: viewOnly,
           placeholder: type === "blank" ? "blank cell" : type === "text" ? "empty text" : "" });
         input.addEventListener("input", () => { set(type === "text" ? { type: "text", value: input.value } : input.value); render(); });
         field = input;
@@ -382,7 +422,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
         ...names.map((a, j) => valueCell(`Test ${i + 1} ${a}`, t.arguments[j] ?? "", (v) => { t.arguments[j] = v; })),
         valueCell(`Test ${i + 1} expected`, t.expected, (v) => { t.expected = v; }),
         el("td", { class: "fn-actual", title: r?.message ?? "" }, r ? `${r.passed ? "✓" : "✗"} ${described(r.actual, r.kind)}` : ""),
-        el("td", {}, el("button", { class: "icon-btn", type: "button", "aria-label": `Remove test ${i + 1}`, onclick: () => { draft.tests.splice(i, 1); render(); renderTests(); } }, icon("x"))));
+        el("td", {}, el("button", { class: "icon-btn", type: "button", "aria-label": `Remove test ${i + 1}`, disabled: viewOnly, title: viewOnly ? VIEW_ONLY : "", onclick: () => { draft.tests.splice(i, 1); render(); renderTests(); } }, icon("x"))));
     }));
     if (!draft.tests.length) testRows.append(el("tr", {}, el("td", { colspan: String(names.length + 4), class: "muted" }, "No tests yet.")));
     if (focusLabel) {
@@ -418,6 +458,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
         el("div", { class: "fn-row" },
           el("button", { class: "btn small", type: "button", "aria-label": `Open v${v.version}`, onclick: () => { fill(fromVersion(f, v.version)); showTab(0); } }, "Open"),
           active ? null : el("button", { class: "btn small", type: "button", "aria-label": `Activate v${v.version} in this workbook`,
+            disabled: !!blocked(), title: blocked() || "",
             "aria-expanded": String(impactFor?.version === v.version), onclick: () => void showImpact(f, v.version) }, "Activate in this workbook")),
         impactFor?.version === v.version && !active ? impactBox(f, v.version) : null);
     }));
@@ -462,7 +503,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
         lines.push(el("p", { class: "notice" }, `${d.name} v${d.version} calls ${f.name} v${d.uses}. Activating v${version} alone is refused; publish ${d.name} against v${version}, then activate both together (Advanced: version map).`));
       }
     }
-    const confirm = el("button", { class: "btn btn-primary small", type: "button", disabled: !u && !impactFor?.error, onclick: () => void act(async () => {
+    const confirm = el("button", { class: "btn btn-primary small", type: "button", disabled: (!u && !impactFor?.error) || !!blocked(), title: blocked() || "", onclick: () => void act(async () => {
       await rpc.call("pin_functions", { pins: { [f.name]: version } });
       impactFor = null;
       say(`${f.name} v${version} is now active in this workbook.`);
@@ -484,13 +525,47 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     render();
   }
 
-  const act = async (work: () => Promise<void>) => {
+  /** Run `work` with the panel's actions disabled and `button` (what started it) busy; a refusal
+   *  shows in the results with the field it points at marked (U.11a). */
+  const act = async (work: () => Promise<void>, button?: HTMLButtonElement) => {
     running = true; render();
-    try { await work(); } catch (e) { say(String((e as Error).message ?? e)); results = { key: key() ?? "", list: [], tests: [], error: (e as Error).message }; }
-    finally { running = false; render(); }
+    const restore = button ? busy(button) : null;
+    let failed: unknown = null;
+    try { await work(); } catch (e) { failed = e; say(String((e as Error).message ?? e)); results = { key: key() ?? "", list: [], tests: [], error: (e as Error).message }; }
+    finally { running = false; restore?.(); render(); }
+    if (failed) showProblem(failed);
+  };
+
+  /** The field a refused definition points at: the server names the part it refuses. */
+  const problemField = (e: unknown): { field: HTMLElement; tab: number; details?: boolean } | null => {
+    const message = String((e as Error).message ?? e);
+    if (e instanceof RpcError && (e.code === "unavailable" || e.code === "cancelled" || e.code === "forbidden" || e.code === "not_allowed")) return null;
+    const wrongTest = /^Test (\d+) has \d+ inputs/.exec(message);
+    if (wrongTest) return { field: testRows.querySelectorAll("tr")[Number(wrongTest[1]) - 1]?.querySelector<HTMLElement>("input, select") ?? addTest, tab: 1 };
+    if (message.startsWith("Dependency versions")) return { field: dependencies, tab: 3, details: true };
+    if (message.includes("version map")) return { field: pins, tab: 3, details: true };
+    if (message.startsWith("invalid or duplicate argument")) return { field: args, tab: 0 };
+    if (/function name|^name conflicts/.test(message)) return { field: name, tab: 0 };
+    if (message.includes("declares what it returns")) return { field: returns, tab: 0 };
+    if (message.includes("execution engine")) return { field: kind, tab: 0 };
+    // Failing tests, limits and a lost connection are not about one field.
+    if (/tests failed|tests were cancelled|time limit|could not run|limit reached|not connected|connection lost|unknown (function|version)/.test(message)) return null;
+    return { field: source, tab: 0 };
+  };
+  const showProblem = (e: unknown) => {
+    const target = problemField(e);
+    // The error is in the results strip: make sure it is showing.
+    resultsTabs[0].click();
+    if (results$.classList.contains("collapsed")) collapse.click();
+    if (!target || !errorLine.isConnected) return;
+    showTab(target.tab);
+    if (target.details) target.field.closest("details")!.open = true;
+    invalid = target.field;
+    markInvalid(target.field, errorLine);
   };
 
   const runTests = () => act(async () => {
+    if (blocked()) return;
     read();
     const seq = ++runSeq, k = key();
     const d = definition();
@@ -526,14 +601,14 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     selected = f;
     say(`Published ${f.name} v${f.versions[f.versions.length - 1].version}. Workbooks keep their active version until you activate another (Versions).`);
     await refresh();
-  }));
+  }, publishBtn));
   pinMap.addEventListener("click", () => void act(async () => {
     let map: Record<string, number>;
     try { map = JSON.parse(pins.value); } catch { throw new Error("The version map is not valid JSON."); }
     await rpc.call("pin_functions", { pins: map });
     say("Version map activated together.");
     await refresh();
-  }));
+  }, pinMap));
 
   switcher.addEventListener("change", () => {
     const f = functions.find((x) => x.name === switcher.value);
@@ -571,7 +646,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
   divider.addEventListener("pointerdown", (e) => pointerDrag(divider, e, (m) => setWidth(panel.getBoundingClientRect().right - m.clientX)));
   expandBtn.addEventListener("click", () => { expanded = !expanded; applyWidth(); render(); });
   panel.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!running) void runTests(); }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); e.stopPropagation(); if (!running && !blocked()) void runTests(); }
     else if (e.key === "Escape" && !e.defaultPrevented && !(e.target instanceof HTMLTextAreaElement)) { e.preventDefault(); controller.close(); }
   });
 
@@ -588,6 +663,19 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
       void refresh().then(() => { if (!functions.length && !draft.name && !draft.source) offerExample(); }).catch((e) => say(String(e)));
       (tabs[tab]).focus();
     },
+    setConnection(next) {
+      if (next === connection) return;
+      const back = next === "open" && connection !== "open";
+      connection = next;
+      render();
+      // Back after a reconnect: the list may have changed meanwhile; the draft stays as it is.
+      if (back && isOpen) void refresh().catch((e) => say(String(e)));
+    },
+    setViewOnly(next) {
+      if (next === viewOnly) return;
+      viewOnly = next;
+      render(); renderTests(); renderVersions();
+    },
     close() {
       if (!isOpen) return;
       panel.remove(); isOpen = false; onClosed();
@@ -597,6 +685,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     },
   };
   const offerExample = () => {
+    if (viewOnly) { resultsBody.replaceChildren(el("p", {}, "No functions in this workbook yet.")); return; }
     resultsBody.replaceChildren(el("p", {}, "No functions in this workbook yet. ",
       el("button", { class: "btn small", type: "button", onclick: () => start({ ...EXAMPLE, tests: EXAMPLE.tests.map((t) => ({ ...t, arguments: [...t.arguments] })) }) }, "Start from an example")));
   };

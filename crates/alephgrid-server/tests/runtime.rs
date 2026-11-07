@@ -457,12 +457,18 @@ async fn idle_workbooks_close_and_reopen_but_not_while_in_use() {
 #[tokio::test(flavor = "multi_thread")]
 async fn eviction_racing_new_work_never_serves_from_a_closed_workbook() {
     let dir = tempfile::tempdir().unwrap();
-    // Evict as soon as a workbook is unused.
-    let server = TestServer::start_with(dir.path(), |c| c.idle_timeout = Duration::ZERO).await;
-    let wb = server.create_workbook("race").await;
-    let mut ws = server.ws(&wb).await;
+    // Set the workbook up first, on a server that keeps it open. With a zero idle timeout
+    // the janitor may close it between the session's hello and its first operation (an open
+    // session does not keep compute open, 7.16), and that ends the setup session unanswered.
+    let setup = TestServer::start(dir.path()).await;
+    let wb = setup.create_workbook("race").await;
+    let mut ws = setup.ws(&wb).await;
     ws.ok("create_table_from_query", json!({ "name": "t", "sql": "SELECT i AS n FROM range(100) r(i)" })).await;
     ws.close().await;
+    let setup_epoch = status(&setup, &wb).await["allocation"]["epoch"].as_u64().unwrap();
+    setup.stop().await;
+    // The race: evict as soon as the workbook is unused.
+    let server = TestServer::start_with(dir.path(), |c| c.idle_timeout = Duration::ZERO).await;
     // Run until enough evictions have raced the requests (or a cap), rather than for a
     // fixed time: under load fewer windows open, and the test must still see them.
     let stop = Arc::new(AtomicBool::new(false));
@@ -528,8 +534,9 @@ async fn eviction_racing_new_work_never_serves_from_a_closed_workbook() {
     }
     let evictions = evicted.load(Ordering::SeqCst);
     let s = status(&server, &wb).await;
-    let epoch = s["allocation"]["epoch"].as_u64().unwrap();
-    eprintln!("eviction race: {total} requests, {evictions} evictions, final epoch {epoch}");
+    // Starts during the race only (allocation epochs continue across server restarts).
+    let epoch = s["allocation"]["epoch"].as_u64().unwrap() - setup_epoch;
+    eprintln!("eviction race: {total} requests, {evictions} evictions, {epoch} starts");
     assert!(total > 20, "{total} requests");
     assert!(evictions >= 10 && epoch > 10, "evictions must actually have raced the requests ({evictions} evictions, epoch {epoch})");
     server.stop().await;
