@@ -189,6 +189,8 @@ pub struct WorkbookHandle {
     lock: Mutex<Option<File>>,
     pub temp_dir: PathBuf,
     pub ownership: OwnershipAssignment,
+    /// Where its jobs are counted (9.13); set by the controller once it opened.
+    pub metrics: std::sync::OnceLock<Arc<crate::metrics::Metrics>>,
 }
 
 /// A use of a live allocation: while any lease is held the workbook is not closed as idle
@@ -294,6 +296,7 @@ impl WorkbookHandle {
             lock: Mutex::new(Some(lock)),
             temp_dir,
             ownership,
+            metrics: std::sync::OnceLock::new(),
         })
     }
 
@@ -573,7 +576,17 @@ impl WorkbookHandle {
     /// [`WorkbookHandle::run_queued`].
     pub fn enqueue(&self, job: &Job, lane: Lane) -> Result<crate::sched::Ticket> {
         self.check_open()?;
-        Ok(self.sched.submit(job.key, lane, job.class)?)
+        let ticket = self.sched.submit(job.key, lane, job.class);
+        if ticket.is_err() {
+            self.count_job(job.class, "rejected");
+        }
+        Ok(ticket?)
+    }
+
+    fn count_job(&self, class: Class, outcome: &'static str) {
+        if let Some(m) = self.metrics.get() {
+            m.inc("alephgrid_jobs_total", &[("class", crate::metrics::class_label(class)), ("outcome", outcome)]);
+        }
     }
 
     pub async fn run_queued<T: Send + 'static>(
@@ -599,12 +612,23 @@ impl WorkbookHandle {
                 }
             }
         };
+        let lane = work.lane();
+        let labels = [("class", crate::metrics::class_label(job.class)), ("lane", crate::metrics::lane_label(lane))];
         let slot = tokio::select! {
             slot = ticket.granted() => slot,
-            _ = tokio::time::sleep_until(job.deadline.into()) => bail!(JobError::DeadlineExceeded),
-            _ = cancelled(&mut cancel) => bail!(JobError::Cancelled),
+            _ = tokio::time::sleep_until(job.deadline.into()) => {
+                self.count_job(job.class, "deadline_exceeded");
+                bail!(JobError::DeadlineExceeded)
+            }
+            _ = cancelled(&mut cancel) => {
+                self.count_job(job.class, "cancelled");
+                bail!(JobError::Cancelled)
+            }
         };
-        let lane = work.lane();
+        if let Some(m) = self.metrics.get() {
+            m.observe("alephgrid_job_wait_seconds", &labels, ticket.queued_at().elapsed());
+        }
+        let ran = Instant::now();
         let h = self.clone();
         // The job's log span, inside the request or session that started it.
         let span = tracing::info_span!("job", workbook = self.id.as_str(), job = %format_args!("{}.{}", job.key.0, job.key.1), class = ?job.class, lane = ?lane);
@@ -643,6 +667,16 @@ impl WorkbookHandle {
                 }
             }
         };
+        if let Some(m) = self.metrics.get() {
+            m.observe("alephgrid_job_duration_seconds", &labels, ran.elapsed());
+        }
+        let outcome = match (&result, &stopped) {
+            (Ok(Ok(_)), _) => "ok",
+            (_, Some(JobError::Cancelled)) => "cancelled",
+            (_, Some(_)) => "deadline_exceeded",
+            _ => "failed",
+        };
+        self.count_job(job.class, outcome);
         let result = result.map_err(|e| anyhow!("internal error: {e}"))?;
         if let Some(why) = &stopped {
             job_span.in_scope(|| tracing::info!("job stopped: {why}"));
@@ -916,6 +950,8 @@ pub struct Config {
     pub outbox_pause_bytes: usize,
     /// A session whose unsent data passes this is closed (the client is not reading).
     pub outbox_max_bytes: usize,
+    /// A bearer token that may read `GET /metrics` besides instance admins (9.13).
+    pub metrics_token: Option<String>,
 }
 
 impl Config {
@@ -949,6 +985,7 @@ impl Config {
             job_timeout: Duration::from_secs(3600),
             outbox_pause_bytes: 16 << 20,
             outbox_max_bytes: 64 << 20,
+            metrics_token: None,
         }
     }
 }
@@ -1057,6 +1094,10 @@ pub struct AppState {
     /// configured but cannot run.
     pub python: Option<Arc<crate::python::PythonRuntime>>,
     pub python_problem: Option<String>,
+    /// Lifecycle counters and histograms (`GET /metrics`, 9.13); the controller's.
+    pub metrics: Arc<crate::metrics::Metrics>,
+    /// When this server started (ms since the epoch).
+    pub started_at_ms: u64,
 }
 
 pub type Shared = Arc<AppState>;
@@ -1196,6 +1237,7 @@ impl AppState {
         let mut controller = Controller::with_spec(&config.data_dir, budget, policy, config.stage_hook.clone(), crate::runtime::RuntimeSpec::current().with_python(python_id.as_deref()))?;
         controller.function_runtime = python.clone().map(|p| p as Arc<dyn alephgrid_core::external::FunctionRuntime>);
         controller.drain_grace = config.shutdown_grace;
+        let metrics = controller.metrics.clone();
         // Before reconciling, which writes records: on a full disk the reserve is given back.
         controller.disk_reserve = crate::reserve::DiskReserve::new(&control, config.disk_reserve);
         let fixed = controller.reconcile()?;
@@ -1227,6 +1269,8 @@ impl AppState {
             downloads: Arc::new(Downloads::default()),
             python,
             python_problem,
+            metrics,
+            started_at_ms: alephgrid_core::storage::now_ms(),
         }))
     }
 

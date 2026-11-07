@@ -245,6 +245,7 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/admin/backups", post(create_backup).get(list_backups))
         .route("/api/admin/backups/{name}", axum::routing::delete(delete_backup))
         .route("/api/admin/audit", get(crate::auth::routes::instance_audit))
+        .route("/api/admin/diagnostics", get(crate::diagnostics::endpoint))
         .route("/api/agents", get(crate::mcp::list).post(crate::mcp::create))
         .route("/api/agents/{id}", axum::routing::delete(crate::mcp::revoke))
         .route("/api/agents/{id}/activity", get(crate::mcp::activity))
@@ -258,6 +259,8 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/config", get(config))
         .route("/healthz", get(crate::health::healthz))
         .route("/readyz", get(crate::health::readyz))
+        // Instance admins or the metrics token; checked by the handler (9.13).
+        .route("/metrics", get(crate::metrics::endpoint))
         .route("/api/auth/setup", post(crate::auth::routes::setup))
         .route("/api/auth/login", post(crate::auth::routes::login))
         .route("/api/auth/logout", post(crate::auth::routes::logout))
@@ -857,12 +860,21 @@ async fn import_file(
         .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
     state.controller.release_upload(size);
+    count_import(&state, result.is_ok(), size);
     let (imported, revision) = result?;
     state.auth.record(&p, "data_imported", &space, &id, json!({ "file": file_name, "bytes": size, "revision": revision }));
     state.quota.forget(&space.id);
     let h2 = h.clone();
     let _ = blocking(move || h2.refresh_summary()).await;
     Ok(Json(imported))
+}
+
+/// Count a file import (`GET /metrics`).
+fn count_import(state: &Shared, ok: bool, bytes: u64) {
+    state.metrics.inc("alephgrid_imports_total", &[("result", if ok { "ok" } else { "failed" })]);
+    if ok {
+        state.metrics.add("alephgrid_import_bytes_total", &[], bytes);
+    }
 }
 
 /// A scheduler job for an HTTP request (session 0, a request number of its own).
@@ -1069,7 +1081,9 @@ async fn import_upload(
         }
         out
     }));
-    let (imported, revision) = h.run(http_job(Class::Bulk, &state), None, None, work).await?;
+    let result = h.run(http_job(Class::Bulk, &state), None, None, work).await;
+    count_import(&state, result.is_ok(), bytes);
+    let (imported, revision) = result?;
     state.auth.record(&p, "data_imported", &space, &id, json!({ "file": file, "bytes": bytes, "revision": revision }));
     state.quota.forget(&space.id);
     state.remove_upload(&upload);

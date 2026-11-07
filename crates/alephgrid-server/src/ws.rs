@@ -1285,6 +1285,7 @@ pub async fn serve_socket(socket: WebSocket, state: Shared, lease: crate::state:
     let _ = handle.touch(true);
     let outbox = Arc::new(Outbox::new(state.config.outbox_pause_bytes, state.config.outbox_max_bytes));
     state.sessions.lock().unwrap().insert(session, SessionInfo { workbook: handle.id.clone(), outbox: outbox.clone() });
+    state.metrics.inc("alephgrid_websocket_connections_total", &[]);
     let revision = {
         let h = handle.clone();
         tokio::task::spawn_blocking(move || {

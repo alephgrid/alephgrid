@@ -176,6 +176,7 @@ pub struct Ticket {
     grant: Option<oneshot::Receiver<usize>>,
     slot: Option<usize>,
     done: bool,
+    queued_at: Instant,
 }
 
 impl Scheduler {
@@ -224,7 +225,7 @@ impl Scheduler {
             inner.lane(lane).queues[ci].entry(key.0).or_default().push_back(Waiting { key, class, since: Instant::now(), grant: tx });
             Self::pump(&mut inner, lane);
         }
-        Ok(Ticket { sched: self.clone(), key, lane, grant: Some(rx), slot: None, done: false })
+        Ok(Ticket { sched: self.clone(), key, lane, grant: Some(rx), slot: None, done: false, queued_at: Instant::now() })
     }
 
     fn pump(inner: &mut Inner, lane: Lane) {
@@ -320,6 +321,11 @@ impl Ticket {
 
     pub fn lane(&self) -> Lane {
         self.lane
+    }
+
+    /// When the job joined the queue.
+    pub fn queued_at(&self) -> Instant {
+        self.queued_at
     }
 }
 

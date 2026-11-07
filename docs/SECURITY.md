@@ -72,6 +72,17 @@ even when it looks like a formula.
 
 Faithful CSV by default, neutralized CSV on request, is the project's current stance.
 
+## Operator endpoints
+
+* `GET /healthz` and `GET /readyz` need no sign-in and say only which check failed.
+* `GET /metrics` answers instance admins and, when `--metrics-token` is set, a bearer of that
+  token (compared in constant time); everyone else gets 401 or 403. Its label values are
+  fixed in the code, so no series can carry a workbook, user, file, SQL text or secret.
+* `GET /api/admin/diagnostics` (instance admins, audited) and `alephgrid diagnose` show
+  secrets, identities, URLs and paths only as `set` / `not set`, and cut configured secrets,
+  tokens, cookies and emails out of the log lines they include
+  ([OPERATIONS.md](OPERATIONS.md#support-diagnostics)).
+
 ## Ids
 
 Workbook, upload, export and download ids are 64 random bits from the operating system's

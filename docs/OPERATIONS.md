@@ -54,13 +54,112 @@ request with its status and latency).
   and plain (letters, digits, `-`, `_`, `.`, at most 64); otherwise the server makes one.
 - Lines written while handling a request carry a `request` span with `request_id`, `method`
   and `path` (the path holds the workbook id). Bulk jobs add a `job` span with `workbook`,
-  `job`, `class` and `lane`; a job stopped by its deadline or a cancel is logged. Workbook
-  lifecycle lines (start, migration, drain, failure) carry `workbook`, WebSocket lines
-  `session`.
+  `job`, `class` and `lane`; a job stopped by its deadline or a cancel is logged. Allocation
+  lifecycle lines (`allocation ready`, `allocation start failed`, `allocation stopping`)
+  carry `workbook`, `allocation`, `operation` (the `operation_id` of a runtime request) and
+  `reason`; migration lines carry `workbook`, WebSocket lines `session`.
 - Logs never carry passwords, tokens, cookies, request headers, query strings or request
   bodies, and workbook contents are not logged, except that a warning may quote an engine
-  error message (DuckDB or Python), which can name a value. A support bundle is the log plus `GET /api/admin/resources` and
-  `/api/admin/sessions` (instance admins).
+  error message (DuckDB or Python), which can name a value.
+
+## Metrics
+
+`GET /metrics` serves Prometheus text format (version 0.0.4). It answers:
+
+- an instance admin (session cookie). With `--auth local` (loopback only) that is everyone
+  who can reach the port;
+- a scraper sending `Authorization: Bearer <token>` when `--metrics-token`
+  (`ALEPHGRID_METRICS_TOKEN`, at least 16 characters) is set.
+
+Everyone else gets 401 or 403. Without a token, scraping in `--auth accounts` needs an admin
+session, so set one for Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: alephgrid
+    scheme: https
+    authorization: { credentials_file: /etc/prometheus/alephgrid-token }
+    static_configs: [{ targets: ["grid.example.com"] }]
+```
+
+Label values come only from fixed sets in the code (states, reasons, job classes and lanes,
+`le`), never from a request: no series names a workbook, space, user, file, SQL text or path,
+and the number of series is fixed. Every counter is present from the first scrape, at 0.
+
+| Metric | Type | Labels | What |
+| --- | --- | --- | --- |
+| `alephgrid_build_info` | gauge | `version` | always 1 |
+| `alephgrid_start_time_seconds` | gauge | | process start (Unix time) |
+| `alephgrid_ready` | gauge | | 1 when `/readyz` answers 200 |
+| `alephgrid_shutting_down` | gauge | | 1 once SIGTERM was received |
+| `alephgrid_workbooks_open` | gauge | | workbooks whose compute is ready |
+| `alephgrid_allocations` | gauge | `state`: requested, starting, running, ready, draining | live allocations |
+| `alephgrid_allocations_queued` | gauge | | starts waiting in line for host capacity |
+| `alephgrid_allocation_starts_total` | counter | | starts begun |
+| `alephgrid_allocation_start_failures_total` | counter | `reason`: incompatible, capacity, quota, owned_elsewhere, startup_failed, cancelled, lost | starts that did not reach ready |
+| `alephgrid_allocation_start_seconds` | histogram | | request to ready |
+| `alephgrid_allocation_stops_total` | counter | `reason`: deleted, evicted, requested, shutdown, restarting | evicted = idle, or closed to make room |
+| `alephgrid_allocations_lost_total` | counter | | allocations of a previous process marked lost at start |
+| `alephgrid_jobs_waiting` | gauge | `lane`: read, write | jobs queued in open workbooks |
+| `alephgrid_jobs_running` | gauge | | jobs running |
+| `alephgrid_job_wait_seconds` | histogram | `class`: interactive, bulk; `lane` | time in the workbook's queue |
+| `alephgrid_job_duration_seconds` | histogram | `class`, `lane` | run time (queries, imports, exports, edits, fetches) |
+| `alephgrid_jobs_total` | counter | `class`; `outcome`: ok, failed, cancelled, deadline_exceeded, rejected | rejected = the queue was full |
+| `alephgrid_websocket_connections` | gauge | | open sessions |
+| `alephgrid_websocket_connections_total` | counter | | sessions opened |
+| `alephgrid_imports_total` | counter | `result`: ok, failed | file imports |
+| `alephgrid_import_bytes_total` | counter | | bytes of files imported |
+| `alephgrid_upload_staged_bytes`, `alephgrid_upload_budget_bytes` | gauge | | staged uploads and their budget |
+| `alephgrid_memory_budget_bytes`, `alephgrid_memory_reserved_bytes` | gauge | | `--memory-budget` and what open workbooks reserve of it |
+| `alephgrid_threads_budget`, `alephgrid_threads_reserved` | gauge | | the same for engine threads |
+| `alephgrid_disk_reserve_state` | gauge | `state`: held, released, off | one of them is 1 |
+| `alephgrid_disk_reserve_bytes`, `alephgrid_disk_free_bytes` | gauge | | reserve size, free disk at the data directory |
+| `alephgrid_last_backup_timestamp_seconds` | gauge | | newest online backup in `.backups/` (Unix time; 0 when none). Offline backups made elsewhere are not seen |
+
+Histogram buckets (seconds): 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
+300, 900, 3600.
+
+## Alerts
+
+Suggested Prometheus rules; tune thresholds to your workload.
+
+| Alert | Expression | For | Means |
+| --- | --- | --- | --- |
+| Down | `up{job="alephgrid"} == 0` | 2m | the process does not answer (liveness) |
+| NotReady | `alephgrid_ready == 0 and alephgrid_shutting_down == 0` | 2m | data directory not writable or control database not answering ([Health](#health-and-readiness)) |
+| DiskReserveReleased | `alephgrid_disk_reserve_state{state="released"} == 1` | 0m | the disk filled up; follow [Disk is full](#disk-is-full) |
+| DiskLow | `alephgrid_disk_free_bytes < 5 * 1024^3` | 10m | under 5 GiB free; imports and backups will start failing |
+| AllocationStartFailures | `sum(increase(alephgrid_allocation_start_failures_total{reason=~"startup_failed\|owned_elsewhere\|incompatible"}[15m])) > 0` | 0m | a workbook could not be opened; see [stuck allocation](#a-workbook-will-not-open-or-its-compute-allocation-is-stuck) |
+| CapacityRefusals | `sum(increase(alephgrid_allocation_start_failures_total{reason="capacity"}[15m])) > 3` | 0m | starts refused after waiting in line: raise `--memory-budget` or lower `--idle-timeout` |
+| StartQueue | `alephgrid_allocations_queued > 0` | 5m | starts keep waiting for capacity |
+| JobWaitP95 | `histogram_quantile(0.95, sum by (le, class) (rate(alephgrid_job_wait_seconds_bucket[10m]))) > 5` | 10m | jobs wait over 5 s for their workbook's queue (interactive ones should wait well under 1 s) |
+| JobsRejectedOrTimedOut | `sum(increase(alephgrid_jobs_total{outcome=~"rejected\|deadline_exceeded"}[15m])) > 5` | 0m | overloaded workbooks or too-short timeouts |
+| MemoryBudgetNearLimit | `alephgrid_memory_reserved_bytes / alephgrid_memory_budget_bytes > 0.9` | 15m | open workbooks hold over 90% of the budget; new starts will close idle ones or wait |
+| BackupStale | `time() - alephgrid_last_backup_timestamp_seconds > 26 * 3600` | 0m | no online backup in 26 h (only if you back up daily with `POST /api/admin/backups`) |
+
+## Support diagnostics
+
+A diagnostics bundle is one JSON file to attach to a support request: version and build,
+platform (OS, architecture, CPUs, memory), the effective configuration with every secret,
+identity, URL and path shown only as `set` / `not set`, health, storage formats, sizes and
+counts, metrics, and recent log lines.
+
+- **From the running server:** Administration API `GET /api/admin/diagnostics` (instance
+  admins; audited as `diagnostics_downloaded`). It includes the newest 200 log lines of the
+  process.
+- **From the data directory:** `alephgrid diagnose --data-dir DIR [--out FILE]`, with the
+  same flags and environment as the server (in Docker: `docker exec <container> alephgrid
+  diagnose --data-dir /data --out /data/diagnostics.json`). It reads files only, never a
+  database, so it works while the server runs or is stopped; it has no log lines.
+
+It never holds passwords, tokens, the SSO client secret or client id, the metrics token,
+session cookies or emails. Outside the log lines it holds no workbook, space, user or file
+names or ids, cell values, SQL text or paths. Log lines are copied as written (never request
+bodies, headers or query strings) with configured secrets, `agt_`/`agc_` tokens, cookies,
+bearer credentials, emails and the data directory's path cut out. They keep request paths and
+workbook ids, which match your own log; a line can name a file given to `alephgrid` on its
+command line, and an engine error quoted in a warning can name a value (see [Logs](#logs)).
+Read the bundle before you send it.
 
 ## Docker
 
