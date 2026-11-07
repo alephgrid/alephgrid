@@ -226,8 +226,59 @@ jobs:
           path: web/test-results
           destination: playwright-<< parameters.browser >>
 
-  long-runs:
+  # The long runs, split in three jobs that run side by side so each stays well inside the
+  # job time limit (together they need far more than one hour).
+  long-props:
     executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          # Each case opens a workbook on disk, so file I/O, not the CPU, sets the pace
+          # (measured: a release build is no faster). The scratch workbooks live in RAM.
+          name: Property and state-machine tests, 2000 cases (workbooks on a RAM disk)
+          command: cargo test --locked -p alephgrid-core --lib props
+          no_output_timeout: 50m
+          environment:
+            PROPTEST_CASES: "2000"
+            TMPDIR: /dev/shm
+      # Shrunk failing inputs of the property targets: commit them to replay them on every
+      # later run (docs/TEST_STRATEGY.md).
+      - store_artifacts:
+          path: crates/alephgrid-core/proptest-regressions
+          destination: proptest-regressions
+
+  long-fuzz:
+    executor: vm
+    environment:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - rust-setup
+      - run:
+          name: Fuzz targets (formula parsers, CSV import, pasted cells), 200,000 cases or 5 minutes each
+          command: cargo test --locked -p alephgrid-core --lib tests::fuzz -- --nocapture
+          no_output_timeout: 40m
+          environment:
+            FUZZ_CASES: "200000"
+            FUZZ_SECONDS: "300"
+      - store_artifacts:
+          path: crates/alephgrid-core/proptest-regressions
+          destination: proptest-regressions
+
+  # Every alephgrid-server test five times, to surface flakiness: five machines, one full
+  # run each (CircleCI parallelism), instead of five runs in a row on one.
+  long-server:
+    executor: vm
+    parallelism: 5
     environment:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -238,27 +289,11 @@ jobs:
       - rust-setup
       - python-sandbox
       - run:
-          name: Property and state-machine tests, 2000 cases
-          command: cargo test --locked -p alephgrid-core --lib props
+          name: Integration and crash suites, one full run on each of the five machines
+          command: |
+            echo "run $((CIRCLE_NODE_INDEX + 1)) of $CIRCLE_NODE_TOTAL"
+            cargo test --locked -p alephgrid-server
           no_output_timeout: 40m
-          environment:
-            PROPTEST_CASES: "2000"
-      - run:
-          name: Fuzz targets (formula parsers, CSV import, pasted cells), 200,000 cases or 5 minutes each
-          command: cargo test --locked -p alephgrid-core --lib tests::fuzz -- --nocapture
-          no_output_timeout: 40m
-          environment:
-            FUZZ_CASES: "200000"
-            FUZZ_SECONDS: "300"
-      - run:
-          name: Integration and crash suites, five times to surface flakiness
-          command: for i in 1 2 3 4 5; do cargo test --locked -p alephgrid-server || exit 1; done
-          no_output_timeout: 40m
-      # Shrunk failing inputs of the property and fuzz targets: commit them to replay them on
-      # every later run (docs/TEST_STRATEGY.md).
-      - store_artifacts:
-          path: crates/alephgrid-core/proptest-regressions
-          destination: proptest-regressions
 
   # The built binary starts on an empty data directory, serves the UI, creates a workbook and
   # imports a CSV: the release smoke test, on every nightly run.
@@ -572,7 +607,11 @@ workflows:
           requires: [rust-build]
       - install-check:
           requires: [rust-build]
-      - long-runs:
+      - long-props:
+          requires: [rust-build]
+      - long-fuzz:
+          requires: [rust-build]
+      - long-server:
           requires: [rust-build]
       - mutation:
           requires: [rust-build]
@@ -610,7 +649,13 @@ workflows:
       - install-check:
           requires: [rust-build]
           filters: *on-tags
-      - long-runs:
+      - long-props:
+          requires: [rust-build]
+          filters: *on-tags
+      - long-fuzz:
+          requires: [rust-build]
+          filters: *on-tags
+      - long-server:
           requires: [rust-build]
           filters: *on-tags
       - mutation:
@@ -649,7 +694,9 @@ workflows:
             - e2e-firefox
             - e2e-webkit
             - install-check
-            - long-runs
+            - long-props
+            - long-fuzz
+            - long-server
             - mutation
           filters: *on-tags
       - approve-publish:
