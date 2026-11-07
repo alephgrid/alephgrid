@@ -1,6 +1,9 @@
 # Alephgrid for a team: accounts, HTTPS through Caddy, health checks and resource limits
 # (docs/OPERATIONS.md, "Docker").
 #
+# The image is published with the first release; until then, build it from the repository
+# root first: docker build -t ghcr.io/alephgrid/alephgrid .
+#
 #   cd deploy/team
 #   cp .env.example .env        # then set ALEPHGRID_DOMAIN and the rest
 #   docker compose up -d

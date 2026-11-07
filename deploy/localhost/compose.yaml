@@ -1,5 +1,8 @@
 # Alephgrid for one person on this machine (docs/OPERATIONS.md, "Docker").
 #
+# The image is published with the first release; until then, build it from the repository
+# root first: docker build -t ghcr.io/alephgrid/alephgrid .
+#
 #   docker compose -f deploy/localhost/compose.yaml up -d
 #   open http://localhost:7878
 #

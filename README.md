@@ -7,7 +7,7 @@
 
 <p align="center">
   <strong>An open-source spreadsheet for data that doesn't fit in a spreadsheet.</strong><br>
-  Hundreds of millions of rows, real spreadsheet formulas, SQL when you want it.<br>
+  Tens of millions of rows, real spreadsheet formulas, SQL when you want it.<br>
   Runs on your laptop or your own server. Your data never leaves it.
 </p>
 
@@ -22,7 +22,7 @@
   <img src="assets/screenshots/workbook-light.png" alt="A sheet totalling a 20,000-row orders table with SUMIFS, formatted as currency and percentages, with a column chart of revenue by region and a selection showing the fill handle" width="100%">
 </p>
 
-Open a CSV or Parquet file with hundreds of millions of rows, then scroll, sort, filter, edit
+Open a CSV or Parquet file with tens of millions of rows, then scroll, sort, filter, edit
 and add calculated columns in your browser. Next to those big tables, build ordinary sheets
 with formatting, charts and Excel formulas such as `XLOOKUP` and `SUMIFS`, and point those
 formulas straight at the big tables. Everything runs on a DuckDB file on your machine. There
@@ -30,7 +30,7 @@ are no seats, tiers or paywalls: export, sign-in, teams and every other feature 
 
 ```bash
 alephgrid flights.parquet          # opens http://127.0.0.1:7878 with the file loaded
-alephgrid --demo-rows 100000000    # or try it on 100M generated rows
+alephgrid --demo-rows 10000000     # or try it on 10M generated rows
 ```
 
 | | |
@@ -40,8 +40,9 @@ alephgrid --demo-rows 100000000    # or try it on 100M generated rows
 | <img src="assets/screenshots/hub-light.png" alt="The hub: search, three recently opened workbooks and the workbook list with contents, size and compute state"> | |
 | **The hub**: every workbook, its size and whether its compute is running | |
 
-> **Status: pre-release.** The first release (v0.1.0) is being prepared. Build from source or
-> with Docker today; published binaries and images come with the release. See
+> **Status: pre-release.** The first release (v0.1.0) is being prepared. Today, build from
+> source (or build the Docker image from a checkout); binaries, the container image, npm and
+> PyPI packages are not published yet. See
 > [what is shipped and what is not](docs/SPREADSHEET_FEATURES.md).
 
 ## Why Alephgrid
@@ -79,27 +80,12 @@ alephgrid --demo-rows 100000000    # or try it on 100M generated rows
 | **Collaboration** | Several people on one workbook see each other's edits live; a change history in which table changes can be taken back |
 | **Teams** | Organizations, spaces, owner/editor/viewer roles (also from identity-provider groups), invitations, service tokens, password or OpenID Connect sign-in, quotas, audit log, backups and an administration screen. See [teams](docs/TEAMS.md) |
 | **Compute** | Each open workbook gets its own share of memory and threads, sleeps when idle and wakes when opened; larger sizes (`--profile`) for heavy workbooks. See [compute](docs/COMPUTE.md) |
-| **Agents (MCP)** | Read-only agent connections per space or workbook over Streamable HTTP (`/mcp`) or stdio (`alephgrid mcp`): schema cards, catalog search, reads, read-only SQL, saved queries and analyses, content-hashed receipts, activity per connection |
+| **Agents (MCP)** | Read-only agent connections per space or workbook over Streamable HTTP (`/mcp`) or stdio (`alephgrid mcp`): schema cards, catalog search, reads, read-only SQL, saved queries and analyses, content-hashed receipts, activity per connection. Tested with MCP Inspector and Claude Code ([tested clients](docs/MCP.md#tested-clients)) |
 
 The full inventory, including what is partial or not planned, is in
 [docs/SPREADSHEET_FEATURES.md](docs/SPREADSHEET_FEATURES.md).
 
 ## Quick start
-
-### Install a release
-
-From v0.1.0 (being prepared; see [releasing](docs/RELEASING.md)):
-
-```bash
-npx alephgrid flights.parquet                         # npm, or: pnpm dlx / yarn dlx / bunx alephgrid
-uvx alephgrid flights.parquet                         # PyPI, or: pipx install alephgrid / pip install alephgrid
-docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid
-```
-
-or download `alephgrid-VERSION-TARGET.tar.gz` for Linux (x86_64, arm64) or macOS (Apple
-silicon, Intel) from GitHub Releases and check it against `SHA256SUMS`. On Windows, use Docker
-or WSL. The npm and PyPI packages hold the same binary (PyPI ships wheels only, no source
-distribution; Linux needs glibc 2.31+ and pip 20.3+); neither is published yet.
 
 ### From source
 
@@ -114,7 +100,24 @@ cargo build --release
 
 The first build compiles DuckDB from source, which takes several minutes.
 
+### Install a release (not yet published)
+
+From v0.1.0 (see [releasing](docs/RELEASING.md)); none of these work until the release exists:
+
+```bash
+npx alephgrid flights.parquet                         # npm, or: pnpm dlx / yarn dlx / bunx alephgrid
+uvx alephgrid flights.parquet                         # PyPI, or: pipx install alephgrid / pip install alephgrid
+docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid
+```
+
+or download `alephgrid-VERSION-TARGET.tar.gz` for Linux (x86_64, arm64) or macOS (Apple
+silicon, Intel) from GitHub Releases and check it against `SHA256SUMS` (not yet signed). On
+Windows, use Docker or WSL. The npm and PyPI packages hold the same binary (PyPI ships wheels
+only; Linux needs glibc 2.31+ and pip 20.3+).
+
 ### Docker (for a team)
+
+From a checkout (builds the image locally):
 
 ```bash
 docker compose up -d
@@ -186,6 +189,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Measured (20M-row table, 9 columns, debug build, 8-core / 8 GB laptop)
 
+Indicative timings from one machine, not capacity limits; none are published yet.
+
 | Operation | Time |
 |---|---|
 | Reopen the workbook after a restart | 3 ms (no rehydrate) |
@@ -196,8 +201,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | GROUP BY carrier via SQL | 39–57 ms |
 | Edit 1 cell / paste 1,000 cells | 3 ms / 43 ms |
 
-Reproduce with `alephgrid --demo-rows 20000000` and `docs/bench.mjs`. Release-build benchmarks
-over varied data shapes will be published with v0.1.0.
+Reproduce with `alephgrid --demo-rows 20000000` and `docs/bench.mjs`. The benchmark tool for
+varied data shapes and concurrent clients is described in
+[operations](docs/OPERATIONS.md#benchmarks); release-build results are not published yet.
 
 ## Documentation
 
@@ -235,8 +241,8 @@ Kubernetes. See [docs/ROADMAP.md](docs/ROADMAP.md) and the
 
 ## Community
 
-* Questions and ideas: GitHub Discussions.
-* Bugs: open an issue with steps to reproduce.
+* Questions, ideas and bugs: [GitHub issues](https://github.com/alephgrid/alephgrid/issues)
+  (for a bug, include steps to reproduce).
 * Security problems: please report privately; see [SECURITY.md](SECURITY.md).
 * Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Everyone taking part follows the
   [code of conduct](CODE_OF_CONDUCT.md).

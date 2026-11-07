@@ -1,5 +1,5 @@
 // U.04 / U.05 / U.T01: the collapsible workbook explorer and the SQL workspace docked under the
-// grid (resizable, maximizable, closable), with their state kept across reloads.
+// grid (resizable, collapsible, maximizable, closable), with their state kept across reloads.
 
 import { expect, test, type Page } from "@playwright/test";
 import { Server } from "./server";
@@ -105,6 +105,63 @@ test("the SQL workspace docks under the grid: resize, maximize, restore and clos
   await page.locator(".sql-editor").focus();
   await page.keyboard.press("Escape");
   await expect(sql).toBeHidden();
+});
+
+test("the SQL panel collapses to its title and keeps its draft and result; the editor resizes from the keyboard", async ({ page }) => {
+  const wb = await workbook("Collapse");
+  await open(page, wb);
+  const grid = page.locator(".grid-wrap");
+  const full = (await grid.boundingBox())!.height;
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  const sql = page.getByRole("region", { name: "SQL" });
+  const editor = page.locator(".sql-editor");
+  await editor.fill("SELECT sum(amount) AS total FROM sales");
+  await sql.getByRole("button", { name: "Run", exact: true }).click();
+  // 10 + 20 from the fixture.
+  await expect(page.locator(".result-table tbody td")).toHaveText(["30"]);
+  const docked = (await grid.boundingBox())!.height;
+
+  // The editor and the results share the panel: a separator under the editor resizes it.
+  const grip = sql.getByRole("separator", { name: "Resize SQL editor" });
+  const h0 = (await editor.boundingBox())!.height;
+  const v0 = Number(await grip.getAttribute("aria-valuenow"));
+  expect(Math.abs(v0 - h0)).toBeLessThan(2);
+  await grip.focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(grip).toHaveAttribute("aria-valuenow", String(v0 + 32));
+  await expect.poll(async () => Math.round((await editor.boundingBox())!.height - h0)).toBe(32);
+  await page.keyboard.press("ArrowUp");
+  await expect(grip).toHaveAttribute("aria-valuenow", String(v0 + 16));
+
+  // Collapsed, only its title bar stays and the grid gets the room back.
+  const collapse = sql.getByRole("button", { name: "Collapse SQL panel" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await collapse.click();
+  const expand = sql.getByRole("button", { name: "Expand SQL panel" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect(editor).toBeHidden();
+  await expect(page.locator(".result-table")).toBeHidden();
+  await expect(sql.getByRole("heading", { name: "SQL" })).toBeVisible();
+  await expect(page.getByRole("separator", { name: "Resize SQL panel" })).toBeHidden();
+  await expect.poll(async () => (await grid.boundingBox())!.height).toBeGreaterThan(docked + 80);
+  expect((await grid.boundingBox())!.height).toBeLessThan(full);
+
+  // Expanded from the keyboard: the draft, the result and the editor's size are kept.
+  await expand.focus();
+  await page.keyboard.press("Enter");
+  await expect(sql.getByRole("button", { name: "Collapse SQL panel" })).toBeFocused();
+  await expect(editor).toHaveValue("SELECT sum(amount) AS total FROM sales");
+  await expect(page.locator(".result-table tbody td")).toHaveText(["30"]);
+  await expect(grip).toHaveAttribute("aria-valuenow", String(v0 + 16));
+  await expect.poll(async () => Math.round((await grid.boundingBox())!.height)).toBe(Math.round(docked));
+
+  // Opening SQL again while it is collapsed expands it.
+  await sql.getByRole("button", { name: "Collapse SQL panel" }).click();
+  await expect(editor).toBeHidden();
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  await expect(editor).toBeVisible();
+  await expect(page.locator(".result-table tbody td")).toHaveText(["30"]);
 });
 
 test("the menu bar works from the keyboard: arrows move between menus, Escape returns focus", async ({ page }) => {

@@ -1,5 +1,6 @@
 // A panel docked under the grid (U.05): resizable by dragging or with the arrow keys,
-// maximizable, closed with its button or Escape. Its height is remembered in this browser.
+// maximizable, optionally collapsible to its title bar (the panel keeps its state while
+// collapsed), closed with its button or Escape. Its height is remembered in this browser.
 
 import { currentOpener, el, pointerDrag } from "./ui";
 import { icon } from "./icons";
@@ -17,8 +18,15 @@ function saved(): { height: number; max: boolean } {
 
 let seq = 0;
 
-/** Dock `panel` at the bottom of `host` (a column flex box); `label` names the region. */
-export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, onClose: () => void): { close: () => void } {
+export interface DockHandle {
+  close: () => void;
+  /** Show a collapsed panel again. */
+  expand: () => void;
+}
+
+/** Dock `panel` at the bottom of `host` (a column flex box); `label` names the region.
+ *  With `collapsible`, the panel's first child (its title bar) stays when it is collapsed. */
+export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, onClose: () => void, opts: { collapsible?: boolean } = {}): DockHandle {
   const opener = currentOpener();
   const state = saved();
   const heading = panel.querySelector("h2");
@@ -29,14 +37,23 @@ export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, 
     title: "Drag, or use the arrow keys, to resize",
   });
   const maxBtn = el("button", { class: "icon-btn dock-max-btn" });
+  const collapseBtn = opts.collapsible ? el("button", { class: "icon-btn dock-collapse-btn" }, icon("chevron")) : null;
+  let collapsed = false;
   const closeBtn = el("button", { class: "icon-btn", "aria-label": `Close ${label} panel`, title: "Close (Esc)", onclick: () => onClose() }, icon("x"));
   const dock = el("section", { class: "dock", role: "region", "aria-labelledby": heading?.id ?? false, "aria-label": heading ? false : label },
-    handle, el("div", { class: "dock-controls" }, maxBtn, closeBtn), panel);
+    handle, el("div", { class: "dock-controls" }, collapseBtn, maxBtn, closeBtn), panel);
 
   const persist = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* this page only */ } };
   const render = () => {
-    dock.style.height = state.max ? "" : `${state.height}%`;
-    host.classList.toggle("dock-maximized", state.max);
+    dock.style.height = state.max || collapsed ? "" : `${state.height}%`;
+    dock.classList.toggle("dock-collapsed", collapsed);
+    handle.hidden = collapsed;
+    host.classList.toggle("dock-maximized", state.max && !collapsed);
+    if (collapseBtn) {
+      collapseBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      collapseBtn.setAttribute("aria-label", collapsed ? `Expand ${label} panel` : `Collapse ${label} panel`);
+      collapseBtn.title = collapsed ? "Expand" : "Collapse to the title bar";
+    }
     handle.setAttribute("aria-valuenow", String(state.max ? MAX : Math.round(state.height)));
     handle.setAttribute("aria-valuetext", state.max ? "maximized" : `${Math.round(state.height)}% of the height`);
     maxBtn.replaceChildren(icon(state.max ? "restore" : "maximize"));
@@ -45,7 +62,9 @@ export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, 
     maxBtn.title = state.max ? "Restore" : "Maximize";
   };
   const setHeight = (h: number) => { state.max = false; state.height = Math.min(MAX, Math.max(MIN, h)); render(); persist(); };
-  maxBtn.addEventListener("click", () => { state.max = !state.max; render(); persist(); });
+  // Maximizing a collapsed panel expands it first.
+  maxBtn.addEventListener("click", () => { state.max = collapsed ? true : !state.max; collapsed = false; render(); persist(); });
+  collapseBtn?.addEventListener("click", () => { collapsed = !collapsed; render(); });
   handle.addEventListener("keydown", (e) => {
     const step = { ArrowUp: STEP, ArrowDown: -STEP }[e.key];
     if (step) { e.preventDefault(); setHeight(state.height + step); }
@@ -72,6 +91,7 @@ export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, 
   render();
   host.append(dock);
   return {
+    expand: () => { if (collapsed) { collapsed = false; render(); } },
     close: () => {
       dock.remove();
       host.classList.remove("dock-maximized");

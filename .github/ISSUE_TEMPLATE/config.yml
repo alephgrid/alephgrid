@@ -3,6 +3,3 @@ contact_links:
   - name: Report a security problem
     url: https://github.com/alephgrid/alephgrid/security/advisories/new
     about: Please report vulnerabilities privately, not as an issue (see SECURITY.md).
-  - name: Questions and ideas
-    url: https://github.com/alephgrid/alephgrid/discussions
-    about: Ask how to do something or share an idea in Discussions.

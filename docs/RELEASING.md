@@ -1,7 +1,8 @@
 # Releasing
 
 A release is built, tested and packaged by CircleCI from a version tag, waits in CircleCI
-for a maintainer's approval, and only then becomes public. Nothing runs on a push.
+for a maintainer's approval, and only then becomes public. Nothing runs on a push. No release
+has been made yet, so none of the channels below is published.
 
 | Channel | What users run | Built by |
 |---|---|---|

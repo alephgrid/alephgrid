@@ -287,7 +287,7 @@ async fn ids_from_another_space_are_not_found() {
 /// Operations a viewer may send (independent of `ws::required_caps`): reading, querying and
 /// exporting. Everything else needs an editor.
 const VIEWER_OPS: &[&str] = &[
-    "tables", "open_view", "update_view", "view_info", "fetch", "stats", "find_in_view", "column_values", "sheet_find", "sheet_find_all", "comments", "hidden_sheets", "sheet_rules", "sheet_charts", "sheet_layout", "sheet_column_texts", "sheet_range_values", "sheet_numbers", "query", "sheets", "sheet_fetch", "sheet_names", "sheet_cell_detail",
+    "tables", "open_view", "update_view", "view_info", "fetch", "stats", "find_in_view", "column_values", "view_sql", "sheet_find", "sheet_find_all", "comments", "hidden_sheets", "sheet_rules", "sheet_charts", "sheet_layout", "sheet_column_texts", "sheet_range_values", "sheet_numbers", "query", "sheets", "sheet_fetch", "sheet_names", "sheet_cell_detail",
     "sheet_check_formula", "sheet_region", "close_view", "history", "schema", "saved_views", "query_versions", "saved_queries", "export_query", "materialized",
     "analyze", "analyses", "dashboards", "dashboard", "validations", "preview_transform", "inspect_formula", "xlsx_compatibility", "drill",
     "presentation", "replace_preview", "functions", "function_usage", "test_function", "cancel",

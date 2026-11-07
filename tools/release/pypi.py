@@ -50,7 +50,7 @@ MANYLINUX_LIBS = {
     "ld-linux-x86-64.so.2", "ld-linux-aarch64.so.1",
 }
 NOTICES = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]
-SUMMARY = ("Open-source spreadsheet for data that doesn't fit in a spreadsheet: hundreds of "
+SUMMARY = ("Open-source spreadsheet for data that doesn't fit in a spreadsheet: tens of "
            "millions of rows, Excel formulas, SQL when you want it.")
 KEYWORDS = "spreadsheet,duckdb,big-data,sql,excel,csv,parquet,self-hosted"
 CLASSIFIERS = [
