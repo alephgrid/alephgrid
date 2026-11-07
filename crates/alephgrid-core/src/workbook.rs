@@ -1155,6 +1155,11 @@ impl Workbook {
         self.db().column_values(spec, column, search, limit)
     }
 
+    /// A SELECT over the rows a view spec shows (see [`Db::view_sql`]).
+    pub fn view_sql(&self, spec: &ViewSpec) -> Result<String> {
+        self.db().view_sql(spec)
+    }
+
     /// Check the cached position index of `table` against its data (tests).
     #[cfg(test)]
     pub fn verify_index(&self, table: &str) -> Result<bool> {
@@ -2027,6 +2032,10 @@ impl Reader {
 
     pub fn column_values(&self, spec: &ViewSpec, column: &str, search: &str, limit: usize) -> Result<ColumnValues> {
         self.db().column_values(spec, column, search, limit)
+    }
+
+    pub fn view_sql(&self, spec: &ViewSpec) -> Result<String> {
+        self.db().view_sql(spec)
     }
 
     pub fn find_in_view(&self, id: u64, text: &str, match_case: bool, from: u64, backwards: bool, count: bool) -> Result<FindResult> {

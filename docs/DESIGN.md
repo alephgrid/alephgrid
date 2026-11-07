@@ -89,8 +89,12 @@ closing tools saves nothing).
 
 The **explorer** (collapsed by default) lists tables with row counts, sheets, saved queries and
 functions; each opens from there. The **SQL workspace** docks under the grid: drag its top edge
-or use the arrow keys on it to resize, maximize it over the grid, close it with its button or
-Escape. **Analyze** and **Functions** open as side panels beside the grid, one at a time; the
+or use the arrow keys on it to resize, collapse it to its title bar (draft, result and a running
+query are kept), maximize it over the grid, close it with its button or Escape; a separator
+under the editor sets the editor's height. Every result names the tables and revision it read
+and turns stale when one of them changes; runs are kept in a History tab in this browser. SQL
+reads whole tables: when the grid shows a filtered, sorted or narrowed view, the workspace says
+so and offers that view's rows as SQL only on request. **Analyze** and **Functions** open as side panels beside the grid, one at a time; the
 table import review is a side pane too. Dialogs are for XLSX imports, formatting and data
 tools, history, compute and confirmations.
 

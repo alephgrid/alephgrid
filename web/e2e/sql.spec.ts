@@ -376,13 +376,13 @@ test("a live query runs on open and turns stale when a source changes", async ({
   await expect(editor).toHaveValue("SELECT sum(amount) AS total FROM sales");
   await expect.poll(() => resultRows(page)).toEqual([["100"]]);
   const live = page.locator(".sql-live");
-  await expect(live).toHaveText(/^Live · read at revision \d+$/);
+  await expect(live).toHaveText(/^Live · read sales at revision \d+ · /);
 
   // Another session changes a source table.
   const client = await server.connect(wb);
   await client.call("sql_change", { sql: "UPDATE sales SET amount = 50 WHERE id = 1" });
   client.close();
-  await expect(live).toContainText("Stale — the source changed");
+  await expect(live).toContainText("Stale — sales changed since this result");
   expect(await resultRows(page)).toEqual([["100"]]);
   await live.getByRole("button", { name: "Refresh result" }).click();
   await expect.poll(() => resultRows(page)).toEqual([["140"]]);
@@ -579,4 +579,143 @@ test("the SQL workspace is accessible and works from the keyboard", async ({ pag
   await expect(dialog.getByLabel("Value of $skip")).toBeVisible();
   await expect(page.locator(".result-table")).toBeVisible();
   expect(await seriousViolations(page)).toEqual([]);
+});
+
+// U.05: label source and result freshness, query history, and grid filters that never
+// silently change what SQL reads.
+
+test("every result names the tables it read and its revision, and turns stale when one of them changes", async ({ page }) => {
+  const wb = await workbook("Freshness");
+  await server.api(`/api/workbooks/${wb}/import?filename=other.csv`, { method: "POST", body: "k\n1\n" });
+  const client = await server.connect(wb);
+  const revision = (await client.call<{ revision: number }>("query", { sql: "SELECT 1" })).revision;
+  const dialog = await openSql(page, wb);
+  const editor = page.locator(".sql-editor");
+  await editor.fill("SELECT sum(amount) AS total FROM sales");
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["100"]]);
+  const fresh = dialog.locator(".sql-fresh");
+  await expect(fresh).toHaveText(new RegExp(`^Read sales at revision ${revision} · \\d{1,2}:\\d{2}:\\d{2}`));
+
+  // A change to a table the query did not read leaves it fresh; a change to sales makes it
+  // stale (events arrive in order, so by then the first change has been seen).
+  await client.call("sql_change", { sql: "UPDATE other SET k = 2" });
+  await client.call("sql_change", { sql: "UPDATE sales SET amount = 50 WHERE id = 1" });
+  const now = (await client.call<{ revision: number }>("query", { sql: "SELECT 1" })).revision;
+  client.close();
+  await expect(fresh).toContainText("Stale — sales changed since this result");
+  await expect(fresh).not.toContainText("other");
+  expect(await resultRows(page)).toEqual([["100"]]);
+  await fresh.getByRole("button", { name: "Run again" }).click();
+  // 100 - 10 + 50, worked out from the fixture.
+  await expect.poll(() => resultRows(page)).toEqual([["140"]]);
+  await expect(fresh).toHaveText(new RegExp(`^Read sales at revision ${now} · `));
+  await expect(fresh).not.toContainText("Stale");
+
+  // A result that reads no table says so.
+  await editor.fill("SELECT 1 AS one");
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["1"]]);
+  await expect(fresh).toHaveText(new RegExp(`^Read no tables at revision ${now} · `));
+});
+
+test("each run is kept in this browser's query history; opening one loads it without running", async ({ page }) => {
+  const wb = await workbook("History");
+  const dialog = await openSql(page, wb);
+  const editor = page.locator(".sql-editor");
+  const q1 = "SELECT id FROM sales WHERE region = $region ORDER BY id";
+  await editor.fill(q1);
+  await dialog.getByLabel("Value of $region").fill("north");
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["1"], ["3"]]);
+  await editor.fill("SELECT nope FROM sales");
+  await run(page);
+  await expect(page.locator(".sql-error")).toBeVisible();
+
+  const tabs = dialog.getByRole("tablist", { name: "Results and history" });
+  await tabs.getByRole("tab", { name: "History" }).click();
+  const history = dialog.getByRole("list", { name: "Query history" });
+  const items = history.getByRole("listitem");
+  await expect(items).toHaveCount(2);
+  // Newest first, with the outcome and the parameter values.
+  await expect(items.nth(0)).toContainText("SELECT nope FROM sales");
+  await expect(items.nth(0)).toContainText("Error");
+  await expect(items.nth(1)).toContainText(q1);
+  await expect(items.nth(1)).toContainText("2 rows");
+  await expect(items.nth(1)).toContainText("$region = north");
+
+  // Kept across a reload (in this browser only), reached with the keyboard.
+  await page.reload();
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  await editor.fill("SELECT 0 AS zero");
+  const resultsTab = tabs.getByRole("tab", { name: "Results" });
+  await resultsTab.focus();
+  await expect(resultsTab).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowRight");
+  await expect(tabs.getByRole("tab", { name: "History" })).toBeFocused();
+  await expect(tabs.getByRole("tab", { name: "History" })).toHaveAttribute("aria-selected", "true");
+  await expect(items).toHaveCount(2);
+
+  // Opening a run puts back its SQL and parameters; it does not run them.
+  const openRun = items.nth(1).getByRole("button", { name: /^Open in the editor/ });
+  await openRun.focus();
+  await page.keyboard.press("Enter");
+  await expect(editor).toHaveValue(q1);
+  await expect(dialog.getByLabel("Value of $region")).toHaveValue("north");
+  await expect(page.locator(".sql-status")).toHaveText(/^Loaded a run from .+ Run it to see current results\.$/);
+  await expect(page.locator(".result-table")).toHaveCount(0);
+  await expect(items).toHaveCount(2);
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["1"], ["3"]]);
+  await tabs.getByRole("tab", { name: "History" }).click();
+  await expect(items).toHaveCount(3);
+
+  await dialog.getByRole("button", { name: "Clear history" }).click();
+  await expect(items).toHaveCount(0);
+  await expect(dialog.locator(".sql-history")).toContainText("No runs yet");
+});
+
+test("grid filters never change what SQL reads: the workspace says so and offers the grid's rows explicitly", async ({ page }) => {
+  const wb = await workbook("Scope");
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  await expect(page.locator(".footer")).toContainText("4 rows");
+  // Keep only north in the grid, with the header filter.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("Alt+ArrowDown");
+  const pop = page.getByRole("dialog", { name: "Filter region" });
+  await pop.locator(".fp-item", { hasText: "south" }).getByRole("checkbox").uncheck();
+  await pop.locator(".fp-item", { hasText: "DROP TABLE" }).getByRole("checkbox").uncheck();
+  await pop.getByRole("button", { name: "Apply" }).click();
+  await expect(page.locator(".footer")).toContainText("2 rows");
+
+  await page.getByRole("button", { name: "SQL", exact: true }).click();
+  const dialog = page.getByRole("region", { name: "SQL" });
+  const scope = dialog.locator(".sql-scope");
+  await expect(scope).toContainText("The grid shows sales filtered (2 of 4 rows).");
+  await expect(scope).toContainText("SQL reads whole tables: the grid's filters, sort and hidden columns do not apply here.");
+  // A query of the table reads all four rows.
+  const editor = page.locator(".sql-editor");
+  await editor.fill("SELECT count(*) AS n FROM sales");
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["4"]]);
+
+  // Asked for explicitly, the editor gets the grid's rows as SQL, built by the server.
+  await scope.getByRole("button", { name: "Query the grid's rows" }).click();
+  await expect(editor).toHaveValue(/^SELECT "id", "region", "amount", "Prix €"\nFROM "sales"\nWHERE /);
+  await run(page);
+  await expect.poll(() => resultRows(page)).toEqual([["1", "north", "10", "1.5"], ["3", "north", "30", "3.5"]]);
+  expect(await resultHeader(page)).toEqual(["id", "region", "amount", "Prix €"]);
+  // The server reads the same two rows from that SQL on another connection.
+  const client = await server.connect(wb);
+  const check = await client.call<{ rows: unknown[][] }>("query", { sql: await editor.inputValue() });
+  client.close();
+  expect(check.rows.map((r) => r[0])).toEqual([1, 3]);
+
+  // Clearing the grid's filter removes the note while SQL stays open.
+  await page.locator(".chips").getByRole("button", { name: "Remove filter" }).click();
+  await expect(page.locator(".footer")).toContainText("4 rows");
+  await expect(scope).toBeHidden();
 });

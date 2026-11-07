@@ -253,7 +253,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .kv th { text-align: left; font-weight: 500; color: var(--muted); padding: 4px 24px 4px 0; }
 .kv td { font-family: var(--font-mono); text-align: right; }
 
-.sql-editor { width: 100%; resize: vertical; min-height: 140px; }
+.sql-editor { width: 100%; resize: none; min-height: 56px; display: block; }
 .sql-results { max-height: 45vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 0; }
 .sql-results > p { padding: 12px; margin: 0; }
 .sql-error { margin: 0; padding: 12px; color: var(--danger); white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; }
@@ -312,15 +312,42 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .sql-param-null { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-family: var(--font-mono); }
 .sql-actions { flex-wrap: wrap; justify-content: flex-start; }
 .sql-actions .spacer { flex: 1; }
-.sql-live, .sql-notice { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); }
-.sql-live[hidden], .sql-notice[hidden] { display: none; }
+.sql-fresh, .sql-notice, .sql-scope { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); }
+.sql-fresh[hidden], .sql-notice[hidden], .sql-scope[hidden] { display: none; }
+.sql-fresh { font-size: 12px; color: var(--muted); padding: 4px 10px; }
+.sql-fresh .sql-stale { font-size: 13px; }
 .sql-notice { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
-.sql-live.stale, .snapshot-banner.stale { border-color: var(--danger); }
+.sql-scope { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--accent-soft); color: var(--text); }
+.sql-scope > span { flex: 1 1 320px; }
+.sql-fresh.stale, .snapshot-banner.stale { border-color: var(--danger); }
 .sql-stale, .snapshot-stale { color: var(--danger); }
 .sql-results:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .sql-results > .sql-applied { color: var(--success); }
 .result-table td.null { color: var(--muted); font-style: italic; }
 .sql-versions { max-height: 50vh; overflow: auto; }
+.sql-editor-grip { position: relative; height: 8px; margin: -6px 0 -4px; cursor: row-resize; border-radius: 4px; flex: none; }
+.sql-editor-grip::after { content: ""; position: absolute; left: 50%; top: 3px; width: 36px; height: 3px; margin-left: -18px; border-radius: 2px; background: var(--border-strong); }
+.sql-editor-grip:hover::after, .sql-editor-grip:focus-visible::after { background: var(--accent); }
+.sql-editor-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sql-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); flex: none; }
+.sql-tab { border: 0; background: none; padding: 6px 10px; font: 600 13px var(--font-ui); color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer; }
+.sql-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.sql-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sql-tabpanel { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.sql-tabpanel[hidden] { display: none; }
+.sql-history-head { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.sql-history-head .spacer { flex: 1; }
+.sql-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; }
+.sql-history-list:empty { display: none; }
+.sql-history-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: start; padding: 8px 10px; border-top: 1px solid var(--border); }
+.sql-history-item:first-child { border-top: 0; }
+.sql-history-item > .btn { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.sql-history-meta { display: flex; gap: 10px; font-size: 12px; color: var(--muted); }
+.sql-history-outcome.error { color: var(--danger); }
+.sql-history-outcome.cancelled { color: var(--warn); }
+.sql-history-sql { margin: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; color: var(--text); }
+.sql-history-params { font-size: 12px; }
+.sql-history-empty { margin: 0; font-size: 13px; }
 .sql-version-sql { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 
 /* Banner over a table made from a query. */
@@ -591,13 +618,18 @@ dialog progress, .dialog progress { width: 100%; }
 .workbook-main.dock-maximized .grid-wrap { flex: 0 0 0; min-height: 0; overflow: hidden; }
 .workbook-main.dock-maximized .dock { flex: 1 1 auto; }
 .sql-docked { display: flex; flex-direction: column; gap: 10px; min-height: 0; flex: 1; overflow: hidden; padding: 10px 14px 12px; }
-.sql-docked .sql-head { flex-direction: row; align-items: baseline; gap: 12px; padding-right: 72px; }
+.sql-docked .sql-head { flex-direction: row; align-items: baseline; gap: 12px; padding-right: 104px; }
 .sql-docked .sql-head h2 { margin: 0; font-size: 14px; font-weight: 700; }
 .sql-docked .sql-hint { font-size: 12px; color: var(--muted); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sql-docked .sql-body { flex: 1; min-height: 0; grid-template-columns: 210px minmax(0, 1fr); }
 .sql-docked .sql-side { max-height: none; overflow: auto; padding-right: 12px; border-right: 1px solid var(--border); }
 .sql-docked .sql-main { overflow: auto; min-height: 0; }
-.sql-docked .sql-editor { min-height: 72px; height: 104px; }
+.sql-docked .sql-editor { min-height: 56px; }
+.dock.dock-collapsed { min-height: 0; }
+.dock.dock-collapsed > :last-child { flex: none; }
+.dock.dock-collapsed > :last-child > :not(:first-child) { display: none; }
+.dock-collapse-btn svg { transition: transform .12s; }
+.dock.dock-collapsed .dock-collapse-btn svg { transform: rotate(180deg); }
 .sql-docked .sql-results { max-height: none; }
 @media (max-width: 900px) {
   .workbook-explorer { position: absolute; z-index: 20; top: 0; bottom: 0; left: 0; box-shadow: var(--shadow); }
