@@ -90,6 +90,12 @@ pub struct PastedCell {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub style: Option<super::StylePatch>,
+    /// The cell's formula in the other spreadsheet, in R1C1 notation relative to the cell
+    /// (`=R[0]C[-1]*2`), as their HTML clipboard data carries it. Pasted as a formula only
+    /// when the paste takes formulas (`all`, `formulas`) and it parses here; else `value`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub formula: Option<String>,
 }
 
 /// One source cell, read before anything is written.
@@ -659,11 +665,14 @@ impl Sheets {
         Ok(target)
     }
 
-    /// Paste cells that come from another app at `at` (F.04b): each one's value, written as
-    /// typed unless `text` keeps it text, and its formats, which replace the target's.
-    /// Text starting with `=` stays text: formulas are not taken from other apps. Every
-    /// format is checked before the first change; one undo step.
-    pub fn paste_cells(&mut self, index: u32, at: (u32, u32), cells: &[Vec<PastedCell>]) -> Result<CellArea> {
+    /// Paste cells that come from another app at `at` (F.04b) as `mode` says: `all` writes
+    /// each one's value (as typed unless `text` keeps it text) and replaces the target's
+    /// formats with its own; `formulas` and `values` write values and leave formats alone;
+    /// `formats` changes formats only. With `all` and `formulas` a cell's R1C1 `formula`
+    /// becomes an A1 formula when it parses and calls only functions this workbook has;
+    /// otherwise its value is pasted. Text starting with `=` stays text. Every format is
+    /// checked before the first change; one undo step.
+    pub fn paste_cells(&mut self, index: u32, at: (u32, u32), cells: &[Vec<PastedCell>], mode: PasteMode) -> Result<CellArea> {
         self.check_index(index)?;
         let columns = cells.iter().map(|r| r.len()).max().unwrap_or(0);
         if columns == 0 {
@@ -671,27 +680,52 @@ impl Sheets {
         }
         let target = CellArea { row: at.0, column: at.1, rows: cells.len() as u32, columns: columns as u32 };
         target.check("paste")?;
+        let (values, formats) = match mode {
+            PasteMode::All => (true, true),
+            PasteMode::Formulas | PasteMode::Values => (true, false),
+            PasteMode::Formats => (false, true),
+        };
+        let formulas = matches!(mode, PasteMode::All | PasteMode::Formulas);
         let mut patches = Vec::new();
-        let mut inputs = Vec::with_capacity(target.cells() as usize);
+        let mut inputs = Vec::with_capacity(if values { target.cells() as usize } else { 0 });
         for (dr, row) in cells.iter().enumerate() {
             for dc in 0..columns {
                 let (r, c) = (at.0 + dr as u32, at.1 + dc as u32);
-                let (value, text, style) = match row.get(dc) {
-                    Some(p) => (p.value.clone(), p.text || p.value.starts_with('='), p.style.as_ref()),
-                    None => (String::new(), false, None),
-                };
-                if let Some(style) = style {
-                    patches.push((r, c, style.paths()?));
+                let cell = row.get(dc);
+                if formats {
+                    if let Some(style) = cell.and_then(|p| p.style.as_ref()) {
+                        patches.push((r, c, style.paths()?));
+                    }
                 }
+                if !values {
+                    continue;
+                }
+                let formula = cell.and_then(|p| p.formula.as_deref()).filter(|_| formulas).and_then(|f| self.pasted_formula(index, r, c, f));
+                let (value, text) = match (cell, formula) {
+                    (_, Some(f)) => (f, false),
+                    (Some(p), None) => (p.value.clone(), p.text || p.value.starts_with('=')),
+                    (None, None) => (String::new(), false),
+                };
                 inputs.push((SheetInput { row: r, column: c, value, base: None }, text));
             }
         }
         let groups = self.undo_groups.len();
         let result = (|| {
-            let plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
-            self.write(index, inputs, Some((target, plain)))?;
+            if values {
+                self.set_values(index, &inputs)?;
+            }
             let m = self.model_mut()?;
             let mut entries = 0;
+            if formats {
+                // The target's formats are replaced: cleared, then the pasted ones applied.
+                let plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
+                m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
+                let (r0, c0) = (target.row as i32 + 1, target.column as i32 + 1);
+                m.set_selected_cell(r0, c0).map_err(|e| anyhow!(e))?;
+                m.set_selected_range(r0, c0, r0 + target.rows as i32 - 1, c0 + target.columns as i32 - 1).map_err(|e| anyhow!(e))?;
+                m.on_paste_styles(&plain).map_err(|e| anyhow!(e))?;
+                entries += 1;
+            }
             for (r, c, paths) in &patches {
                 let cell = super::format::area(index, &CellArea { row: *r, column: *c, rows: 1, columns: 1 });
                 for (path, value) in paths {
@@ -708,23 +742,47 @@ impl Sheets {
         result.map(|()| target)
     }
 
-    /// Cut and paste within one sheet: cells move with their formats, formulas elsewhere
-    /// that refer to them follow, and references inside the moved area keep pointing at
-    /// the same cells. Uses IronCalc's own cut/paste.
-    pub fn move_cells(&mut self, index: u32, source: CellArea, at: (u32, u32)) -> Result<CellArea> {
+    /// A formula from another spreadsheet (R1C1, see [`PastedCell::formula`]) as it reads in
+    /// cell (`row`, `column`) of sheet `index`, when it parses and every function it calls
+    /// exists here (a built-in or a workbook function); `None` pastes the value instead.
+    fn pasted_formula(&self, index: u32, row: u32, column: u32, r1c1: &str) -> Option<String> {
+        let a1 = super::r1c1::r1c1_to_a1(r1c1.trim(), row, column).ok()?;
+        let body = a1.strip_prefix('=')?;
+        if body.trim().is_empty() || self.check_formula(index, row, column, &a1).ok()?.is_some() {
+            return None;
+        }
+        let m = self.model().ok()?.get_model();
+        let wb = &m.workbook;
+        let mut parser = new_parser_english(wb.get_worksheet_names(), wb.get_defined_names_with_scope(), wb.tables.clone());
+        let context = CellReferenceRC { sheet: wb.worksheet(index).ok()?.get_name(), row: row as i32 + 1, column: column as i32 + 1 };
+        let node = parser.parse(body, &context);
+        let known = |name: &str| wb.defined_names.iter().any(|n| n.name.eq_ignore_ascii_case(name));
+        (!calls_unknown(&node, &known)).then_some(a1)
+    }
+
+    /// Cut and paste: the `source` cells of sheet `from` move to `at` on sheet `index` (the
+    /// same sheet or another one) with their formats; formulas elsewhere that refer to them
+    /// follow (to the other sheet too), references inside the moved area keep pointing at the
+    /// same cells, and references from moved formulas to cells left behind keep pointing at
+    /// those (naming their sheet after a move to another one). Uses IronCalc's own cut/paste
+    /// (patched for other sheets, see vendor/ironcalc_base/ALEPHGRID_PATCHES.md): the target
+    /// is written first and the source cleared after it, in one undo step; the caller's
+    /// transaction makes the two one commit.
+    pub fn move_cells(&mut self, from: u32, source: CellArea, index: u32, at: (u32, u32)) -> Result<CellArea> {
+        self.check_index(from)?;
         self.check_index(index)?;
         source.check("moved")?;
         let target = CellArea { row: at.0, column: at.1, ..source };
         target.check("paste")?;
-        let (rows, columns) = self.shown_lines(index, &source)?;
+        let (rows, columns) = self.shown_lines(from, &source)?;
         if rows.len() < source.rows as usize || columns.len() < source.columns as usize {
             bail!("the cut cells include hidden rows or columns, which would move unseen: show them first, or copy the shown cells and clear the originals");
         }
-        if (target.row, target.column) == (source.row, source.column) {
+        if from == index && (target.row, target.column) == (source.row, source.column) {
             return Ok(target);
         }
         let m = self.model_mut()?;
-        m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
+        m.set_selected_sheet(from).map_err(|e| anyhow!(e))?;
         let (r0, c0) = (source.row as i32 + 1, source.column as i32 + 1);
         let (r1, c1) = (r0 + source.rows as i32 - 1, c0 + source.columns as i32 - 1);
         m.set_selected_cell(r0, c0).map_err(|e| anyhow!(e))?;
@@ -733,12 +791,37 @@ impl Sheets {
         let data = serde_json::from_value(clipboard["data"].clone())?;
         // The clipboard's range is clamped to the used area; pass the full source range
         // so the whole area moves (empty cells included).
+        m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
         m.set_selected_cell(target.row as i32 + 1, target.column as i32 + 1).map_err(|e| anyhow!(e))?;
-        m.paste_from_clipboard(index, (r0, c0, r1, c1), &data, true).map_err(|e| anyhow!(e))?;
+        m.paste_from_clipboard(from, (r0, c0, r1, c1), &data, true).map_err(|e| anyhow!(e))?;
         self.record(1);
         // Cells moved: addresses read before now name other content.
-        self.moved(index);
+        self.moved(from);
+        if index != from {
+            self.moved(index);
+        }
         Ok(target)
+    }
+}
+
+/// Whether `node` calls a function that is neither built in nor one of the workbook's
+/// (`known`): such a pasted formula would only show #NAME?.
+fn calls_unknown(node: &Node, known: &dyn Fn(&str) -> bool) -> bool {
+    let any = |nodes: &[Node]| nodes.iter().any(|n| calls_unknown(n, known));
+    match node {
+        Node::NamedFunctionKind { name, args, .. } => !known(name) || any(args),
+        Node::FunctionKind { args, .. } => any(args),
+        Node::LambdaCallKind { lambda, args } => calls_unknown(lambda, known) || any(args),
+        Node::LambdaDefKind { body, .. } => calls_unknown(body, known),
+        Node::OpRangeKind { left, right }
+        | Node::OpConcatenateKind { left, right }
+        | Node::OpSumKind { left, right, .. }
+        | Node::OpProductKind { left, right, .. }
+        | Node::OpPowerKind { left, right }
+        | Node::CompareKind { left, right, .. } => calls_unknown(left, known) || calls_unknown(right, known),
+        Node::ImplicitIntersection { child, .. } | Node::SpillRangeOperator { child } => calls_unknown(child, known),
+        Node::UnaryKind { right, .. } => calls_unknown(right, known),
+        _ => false,
     }
 }
 
@@ -1205,7 +1288,7 @@ mod tests {
         let e = s.paste(0, a(2, 1, 1, 1), 0, (30, 0), PasteMode::All, false).unwrap_err().to_string();
         assert!(e.contains("hidden"), "{e}");
         // A cut over hidden rows is refused rather than moving cells nobody can see.
-        let e = s.move_cells(0, a(0, 0, 5, 1), (40, 0)).unwrap_err().to_string();
+        let e = s.move_cells(0, a(0, 0, 5, 1), 0, (40, 0)).unwrap_err().to_string();
         assert!(e.contains("hidden"), "{e}");
         assert_eq!(content(&s, 0, 2, 0), "y");
     }
@@ -1218,7 +1301,7 @@ mod tests {
     fn pasted_cells_keep_values_text_and_formats() {
         let mut s = sheets();
         let a = |row, column, rows, columns| CellArea { row, column, rows, columns };
-        let cell = |value: &str, text: bool, style: Option<StylePatch>| PastedCell { value: value.into(), text, style };
+        let cell = |value: &str, text: bool, style: Option<StylePatch>| PastedCell { value: value.into(), text, style, formula: None };
         let fmt = |f: &str| StylePatch { num_fmt: Some(f.into()), ..Default::default() };
         s.set(0, &[input(1, 1, "old"), input(2, 1, "old")]).unwrap();
         let bold_b2 = Area { sheet: 0, row: 2, column: 2, width: 1, height: 1 };
@@ -1228,7 +1311,7 @@ mod tests {
             vec![cell("0.125", false, Some(fmt("0.00%"))), cell("=1+1", false, None)],
             vec![cell("45306", false, Some(StylePatch { i: Some(true), color: Some("#ff0000".into()), fill: Some("#FFFF00".into()), ..fmt("yyyy-mm-dd") })), cell("", false, None)],
         ];
-        let t = s.paste_cells(0, (0, 0), &cells).unwrap();
+        let t = s.paste_cells(0, (0, 0), &cells, PasteMode::All).unwrap();
         assert_eq!(t, a(0, 0, 3, 2));
         let style = |s: &Sheets, r: u32, c: u32| s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap();
         assert_eq!(display(&s, 0, 0, 0), "$1,234.50");
@@ -1247,9 +1330,9 @@ mod tests {
         assert!(style(&s, 1, 1).font.b && content(&s, 0, 0, 0).is_empty());
         // A colour that is not #RRGGBB is refused before anything is written.
         let bad = vec![vec![cell("1", false, None), cell("2", false, Some(StylePatch { color: Some("red".into()), ..Default::default() }))]];
-        assert!(s.paste_cells(0, (0, 0), &bad).is_err());
+        assert!(s.paste_cells(0, (0, 0), &bad, PasteMode::All).is_err());
         assert!(content(&s, 0, 0, 0).is_empty());
-        assert!(s.paste_cells(0, (0, 0), &[]).is_err(), "nothing to paste");
+        assert!(s.paste_cells(0, (0, 0), &[], PasteMode::All).is_err(), "nothing to paste");
     }
 
     #[test]
@@ -1266,7 +1349,7 @@ mod tests {
     fn move_updates_references_to_the_moved_cells() {
         let mut s = sheets();
         s.set(0, &[input(0, 0, "5"), input(1, 0, "=A1*2"), input(0, 1, "=A1+1"), input(0, 2, "=SUM(A1:A2)")]).unwrap();
-        let t = s.move_cells(0, CellArea { row: 0, column: 0, rows: 2, columns: 1 }, (4, 3)).unwrap();
+        let t = s.move_cells(0, CellArea { row: 0, column: 0, rows: 2, columns: 1 }, 0, (4, 3)).unwrap();
         assert_eq!((t.row, t.column), (4, 3));
         assert!(content(&s, 0, 0, 0).is_empty() && content(&s, 0, 1, 0).is_empty());
         assert_eq!(content(&s, 0, 4, 3), "5");
@@ -1303,5 +1386,136 @@ mod tests {
         // Into another sheet: unqualified references are relative to the new sheet.
         s.paste(0, CellArea { row: 0, column: 1, rows: 1, columns: 1 }, 1, (0, 1), PasteMode::All, false).unwrap();
         assert_eq!(content(&s, 1, 0, 1), "=A1+$A$1+A$1+$A1+Data!A1+Other!B2");
+    }
+
+    /// F.04b: formulas from another spreadsheet's clipboard (R1C1, relative to their cell)
+    /// become A1 formulas relative to where they land when the paste takes formulas; one
+    /// that does not parse, refers outside the sheet or calls a function this workbook does
+    /// not have pastes as its value. Values mode never takes them. Expected texts by hand.
+    #[test]
+    fn pasted_formulas_from_other_spreadsheets() {
+        let mut s = sheets();
+        s.model_mut().unwrap().new_defined_name("DOUBLE", None, "LAMBDA(x,x*2)").unwrap();
+        s.set(0, &[input(0, 1, "3"), input(2, 1, "4")]).unwrap();
+        let cell = |value: &str, formula: Option<&str>| PastedCell { value: value.into(), text: false, style: None, formula: formula.map(str::to_string) };
+        let row = vec![
+            cell("6", Some("=R[0]C[-1]*2")),
+            cell("x", Some("=GOOGLEFINANCE(\"X\")")),
+            cell("7", Some("=1+*2")),
+            cell("9", Some("=R[-1]C[0]")),
+            cell("12", Some("=DOUBLE(RC[-5])+SUM(R1C2:R3C2)")),
+            cell("=1+1", None),
+        ];
+        let t = s.paste_cells(0, (0, 2), &[row.clone()], PasteMode::All).unwrap();
+        assert_eq!(t, CellArea { row: 0, column: 2, rows: 1, columns: 6 });
+        assert_eq!((content(&s, 0, 0, 2), display(&s, 0, 0, 2)), ("=B1*2".into(), "6".into()));
+        assert_eq!(content(&s, 0, 0, 3), "x", "a function Alephgrid lacks: the value");
+        assert_eq!(content(&s, 0, 0, 4), "7", "a formula that does not parse: the value");
+        assert_eq!(content(&s, 0, 0, 5), "9", "above row 1: the value");
+        // (The engine writes a workbook function's name in lower case.)
+        assert_eq!((content(&s, 0, 0, 6).to_uppercase(), display(&s, 0, 0, 6)), ("=DOUBLE(B1)+SUM($B$1:$B$3)".into(), "13".into()), "workbook functions count");
+        assert_eq!(display(&s, 0, 0, 7), "=1+1", "plain text starting with = stays text");
+        assert!(s.undo().unwrap(), "one undo step");
+        assert!(content(&s, 0, 0, 2).is_empty());
+        // One row down, the same formula reads the cell left of its new place.
+        s.paste_cells(0, (2, 2), &[row.clone()], PasteMode::Formulas).unwrap();
+        assert_eq!((content(&s, 0, 2, 2), display(&s, 0, 2, 2)), ("=B3*2".into(), "8".into()));
+        assert_eq!(content(&s, 0, 2, 5), "=F2", "row 3 has a row above");
+        // Values: never a formula.
+        s.paste_cells(0, (5, 2), &[row], PasteMode::Values).unwrap();
+        assert_eq!(content(&s, 0, 5, 2), "6");
+    }
+
+    /// F.04d with cells from another app: `formats` changes formats only, `values` and
+    /// `formulas` leave the target's formats alone, `all` replaces them; each one step.
+    #[test]
+    fn paste_modes_for_cells_from_other_apps() {
+        let mut s = sheets();
+        let style = |s: &Sheets, r: u32, c: u32| crate::sheets::CellStyle::of(&s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap());
+        s.set(0, &[input(0, 0, "old"), input(1, 0, "keep")]).unwrap();
+        s.set_style(0, CellArea { row: 0, column: 0, rows: 1, columns: 1 }, &StylePatch { b: Some(true), ..Default::default() }).unwrap();
+        s.set_style(0, CellArea { row: 1, column: 0, rows: 1, columns: 1 }, &StylePatch { i: Some(true), ..Default::default() }).unwrap();
+        let italic = Some(StylePatch { i: Some(true), ..Default::default() });
+        let bold = Some(StylePatch { b: Some(true), ..Default::default() });
+        // Formats only: the value stays, the bold is replaced by the pasted italic.
+        s.paste_cells(0, (0, 0), &[vec![PastedCell { value: "new".into(), text: false, style: italic.clone(), formula: None }]], PasteMode::Formats).unwrap();
+        assert_eq!(content(&s, 0, 0, 0), "old");
+        assert!(style(&s, 0, 0).i && !style(&s, 0, 0).b);
+        assert!(s.undo().unwrap());
+        assert!(style(&s, 0, 0).b && !style(&s, 0, 0).i);
+        // Values only: the value changes, the italic of A2 stays and no bold is added.
+        s.paste_cells(0, (1, 0), &[vec![PastedCell { value: "new".into(), text: false, style: bold.clone(), formula: Some("=1".into()) }]], PasteMode::Values).unwrap();
+        assert_eq!(content(&s, 0, 1, 0), "new");
+        assert!(style(&s, 1, 0).i && !style(&s, 1, 0).b);
+        // Formulas: values or formulas, formats alone.
+        s.paste_cells(0, (1, 1), &[vec![PastedCell { value: "new!".into(), text: false, style: bold.clone(), formula: Some("=RC[-1]&\"!\"".into()) }]], PasteMode::Formulas).unwrap();
+        assert_eq!((content(&s, 0, 1, 1), display(&s, 0, 1, 1)), ("=A2&\"!\"".into(), "new!".into()));
+        assert!(style(&s, 1, 1).is_default());
+        // All: value and the pasted formats, which replace the target's.
+        s.paste_cells(0, (1, 0), &[vec![PastedCell { value: "all".into(), text: false, style: bold, formula: None }]], PasteMode::All).unwrap();
+        assert_eq!(content(&s, 0, 1, 0), "all");
+        assert!(style(&s, 1, 0).b && !style(&s, 1, 0).i);
+    }
+
+    /// F.04b/d: a cut pasted on another sheet moves the cells there as one undo step:
+    /// values, formats, references inside the moved area, references from moved formulas to
+    /// cells left behind (now naming their sheet), formulas elsewhere that refer to the moved
+    /// cells (on the source sheet, the target sheet and a third one), and names. Hidden,
+    /// oversized and out-of-sheet cuts are refused with nothing changed. Expected texts and
+    /// values worked out by hand.
+    #[test]
+    fn cut_to_another_sheet_moves_cells_and_references() {
+        let mut s = sheets();
+        s.create("Other").unwrap();
+        s.create("Third").unwrap();
+        s.set(0, &[input(0, 0, "5"), input(1, 0, "=A1*2"), input(2, 0, "=C1+A1"), input(0, 2, "100"), input(0, 1, "=A1+A2")]).unwrap();
+        s.set(1, &[input(0, 0, "=Data!A2*10")]).unwrap();
+        s.set(2, &[input(0, 0, "=SUM(Data!A1:A2)"), input(0, 1, "=SUM(Data!A1:A5)")]).unwrap();
+        s.define_name("Total", None, "=Data!$A$1").unwrap();
+        s.set_style(0, CellArea { row: 0, column: 0, rows: 1, columns: 1 }, &StylePatch { b: Some(true), ..Default::default() }).unwrap();
+        let bold = |s: &Sheets, sheet: u32, r: u32, c: u32| s.model().unwrap().get_cell_style(sheet, r as i32 + 1, c as i32 + 1).unwrap().font.b;
+        let total = |s: &Sheets| s.names().into_iter().find(|n| n.name == "Total").unwrap().refers_to;
+        let before = |s: &Sheets| {
+            assert_eq!((content(s, 0, 0, 0), content(s, 0, 1, 0), content(s, 0, 2, 0)), ("5".into(), "=A1*2".into(), "=C1+A1".into()));
+            assert_eq!((content(s, 0, 0, 1), content(s, 1, 0, 0), content(s, 2, 0, 0)), ("=A1+A2".into(), "=Data!A2*10".into(), "=SUM(Data!A1:A2)".into()));
+            assert!(bold(s, 0, 0, 0) && content(s, 1, 4, 3).is_empty());
+            assert_eq!(total(s), "=Data!$A$1");
+        };
+        before(&s);
+
+        // Data!A1:A3 → Other!D5.
+        let t = s.move_cells(0, CellArea { row: 0, column: 0, rows: 3, columns: 1 }, 1, (4, 3)).unwrap();
+        assert_eq!(t, CellArea { row: 4, column: 3, rows: 3, columns: 1 });
+        let after = |s: &Sheets| {
+            assert!((0..3).all(|r| content(s, 0, r, 0).is_empty()), "the source is cleared");
+            assert!(!bold(s, 0, 0, 0), "and its format moved");
+            assert_eq!((content(s, 1, 4, 3), display(s, 1, 4, 3)), ("5".into(), "5".into()));
+            assert!(bold(s, 1, 4, 3));
+            assert_eq!((content(s, 1, 5, 3), display(s, 1, 5, 3)), ("=D5*2".into(), "10".into()), "inside the moved area");
+            assert_eq!((content(s, 1, 6, 3), display(s, 1, 6, 3)), ("=Data!C1+D5".into(), "105".into()), "C1 stayed on Data");
+            assert_eq!((content(s, 0, 0, 1), display(s, 0, 0, 1)), ("=Other!D5+Other!D6".into(), "15".into()), "from the source sheet");
+            assert_eq!((content(s, 1, 0, 0), display(s, 1, 0, 0)), ("=D6*10".into(), "100".into()), "from the target sheet");
+            assert_eq!((content(s, 2, 0, 0), display(s, 2, 0, 0)), ("=SUM(Other!D5:D6)".into(), "15".into()), "a range wholly moved");
+            assert_eq!((content(s, 2, 0, 1), display(s, 2, 0, 1)), ("=SUM(Data!A1:A5)".into(), "0".into()), "a range partly moved stays");
+            assert_eq!(total(s), "=Other!$D$5");
+        };
+        after(&s);
+        assert!(s.undo().unwrap(), "one undo step");
+        before(&s);
+        assert!(s.redo().unwrap());
+        after(&s);
+        assert!(s.undo().unwrap());
+
+        // Refused, with nothing changed: hidden rows, more cells than one edit, off the sheet.
+        s.set_hidden(0, crate::sheets::Axis::Rows, 1, 1, true).unwrap();
+        let e = s.move_cells(0, CellArea { row: 0, column: 0, rows: 3, columns: 1 }, 1, (4, 3)).unwrap_err().to_string();
+        assert!(e.contains("hidden"), "{e}");
+        s.set_hidden(0, crate::sheets::Axis::Rows, 1, 1, false).unwrap();
+        let e = s.move_cells(0, CellArea { row: 0, column: 0, rows: 1001, columns: 1000 }, 1, (0, 0)).unwrap_err().to_string();
+        assert!(e.contains("too many cells"), "{e}");
+        let e = s.move_cells(0, CellArea { row: 0, column: 0, rows: 3, columns: 1 }, 1, (MAX_ROWS - 1, 0)).unwrap_err().to_string();
+        assert!(e.contains("outside the sheet"), "{e}");
+        assert!(s.move_cells(0, CellArea { row: 0, column: 0, rows: 3, columns: 1 }, 7, (0, 0)).is_err(), "no such sheet");
+        before(&s);
     }
 }

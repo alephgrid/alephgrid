@@ -203,7 +203,7 @@ fn changes_reach_tables_that_read_them_indirectly() {
 fn moved_cells_take_their_readers_along() {
     let (mut t, s) = settings();
     let b1 = CellArea { row: 0, column: 1, rows: 1, columns: 1 };
-    t.wb.with_sheets(|sh| sh.move_cells(s, b1, (4, 3))).unwrap();
+    t.wb.with_sheets(|sh| sh.move_cells(s, b1, s, (4, 3))).unwrap();
     assert_eq!(formula(&t.wb, "orders", "gross"), "=[@amount]*(1+Settings!$D$5)");
     assert_eq!(rows(&mut t.wb, "orders")[0], "1|\"100.0\"|110.00000000000001|\"EUR 1\"|\"none\"");
     assert!(t.wb.with_sheets(|sh| sh.undo()).unwrap());

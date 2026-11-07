@@ -21,6 +21,7 @@ mod layout;
 pub use layout::{Axis, LineSize, MergeMode, SheetLayout, GRID_COLUMN_WIDTH, GRID_ROW_HEIGHT};
 pub use find::{SheetMatches, SheetSearch, SortBy};
 mod links;
+mod r1c1;
 pub use format::{CellStyle, StyledCell, StylePatch};
 pub(crate) use format::is_hex_color;
 pub use links::{Anchor, SlotCell, LINK_SHEET, MAX_SPILL_CELLS};

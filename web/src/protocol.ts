@@ -627,7 +627,13 @@ export type FillDirection = "down" | "right";
 
 export type PasteMode = "all" | "formulas" | "values" | "formats";
 
-export type PastedCell = { value: string, text?: boolean, style?: StylePatch, };
+export type PastedCell = { value: string, text?: boolean, style?: StylePatch, 
+/**
+ * The cell's formula in the other spreadsheet, in R1C1 notation relative to the cell
+ * (`=R[0]C[-1]*2`), as their HTML clipboard data carries it. Pasted as a formula only
+ * when the paste takes formulas (`all`, `formulas`) and it parses here; else `value`.
+ */
+formula?: string, };
 
 export type Imported = { "kind": "table", table: TableInfo, } | { "kind": "sheets", sheets: Array<SheetInfo>, warnings: Array<string>, };
 
@@ -849,7 +855,11 @@ export type Op = { "op": "analyze", spec: AnalysisSpec, } | { "op": "analyses" }
 /**
  * Layouts (see `SheetInfo::layout`) of the target sheet and of `from_sheet`.
  */
-layout?: number, source_layout?: number, } | { "op": "sheet_paste_cells", sheet: number, row: number, column: number, cells: Array<Array<PastedCell>>, layout?: number, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, layout?: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, layout?: number, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
+layout?: number, source_layout?: number, } | { "op": "sheet_paste_cells", sheet: number, row: number, column: number, cells: Array<Array<PastedCell>>, mode?: PasteMode, layout?: number, } | { "op": "sheet_move", sheet: number, source: CellArea, row: number, column: number, layout?: number, from_sheet?: number, 
+/**
+ * The layout of `from_sheet` when it is another sheet.
+ */
+source_layout?: number, } | { "op": "create_sheet_from_query", name: string, sql: string, params?: Array<QueryParam>, allow_truncation?: boolean, } | { "op": "table_to_sheet", view_id: number, name: string, } | { "op": "saved_views", table?: string, } | { "op": "save_view", saved?: string, name: string, spec: ViewSpec, widths?: { [key in string]: number }, } | { "op": "rename_saved_view", saved: string, name: string, } | { "op": "delete_saved_view", saved: string, } | { "op": "table_from_view", view_id: number, name: string, } | { "op": "sheet_to_table", sheet: number, name: string, layout?: number, } | { "op": "history", after?: number, limit?: number, } | { "op": "schema" } | { "op": "export_query", sql: string, params?: Array<QueryParam>, format?: ExportFormat, } | { "op": "sql_change", sql: string, params?: Array<QueryParam>, } | { "op": "saved_queries" } | { "op": "query_versions", saved: string, } | { "op": "save_query", saved?: string, name: string, kind?: QueryKind, sql: string, params?: Array<QueryParam>, } | { "op": "rename_query", saved: string, name: string, } | { "op": "delete_query", saved: string, } | { "op": "materialized" } | { "op": "refresh_materialized", table: string, } | { "op": "cancel", request: number, } | { "op": "recalculate", table: string, } | { "op": "cancel_recalculation", table: string, };
 
 export type ColumnType = { name: string, sql_type: string, };
 

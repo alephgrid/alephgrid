@@ -65,6 +65,86 @@ async fn comments_follow_moves_and_undo_of_structural_changes() {
     server.stop().await;
 }
 
+/// F.04b/d, U.11a: a cut pasted on another sheet is one operation and one undo step: the
+/// cells, a formula elsewhere that reads them and their comment move to the other sheet,
+/// and the comment of the cell they cover goes with its value. Refused cuts (a stale
+/// layout of either sheet, hidden rows, too many cells, a read-only viewer is covered in
+/// teams.rs) leave both sheets as they were. Expected cells and anchors written by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn cut_to_another_sheet_moves_cells_comments_and_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("cross").await;
+    let mut ws = server.ws(&wb).await;
+    ws.ok("sheet_create", json!({ "name": "S" })).await;
+    ws.ok("sheet_create", json!({ "name": "T" })).await;
+    ws.ok("sheet_set", json!({ "sheet": 0, "inputs": [{ "row": 1, "column": 1, "value": "7" }, { "row": 0, "column": 2, "value": "=B2*3" }] })).await;
+    ws.ok("sheet_set", json!({ "sheet": 1, "inputs": [{ "row": 0, "column": 0, "value": "old" }] })).await;
+    ws.ok("add_comment", json!({ "sheet": 0, "row": 1, "column": 1, "text": "on S!B2" })).await;
+    ws.ok("add_comment", json!({ "sheet": 1, "row": 0, "column": 0, "text": "on T!A1" })).await;
+    async fn on(ws: &mut Ws, sheet: u32) -> Vec<(String, u64, u64)> {
+        let list = ws.ok("comments", json!({ "sheet": sheet })).await;
+        list.as_array().unwrap().iter().map(|c| (c["text"].as_str().unwrap().to_string(), c["row"].as_u64().unwrap(), c["column"].as_u64().unwrap())).collect()
+    }
+    async fn cell(ws: &mut Ws, sheet: u32, row: u32, column: u32) -> String {
+        let b = ws.ok("sheet_fetch", json!({ "sheet": sheet, "row_start": row, "row_count": 1, "column_count": column + 1 })).await;
+        let c = &b["rows"][0][column as usize];
+        if c.is_null() { String::new() } else { c[2].as_str().or(c[0].as_str()).unwrap().to_string() }
+    }
+    let layouts = |v: &Value| (v[0]["layout"].as_u64().unwrap(), v[1]["layout"].as_u64().unwrap());
+    let source = json!({ "row": 1, "column": 1, "rows": 1, "columns": 1 });
+    async fn unchanged(ws: &mut Ws) {
+        assert_eq!((cell(ws, 0, 1, 1).await, cell(ws, 0, 0, 2).await, cell(ws, 1, 0, 0).await), ("7".into(), "=B2*3".into(), "old".into()));
+        assert_eq!(on(ws, 0).await, vec![a("on S!B2", 1, 1)]);
+        assert_eq!(on(ws, 1).await, vec![a("on T!A1", 0, 0)]);
+    }
+    unchanged(&mut ws).await;
+
+    // Refused: a stale layout of the source sheet, or of the target.
+    let (ls, lt) = layouts(&ws.ok("sheets", json!({})).await);
+    let e = ws.call("sheet_move", json!({ "sheet": 1, "from_sheet": 0, "source": source, "row": 0, "column": 0, "layout": lt, "source_layout": ls + 1 })).await.unwrap_err();
+    assert!(e.contains("since you read them"), "{e}");
+    let e = ws.call("sheet_move", json!({ "sheet": 1, "from_sheet": 0, "source": source, "row": 0, "column": 0, "layout": lt + 1, "source_layout": ls })).await.unwrap_err();
+    assert!(e.contains("since you read them"), "{e}");
+    // Too many cells, and hidden rows.
+    let e = ws.call("sheet_move", json!({ "sheet": 1, "from_sheet": 0, "source": { "row": 0, "column": 0, "rows": 2000, "columns": 1000 }, "row": 0, "column": 0 })).await.unwrap_err();
+    assert!(e.contains("too many cells"), "{e}");
+    ws.ok("sheet_set_hidden", json!({ "sheet": 0, "axis": "rows", "start": 1, "count": 1, "hidden": true })).await;
+    let e = ws.call("sheet_move", json!({ "sheet": 1, "from_sheet": 0, "source": source, "row": 0, "column": 0 })).await.unwrap_err();
+    assert!(e.contains("hidden"), "{e}");
+    ws.ok("sheet_undo", json!({})).await;
+    unchanged(&mut ws).await;
+
+    // S!B2 → T!A1.
+    let (ls, lt) = layouts(&ws.ok("sheets", json!({})).await);
+    let area = ws.ok("sheet_move", json!({ "sheet": 1, "from_sheet": 0, "source": source, "row": 0, "column": 0, "layout": lt, "source_layout": ls })).await;
+    assert_eq!(area, json!({ "row": 0, "column": 0, "rows": 1, "columns": 1 }));
+    async fn moved(ws: &mut Ws) {
+        assert_eq!((cell(ws, 0, 1, 1).await, cell(ws, 1, 0, 0).await), ("".into(), "7".into()));
+        assert_eq!(cell(ws, 0, 0, 2).await, "=T!A1*3");
+        assert!(on(ws, 0).await.is_empty(), "the comment left S");
+        assert_eq!(on(ws, 1).await, vec![a("on S!B2", 0, 0)], "and replaced the covered cell's");
+    }
+    moved(&mut ws).await;
+    ws.ok("sheet_undo", json!({})).await;
+    unchanged(&mut ws).await;
+    ws.ok("sheet_redo", json!({})).await;
+    moved(&mut ws).await;
+    ws.ok("sheet_undo", json!({})).await;
+    unchanged(&mut ws).await;
+
+    // U.11a: a paste with one value the sheet's allowed values refuse, or that runs off the
+    // sheet, pastes nothing at all.
+    ws.ok("set_sheet_rules", json!({ "sheet": 1, "rules": { "colors": [], "validations": [{ "area": { "row": 0, "column": 1, "rows": 5, "columns": 1 }, "list": ["yes", "no"] }] } })).await;
+    let e = ws.call("sheet_paste_cells", json!({ "sheet": 1, "row": 0, "column": 0, "cells": [[{ "value": "new" }, { "value": "yes" }], [{ "value": "new" }, { "value": "maybe" }]] })).await.unwrap_err();
+    assert!(e.contains("B2"), "{e}");
+    let e = ws.call("sheet_paste_cells", json!({ "sheet": 1, "row": 0, "column": 16383, "cells": [[{ "value": "new" }, { "value": "new" }]] })).await.unwrap_err();
+    assert!(e.contains("outside the sheet"), "{e}");
+    unchanged(&mut ws).await;
+    assert_eq!(cell(&mut ws, 1, 0, 1).await, "");
+    server.stop().await;
+}
+
 /// S.T01: two editors format and lay out the same sheet at once; each change is announced
 /// to the other and both land.
 #[tokio::test(flavor = "multi_thread")]
