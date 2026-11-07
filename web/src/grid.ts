@@ -138,6 +138,8 @@ export class Grid {
   private fillDrag: { source: Range; target: Range } | null = null;
   /** The copied range, outlined until Escape, an edit or a cut's paste. */
   private copied: Range | null = null;
+  /** A refused paste's reason (or paste special's next step), see `showNote`. */
+  private note: { el: HTMLDivElement; onClose?: () => void } | null = null;
   private referencePicked = false;
   private references: Range[] = [];
   /** Removes every listener this grid added (including window and media-query ones). */
@@ -222,6 +224,7 @@ export class Grid {
 
   /** Detach everything: listeners, the resize observer and any pending frame. */
   dispose(): void {
+    this.clearNote();
     this.disposed = true;
     this.abort.abort();
     this.observer.disconnect();
@@ -340,6 +343,38 @@ export class Grid {
   setCopied(range: Range | null): void {
     this.copied = range;
     this.invalidate();
+  }
+
+  /** U.11a: a note at the active cell saying why a paste or cut did nothing (or what to do
+   *  next), announced as an alert. It stays until the next key (other than a paste), click
+   *  or note; `onClose` runs when the person dismisses it. */
+  showNote(message: string, onClose?: () => void): void {
+    this.clearNote();
+    const note = document.createElement("div");
+    note.className = "grid-note";
+    note.setAttribute("role", "alert");
+    note.textContent = message;
+    const host = this.host.getBoundingClientRect(), box = this.cellBox(this.active.r, this.active.c);
+    const left = Math.min(Math.max(host.left + 8, host.left + box.x), Math.max(host.left + 8, host.right - 320));
+    const top = Math.min(host.top + box.y + 28, Math.max(host.top + 8, host.bottom - 60));
+    note.style.left = `${left}px`;
+    note.style.top = `${top}px`;
+    document.body.append(note);
+    this.note = { el: note, onClose };
+  }
+
+  /** Remove the note, if any; `dismissed` runs its `onClose`. */
+  clearNote(dismissed = false): void {
+    const note = this.note;
+    if (!note) return;
+    this.note = null;
+    note.el.remove();
+    if (dismissed) note.onClose?.();
+  }
+
+  /** The note's text, if one is shown. */
+  noteText(): string | null {
+    return this.note?.el.textContent ?? null;
   }
 
   /** The fill handle: a small square at the selection's bottom-right corner (sheets). */
@@ -716,6 +751,7 @@ export class Grid {
   }
 
   private onMouseDown(e: MouseEvent): void {
+    this.clearNote(true);
     if (e.button !== 0) return;
     // Let clicks on the native scrollbar through.
     if (e.offsetX > this.scroller.clientWidth || e.offsetY > this.scroller.clientHeight) return;
@@ -916,6 +952,9 @@ export class Grid {
   }
 
   private onKey(e: KeyboardEvent): void {
+    // A note stays through modifier keys and the paste it may be waiting for.
+    const pasteKey = (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v";
+    if (this.note && !pasteKey && !["Shift", "Control", "Meta", "Alt"].includes(e.key)) this.clearNote(true);
     if (this.editing) return;
     if (this.handlers.command?.(e)) { e.preventDefault(); return; }
     const mod = e.metaKey || e.ctrlKey;

@@ -131,8 +131,8 @@ const OPENS: Record<string, Outcome> = {
   "Export JSON lines": "download",
   // A workbook with tables gets its compatibility notes first (tables are not sheets in .xlsx).
   "Export Sheets as .xlsx": "dialog", "Export Excel workbook (.xlsx), all sheets": "dialog",
-  // Paste special with nothing copied says what to copy first.
-  "Paste special…": "toast", "Go to…": "dialog", "Find…": "find", "Find and replace…": "find",
+  // Paste special opens its menu: it applies to cells copied here and to other apps' clipboard.
+  "Paste special…": "menu", "Go to…": "dialog", "Find…": "find", "Find and replace…": "find",
   "Zoom in": "toast", "Zoom out": "toast", "Actual size (100%)": "toast", "Explorer": "explorer", "Saved views…": "menu",
   "Light theme": "theme", "Dark theme": "theme", "System theme": "theme",
   "Column…": "dialog", "Named range…": "dialog", "Table from SQL query…": "sql",

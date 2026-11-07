@@ -1400,13 +1400,13 @@ mod tests {
         let cell = |value: &str, formula: Option<&str>| PastedCell { value: value.into(), text: false, style: None, formula: formula.map(str::to_string) };
         let row = vec![
             cell("6", Some("=R[0]C[-1]*2")),
-            cell("x", Some("=GOOGLEFINANCE(\"X\")")),
+            cell("x", Some("=STOCKQUOTE(\"X\")")),
             cell("7", Some("=1+*2")),
             cell("9", Some("=R[-1]C[0]")),
             cell("12", Some("=DOUBLE(RC[-5])+SUM(R1C2:R3C2)")),
             cell("=1+1", None),
         ];
-        let t = s.paste_cells(0, (0, 2), &[row.clone()], PasteMode::All).unwrap();
+        let t = s.paste_cells(0, (0, 2), std::slice::from_ref(&row), PasteMode::All).unwrap();
         assert_eq!(t, CellArea { row: 0, column: 2, rows: 1, columns: 6 });
         assert_eq!((content(&s, 0, 0, 2), display(&s, 0, 0, 2)), ("=B1*2".into(), "6".into()));
         assert_eq!(content(&s, 0, 0, 3), "x", "a function Alephgrid lacks: the value");
@@ -1418,7 +1418,7 @@ mod tests {
         assert!(s.undo().unwrap(), "one undo step");
         assert!(content(&s, 0, 0, 2).is_empty());
         // One row down, the same formula reads the cell left of its new place.
-        s.paste_cells(0, (2, 2), &[row.clone()], PasteMode::Formulas).unwrap();
+        s.paste_cells(0, (2, 2), std::slice::from_ref(&row), PasteMode::Formulas).unwrap();
         assert_eq!((content(&s, 0, 2, 2), display(&s, 0, 2, 2)), ("=B3*2".into(), "8".into()));
         assert_eq!(content(&s, 0, 2, 5), "=F2", "row 3 has a row above");
         // Values: never a formula.

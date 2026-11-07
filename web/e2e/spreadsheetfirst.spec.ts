@@ -42,8 +42,11 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   if (browserName === "chromium") await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
   await page.addInitScript(() => {
     try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ }
-    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
-    navigator.clipboard.writeText = async (text: string) => { (window as unknown as { __copied: string }).__copied = text; return write(text); };
+    // Record what the app copies (text alone, or text and HTML) instead of using the shared system clipboard.
+    navigator.clipboard.writeText = async (text: string) => { (window as unknown as { __copied: string }).__copied = text; };
+    navigator.clipboard.write = async (items: ClipboardItem[]) => {
+      for (const item of items) (window as unknown as { __copied: string }).__copied = await (await item.getType("text/plain")).text();
+    };
   });
 
   // New workbook from the hub: straight into a blank sheet.
@@ -106,15 +109,13 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   await page.keyboard.press("ControlOrMeta+Shift+z");
   await expect.poll(() => cellText(page, "C3")).toContain("50");
 
-  // Paste cannot be simulated in Playwright's Firefox (as in commands.spec): the copy-paste
-  // step is skipped there; the rest of the journey runs in every browser.
-  const canPaste = browserName !== "firefox";
-  if (!canPaste) test.info().annotations.push({ type: "limit", description: "keyboard paste not simulated in Firefox" });
   const ws = await server.connect(wb);
   const sheets = await ws.call("sheets", {});
   const sheet = sheets.find((s: { name: string }) => s.name === "Sheet 1").index;
-  if (canPaste) {
-    // Copy A1:C4 and paste at E1 with the keyboard: formulas follow (=SUMIFS(…,E2)).
+  {
+    // Copy A1:C4 and paste at E1 with the keyboard: formulas follow (=SUMIFS(…,E2)). The
+    // paste is a script-made paste event whose data rides on its `clipboardData` property
+    // (Playwright's Firefox drops the data of script-made ClipboardEvents).
     await cellText(page, "A1");
     for (let i = 0; i < 2; i++) await page.keyboard.press("Shift+ArrowRight");
     for (let i = 0; i < 3; i++) await page.keyboard.press("Shift+ArrowDown");
@@ -124,7 +125,9 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
     await page.evaluate(() => {
       const data = new DataTransfer();
       data.setData("text/plain", (window as unknown as { __copied?: string }).__copied ?? "");
-      document.querySelector(".grid-host")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", { value: data });
+      document.querySelector(".grid-host")!.dispatchEvent(event);
     });
     await expect.poll(() => cellText(page, "G3")).toContain("50");
     const detail = await ws.call("sheet_cell_detail", { sheet, row: 2, column: 6 });
@@ -147,7 +150,7 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   await page.getByRole("tab", { name: /Sheet 1/ }).click();
   expect(await cellText(page, "C2")).toContain("125");
   expect(await cellText(page, "B3")).toContain("East");
-  if (canPaste) expect(await cellText(page, "G4")).toContain("10");
+  expect(await cellText(page, "G4")).toContain("10");
   await noSql(page);
   ws.close();
 });
