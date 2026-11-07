@@ -237,7 +237,10 @@ impl PythonRuntime {
             }
             Isolation::Bubblewrap(bwrap) => {
                 let mut c = Command::new(bwrap);
-                c.args(["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+                // No `--new-session`: the worker gets its own session before bwrap starts
+                // (`setsid` below), which detaches it from any terminal just the same and keeps
+                // every process of the sandbox in one process group that a kill can reach.
+                c.args(["--unshare-all", "--die-with-parent", "--cap-drop", "ALL", "--clearenv"]);
                 // An empty /tmp first: the binds below may lie under /tmp (a runtime kept there)
                 // and must stay visible, so they are mounted inside it, not hidden by it.
                 c.args(["--tmpfs", "/tmp"]);
@@ -266,10 +269,17 @@ impl PythonRuntime {
         };
         cmd.env_clear().current_dir(work).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let limits = self.limits;
-        // SAFETY: only async-signal-safe calls (setrlimit) between fork and exec.
+        // SAFETY: only async-signal-safe calls (setsid, setrlimit) between fork and exec.
         unsafe {
             use std::os::unix::process::CommandExt;
             cmd.pre_exec(move || {
+                // A new session and process group, led by the worker, with no controlling
+                // terminal (so no keystrokes can be pushed into one). Everything the worker
+                // starts, including the processes inside bwrap's namespaces, stays in this
+                // group, and `kill_worker` ends them all.
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 let set_both = |resource, soft: u64, hard: u64| {
                     let lim = libc::rlimit { rlim_cur: soft as libc::rlim_t, rlim_max: hard as libc::rlim_t };
                     libc::setrlimit(resource, &lim);
@@ -357,7 +367,7 @@ impl PythonRuntime {
                 None
             };
             if let Some(r) = reason {
-                let _ = child.kill();
+                kill_worker(&mut child);
                 killed = Some(r);
                 break child.wait().ok();
             }
@@ -517,6 +527,20 @@ fn seatbelt_profile(m: &Manifest, work: &Path) -> String {
         reads = read_rules.join(" "),
         meta = meta_rules.join(" "),
     )
+}
+
+/// End a worker and everything it started: its whole process group (see `setsid` in
+/// `command`). Killing only the first process is not enough under bwrap: the sandboxed Python
+/// can outlive it (it was found still running, and holding the output pipe open, until its CPU
+/// limit 30 s later), which delayed a cancelled call's reply by as long.
+fn kill_worker(child: &mut std::process::Child) {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: signals the worker's own process group; `pid` leads it, and it has not been
+    // waited for yet, so the id cannot have been reused.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 /// Whether the worker was stopped by its CPU-time limit: SIGXCPU directly, or through the
