@@ -40,7 +40,7 @@ These pages are the detailed reference and the contributor documentation.
 | [TEST_MATRIX.md](TEST_MATRIX.md) | Historical per-task test evidence for phases 1–8 and F |
 | [ACCESSIBILITY_TESTING.md](ACCESSIBILITY_TESTING.md) | Manual screen-reader and keyboard-layout checks |
 | [CI.md](CI.md) | CircleCI, run on demand: setup and how to start a run |
-| [RELEASING.md](RELEASING.md) | Building and publishing a release: binaries, Docker image, npm |
+| [RELEASING.md](RELEASING.md) | Building and publishing a release: binaries, Docker image, npm, PyPI |
 | [UPSTREAM.md](UPSTREAM.md) | IronCalc defects, the local patch set and proposals for upstream |
 | [samples/](samples/README.md) | A reproducible sample workbook used by the tests |
 
