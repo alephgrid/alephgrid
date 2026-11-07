@@ -312,17 +312,29 @@ pub enum Op {
         #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
         #[serde(default)] #[ts(optional, as = "Option<u64>")] source_layout: Option<u64>,
     },
-    /// Paste cells copied in another app (read from its HTML table clipboard data) at
-    /// (`row`, `column`): values, text kept as text, and formats. Never makes formulas.
+    /// Paste cells copied in another app (read from its HTML table clipboard data or its
+    /// text) at (`row`, `column`): values, text kept as text, formats, and (when `mode`
+    /// takes formulas) formulas given in R1C1 notation that parse here.
     SheetPasteCells {
         sheet: u32,
         row: u32,
         column: u32,
         cells: Vec<Vec<alephgrid_core::PastedCell>>,
+        #[serde(default = "default_paste_mode")] #[ts(optional, as = "Option<alephgrid_core::PasteMode>")] mode: alephgrid_core::PasteMode,
         #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
     },
-    /// Cut and paste within one sheet; references to the moved cells follow them.
-    SheetMove { sheet: u32, source: alephgrid_core::CellArea, row: u32, column: u32, #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64> },
+    /// Cut and paste: `source` of `from_sheet` (default: `sheet`) moves to (`row`, `column`)
+    /// of `sheet`; references to the moved cells follow them, also to another sheet.
+    SheetMove {
+        sheet: u32,
+        source: alephgrid_core::CellArea,
+        row: u32,
+        column: u32,
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] layout: Option<u64>,
+        #[serde(default)] #[ts(optional, as = "Option<u32>")] from_sheet: Option<u32>,
+        /// The layout of `from_sheet` when it is another sheet.
+        #[serde(default)] #[ts(optional, as = "Option<u64>")] source_layout: Option<u64>,
+    },
     /// Copy a query's first rows into a new sheet. Fails with `too_large` when the result has
     /// more rows than a sheet copy holds, unless `allow_truncation`.
     CreateSheetFromQuery {
@@ -814,7 +826,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.insert_rows(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, count as i64)?;
-            wb.note_comment_step(sheet, before)?;
+            wb.note_comment_step(vec![(sheet, before)])?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteRows { sheet, at, count, layout } => {
@@ -822,7 +834,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.delete_rows(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Rows, at, -(count as i64))?;
-            wb.note_comment_step(sheet, before)?;
+            wb.note_comment_step(vec![(sheet, before)])?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetInsertColumns { sheet, at, count, layout } => {
@@ -830,7 +842,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.insert_columns(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, count as i64)?;
-            wb.note_comment_step(sheet, before)?;
+            wb.note_comment_step(vec![(sheet, before)])?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDeleteColumns { sheet, at, count, layout } => {
@@ -838,7 +850,7 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let before = wb.comments(sheet)?;
             wb.with_sheets(|s| s.delete_columns(sheet, at, count))?;
             wb.shift_comments(sheet, alephgrid_core::comments::Axis::Columns, at, -(count as i64))?;
-            wb.note_comment_step(sheet, before)?;
+            wb.note_comment_step(vec![(sheet, before)])?;
             (Value::Null, sheet_changed(sheet))
         }
         Op::SheetDefineName { name, scope, refers_to } => {
@@ -952,22 +964,37 @@ fn write(wb: &mut Workbook, op: Op, ctx: &Ctx) -> Result<(Value, Option<Event>)>
             let area = wb.with_sheets(|s| s.paste(from_sheet, source, sheet, (row, column), mode, transpose))?;
             (json!(area), sheet_changed(sheet))
         }
-        Op::SheetPasteCells { sheet, row, column, cells, layout } => {
+        Op::SheetPasteCells { sheet, row, column, cells, mode, layout } => {
             expect_layout(wb, sheet, layout)?;
-            let inputs: Vec<alephgrid_core::SheetInput> = cells.iter().enumerate()
-                .flat_map(|(r, line)| line.iter().enumerate().map(move |(c, p)| alephgrid_core::SheetInput { row: row + r as u32, column: column + c as u32, value: p.value.clone(), base: None }))
-                .collect();
-            wb.check_sheet_inputs(sheet, &inputs)?;
-            let area = wb.with_sheets(|s| s.paste_cells(sheet, (row, column), &cells))?;
+            // Allowed values are checked for what is written (nothing, for formats only).
+            if mode != alephgrid_core::PasteMode::Formats {
+                let inputs: Vec<alephgrid_core::SheetInput> = cells.iter().enumerate()
+                    .flat_map(|(r, line)| line.iter().enumerate().map(move |(c, p)| alephgrid_core::SheetInput { row: row + r as u32, column: column + c as u32, value: p.value.clone(), base: None }))
+                    .collect();
+                wb.check_sheet_inputs(sheet, &inputs)?;
+            }
+            let area = wb.with_sheets(|s| s.paste_cells(sheet, (row, column), &cells, mode))?;
             (json!(area), sheet_changed(sheet))
         }
-        Op::SheetMove { sheet, source, row, column, layout } => {
+        Op::SheetMove { sheet, source, row, column, layout, from_sheet, source_layout } => {
+            let from = from_sheet.unwrap_or(sheet);
             expect_layout(wb, sheet, layout)?;
+            if from != sheet {
+                expect_layout(wb, from, source_layout)?;
+            }
             let before = wb.comments(sheet)?;
-            let area = wb.with_sheets(|s| s.move_cells(sheet, source, (row, column)))?;
-            wb.move_comments(sheet, source, (row, column))?;
-            wb.note_comment_step(sheet, before)?;
-            (json!(area), sheet_changed(sheet))
+            let before_from = if from != sheet { Some(wb.comments(from)?) } else { None };
+            // One transaction: the target is written, then the source cleared; a failure
+            // anywhere rolls both back.
+            let area = wb.with_sheets(|s| s.move_cells(from, source, sheet, (row, column)))?;
+            wb.move_comments(from, source, sheet, (row, column))?;
+            let mut noted = vec![(sheet, before)];
+            if let Some(b) = before_from {
+                noted.push((from, b));
+            }
+            wb.note_comment_step(noted)?;
+            let event = if from == sheet { sheet_changed(sheet) } else { Some(Event::SheetChanged { sheet: None, origin, revision: 0 }) };
+            (json!(area), event)
         }
         Op::CreateSheetFromQuery { name, sql, params, allow_truncation } => {
             require_sql(ctx)?;

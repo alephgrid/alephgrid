@@ -199,42 +199,51 @@ impl Workbook {
         .map_err(|e| anyhow!(e))
     }
 
-    /// Cells of `source` moved by `(rows, columns)` on the same sheet (cut and paste): their
-    /// comments go with them, and comments on the cells they cover are removed with the
-    /// values they annotated.
-    pub fn move_comments(&mut self, sheet: u32, source: crate::sheets::CellArea, to: (u32, u32)) -> Result<()> {
+    /// Cells of `source` on sheet `from` moved to `to` on sheet `sheet` (cut and paste, on
+    /// the same sheet or onto another one): their comments go with them, and comments on the
+    /// cells they cover are removed with the values they annotated.
+    pub fn move_comments(&mut self, from: u32, source: crate::sheets::CellArea, sheet: u32, to: (u32, u32)) -> Result<()> {
+        let from_key = self.sheet_key(from)?;
         let key = self.sheet_key(sheet)?;
         let (dr, dc) = (to.0 as i64 - source.row as i64, to.1 as i64 - source.column as i64);
-        if dr == 0 && dc == 0 {
+        if dr == 0 && dc == 0 && from_key == key {
             return Ok(());
         }
         let (r0, c0) = (source.row as i64, source.column as i64);
         let (r1, c1) = (r0 + source.rows as i64, c0 + source.columns as i64);
         self.mutating("move_comments", None, |wb| {
             ensure(&wb.conn)?;
+            // The covered cells' comments, except (same sheet) those on cells that move.
+            let (sr0, sr1, sc0, sc1) = if from_key == key { (r0, r1, c0, c1) } else { (0, 0, 0, 0) };
             wb.conn.execute(
                 "DELETE FROM _rf_comments WHERE sheet = ? AND row_ix >= ? AND row_ix < ? AND col_ix >= ? AND col_ix < ?
                  AND NOT (row_ix >= ? AND row_ix < ? AND col_ix >= ? AND col_ix < ?)",
-                duckdb::params![key, r0 + dr, r1 + dr, c0 + dc, c1 + dc, r0, r1, c0, c1],
+                duckdb::params![key, r0 + dr, r1 + dr, c0 + dc, c1 + dc, sr0, sr1, sc0, sc1],
             )?;
             wb.conn.execute(
-                "UPDATE _rf_comments SET row_ix = row_ix + ?, col_ix = col_ix + ? WHERE sheet = ? AND row_ix >= ? AND row_ix < ? AND col_ix >= ? AND col_ix < ?",
-                duckdb::params![dr, dc, key, r0, r1, c0, c1],
+                "UPDATE _rf_comments SET sheet = ?, row_ix = row_ix + ?, col_ix = col_ix + ? WHERE sheet = ? AND row_ix >= ? AND row_ix < ? AND col_ix >= ? AND col_ix < ?",
+                duckdb::params![key, dr, dc, from_key, r0, r1, c0, c1],
             )?;
             Ok(())
         })
         .map_err(|e| anyhow!(e))
     }
 
-    /// Attach a sheet's comments from before a change that moved cells (and as they are now)
-    /// to that change's undo step, so undo and redo move them back and forth too.
-    pub fn note_comment_step(&mut self, sheet: u32, before: Vec<CellComment>) -> Result<()> {
-        let after = self.comments(sheet)?;
-        if before == after {
+    /// Attach sheets' comments from before a change that moved cells (and as they are now)
+    /// to that change's undo step, so undo and redo move them back and forth too. A cut to
+    /// another sheet passes both sheets.
+    pub fn note_comment_step(&mut self, sheets: Vec<(u32, Vec<CellComment>)>) -> Result<()> {
+        let mut steps = Vec::new();
+        for (sheet, before) in sheets {
+            let after = self.comments(sheet)?;
+            if before != after {
+                steps.push(AnchorStep { key: self.sheet_key(sheet)?, before, after });
+            }
+        }
+        if steps.is_empty() {
             return Ok(());
         }
-        let key = self.sheet_key(sheet)?;
-        let note = serde_json::to_string(&AnchorStep { key, before, after })?;
+        let note = if steps.len() == 1 { serde_json::to_string(&steps[0])? } else { serde_json::to_string(&steps)? };
         self.sheets().note_step(note);
         Ok(())
     }
@@ -242,21 +251,28 @@ impl Workbook {
     /// After undoing (or redoing) a step with a comment note: put the comments where they
     /// were before (or after) it. Comments added since stay; text edited since is kept.
     pub fn restore_comment_step(&mut self, note: &str, undo: bool) -> Result<()> {
-        let step: AnchorStep = serde_json::from_str(note)?;
-        let (target, other) = if undo { (&step.before, &step.after) } else { (&step.after, &step.before) };
-        let key = step.key;
+        // One sheet's anchors, or (a cut to another sheet) several.
+        let steps: Vec<AnchorStep> = if note.trim_start().starts_with('[') { serde_json::from_str(note)? } else { vec![serde_json::from_str(note)?] };
         self.mutating("restore_comments", None, |wb| {
             ensure(&wb.conn)?;
-            for c in other.iter().filter(|c| !target.iter().any(|t| t.id == c.id)) {
-                wb.conn.execute("DELETE FROM _rf_comments WHERE id = ? AND sheet = ?", duckdb::params![c.id, key])?;
+            // Removals first: a comment moving between sheets leaves one before it lands on the other.
+            for step in &steps {
+                let (target, other) = if undo { (&step.before, &step.after) } else { (&step.after, &step.before) };
+                for c in other.iter().filter(|c| !target.iter().any(|t| t.id == c.id)) {
+                    wb.conn.execute("DELETE FROM _rf_comments WHERE id = ? AND sheet = ?", duckdb::params![c.id, step.key])?;
+                }
             }
-            for c in target {
-                let n = wb.conn.execute("UPDATE _rf_comments SET row_ix = ?, col_ix = ? WHERE id = ? AND sheet = ?", duckdb::params![c.row as i64, c.column as i64, c.id, key])?;
-                if n == 0 {
-                    wb.conn.execute(
-                        "INSERT INTO _rf_comments (id, sheet, row_ix, col_ix, author, created_ms, edited_ms, body, resolved, parent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        duckdb::params![c.id, key, c.row as i64, c.column as i64, c.author, c.created_ms as i64, c.edited_ms.map(|v| v as i64), c.text, c.resolved, c.parent],
-                    )?;
+            for step in &steps {
+                let target = if undo { &step.before } else { &step.after };
+                let key = step.key;
+                for c in target {
+                    let n = wb.conn.execute("UPDATE _rf_comments SET row_ix = ?, col_ix = ? WHERE id = ? AND sheet = ?", duckdb::params![c.row as i64, c.column as i64, c.id, key])?;
+                    if n == 0 {
+                        wb.conn.execute(
+                            "INSERT INTO _rf_comments (id, sheet, row_ix, col_ix, author, created_ms, edited_ms, body, resolved, parent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            duckdb::params![c.id, key, c.row as i64, c.column as i64, c.author, c.created_ms as i64, c.edited_ms.map(|v| v as i64), c.text, c.resolved, c.parent],
+                        )?;
+                    }
                 }
             }
             Ok(())

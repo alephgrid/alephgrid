@@ -12,30 +12,59 @@ const server = new Server();
 test.beforeAll(async () => server.start());
 test.afterAll(async () => server.dispose());
 
-/** Grant clipboard access (Chromium) and remember what the app writes there. */
+/** Grant clipboard access (Chromium) and stand in for the system clipboard: what the app
+ *  writes (text, and HTML through `navigator.clipboard.write`) is recorded instead of
+ *  reaching the machine's clipboard (which other programs share), and a read from a menu
+ *  (paste special) returns what a test put there with `setClipboard`, or is refused like a
+ *  browser that does not let pages read the clipboard (`denyRead`). */
 async function recordClipboard(page: Page) {
   if (page.context().browser()?.browserType().name() === "chromium") {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
   }
   await page.addInitScript(() => {
     try { localStorage.setItem("alephgrid-welcome-done", "1"); } catch { /* */ }
-    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
-    navigator.clipboard.writeText = async (text: string) => {
-      (window as unknown as { __copied: string }).__copied = text;
-      return write(text).catch(() => undefined);
+    type Board = { __copied?: string; __copiedHtml?: string; __noRead?: boolean };
+    const w = window as unknown as Board;
+    navigator.clipboard.writeText = async (text: string) => { w.__copied = text; w.__copiedHtml = undefined; };
+    navigator.clipboard.write = async (items: ClipboardItem[]) => {
+      for (const item of items) {
+        w.__copied = item.types.includes("text/plain") ? await (await item.getType("text/plain")).text() : "";
+        w.__copiedHtml = item.types.includes("text/html") ? await (await item.getType("text/html")).text() : undefined;
+      }
+    };
+    navigator.clipboard.read = async () => {
+      if (w.__noRead) throw new DOMException("Read permission denied.", "NotAllowedError");
+      const parts: Record<string, Blob> = { "text/plain": new Blob([w.__copied ?? ""], { type: "text/plain" }) };
+      if (w.__copiedHtml) parts["text/html"] = new Blob([w.__copiedHtml], { type: "text/html" });
+      return [new ClipboardItem(parts)];
     };
   });
 }
 
 const copied = (page: Page) => page.evaluate(() => (window as unknown as { __copied?: string }).__copied ?? "");
+const copiedHtml = (page: Page) => page.evaluate(() => (window as unknown as { __copiedHtml?: string }).__copiedHtml ?? "");
 
-/** A paste event carrying `text` and, when given, `html` (what Mod+V delivers). */
+/** What another app put on the clipboard, for paste special to read. */
+async function setClipboard(page: Page, text: string, html?: string) {
+  await page.evaluate(([text, html]) => {
+    const w = window as unknown as { __copied?: string; __copiedHtml?: string };
+    w.__copied = text; w.__copiedHtml = html || undefined;
+  }, [text, html ?? ""] as const);
+}
+
+const denyRead = (page: Page) => page.evaluate(() => { (window as unknown as { __noRead: boolean }).__noRead = true; });
+
+/** A paste event carrying `text` and, when given, `html` (what Mod+V delivers). The data is
+ *  attached as the event's `clipboardData` property: Playwright's Firefox drops the data of
+ *  script-made ClipboardEvents, and this way every browser gets the same event. */
 async function paste(page: Page, text: string, html?: string) {
   await page.evaluate(([text, html]) => {
     const data = new DataTransfer();
     data.setData("text/plain", text);
     if (html) data.setData("text/html", html);
-    document.querySelector(".grid-host")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: data });
+    document.querySelector(".grid-host")!.dispatchEvent(event);
   }, [text, html ?? ""] as const);
 }
 
@@ -57,8 +86,7 @@ async function go(page: Page, cell: string) {
   await expect(page.locator(".cell-ref")).toHaveText(cell);
 }
 
-test("a filtered range copies and pastes only the rows it shows (Mod+A, Mod+C)", async ({ page, browserName }) => {
-  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
+test("a filtered range copies and pastes only the rows it shows (Mod+A, Mod+C)", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Filtered copy"), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Data" });
@@ -91,8 +119,9 @@ test("a filtered range copies and pastes only the rows it shows (Mod+A, Mod+C)",
   await page.keyboard.press("ControlOrMeta+x");
   await go(page, "G1");
   await paste(page, await copied(page));
-  await expect(page.locator(".toast").last()).toContainText("hidden rows or columns");
+  await expect(page.locator(".grid-note")).toContainText("Nothing was moved: the cut cells include hidden rows or columns");
   expect((await cells(ws, 0, 1, 7)).content(0, 6)).toBe("");
+  expect((await cells(ws, 0, 5, 2)).content(2, 0), "the hidden row stays where it was").toBe("y");
   ws.close();
 });
 
@@ -178,8 +207,7 @@ const INLINE_HTML = `<meta charset="utf-8"><style type="text/css"><!--td {border
   + `</tbody></table>`;
 const INLINE_TEXT = "007\t25%\t42\nTRUE\t=not a formula\t";
 
-test("cells copied in other spreadsheets paste with their values and formats", async ({ page, browserName }) => {
-  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
+test("cells copied in other spreadsheets paste with their values and formats", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Formatted paste"), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Data" });
@@ -233,7 +261,7 @@ test("cells copied in other spreadsheets paste with their values and formats", a
   // Larger than the edit limit (1,000,000 cells here): refused before anything is sent.
   await go(page, "A12");
   await paste(page, "big", `<table><tr><td colspan=1000 rowspan=1000>big</td><td>one more</td></tr></table>`);
-  await expect(page.locator(".toast").last()).toContainText("That paste is too large");
+  await expect(page.locator(".grid-note")).toContainText("Nothing was pasted: that is more than 1,000,000 cells");
   expect((await cells(ws, 0, 12, 1)).content(11, 0)).toBe("");
 
   // HTML without a table: the tab-separated text is pasted.
@@ -243,8 +271,7 @@ test("cells copied in other spreadsheets paste with their values and formats", a
   ws.close();
 });
 
-test("HTML pasted into a table keeps its raw values", async ({ page, browserName }) => {
-  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
+test("HTML pasted into a table keeps its raw values", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Table paste"), ws = await server.connect(wb);
   await ws.call("create_table_from_query", { name: "t", sql: "SELECT 'a' AS label, 1.0::DOUBLE AS amount" });
@@ -257,8 +284,7 @@ test("HTML pasted into a table keeps its raw values", async ({ page, browserName
   ws.close();
 });
 
-test("cells copy between sheets, and from a table into a sheet with their types", async ({ page, browserName }) => {
-  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
+test("cells copy between sheets, and from a table into a sheet with their types", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Between sheets"), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Data" });
@@ -289,15 +315,6 @@ test("cells copy between sheets, and from a table into a sheet with their types"
   await page.reload();
   await page.getByRole("tab", { name: /^Other/ }).click();
   await expect.poll(async () => (await cells(ws, 1, 2, 2)).content(1, 1)).toBe("=A2*10+$A$1+A$1+$A2+Data!A2+Other!A2");
-  // A cut cannot move cells to another sheet yet: it says so and changes nothing.
-  await page.getByRole("tab", { name: /^Data/ }).click();
-  await go(page, "A1");
-  await page.keyboard.press("ControlOrMeta+x");
-  await page.getByRole("tab", { name: /^Other/ }).click();
-  await go(page, "D1");
-  await paste(page, await copied(page));
-  await expect(page.locator(".toast").last()).toContainText("another sheet");
-  expect((await cells(ws, 0, 1, 1)).content(0, 0)).toBe("2");
 
   // From a table: text stays text (leading zeros), numbers stay numbers.
   await ws.call("create_table_from_query", { name: "codes", sql: "SELECT '007' AS code, 12 AS n UNION ALL SELECT '010', 3" });
@@ -318,4 +335,296 @@ test("cells copy between sheets, and from a table into a sheet with their types"
   const got = await cells(ws, 1, 5, 5);
   expect([got.content(3, 3), got.content(4, 3), got.content(3, 4), got.content(4, 4)]).toEqual(["007", "010", "12", "3"]);
   ws.close();
+});
+
+test("copying sheet cells writes an HTML table with raw values and formats; cell text is escaped", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Copy out"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [
+    { row: 0, column: 0, value: "1234.5" }, { row: 0, column: 1, value: "<script>window.__ran=1</script>" },
+    { row: 1, column: 0, value: `say "hi" & bye` }, { row: 1, column: 1, value: "'007" },
+    { row: 2, column: 0, value: "=A1*2" }, { row: 2, column: 1, value: "TRUE" },
+  ] });
+  await ws.call("sheet_style", { sheet: 0, area: { row: 0, column: 0, rows: 1, columns: 1 }, style: { b: true, num_fmt: "#,##0.00" } });
+  await ws.call("sheet_style", { sheet: 0, area: { row: 0, column: 1, rows: 1, columns: 1 }, style: { i: true, u: true, s: true, color: "#FF0000" } });
+  await ws.call("sheet_style", { sheet: 0, area: { row: 1, column: 0, rows: 1, columns: 1 }, style: { fill: "#FFFF00" } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("Shift+ArrowRight"); await page.keyboard.press("Shift+ArrowDown"); await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("ControlOrMeta+c");
+  await expect(page.locator(".toast").last()).toContainText("Copied 6 cells");
+  // The text is the displayed values, as before.
+  expect(await copied(page)).toBe(`1,234.50\t<script>window.__ran=1</script>\n"say ""hi"" & bye"\t007\n2469\tTRUE`);
+  const html = await copiedHtml(page);
+  // Every value is escaped: no markup from a cell, no attribute broken out of.
+  expect(html).not.toContain("<script");
+  expect(html).toContain("&lt;script&gt;window.__ran=1&lt;/script&gt;");
+  expect(html).toContain("say \"hi\" &amp; bye");
+  const parsed = await page.evaluate((html) => {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return {
+      scripts: doc.querySelectorAll("script").length,
+      cells: [...doc.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => ({
+        text: td.textContent, value: td.getAttribute("data-sheets-value"), num: td.getAttribute("x:num"),
+        bool: td.getAttribute("x:bool"), style: td.getAttribute("style") ?? "",
+      }))),
+    };
+  }, html);
+  expect(parsed.scripts).toBe(0);
+  const [[a1, b1], [a2, b2], [a3, b3]] = parsed.cells;
+  expect([a1.text, a1.value, a1.num]).toEqual(["1,234.50", '{"1":3,"3":1234.5}', "1234.5"]);
+  expect(a1.style).toContain("font-weight:bold");
+  expect(a1.style).toContain('mso-number-format:"#,##0.00"');
+  expect(b1.text).toBe("<script>window.__ran=1</script>");
+  expect(b1.style).toContain("font-style:italic");
+  expect(b1.style).toContain("text-decoration:underline line-through");
+  expect(b1.style).toContain("color:#FF0000");
+  expect([a2.text, a2.value]).toEqual([`say "hi" & bye`, JSON.stringify({ 1: 2, 2: `say "hi" & bye` })]);
+  expect(a2.style).toContain("background-color:#FFFF00");
+  expect([b2.text, b2.value]).toEqual(["007", '{"1":2,"2":"007"}']);
+  expect(b2.style).toContain('mso-number-format:"@"');
+  expect([a3.text, a3.value, a3.num]).toEqual(["2469", '{"1":3,"3":2469}', "2469"]);
+  expect([b3.text, b3.bool]).toEqual(["TRUE", "TRUE"]);
+  expect(await page.evaluate(() => (window as unknown as { __ran?: number }).__ran)).toBeUndefined();
+
+  // Pasted into another workbook (as another app would get it), values and formats survive.
+  const wb2 = await server.createWorkbook("Copy in"), ws2 = await server.connect(wb2);
+  await ws2.call("sheet_create", { name: "In" });
+  const text = await copied(page);
+  await page.goto(`${server.url}/w/${wb2}`);
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  await page.locator(".grid-host").focus();
+  await paste(page, text, html);
+  await expect.poll(async () => (await cells(ws2, 0, 3, 2)).content(2, 1)).toBe("TRUE");
+  const got = await cells(ws2, 0, 3, 2);
+  expect([got.display(0, 0), got.content(0, 0)]).toEqual(["1,234.50", "1234.5"]);
+  expect(got.style(0, 0)).toMatchObject({ b: true, num_fmt: "#,##0.00" });
+  expect(got.content(0, 1)).toBe("<script>window.__ran=1</script>");
+  expect(got.style(0, 1)).toMatchObject({ i: true, u: true, s: true, color: "#FF0000" });
+  expect(got.content(1, 0)).toBe(`say "hi" & bye`);
+  expect(got.style(1, 0)).toMatchObject({ fill: "#FFFF00" });
+  expect([got.display(1, 1), got.content(1, 1)]).toEqual(["007", "007"]);
+  expect(got.content(2, 0)).toBe("2469");
+  ws.close(); ws2.close();
+});
+
+// Cells as a spreadsheet that writes formulas into its clipboard HTML puts them there: typed
+// values, and each formula in R1C1 notation relative to its own cell (written by hand).
+const FORMULA_TEXT = "6\n99";
+const FORMULA_HTML = `<meta charset="utf-8"><table data-sheets-root="1"><tbody>`
+  + `<tr><td data-sheets-value='{"1":3,"3":6}' data-sheets-formula="=R[0]C[-1]*2">6</td></tr>`
+  + `<tr><td data-sheets-value='{"1":3,"3":99}' data-sheets-formula="=STOCKQUOTE(&quot;X&quot;)" style="font-weight:bold">99</td></tr>`
+  + `</tbody></table>`;
+
+test("formulas from other spreadsheets: Mod+V pastes their values, paste special takes the formulas", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Formulas in"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "3" }, { row: 1, column: 0, value: "4" }] });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  // Mod+V at B1: values (and formats); the toast says where the formulas are.
+  await go(page, "B1");
+  await paste(page, FORMULA_TEXT, FORMULA_HTML);
+  await expect.poll(async () => (await cells(ws, 0, 2, 2)).content(1, 1)).toBe("99");
+  expect((await cells(ws, 0, 2, 2)).content(0, 1)).toBe("6");
+  await expect(page.locator(".toast").last()).toContainText("Paste special → Formulas");
+  // Paste special → Formulas at C1: R[0]C[-1] is the cell to the left of C1. The formula
+  // calling a function Alephgrid lacks pastes as its value.
+  await setClipboard(page, FORMULA_TEXT, FORMULA_HTML);
+  await go(page, "C1");
+  await page.keyboard.press("ControlOrMeta+Shift+v");
+  await page.getByRole("menu", { name: "Paste special" }).getByRole("menuitem", { name: "Formulas (no formats)" }).click();
+  await expect.poll(async () => (await cells(ws, 0, 2, 3)).content(0, 2)).toBe("=B1*2");
+  let got = await cells(ws, 0, 2, 3);
+  expect(got.display(0, 2)).toBe("12");
+  expect(got.content(1, 2)).toBe("99");
+  expect(got.style(1, 2)).toEqual({});
+  // One undo step.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await cells(ws, 0, 2, 3)).content(0, 2)).toBe("");
+  // Plain text starting with = stays text.
+  await go(page, "D1");
+  await paste(page, "=A1*100");
+  await expect.poll(async () => (await cells(ws, 0, 1, 4)).display(0, 3)).toBe("=A1*100");
+  got = await cells(ws, 0, 1, 4);
+  expect(got.content(0, 3), "its input is marked as text").toBe("'=A1*100");
+  ws.close();
+});
+
+test("paste special works on text and HTML from other apps", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Special from apps"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "3" }, { row: 2, column: 0, value: "keep" }] });
+  await ws.call("sheet_style", { sheet: 0, area: { row: 2, column: 0, rows: 1, columns: 1 }, style: { i: true } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  const special = async (cell: string, item: string) => {
+    await go(page, cell);
+    await page.keyboard.press("ControlOrMeta+Shift+v");
+    await page.getByRole("menu", { name: "Paste special" }).getByRole("menuitem", { name: item, exact: true }).click();
+  };
+  // Tab-separated text, values transposed at E1.
+  await setClipboard(page, "1\t2");
+  await special("E1", "Values only, transposed");
+  await expect.poll(async () => (await cells(ws, 0, 2, 5)).content(1, 4)).toBe("2");
+  expect((await cells(ws, 0, 2, 5)).content(0, 4)).toBe("1");
+  // HTML, formats only, on A1: the value stays, the bold arrives.
+  await setClipboard(page, "x", `<table><tr><td style="font-weight:bold">x</td></tr></table>`);
+  await special("A1", "Formats only");
+  await expect.poll(async () => (await cells(ws, 0, 1, 1)).style(0, 0)).toMatchObject({ b: true });
+  expect((await cells(ws, 0, 1, 1)).content(0, 0)).toBe("3");
+  // HTML, values only, on A3: the value arrives, the italic stays, no bold.
+  await special("A3", "Values only");
+  await expect.poll(async () => (await cells(ws, 0, 3, 1)).content(2, 0)).toBe("x");
+  expect((await cells(ws, 0, 3, 1)).style(2, 0)).toEqual({ i: true });
+  // Text has no formats: refused at the cell, nothing changed.
+  await setClipboard(page, "y");
+  await special("A3", "Formats only");
+  await expect(page.locator(".grid-note")).toContainText("plain text, which has no formats");
+  expect((await cells(ws, 0, 3, 1)).content(2, 0)).toBe("x");
+  // A browser that will not let the page read the clipboard: the next Mod+V pastes as chosen.
+  await denyRead(page);
+  await special("B1", "Values only");
+  await expect(page.locator(".grid-note")).toContainText(/Press (⌘V|Ctrl\+V) to paste values only/);
+  await paste(page, "z", `<table><tr><td style="font-weight:bold">z</td></tr></table>`);
+  await expect.poll(async () => (await cells(ws, 0, 1, 2)).content(0, 1)).toBe("z");
+  expect((await cells(ws, 0, 1, 2)).style(0, 1)).toEqual({});
+  await expect(page.locator(".grid-note")).toHaveCount(0);
+  ws.close();
+});
+
+test("a cut pasted on another sheet moves the cells and the formulas that read them, as one undo step", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Cross-sheet move"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_create", { name: "Other" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [
+    { row: 0, column: 0, value: "5" }, { row: 1, column: 0, value: "=A1*2" }, { row: 0, column: 1, value: "=A1+A2" },
+  ] });
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^Data/ }).click();
+  await go(page, "A1");
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("ControlOrMeta+x");
+  await expect(page.locator(".toast").last()).toContainText("Cut.");
+  await page.getByRole("tab", { name: /^Other/ }).click();
+  await go(page, "D6");
+  await paste(page, await copied(page));
+  await expect.poll(async () => (await cells(ws, 1, 7, 4)).content(6, 3)).toBe("=D6*2");
+  expect((await cells(ws, 1, 7, 4)).content(5, 3)).toBe("5");
+  let data = await cells(ws, 0, 2, 2);
+  expect([data.content(0, 0), data.content(1, 0)]).toEqual(["", ""]);
+  expect([data.content(0, 1), data.display(0, 1)]).toEqual(["=Other!D6+Other!D7", "15"]);
+  // One undo step puts everything back on Data.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await cells(ws, 0, 2, 2)).content(0, 0)).toBe("5");
+  data = await cells(ws, 0, 2, 2);
+  expect([data.content(1, 0), data.content(0, 1)]).toEqual(["=A1*2", "=A1+A2"]);
+  expect((await cells(ws, 1, 7, 4)).content(5, 3)).toBe("");
+  ws.close();
+});
+
+test("refused pastes and cuts change nothing and say why at the cell", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Refusals"), ws = await server.connect(wb);
+  await ws.call("sheet_create", { name: "Data" });
+  await ws.call("sheet_set", { sheet: 0, inputs: [
+    { row: 0, column: 0, value: "keep" }, { row: 0, column: 1, value: "yes" }, { row: 1, column: 0, value: "a2" }, { row: 2, column: 0, value: "a3" },
+  ] });
+  await ws.call("set_sheet_rules", { sheet: 0, rules: { colors: [], validations: [{ area: { row: 0, column: 1, rows: 5, columns: 1 }, list: ["yes", "no"] }] } });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  const unchanged = async () => {
+    const got = await cells(ws, 0, 3, 3);
+    expect([got.content(0, 0), got.content(0, 1), got.content(1, 0), got.content(2, 0), got.content(0, 2)]).toEqual(["keep", "yes", "a2", "a3", ""]);
+  };
+  // Invalid: B2 does not allow "maybe"; the valid cells are not pasted either.
+  await go(page, "A1");
+  await paste(page, "new\tno\nnew\tmaybe");
+  await expect(page.locator(".grid-note")).toContainText("Nothing was pasted: B2");
+  await unchanged();
+  // Oversized: more cells than one edit takes, refused before anything is sent.
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".grid-note")).toHaveCount(0);
+  await paste(page, Array.from({ length: 1001 }, () => "1\t".repeat(999) + "1").join("\n"));
+  await expect(page.locator(".grid-note")).toContainText("more than 1,000,000 cells");
+  await unchanged();
+  // A refused cut: row 2, hidden inside the cut range, cannot move unseen; the source stays.
+  await ws.call("sheet_set_hidden", { sheet: 0, axis: "rows", start: 1, count: 1, hidden: true });
+  await page.reload();
+  await expect(page.locator(".cell-ref")).toHaveText("A1");
+  await go(page, "A1:A3");
+  await page.keyboard.press("ControlOrMeta+x");
+  await expect(page.locator(".toast").last()).toContainText("Cut.");
+  await go(page, "C1");
+  await paste(page, await copied(page));
+  await expect(page.locator(".grid-note")).toContainText("hidden rows or columns");
+  await unchanged();
+  ws.close();
+});
+
+test("a viewer's paste and cut change nothing and say why at the cell", async ({ browser }) => {
+  // A server with accounts: an administrator, and a viewer of the workbook's space.
+  const accounts = new Server(["--auth", "accounts"]);
+  await accounts.start();
+  try {
+    const adminContext = await browser.newContext(), viewerContext = await browser.newContext();
+    const url = accounts.url;
+    // Requests made with a session cookie must say they come from the server's own pages.
+    const headers = { Origin: url };
+    const post = async (ctx: typeof adminContext, path: string, data: unknown) => {
+      const r = await ctx.request.post(`${url}${path}`, { data, headers });
+      expect(r.ok(), `${path}: ${r.status()} ${await r.text()}`).toBe(true);
+      return r.json();
+    };
+    const code = /setup code (\S+)/.exec(accounts.output)?.[1];
+    expect(code, accounts.output).toBeTruthy();
+    await post(adminContext, "/api/auth/setup", { code, email: "ada@example.com", name: "Ada", password: "correct horse battery" });
+    const [space] = await (await adminContext.request.get(`${url}/api/spaces`)).json();
+    const wb = (await post(adminContext, "/api/workbooks", { name: "Viewer book", space: space.id })).id;
+    const invite = await post(adminContext, `/api/orgs/${space.org_id}/invites`, { email: "vera@example.com", space: space.id, space_role: "viewer" });
+    await post(viewerContext, "/api/invites/accept", { code: invite.code, name: "Vera", password: "a long enough password" });
+    // The administrator's session makes the sheet and reads it back.
+    const adminPage = await adminContext.newPage();
+    await adminPage.goto(url);
+    const op = (name: string, params: Record<string, unknown> = {}) => adminPage.evaluate(async ({ wb, name, params }) => new Promise<any>((ok, fail) => {
+      const ws = new WebSocket(`ws://${location.host}/ws/${wb}`);
+      ws.onmessage = (m) => {
+        const msg = JSON.parse(String(m.data));
+        if (msg.event === "hello") ws.send(JSON.stringify({ id: 1, op: name, ...params }));
+        else if (msg.id === 1) { ws.close(); msg.ok ? ok(msg.result) : fail(new Error(msg.error)); }
+      };
+      ws.onerror = () => fail(new Error("websocket failed"));
+    }), { wb, name, params });
+    await op("sheet_create", { name: "Data" });
+    await op("sheet_set", { sheet: 0, inputs: [{ row: 0, column: 0, value: "keep" }, { row: 1, column: 0, value: "a2" }] });
+    const shown = async () => {
+      const block = await op("sheet_fetch", { sheet: 0, row_start: 0, row_count: 3, column_count: 3 });
+      return [0, 1, 2].map((r) => [0, 1, 2].map((c) => block.rows[r]?.[c]?.[0] ?? ""));
+    };
+    const before = [["keep", "", ""], ["a2", "", ""], ["", "", ""]];
+    expect(await shown()).toEqual(before);
+
+    const page = await viewerContext.newPage();
+    await recordClipboard(page);
+    await page.goto(`${url}/w/${wb}`);
+    await expect(page.locator(".cell-ref")).toHaveText("A1");
+    await page.locator(".grid-host").focus();
+    await paste(page, "new\tcells\nmore\tcells", `<table><tr><td style="font-weight:bold">new</td></tr></table>`);
+    await expect(page.locator(".grid-note")).toContainText("Nothing was pasted: you can only view this workbook");
+    expect(await shown()).toEqual(before);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Shift+ArrowDown");
+    await page.keyboard.press("ControlOrMeta+x");
+    await expect(page.locator(".grid-note")).toContainText("Nothing was cut: you can only view this workbook");
+    expect(await shown()).toEqual(before);
+    await adminContext.close();
+    await viewerContext.close();
+  } finally {
+    await accounts.dispose();
+  }
 });

@@ -3,7 +3,7 @@ import { applyReferenceLock, referenceInsertion, referenceRanges } from "./refer
 import { goToDialog, namesDialog, parseAddress, quoteSheet, type Address, type NamesContext } from "./names";
 import { CommandRegistry, commandPalette, shortcutHelp } from "./commands";
 import { workbookCommands } from "./workbookcommands";
-import type { CellArea, CellComment, ColumnValues, MaterializedTable, PastedCell, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
+import type { CellArea, CellComment, CellStyle, ColumnValues, MaterializedTable, PastedCell, PasteMode, RuntimeStatus, SavedQuery, SheetLayout, SheetRules, SpaceRole, StylePatch, Validation, WorkbookFunction } from "./protocol";
 import { displayValue, cellColor, emptyPresentation, presentationDialog } from "./presentation";
 import { dashboardsDialog } from "./analysis";
 import { AnalyzePane } from "./analyzepane";
@@ -19,6 +19,7 @@ import { cellKey, FETCH_LIMIT, RowCache, SheetCache } from "./cache";
 import { columnLetter, formatCompact, formatCount, formatStat, formatValue, isNumericKind, rawText } from "./format";
 import { parseTsv, tsvCell } from "./tsv";
 import { parseClipboardHtml } from "./clipboardhtml";
+import { clipboardHtml, MAX_HTML_CELLS, readClipboard, writeClipboard, type OutCell } from "./clipboardout";
 import { store, stored, unstore } from "./storage";
 import { ruleFill, rulesDialog } from "./sheetrules";
 import { areaContains, areaOf, rangeOf } from "./sheetarea";
@@ -1900,43 +1901,125 @@ export class WorkbookScreen {
     try {
       // Hidden rows and columns (a filter's included) are left out, as the paste does.
       const hidden = await this.hiddenLines();
-      const data = (await this.fetchRange({ ...range, r1 })).filter((_, i) => !hidden.rows.has(range.r0 + i));
+      const shownRows = Array.from({ length: rows }, (_, i) => range.r0 + i).filter((r) => !hidden.rows.has(r));
       const columns = Array.from({ length: range.c1 - range.c0 + 1 }, (_, i) => range.c0 + i).filter((c) => !hidden.columns.has(c));
-      if (!data.length || !columns.length) { toast("Every selected cell is hidden: show the rows or columns first", "error"); return; }
-      const text = data.map((row) => columns.map((c) => tsvCell(row[c])).join("\t")).join("\n");
-      await navigator.clipboard.writeText(text);
-      this.clip = this.active?.kind === "sheet" ? { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined } : null;
-      this.tableClip = null;
-      if (this.active?.kind !== "sheet" && data.length * columns.length <= this.maxEditCells) {
-        const cols = this.view?.columns ?? [];
-        this.tableClip = { text, cells: data.map((row) => columns.map((c) => {
-          const v = row[c];
-          return cols[c]?.kind === "text" && typeof v === "string" ? { value: v, text: true } : { value: rawText(v) };
-        })) };
+      if (!shownRows.length || !columns.length) { toast("Every selected cell is hidden: show the rows or columns first", "error"); return; }
+      let text: string, html: string | undefined, cellCount: number;
+      if (this.active?.kind === "sheet") {
+        // Sheets: the displayed values as text, and (for copies other spreadsheets can take
+        // in) an HTML table with raw values and formats.
+        const out = await this.fetchSheetOut(this.active.index, { ...range, r1 }, shownRows, columns);
+        text = out.map((row) => row.map((c) => tsvCell(c.display)).join("\t")).join("\n");
+        html = out.length * columns.length <= MAX_HTML_CELLS ? clipboardHtml(out) : undefined;
+        cellCount = out.length * columns.length;
+      } else {
+        const data = (await this.fetchRange({ ...range, r1 })).filter((_, i) => !hidden.rows.has(range.r0 + i));
+        text = data.map((row) => columns.map((c) => tsvCell(row[c])).join("\t")).join("\n");
+        cellCount = data.length * columns.length;
+        this.tableClip = null;
+        if (cellCount <= this.maxEditCells) {
+          const cols = this.view?.columns ?? [];
+          this.tableClip = { text, cells: data.map((row) => columns.map((c) => {
+            const v = row[c];
+            return cols[c]?.kind === "text" && typeof v === "string" ? { value: v, text: true } : { value: rawText(v) };
+          })) };
+        }
+      }
+      await writeClipboard(text, html);
+      if (this.active?.kind === "sheet") {
+        this.clip = { sheet: this.active.index, range: { ...range, r1 }, text, cut: false, layout: this.shownLayout(this.active.index, range.r0, r1) ?? undefined };
+        this.tableClip = null;
+      } else {
+        this.clip = null;
       }
       this.grid.setCopied({ ...range, r1 });
-      const lines = [data.length < rows ? "rows" : "", columns.length < range.c1 - range.c0 + 1 ? "columns" : ""].filter(Boolean).join(" and ");
-      toast(`Copied ${formatCount(data.length * columns.length)} cells${lines ? ` (hidden ${lines} left out)` : ""}`);
+      const lines = [shownRows.length < rows ? "rows" : "", columns.length < range.c1 - range.c0 + 1 ? "columns" : ""].filter(Boolean).join(" and ");
+      toast(`Copied ${formatCount(cellCount)} cells${lines ? ` (hidden ${lines} left out)` : ""}`);
     } catch (e) {
       toast(`Copy failed: ${(e as Error).message}`, "error");
     }
   }
 
-  private async paste(at: Cell, text: string, html?: string): Promise<void> {
+  /** The shown cells of `range` on sheet `sheet` for the clipboard: displayed values, kinds,
+   *  computed numbers (formulas included) and formats. */
+  private async fetchSheetOut(sheet: number, range: Range, shownRows: number[], columns: number[]): Promise<OutCell[][]> {
+    const width = range.c1 + 1;
+    const byRow = new Map<number, OutCell[]>();
+    const withNumbers = shownRows.length * columns.length <= MAX_HTML_CELLS;
+    for (let start = range.r0; start <= range.r1; start += FETCH_LIMIT) {
+      const count = Math.min(FETCH_LIMIT, range.r1 - start + 1);
+      const block = await this.rpc.call("sheet_fetch", { sheet, row_start: start, row_count: count, column_count: width });
+      const styles = new Map<string, CellStyle>();
+      for (const st of block.styles ?? []) styles.set(cellKey(st.row, st.column), st.style);
+      const numbers = withNumbers
+        ? await this.rpc.call("sheet_numbers", { sheet, area: { row: start, column: range.c0, rows: count, columns: range.c1 - range.c0 + 1 } })
+        : [];
+      for (let i = 0; i < count; i++) {
+        const r = start + i;
+        const line = block.rows[i] ?? [];
+        byRow.set(r, columns.map((c) => {
+          const cell = line[c] ?? null;
+          const style = styles.get(cellKey(r, c));
+          if (!cell) return { display: "", kind: "empty", ...(style ? { style } : {}) };
+          const [display, align] = cell;
+          const number = numbers[i]?.[c - range.c0] ?? undefined;
+          const kind: OutCell["kind"] = align === "right" && number !== undefined && number !== null ? "number"
+            : align === "center" ? (/^(TRUE|FALSE)$/i.test(display) ? "boolean" : "error")
+            : align === "right" ? "error" : "text";
+          return { display, kind, ...(kind === "number" ? { number: number as number } : {}), ...(style ? { style } : {}) };
+        }));
+      }
+    }
+    return shownRows.map((r) => byRow.get(r) ?? columns.map(() => ({ display: "", kind: "empty" as const })));
+  }
+
+  /** U.11a: a paste or cut that did nothing says why, at the active cell. */
+  private refuse(message: string): void {
+    this.grid.showNote(message);
+  }
+
+  /** The reason a refused paste gives, from a server error. */
+  private refusedPaste(e: unknown, done = "pasted"): void {
+    const err = e as RpcError;
+    if (err.code === "forbidden") this.refuse(`Nothing was ${done}: you can only view this workbook.`);
+    else this.refuse(`Nothing was ${done}: ${err.message}`);
+  }
+
+  /** The viewer check before a paste or cut changes anything (the server refuses it too). */
+  private viewOnly(): boolean {
+    if (this.role !== "viewer") return false;
+    this.refuse("Nothing was pasted: you can only view this workbook.");
+    return true;
+  }
+
+  /** Paste special waiting for the clipboard (see `pasteSpecial`). */
+  private pendingPaste: { mode: PasteMode; transpose: boolean } | null = null;
+
+  private async paste(at: Cell, text: string, html?: string, special?: { mode: PasteMode; transpose: boolean }): Promise<void> {
     await this.clipboardWork;
+    // A paste special waiting for ⌘V takes this paste.
+    if (!special && this.pendingPaste) { special = this.pendingPaste; this.pendingPaste = null; this.grid.clearNote(); }
+    if (this.viewOnly()) return;
+    const mode = special?.mode ?? "all", transpose = special?.transpose ?? false;
     const same = (a: string) => a.replace(/\r\n/g, "\n").replace(/\n$/, "");
     if (this.isSheet() && this.clip && same(text) === same(this.clip.text)) {
-      await this.pasteCells(at, "all", false);
+      await this.pasteCells(at, mode, transpose);
       return;
     }
     if (this.isSheet() && this.tableClip && same(text) === same(this.tableClip.text)) {
-      await this.pasteForeign(at, this.tableClip.cells, false);
+      await this.pasteForeign(at, this.tableClip.cells, false, mode, transpose);
       return;
     }
     // Cells copied in another spreadsheet: their HTML holds raw values and formats.
     const parsed = html ? parseClipboardHtml(html, this.maxEditCells) : null;
-    if (parsed?.tooMany) { toast(`That paste is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
-    if (parsed && this.isSheet()) { await this.pasteForeign(at, parsed.cells, true); return; }
+    if (parsed?.tooMany) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
+    if (parsed && this.isSheet()) {
+      // Their formulas are taken only by paste special (all or formulas); ⌘V pastes values.
+      const formulas = parsed.cells.some((r) => r.some((c) => c.formula));
+      const cells = special ? parsed.cells : parsed.cells.map((r) => r.map(({ formula: _, ...c }) => c));
+      await this.pasteForeign(at, cells, true, mode, transpose, !special && formulas);
+      return;
+    }
     if (parsed) {
       // Tables keep values only, in their raw form (1234.5, not $1,234.50).
       const cols = this.view?.columns ?? [];
@@ -1949,54 +2032,89 @@ export class WorkbookScreen {
       return;
     }
     const rows = parseTsv(text.replace(/\n$/, ""));
-    const sheet = this.isSheet();
+    if (this.isSheet()) {
+      // Text from other apps: values (text starting with = stays text), one undo step.
+      if (mode === "formats") { this.refuse("Nothing was pasted: the clipboard holds plain text, which has no formats."); return; }
+      const width = rows.reduce((n, r) => Math.max(n, r.length), 0);
+      if (rows.length * width > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
+      const cells: PastedCell[][] = rows.map((r) => Array.from({ length: width }, (_, j) => ({ value: r[j] ?? "" })));
+      await this.pasteForeign(at, cells, false, "values", transpose);
+      return;
+    }
     const cols = this.view?.columns ?? [];
     const edits: { r: number; c: number; value: string | null }[] = [];
     rows.forEach((row, i) => row.forEach((value, j) => {
       const c = at.c + j;
-      if (sheet || (c < cols.length && !cols[c].formula)) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
+      if (c < cols.length && !cols[c].formula) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
     }));
     if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
   }
 
-  /** Paste cells from another app (or a table of this workbook) into the sheet at `at`:
-   *  values, text kept as text, and formats when `formats`; one undo step. */
-  private async pasteForeign(at: Cell, cells: PastedCell[][], formats: boolean): Promise<void> {
+  /** Paste cells from another app (or a table of this workbook) into the sheet at `at` as
+   *  `mode` says; one undo step. `transpose` swaps rows and columns (formulas from other
+   *  apps are not transposed: their values are). `formulasLeft`: the clipboard had formulas
+   *  this paste took as values. */
+  private async pasteForeign(at: Cell, cells: PastedCell[][], formats: boolean, mode: PasteMode = "all", transpose = false, formulasLeft = false): Promise<void> {
     if (this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
+    if (transpose) {
+      const width = cells.reduce((n, r) => Math.max(n, r.length), 0);
+      cells = Array.from({ length: width }, (_, j) => cells.map((r) => {
+        const { formula: _, ...c } = r[j] ?? { value: "" };
+        return c;
+      }));
+    }
     const rows = cells.length, columns = cells.reduce((n, r) => Math.max(n, r.length), 0);
     if (!rows || !columns) return;
+    if (rows * columns > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
     const layout = this.shownLayout(sheet, at.r, at.r + rows - 1);
     if (layout === null) return;
-    const params = { sheet, row: at.r, column: at.c, cells, layout };
-    if (!this.fits(rows * columns, { op: "sheet_paste_cells", ...params })) return;
+    const params = { sheet, row: at.r, column: at.c, cells, mode, layout };
+    if (!this.fitsMessage(rows * columns, { op: "sheet_paste_cells", ...params })) return;
     try {
       const area = await this.inSheetOrder(() => this.rpc.call("sheet_paste_cells", params));
       await this.refreshSheet();
       this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
-      const styled = formats && cells.some((r) => r.some((c) => c.style));
-      toast(`Pasted ${formatCount(area.rows * area.columns)} cells${styled ? " with their formats" : ""}`, "success");
+      const styled = formats && (mode === "all" || mode === "formats") && cells.some((r) => r.some((c) => c.style));
+      const what = mode === "formats" ? "the formats of" : mode === "values" && formats ? "the values of" : "";
+      toast(`Pasted ${what ? `${what} ` : ""}${formatCount(area.rows * area.columns)} cells${styled && mode === "all" ? " with their formats" : ""}${formulasLeft ? ". Their formulas pasted as values; Paste special → Formulas takes them" : ""}`, "success", formulasLeft ? 8000 : 4000);
     } catch (e) {
-      await this.sheetConflict(e);
+      if ((e as RpcError).code === "conflict") await this.sheetConflict(e);
+      else this.refusedPaste(e);
     }
   }
 
-  /** Paste the copied (or cut) cells at `at`: formulas are translated, cut cells move. */
+  /** `fits` for pastes: a too-large paste says so at the cell instead of in a toast. */
+  private fitsMessage(cells: number, frame: unknown): boolean {
+    const bytes = new TextEncoder().encode(JSON.stringify(frame)).length + 100;
+    if (cells <= this.maxEditCells && bytes <= this.maxMessageBytes) return true;
+    const limit = cells > this.maxEditCells ? this.maxEditCells : Math.max(1, Math.floor((cells * this.maxMessageBytes) / bytes));
+    this.refuse(`Nothing was pasted: ${formatCount(cells)} cells is too large (the limit is ${formatCount(limit)}).`);
+    return false;
+  }
+
+  /** Paste the copied (or cut) cells at `at`: formulas are translated, cut cells move (to
+   *  this or another sheet of the workbook). */
   private async pasteCells(at: Cell, mode: PasteMode, transpose: boolean): Promise<void> {
     const clip = this.clip;
     if (!clip || this.active?.kind !== "sheet") return;
     const sheet = this.active.index;
     const r = clip.range;
     const source = areaOf(r);
-    if (source.rows * source.columns > this.maxEditCells) { toast(`That paste is too large (the limit is ${formatCount(this.maxEditCells)} cells)`, "error"); return; }
+    if (source.rows * source.columns > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
     try {
       let area;
       if (clip.cut) {
-        if (clip.sheet !== sheet) { toast("Moving cells to another sheet is not supported yet. Copy them, then clear the originals.", "error"); return; }
-        if (mode !== "all" || transpose) { toast("Paste special applies to copied cells. Cut cells move as they are.", "error"); return; }
-        const layout = this.shownLayout(sheet, Math.min(source.row, at.r), Math.max(source.row, at.r) + source.rows - 1);
+        if (mode !== "all" || transpose) { this.refuse("Nothing was pasted: paste special applies to copied cells. Cut cells move as they are."); return; }
+        const other = clip.sheet !== sheet;
+        const layout = other
+          ? this.shownLayout(sheet, at.r, at.r + source.rows - 1)
+          : this.shownLayout(sheet, Math.min(source.row, at.r), Math.max(source.row, at.r) + source.rows - 1);
         if (layout === null) return;
-        area = await this.inSheetOrder(() => this.rpc.call("sheet_move", { sheet, source, row: at.r, column: at.c, layout }));
+        area = await this.inSheetOrder(() => this.rpc.call("sheet_move", {
+          sheet, source, row: at.r, column: at.c, layout,
+          ...(other ? { from_sheet: clip.sheet, ...(clip.layout !== undefined ? { source_layout: clip.layout } : {}) } : {}),
+        }));
         this.clip = null;
         this.grid.setCopied(null);
       } else {
@@ -2011,30 +2129,37 @@ export class WorkbookScreen {
       this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
       toast(`${clip.cut ? "Moved" : "Pasted"} ${formatCount(area.rows * area.columns)} cells`, "success");
     } catch (e) {
-      await this.sheetConflict(e);
+      if ((e as RpcError).code === "conflict") {
+        await this.sheetConflict(e);
+        this.refuse(`Nothing was ${clip.cut ? "moved" : "pasted"}: ${(e as RpcError).message}`);
+      } else {
+        this.refusedPaste(e, clip.cut ? "moved" : "pasted");
+      }
     }
   }
 
   private cut(): Promise<void> {
     const work = (async () => {
+      if (this.role === "viewer") { this.refuse("Nothing was cut: you can only view this workbook."); return; }
       await this.copyNow(this.grid.selection());
       if (this.clip) {
         this.clip.cut = true;
-        toast("Cut. Paste to move these cells; formulas that refer to them follow.");
+        toast("Cut. Paste to move these cells, on this or another sheet; formulas that refer to them follow.");
       }
     })();
     this.clipboardWork = work.catch(() => undefined);
     return work;
   }
 
-  /** Paste special (⇧⌘V): a small menu at the active cell, not a dialog (F.04d). */
+  /** Paste special (⇧⌘V): a small menu at the active cell, not a dialog (F.04d). It applies
+   *  to cells copied here and to what other apps put on the clipboard (HTML or text). */
   private pasteSpecialDialog(): void {
-    if (!this.clip || this.clip.cut) {
-      toast(this.clip ? "Paste special applies to copied cells. Cut cells move as they are." : "Copy cells in this workbook first. Text from other apps pastes as values with ⌘V.");
+    if (this.clip?.cut) {
+      this.refuse("Paste special applies to copied cells. Cut cells move as they are: paste with ⌘V.");
       return;
     }
     const at = this.grid.active;
-    const paste = (mode: PasteMode, transpose: boolean) => () => void this.pasteCells(at, mode, transpose);
+    const paste = (mode: PasteMode, transpose: boolean) => () => void this.pasteSpecial(at, mode, transpose);
     const box = this.grid.cellBox(at.r, at.c), host = this.grid.host.getBoundingClientRect();
     showMenu([
       { label: "All (values, formulas and formats)", action: paste("all", false) },
@@ -2045,6 +2170,23 @@ export class WorkbookScreen {
       { label: "All, transposed", action: paste("all", true) },
       { label: "Values only, transposed", action: paste("values", true) },
     ], host.left + box.x + 8, host.top + box.y + 28, { label: "Paste special" });
+  }
+
+  private static PASTE_LABELS: Record<PasteMode, string> = { all: "everything", formulas: "formulas", values: "values only", formats: "formats only" };
+
+  /** Paste the clipboard at `at` as `mode` says. The page reads the clipboard when the
+   *  browser lets it; otherwise cells copied here paste, and else the next ⌘V does. */
+  private async pasteSpecial(at: Cell, mode: PasteMode, transpose: boolean): Promise<void> {
+    const special = { mode, transpose };
+    // Back to the grid from the menu (Safari does not focus a clicked menu item).
+    this.grid.focus();
+    const read = await readClipboard();
+    if (read && (read.text || read.html)) { await this.paste(at, read.text, read.html, special); return; }
+    if (this.clip && !this.clip.cut) { if (!this.viewOnly()) await this.pasteCells(at, mode, transpose); return; }
+    this.pendingPaste = special;
+    const key = navigator.platform.toLowerCase().includes("mac") ? "⌘V" : "Ctrl+V";
+    this.grid.showNote(`Press ${key} to paste ${WorkbookScreen.PASTE_LABELS[mode]}${transpose ? ", transposed" : ""}: this browser lets the page read the clipboard only from a paste.`,
+      () => { this.pendingPaste = null; });
   }
 
   /** Ctrl/Cmd+D and +R: copy the selection's first row (column) over the rest. With a single
@@ -2749,8 +2891,9 @@ export class WorkbookScreen {
         { label: "Cut", hint: "⌘X", action: () => void this.cut() },
         { label: "Copy", hint: "⌘C", action: () => this.copy(sel) },
         { label: "Paste", hint: "⌘V", action: async () => {
-          try { this.paste({ r: sel.r0, c: sel.c0 }, await navigator.clipboard.readText()); }
-          catch { toast("Paste with ⌘V: this browser does not let the page read the clipboard from a menu"); }
+          const read = await readClipboard();
+          if (read) void this.paste({ r: sel.r0, c: sel.c0 }, read.text, read.html);
+          else this.refuse("Paste with ⌘V: this browser does not let the page read the clipboard from a menu.");
         } },
         { label: "Paste special…", hint: "⌘⇧V", action: () => this.pasteSpecialDialog() },
         "sep",

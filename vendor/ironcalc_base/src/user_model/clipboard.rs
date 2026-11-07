@@ -202,8 +202,11 @@ impl<'a> UserModel<'a> {
         let (selected_row, selected_column) = (view.row, view.column);
         let mut max_row = selected_row;
         let mut max_column = selected_column;
+        // Alephgrid patch: a cut reads its formulas on the sheet they come from, so a cut to
+        // another sheet keeps references outside the area pointing at their cells.
+        let formula_sheet = if is_cut { source_sheet } else { sheet };
         let area = &Area {
-            sheet,
+            sheet: formula_sheet,
             row: source_first_row,
             column: source_first_column,
             width: source_last_column - source_first_column + 1,
@@ -283,7 +286,7 @@ impl<'a> UserModel<'a> {
 
                 // remain in the copied area
                 let source = &CellReferenceIndex {
-                    sheet,
+                    sheet: formula_sheet,
                     column: *source_column,
                     row: *source_row,
                 };
@@ -526,6 +529,7 @@ impl<'a> UserModel<'a> {
             };
             let ext_updates = self.model.get_external_formula_updates_for_cut(
                 &ext_area,
+                sheet,
                 selected_row,
                 selected_column,
             )?;
@@ -549,6 +553,7 @@ impl<'a> UserModel<'a> {
             // Update defined names whose references land inside the moved area.
             let dn_updates = self.model.get_defined_name_updates_for_cut(
                 &ext_area,
+                sheet,
                 selected_row,
                 selected_column,
             );
@@ -572,6 +577,7 @@ impl<'a> UserModel<'a> {
             // Update conditional formatting ranges and formula references.
             let cf_updates = self.model.get_conditional_formatting_updates_for_cut(
                 &ext_area,
+                sheet,
                 selected_row,
                 selected_column,
             )?;

@@ -7,13 +7,17 @@
 //
 // The HTML is untrusted. It is parsed into an inert document (DOMParser runs no scripts and
 // loads nothing), never added to the page, and only text and the attributes above are read;
-// everything else is dropped. Formulas are not taken over: their values are.
+// everything else is dropped. A formula some spreadsheets add in `data-sheets-formula` (R1C1
+// notation, relative to its cell) is kept as `formula`; the server makes it a formula only
+// for a paste that takes formulas (paste special) and only when it parses there. Other
+// spreadsheets' HTML usually carries no formulas at all: their values paste.
 
 import type { PastedCell, StylePatch } from "./protocol";
 
 /** Clipboard HTML larger than this is not read; the plain text is pasted instead. */
 const MAX_HTML = 32 * 1024 * 1024;
 const MAX_FORMAT = 255;
+const MAX_FORMULA = 8192;
 
 export type HtmlCells = { cells: PastedCell[][]; tooMany: boolean };
 
@@ -115,6 +119,8 @@ function readCell(td: Element, classes: Map<string, Map<string, string>>): Paste
   if (fill && fill !== "#FFFFFF") style.fill = fill;
   const cell: PastedCell = { value };
   if (text) cell.text = true;
+  const formula = td.getAttribute("data-sheets-formula")?.trim();
+  if (formula && formula.startsWith("=") && formula.length <= MAX_FORMULA) cell.formula = formula;
   if (Object.keys(style).length) cell.style = style;
   return cell;
 }

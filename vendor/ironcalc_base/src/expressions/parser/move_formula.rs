@@ -34,12 +34,23 @@ pub(crate) struct MoveContext<'a> {
     pub target_sheet_name: &'a str,
     pub row_delta: i32,
     pub column_delta: i32,
+    /// Alephgrid patch: when the cut area lands on another sheet, its name. References into
+    /// the area then follow it there (qualified unless the formula lives on that sheet).
+    pub moved_to: Option<&'a str>,
 }
 
 /// This implements Excel's cut && paste
 /// We are moving a formula in (row, column) to (row+row_delta, column + column_delta).
 /// All references that do not point to a cell in area will be left untouched.
 /// All references that point to a cell in area will be displaced
+/// Alephgrid patch: the sheet name a reference into an area cut to another sheet gets
+/// (`None`: unqualified, the formula lives there); `None` for a same-sheet move.
+fn moved_sheet_name(move_context: &MoveContext) -> Option<Option<String>> {
+    move_context
+        .moved_to
+        .map(|to| (to != move_context.target_sheet_name).then(|| to.to_string()))
+}
+
 pub(crate) fn move_formula(
     node: &Node,
     move_context: &MoveContext,
@@ -137,6 +148,7 @@ fn to_string_moved(
             let new_column;
             let mut ref_sheet_name = sheet_name;
             let source_sheet_name = &Some(move_context.source_sheet_name.to_string());
+            let moved_sheet_name = moved_sheet_name(move_context);
 
             if ref_is_in_area(
                 *sheet_index,
@@ -147,6 +159,9 @@ fn to_string_moved(
                 // if the reference is in the area we are moving we want to displace the reference
                 new_row = row + move_context.row_delta;
                 new_column = column + move_context.column_delta;
+                if let Some(name) = &moved_sheet_name {
+                    ref_sheet_name = name;
+                }
             } else {
                 // If the reference is not in the area we are moving the reference remains unchanged
                 new_row = *row;
@@ -223,6 +238,7 @@ fn to_string_moved(
             let new_column2;
             let mut ref_sheet_name = sheet_name;
             let source_sheet_name = &Some(move_context.source_sheet_name.to_string());
+            let moved_sheet_name = moved_sheet_name(move_context);
             if ref_is_in_area(
                 *sheet_index,
                 reference_row1,
@@ -239,6 +255,9 @@ fn to_string_moved(
                 new_column1 = column1 + move_context.column_delta;
                 new_row2 = row2 + move_context.row_delta;
                 new_column2 = column2 + move_context.column_delta;
+                if let Some(name) = &moved_sheet_name {
+                    ref_sheet_name = name;
+                }
             } else {
                 // If the reference is not in the area we are moving the context remains unchanged
                 new_row1 = *row1;

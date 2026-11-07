@@ -83,6 +83,14 @@ test("Ctrl/Cmd+A selects the filled block, then everything; copy outlines its ra
   if (page.context().browser()?.browserType().name() === "chromium") {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
   }
+  // A browser that does not let the page read the clipboard from a menu; copies are recorded
+  // instead of reaching the shared system clipboard.
+  await page.addInitScript(() => {
+    navigator.clipboard.writeText = async () => undefined;
+    navigator.clipboard.write = async () => undefined;
+    navigator.clipboard.read = async () => { throw new DOMException("Read permission denied.", "NotAllowedError"); };
+    navigator.clipboard.readText = async () => { throw new DOMException("Read permission denied.", "NotAllowedError"); };
+  });
   await open(page, wb);
   const grid = page.locator(".grid-host");
   await grid.focus();
@@ -90,13 +98,18 @@ test("Ctrl/Cmd+A selects the filled block, then everything; copy outlines its ra
   await expect(page.locator(".cell-ref")).toHaveText("B2");
   await page.keyboard.press("ControlOrMeta+a");
   await expect(page.locator(".cell-ref")).toHaveText("B2:C3");
-  // Copy, then Escape: the copied state is gone, so paste special has nothing to paste.
+  // Copy, then Escape: the copied state is gone, so paste special has no cells of this
+  // workbook to paste and, unable to read the clipboard, waits for Mod+V instead.
   await page.keyboard.press("ControlOrMeta+c");
   await expect(page.locator(".toast").last()).toContainText("Copied 4 cells");
   await page.keyboard.press("Escape");
   await page.keyboard.press("ControlOrMeta+Shift+v");
-  await expect(page.locator(".toast").last()).toContainText("Copy cells in this workbook first");
-  await expect(page.getByRole("menu", { name: "Paste special" })).toHaveCount(0);
+  await page.getByRole("menu", { name: "Paste special" }).getByRole("menuitem", { name: "Values only", exact: true }).click();
+  await expect(page.locator(".grid-note")).toContainText(/Press (⌘V|Ctrl\+V) to paste values only/);
+  await grid.focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".grid-note")).toHaveCount(0);
+  expect((await ws.call("sheet_fetch", { sheet: 0, row_start: 1, row_count: 1, column_count: 3 })).rows[0][1][0]).toBe("a");
   // Escape kept B2 active: Ctrl/Cmd+A twice selects the block, then everything.
   await page.keyboard.press("ControlOrMeta+a");
   await expect(page.locator(".cell-ref")).toHaveText("B2:C3");

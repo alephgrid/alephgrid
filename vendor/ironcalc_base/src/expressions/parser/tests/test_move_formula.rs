@@ -47,6 +47,7 @@ fn test_move_formula() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "AB31");
@@ -63,6 +64,7 @@ fn test_move_formula() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "AB31");
@@ -79,6 +81,7 @@ fn test_move_formula() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "N15");
@@ -95,6 +98,7 @@ fn test_move_formula() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "$N$15");
@@ -133,6 +137,7 @@ fn test_move_formula_context_offset() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "-X9+M12%");
@@ -172,6 +177,7 @@ fn test_move_formula_lambda_def() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     // C2 is in area → M12; parameter x and the body's x are unchanged
@@ -189,6 +195,7 @@ fn test_move_formula_lambda_def() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "LAMBDA(y,X9*y)");
@@ -229,6 +236,7 @@ fn test_move_formula_lambda_call() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "LAMBDA(x,M12+x)(N15)");
@@ -245,6 +253,7 @@ fn test_move_formula_lambda_call() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "LAMBDA(x,x+1)(X9)");
@@ -284,6 +293,7 @@ fn test_move_formula_area_limits() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "B2+B3+C1+G6+H5");
@@ -300,6 +310,7 @@ fn test_move_formula_area_limits() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "M12+P14+P15+P16");
@@ -337,6 +348,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(M12:P15)");
@@ -352,6 +364,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM($M$12:$P$15)");
@@ -368,6 +381,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(A1:B3)");
@@ -383,6 +397,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM($A$1:$B$3)");
@@ -399,6 +414,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(A1:F5)");
@@ -415,6 +431,7 @@ fn test_move_formula_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(A1:X50)");
@@ -453,6 +470,7 @@ fn test_move_formula_wrong_reference() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "Sheet3!AB31");
@@ -467,6 +485,7 @@ fn test_move_formula_wrong_reference() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "Sheet3!$X$9");
@@ -482,6 +501,7 @@ fn test_move_formula_wrong_reference() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(Sheet3!D2:D3)");
@@ -519,6 +539,7 @@ fn test_move_formula_misc() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "X9^M12-P14*H2+SUM(F2:H4)+SUM(M12:P16)");
@@ -534,6 +555,7 @@ fn test_move_formula_misc() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "P15*(-N15)*SUM(A1,X9,$N$15)");
@@ -549,6 +571,7 @@ fn test_move_formula_misc() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "IF(P15<-N15,X9&P15,FALSE)");
@@ -589,6 +612,7 @@ fn test_move_formula_another_sheet() {
             target_sheet_name: "Sheet2",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(
@@ -629,6 +653,7 @@ fn move_formula_implicit_intersetion() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(@F2:H4)+SUM(@M12:P16)");
@@ -666,6 +691,7 @@ fn move_formula_implicit_intersetion_with_ranges() {
             target_sheet_name: "Sheet1",
             row_delta: 10,
             column_delta: 10,
+            moved_to: None,
         },
     );
     assert_eq!(t, "SUM(@F2:H4)+SUM(@M12:P16)+SUM(@A1,@X9,@$N$15)");
