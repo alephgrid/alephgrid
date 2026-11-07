@@ -94,7 +94,7 @@ pub fn readiness(state: &Shared) -> Readiness {
 
 /// Create, write and remove a small file: what the server needs to record state. Each call
 /// uses its own file, so probes running at the same time do not remove each other's.
-fn probe_write(dir: &std::path::Path) -> bool {
+pub fn probe_write(dir: &std::path::Path) -> bool {
     use std::io::Write;
     static PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = PROBE.fetch_add(1, Ordering::Relaxed);

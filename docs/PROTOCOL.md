@@ -263,6 +263,8 @@ integer column, more decimals than a DECIMAL's scale, or a value out of range.
 | PUT | `/api/spaces/{id}/profiles` | `SpaceProfiles {profiles}` (organization admins): profiles granted to the space besides `standard`; unknown ids are 400 |
 | GET | `/api/admin/resources` | host budget, each open workbook's reservation and the DuckDB limits read back from it, jobs, upload bytes |
 | GET | `/api/admin/sessions` | open connections with unsent bytes |
+| GET | `/api/admin/diagnostics` | the support-diagnostics bundle (JSON download, no secrets or names; OPERATIONS.md) |
+| GET | `/metrics` | Prometheus metrics, for instance admins or `Authorization: Bearer <--metrics-token>` (OPERATIONS.md) |
 | POST | `/api/admin/backups` | back up every workbook into `<data-dir>/.backups/backup-<ms>/` → `{path, name, manifest}` (see DURABILITY.md). One at a time (409 while one runs), at most one per `backup_interval` (409), refused without enough free disk; only the newest `backups_kept` (5) are kept |
 | GET | `/api/admin/backups` | the kept backups, newest first: `[{name, created_at_ms, workbooks, bytes}]` |
 | DELETE | `/api/admin/backups/{name}` | remove one backup → 204 |

@@ -3,10 +3,12 @@
 
 pub mod auth;
 pub mod backup;
+pub mod diagnostics;
 pub mod health;
 pub mod http;
 pub mod library;
 pub mod mcp;
+pub mod metrics;
 pub mod protocol;
 pub mod python;
 pub mod quota;
