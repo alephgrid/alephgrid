@@ -394,7 +394,7 @@ export class SqlWorkspace {
       this.job = null;
       return true;
     }
-    toast(`Wait for “${this.job.label}” to finish, or cancel it`, "error");
+    this.inPane(new Error(`Wait for “${this.job.label}” to finish, or cancel it`));
     return false;
   }
 
@@ -415,6 +415,13 @@ export class SqlWorkspace {
   }
 
   /** An error reply: parameters next to the editor, everything else in the results. */
+  /** U.11a: an error of something done in the workspace shows next to Run, not only in a toast;
+   *  the results shown stay. */
+  private inPane(e: unknown): void {
+    toastError(e);
+    this.status.textContent = e instanceof Error ? e.message : String(e);
+  }
+
   private showError(e: unknown): void {
     const message = (e as Error).message;
     if (codeOf(e) === "cancelled") {
@@ -591,7 +598,7 @@ export class SqlWorkspace {
     if ("error" in out) {
       if (codeOf(out.error) === "cancelled") this.status.textContent = "Cancelled.";
       else if (codeOf(out.error) === "bad_parameter") this.showError(out.error);
-      else toast((out.error as Error).message, "error");
+      else this.inPane(out.error);
       return;
     }
     const info = out.value;
@@ -636,7 +643,7 @@ export class SqlWorkspace {
       }
       if (code === "cancelled") this.status.textContent = "Cancelled.";
       else if (code === "bad_parameter") this.showError(out.error);
-      else toast((out.error as Error).message, "error");
+      else this.inPane(out.error);
       return;
     }
     this.close();
@@ -749,7 +756,7 @@ export class SqlWorkspace {
         toast(fresh ? `Saved “${q.name}” as version ${q.version}` : `No changes since version ${q.version} of “${q.name}”`, "success");
         this.afterSave();
       } catch (e) {
-        toastError(e);
+        this.inPane(e);
       }
       return;
     }
@@ -805,7 +812,7 @@ export class SqlWorkspace {
       this.saveDraft();
       await this.loadSaved();
     } catch (e) {
-      toastError(e);
+      this.inPane(e);
     }
   }
 
@@ -814,7 +821,7 @@ export class SqlWorkspace {
     try {
       versions = await this.rpc.call("query_versions", { saved: q.id });
     } catch (e) {
-      toastError(e);
+      this.inPane(e);
       return;
     }
     if (this.disposed) return;

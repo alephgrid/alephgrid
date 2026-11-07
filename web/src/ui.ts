@@ -36,9 +36,59 @@ export function pointerDrag(target: HTMLElement, e: PointerEvent, move: (m: Poin
   target.addEventListener("pointerup", end);
 }
 
-/** Show an error's message as an error toast. */
-export function toastError(e: unknown): void {
-  toast((e as Error).message, "error");
+/**
+ * Show an error's message as an error toast. U.11a: a toast is never the only place an error
+ * shows. When the error belongs to a panel, pane or dialog, `near` is an element inside it: the
+ * message also goes into the alert line of the nearest `[data-errors]` host (made at its end on
+ * first use; re-rendering the host's content, or `clearError`, removes it).
+ */
+export function toastError(e: unknown, near?: Element | null): void {
+  const message = e instanceof Error ? e.message : String(e);
+  toast(message, "error");
+  const host = near?.closest<HTMLElement>("[data-errors]");
+  if (!host) return;
+  let line = host.querySelector<HTMLElement>(":scope > .inline-error");
+  if (!line) host.append(line = el("p", { class: "dialog-error inline-error", role: "alert" }));
+  line.textContent = message;
+}
+
+/** Clear the alert line `toastError(e, near)` filled. */
+export function clearError(near: Element | null | undefined): void {
+  const line = near?.closest<HTMLElement>("[data-errors]")?.querySelector<HTMLElement>(":scope > .inline-error");
+  if (line) line.textContent = "";
+}
+
+/**
+ * U.11a: run `work` as a form's check (`formDialog`'s `validate`): null when it was done, or the
+ * server's refusal, which the form then shows on its field.
+ */
+export async function refusal(work: () => Promise<unknown>): Promise<string | null> {
+  try { await work(); return null; } catch (e) { return e instanceof Error ? e.message : String(e); }
+}
+
+let errorSeq = 0;
+/**
+ * U.11a: mark `field` as the one the error text `error` (which gets an id if it has none)
+ * refers to: `aria-invalid`, described by the error, and focused. `false` clears the mark.
+ */
+export function markInvalid(field: HTMLElement | null | undefined, error: HTMLElement | false): void {
+  if (!field) return;
+  if (error === false) {
+    field.removeAttribute("aria-invalid");
+    const id = field.dataset.errorId;
+    if (id) {
+      const rest = (field.getAttribute("aria-describedby") ?? "").split(/\s+/).filter((x) => x && x !== id);
+      if (rest.length) field.setAttribute("aria-describedby", rest.join(" ")); else field.removeAttribute("aria-describedby");
+      delete field.dataset.errorId;
+    }
+    return;
+  }
+  error.id ||= `field-error-${++errorSeq}`;
+  field.setAttribute("aria-invalid", "true");
+  const ids = (field.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean);
+  if (!ids.includes(error.id)) field.setAttribute("aria-describedby", [...ids, error.id].join(" "));
+  field.dataset.errorId = error.id;
+  field.focus();
 }
 
 export function toast(message: string, kind: "info" | "error" | "success" = "info", ms = 4000,
@@ -258,7 +308,8 @@ export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dial
 /** A wide dialog with a Close button whose body `render` fills (and may fill again); an
  *  error it throws is shown in the body. `lede` is a line under the title. */
 export function panelDialog(title: string, render: (body: HTMLElement, close: () => void) => Promise<void>, opts: { lede?: string } = {}): void {
-  const body = el("div", { class: "panel-body" });
+  // Errors of the panel's own actions show in it (`toastError(e, body)`), not only in a toast.
+  const body = el("div", { class: "panel-body", "data-errors": true });
   const box = el("div", { class: "dialog wide" }, el("h2", {}, title),
     opts.lede ? el("p", { class: "dialog-lede" }, opts.lede) : null, body,
     el("div", { class: "dialog-actions" }, el("button", { class: "btn", onclick: () => modal.close() }, "Close")));
@@ -301,7 +352,7 @@ export function formDialog(
       ),
     );
     // Editing after a refusal clears the invalid state; the message stays until the next try.
-    form.addEventListener("input", () => markInvalid(false));
+    form.addEventListener("input", () => markInvalid(firstField(), false));
     const modal = openModal(form, () => finish(null));
     (inputs.values().next().value as HTMLElement | undefined)?.focus();
 
@@ -311,15 +362,8 @@ export function formDialog(
       return out;
     }
     /** U.11a: a refused value marks the first field invalid, linked to the error text. */
-    function markInvalid(on: boolean): void {
-      const first = inputs.values().next().value as HTMLElement | undefined;
-      if (!first) return;
-      if (on) {
-        first.setAttribute("aria-invalid", "true");
-        first.setAttribute("aria-describedby", error.id);
-      } else {
-        first.removeAttribute("aria-invalid");
-      }
+    function firstField(): HTMLElement | undefined {
+      return inputs.values().next().value as HTMLElement | undefined;
     }
     async function submit(e: Event) {
       e.preventDefault();
@@ -327,15 +371,14 @@ export function formDialog(
       const v = values();
       if (validate) {
         error.textContent = "";
-        markInvalid(false);
+        markInvalid(firstField(), false);
         // Busy while the check runs: it cannot be sent twice.
         const done = busy(submitButton);
         let msg: string | null;
         try { msg = await validate(v); } finally { done(); }
         if (msg) {
           error.textContent = msg;
-          markInvalid(true);
-          (inputs.values().next().value as HTMLElement | undefined)?.focus();
+          markInvalid(firstField(), error);
           return;
         }
       }
@@ -348,14 +391,32 @@ export function formDialog(
   });
 }
 
-export function confirmDialog(title: string, message: string, confirmLabel = "Delete"): Promise<boolean> {
+/**
+ * A consequential confirmation. With `act`, confirming runs it while the button is busy: the
+ * dialog closes once the server has done it, and a refusal stays in the dialog (U.11a).
+ */
+export function confirmDialog(title: string, message: string, confirmLabel = "Delete", act?: () => Promise<unknown>): Promise<boolean> {
   return new Promise((resolve) => {
-    const done = (v: boolean) => { modal.close(); resolve(v); };
-    const ok = el("button", { class: "btn btn-danger", onclick: () => done(true) }, confirmLabel);
+    let settled = false;
+    const done = (v: boolean) => { if (settled) return; settled = true; modal.close(); resolve(v); };
+    const error = el("div", { class: "dialog-error", role: "alert" });
+    const ok = el("button", { class: "btn btn-danger", onclick: async () => {
+      if (!act) { done(true); return; }
+      if (ok.disabled) return;
+      error.textContent = "";
+      const restore = busy(ok);
+      const msg = await refusal(act);
+      restore();
+      if (settled) return;
+      if (msg === null) { done(true); return; }
+      error.textContent = msg;
+      ok.focus();
+    } }, confirmLabel);
     const modal = openModal(
       el("div", { class: "dialog" },
         el("h2", {}, title),
         el("p", {}, message),
+        error,
         el("div", { class: "dialog-actions" },
           el("button", { class: "btn", onclick: () => done(false) }, "Cancel"),
           ok,

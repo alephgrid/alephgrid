@@ -4,7 +4,7 @@
 // to the rows behind any group. Plans are saved in the workbook and run on the server.
 
 import type { Rpc } from "./api";
-import { el, toast } from "./ui";
+import { busy, el, markInvalid, toast } from "./ui";
 import { icon } from "./icons";
 import { drawChart, resultTable } from "./analysis";
 import type {
@@ -62,6 +62,9 @@ export class AnalyzePane {
 
   private body = el("div", { class: "analyze-body" });
   private status = el("p", { class: "analyze-status", role: "status", "aria-live": "polite" });
+  /** A refusal; the field it points at is marked and described by it (U.11a). */
+  private error = el("p", { class: "dialog-error analyze-error", role: "alert", id: "analyze-error" });
+  private invalid: HTMLElement | null = null;
   private panel: HTMLElement;
   private paneHandle: { close: () => void };
   private resultsHandle: { close: () => void } | null = null;
@@ -75,7 +78,7 @@ export class AnalyzePane {
     close.addEventListener("click", () => this.close());
     this.panel = el("aside", { class: "analyze-pane", "aria-label": "Analyze" },
       el("header", { class: "analyze-head" }, el("h2", {}, "Analyze"), close),
-      this.body, this.status);
+      this.body, this.error, this.status);
     this.panel.addEventListener("keydown", (e) => { if (e.key === "Escape" && !(e.target instanceof HTMLSelectElement)) { e.preventDefault(); this.close(); } });
     this.paneHandle = host.pane(this.panel, () => this.close());
     void this.load();
@@ -84,7 +87,7 @@ export class AnalyzePane {
   private async load(): Promise<void> {
     try {
       [this.schema, this.saved] = await Promise.all([this.rpc.call("schema", {}), this.rpc.call("analyses", {})]);
-    } catch (e) { this.status.textContent = (e as Error).message; return; }
+    } catch (e) { this.fail(e); return; }
     if (!this.schema.length) {
       // U.T05: no data source yet: say what Analyze needs instead of empty pickers.
       this.body.replaceChildren();
@@ -112,7 +115,54 @@ export class AnalyzePane {
     this.join.right_key = this.columns(this.join.right)[0]?.name ?? "";
   }
 
-  private changed(): void { this.seq++; this.status.textContent = "Run to see the result."; }
+  private changed(): void {
+    this.seq++;
+    this.status.textContent = "Run to see the result.";
+    // Editing after a refusal clears the invalid mark; the message stays until the next try.
+    if (this.invalid) { markInvalid(this.invalid, false); this.invalid = null; }
+  }
+
+  /** Show a refusal in the pane, with the field it is about marked and focused. */
+  private fail(e: unknown): void {
+    const message = e instanceof Error ? e.message : String(e);
+    this.error.textContent = message;
+    this.status.textContent = "";
+    const field = this.fieldFor(message);
+    if (field) { this.invalid = field; markInvalid(field, this.error); }
+  }
+
+  /** The field a refusal is about: the server names the value, column or part it refuses. */
+  private fieldFor(message: string): HTMLElement | null {
+    const q = (label: string) => this.body.querySelector<HTMLElement>(`[aria-label="${CSS.escape(label)}"]`);
+    const quoted = /"((?:[^"\\]|\\.)*)"/.exec(message)?.[1];
+    if (message.startsWith("calculated measure") && quoted !== undefined) {
+      const i = this.calculated.findIndex((c) => c.name.trim() === quoted);
+      return i >= 0 ? q(`Formula of calculated value ${i + 1}`) : null;
+    }
+    if (/^measure ".*" needs a value column/.test(message) && quoted !== undefined) {
+      const i = this.values.findIndex((v) => v.name.trim() === quoted);
+      return i >= 0 ? q(`Column of value ${i + 1}`) : null;
+    }
+    if (message.startsWith("sum and average require a numeric column")) {
+      const i = this.values.findIndex((v) => v.column === quoted && (v.aggregate === "sum" || v.aggregate === "average"));
+      return q(`Aggregate of value ${(i >= 0 ? i : this.values.findIndex((v) => v.aggregate === "sum" || v.aggregate === "average")) + 1}`);
+    }
+    if (message.startsWith("measure and group names must be distinct") && quoted !== undefined) {
+      const v = this.values.findIndex((x) => x.name.trim() === quoted);
+      if (v >= 0) return q(`Name of value ${v + 1}`);
+      const c = this.calculated.findIndex((x) => x.name.trim() === quoted);
+      return c >= 0 ? q(`Name of calculated value ${c + 1}`) : null;
+    }
+    if (message.startsWith("unknown column") && quoted !== undefined) {
+      const f = this.filters.findIndex((x) => x.column === quoted);
+      return f >= 0 ? q(`Filter ${f + 1} column`) : null;
+    }
+    if (message.startsWith("analysis name")) return q("Analysis name");
+    if (message.startsWith("join keys")) return q("Left key");
+    if (message.startsWith("select at least one column to profile")) return q("Add field to Columns");
+    if (message.includes("pivot")) return q("Pivot column");
+    return null;
+  }
 
   // ------------------------------------------------------------- rendering
 
@@ -121,7 +171,7 @@ export class AnalyzePane {
     // Saved analyses and the plan's name.
     const open = sel("Open a saved analysis", [option("", this.saved.length ? "Open saved…" : "No saved analyses yet"), ...this.saved.map((a) => option(a.id, a.name, a.id === this.current?.id))]);
     open.disabled = !this.saved.length;
-    open.addEventListener("change", () => { const a = this.saved.find((x) => x.id === open.value); if (a) { this.loadSaved(a); void this.run().catch((e) => (this.status.textContent = (e as Error).message)); } });
+    open.addEventListener("change", () => { const a = this.saved.find((x) => x.id === open.value); if (a) { this.loadSaved(a); void this.run().catch((e) => this.fail(e)); } });
     const name = el("input", { value: this.name, "aria-label": "Analysis name", maxlength: "200" }) as HTMLInputElement;
     name.addEventListener("input", () => { this.name = name.value; });
     sections.push(el("div", { class: "analyze-row" }, open), this.labelled("Name", name));
@@ -284,9 +334,15 @@ export class AnalyzePane {
   private button(label: string, action: () => Promise<void>, cls = "btn"): HTMLButtonElement {
     const b = el("button", { class: cls, type: "button" }, label) as HTMLButtonElement;
     b.addEventListener("click", async () => {
-      b.disabled = true;
-      try { await action(); } catch (e) { this.status.textContent = (e as Error).message; }
-      finally { b.disabled = false; }
+      if (b.disabled) return;
+      // Busy while the server works on it: it cannot be pressed twice (U.11a).
+      const restore = busy(b);
+      this.error.textContent = "";
+      if (this.invalid) { markInvalid(this.invalid, false); this.invalid = null; }
+      let failed: unknown = null;
+      try { await action(); } catch (e) { failed = e; }
+      finally { restore(); }
+      if (failed) this.fail(failed);
     });
     return b;
   }
@@ -301,7 +357,7 @@ export class AnalyzePane {
       this.pivotChoices = out;
       if (!this.pivot.values.length) this.pivot.values = out.values.slice(0, 12).map((v) => v.value);
       this.render();
-    } catch (e) { this.status.textContent = (e as Error).message; }
+    } catch (e) { this.fail(e); }
   }
 
   // ------------------------------------------------------------- the plan
@@ -350,7 +406,7 @@ export class AnalyzePane {
     finally { if (seq === this.seq) this.job = 0; }
     if (this.closed || seq !== this.seq) return;
     const drill = spec.kind === "summary" || spec.kind === "report"
-      ? (row: unknown[]) => void this.rpc.call("drill", { spec, row: row as never }).then((v) => this.host.openView(v)).catch((e) => (this.status.textContent = String(e)))
+      ? (row: unknown[]) => void this.rpc.call("drill", { spec, row: row as never }).then((v) => this.host.openView(v)).catch((e) => this.fail(e))
       : undefined;
     const chartEl = el("div", { class: "analysis-chart", role: "figure", "aria-label": "Analysis chart" });
     if (this.chart && (spec.kind === "summary" || spec.kind === "report")) drawChart(chartEl, spec, data, this.chartKind);

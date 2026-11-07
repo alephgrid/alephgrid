@@ -3,7 +3,7 @@
 // preview-then-apply replacement with undo. The provider says where to look: a table view
 // (searched on the server over every row) or, with S.04, a sheet.
 
-import { el, toast, toastError } from "./ui";
+import { clearError, el, toast, toastError } from "./ui";
 import { icon } from "./icons";
 import { formatCount } from "./format";
 import type { FindHit, FindResult } from "./protocol";
@@ -71,11 +71,12 @@ export class FindBar {
       const r = this.provider?.replace;
       if (!r?.one || !this.input.value) return;
       try { await r.one(this.input.value, this.replacement.value, this.matchCase); await this.step(false); await this.refresh(); }
-      catch (e) { toastError(e); }
+      catch (e) { toastError(e, this.el); }
     });
     this.oneBtn = one;
     this.replaceRow.append(this.column, this.replacement, one, preview, this.applyBtn, undo);
-    this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true },
+    // Errors of a find or replace show in the bar, not only in a toast (U.11a).
+    this.el = el("div", { class: "find-bar", role: "search", "aria-label": "Find in table", hidden: true, "data-errors": true },
       el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, this.allBtn, prev, next, close),
       this.replaceRow);
 
@@ -107,18 +108,18 @@ export class FindBar {
         this.count.textContent = n === 0 ? "No cell to replace" : `${formatCount(n)} cells will change in ${this.column.value}`;
         this.applyBtn.disabled = n === 0 || n > 10_000;
         if (n > 10_000) this.count.textContent = `${formatCount(n)} cells: at most 10,000 can be replaced at once`;
-      } catch (e) { toastError(e); }
+      } catch (e) { toastError(e, this.el); }
     });
     this.applyBtn.addEventListener("click", async () => {
       const r = this.provider?.replace;
       if (!r) return;
       this.applyBtn.disabled = true;
-      try { toast(await r.apply(), "success"); void this.refresh(); } catch (e) { toastError(e); }
+      try { toast(await r.apply(), "success"); void this.refresh(); } catch (e) { toastError(e, this.el); }
     });
     undo.addEventListener("click", async () => {
       const r = this.provider?.replace;
       if (!r) return;
-      try { toast(await r.undo(), "success"); void this.refresh(); } catch (e) { toastError(e); }
+      try { toast(await r.undo(), "success"); void this.refresh(); } catch (e) { toastError(e, this.el); }
     });
   }
 
@@ -165,6 +166,7 @@ export class FindBar {
   async refresh(): Promise<void> {
     const p = this.provider;
     if (!p) return;
+    clearError(this.el);
     const text = this.input.value;
     const mine = ++this.seq;
     if (!text) { this.count.textContent = ""; return; }

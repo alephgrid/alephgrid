@@ -102,7 +102,8 @@ export class SheetChartsLayer {
     const create = el("button", { class: "btn btn-primary btn-small", type: "button" }, "Create chart");
     const cancel = el("button", { class: "btn btn-small", type: "button" }, "Cancel");
     const body = el("div", { class: "sheet-chart-body" });
-    const box = el("section", { class: "sheet-chart sheet-chart-draft", role: "region", "aria-label": "Chart preview" },
+    // A refused save says why on the preview, not only in a toast (U.11a).
+    const box = el("section", { class: "sheet-chart sheet-chart-draft", role: "region", "aria-label": "Chart preview", "data-errors": true },
       el("div", { class: "sheet-chart-bar" }, title, kindSel, cancel, create), body);
     this.el.append(box);
     this.preview = { chart, box, body, title, kind: kindSel };
@@ -120,7 +121,7 @@ export class SheetChartsLayer {
           this.set([...this.charts, chart]);
           resolve(true);
         } catch (e) {
-          toastError(e);
+          toastError(e, box);
           create.disabled = cancel.disabled = false;
         }
       };
