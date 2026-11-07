@@ -23,7 +23,7 @@ import { clipboardHtml, MAX_HTML_CELLS, readClipboard, writeClipboard, type OutC
 import { store, stored, unstore } from "./storage";
 import { ruleFill, rulesDialog } from "./sheetrules";
 import { areaContains, areaOf, rangeOf } from "./sheetarea";
-import { Grid, type Cell, type GridEdit, type Range } from "./grid";
+import { Grid, sameRange, type Cell, type GridEdit, type Range } from "./grid";
 import type {
   CellValue, Column, Filter, FilterOp, Imported, SavedView, ServerEvent, SheetCopy, SheetInfo, TableInfo, ViewInfo, ViewSpec, WorkbookMeta,
 } from "./types";
@@ -2097,6 +2097,7 @@ export class WorkbookScreen {
     const rows = cells.length, columns = cells.reduce((n, r) => Math.max(n, r.length), 0);
     if (!rows || !columns) return;
     if (rows * columns > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
+    const before = this.grid.selection();
     const layout = await this.pasteLayout(sheet, at.r, at.r + rows - 1);
     if (layout === null) return;
     const params = { sheet, row: at.r, column: at.c, cells, mode, layout };
@@ -2104,7 +2105,7 @@ export class WorkbookScreen {
     try {
       const area = await this.inSheetOrder(() => this.rpc.call("sheet_paste_cells", params));
       await this.refreshSheet();
-      this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
+      this.selectPasted(before, sheet, area);
       const styled = formats && (mode === "all" || mode === "formats") && cells.some((r) => r.some((c) => c.style));
       const what = mode === "formats" ? "the formats of" : mode === "values" && formats ? "the values of" : "";
       toast(`Pasted ${what ? `${what} ` : ""}${formatCount(area.rows * area.columns)} cells${styled && mode === "all" ? " with their formats" : ""}${formulasLeft ? ". Their formulas pasted as values; Paste special → Formulas takes them" : ""}`, "success", formulasLeft ? 8000 : 4000);
@@ -2112,6 +2113,13 @@ export class WorkbookScreen {
       if ((e as RpcError).code === "conflict") await this.sheetConflict(e);
       else this.refusedPaste(e);
     }
+  }
+
+  /** Select the cells a paste filled, unless the user moved on while it ran (another cell
+   *  or sheet): the reply then must not pull the selection back. */
+  private selectPasted(before: Range, sheet: number, area: { row: number; column: number; rows: number; columns: number }): void {
+    if (this.active?.kind !== "sheet" || this.active.index !== sheet || !sameRange(before, this.grid.selection())) return;
+    this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
   }
 
   /** `fits` for pastes: a too-large paste says so at the cell instead of in a toast. */
@@ -2132,6 +2140,7 @@ export class WorkbookScreen {
     const r = clip.range;
     const source = areaOf(r);
     if (source.rows * source.columns > this.maxEditCells) { this.refuse(`Nothing was pasted: that is more than ${formatCount(this.maxEditCells)} cells.`); return; }
+    const before = this.grid.selection();
     try {
       let area;
       if (clip.cut) {
@@ -2156,7 +2165,7 @@ export class WorkbookScreen {
         }));
       }
       await this.refreshSheet();
-      this.grid.select({ r: area.row, c: area.column }, { r: area.row + area.rows - 1, c: area.column + area.columns - 1 });
+      this.selectPasted(before, sheet, area);
       toast(`${clip.cut ? "Moved" : "Pasted"} ${formatCount(area.rows * area.columns)} cells`, "success");
     } catch (e) {
       if ((e as RpcError).code === "conflict") {

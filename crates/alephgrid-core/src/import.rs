@@ -140,7 +140,12 @@ pub(crate) fn reader_select(path: &Path, overrides: &[ColumnType]) -> Result<Str
                 let pairs: Vec<String> = overrides.iter().map(|o| format!("{}: {}", lit(&o.name), lit(&o.sql_type))).collect();
                 format!(", types = {{{}}}", pairs.join(", "))
             };
-            let delim = csv_delimiter(path).map(|d| format!(", delim = {}", lit(&d.to_string()))).unwrap_or_default();
+            // When our own scan settles the delimiter it read the file with standard quoting
+            // (`"…"`, `""` inside), so DuckDB is told the same: its sniffer, left to guess the
+            // quote, can take `'` (from a value like `"'"`) and then misread the header.
+            let delim = csv_delimiter(path)
+                .map(|d| format!(", delim = {}, quote = '\"', escape = '\"'", lit(&d.to_string())))
+                .unwrap_or_default();
             format!("SELECT * FROM read_csv({file}, auto_detect = true, sample_size = 100000{delim}{types})")
         }
         format => {

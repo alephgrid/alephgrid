@@ -1393,7 +1393,7 @@ export class Grid {
   }
 }
 
-function sameRange(a: Range, b: Range): boolean {
+export function sameRange(a: Range, b: Range): boolean {
   return a.r0 === b.r0 && a.r1 === b.r1 && a.c0 === b.c0 && a.c1 === b.c1;
 }
 

@@ -354,15 +354,22 @@ async fn main() -> Result<()> {
     let serve = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
+            // Listen for a second signal before anything announces the drain: a signal sent
+            // before its listener exists would be missed.
+            let second = shutdown_signal();
             // Stop admitting work and drain every workbook now: open WebSocket sessions end
             // when their workbook closes, which lets the server finish.
             stopping.begin_shutdown();
             let s = stopping.clone();
             tokio::task::spawn_blocking(move || s.checkpoint_all());
-            tokio::spawn(async {
-                shutdown_signal().await;
+            tokio::spawn(async move {
+                second.await;
                 tracing::warn!("second signal: exiting without waiting for running work (committed changes are safe)");
-                std::process::exit(130);
+                // `_exit`, not `exit`: running exit handlers and static destructors while
+                // engine threads still run a query can crash the process instead of letting
+                // it exit with 130. Committed changes are already on disk.
+                // SAFETY: `_exit` only ends the process.
+                unsafe { libc::_exit(130) }
             });
             let _ = begun_tx.send(());
         });
@@ -493,27 +500,36 @@ fn parse_size(s: &str) -> Result<u64, String> {
     alephgrid_server::runtime::budget::parse_bytes(s)
 }
 
-/// Ctrl-C, or SIGTERM from `docker stop` / systemd.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+/// Ctrl-C, or SIGTERM from `docker stop` / systemd. The listeners are registered when this
+/// is called, not when the future is first polled, so no signal sent after the call is lost.
+fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
-    let term = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
+    let (int, term) = {
+        use tokio::signal::unix::{signal, SignalKind};
+        (signal(SignalKind::interrupt()).ok(), signal(SignalKind::terminate()).ok())
     };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
+    async move {
+        #[cfg(unix)]
+        {
+            let wait = |s: Option<tokio::signal::unix::Signal>| async move {
+                match s {
+                    Some(mut s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                _ = wait(int) => {},
+                _ = wait(term) => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        tracing::info!("shutting down");
     }
-    tracing::info!("shutting down");
 }
 
 /// `alephgrid diagnose`: the bundle from the data directory alone (it opens no database, so

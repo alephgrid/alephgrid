@@ -1181,13 +1181,23 @@ impl AppState {
         let control = config.data_dir.join(".control");
         std::fs::create_dir_all(&control)?;
         let dir_lock = File::create(control.join("controller.lock"))?;
-        match dir_lock.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => bail!(
-                "another Alephgrid server is using {}; stop it first (one server per data directory)",
-                config.data_dir.display()
-            ),
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        // The lock can stay held for a moment after its server let go: by a server that is
+        // still exiting, or by a child process forked in the same process (a Python worker),
+        // which holds a copy of every open file until it starts its program. Wait briefly
+        // before deciding another server is running.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match dir_lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(std::fs::TryLockError::WouldBlock) => bail!(
+                    "another Alephgrid server is using {}; stop it first (one server per data directory)",
+                    config.data_dir.display()
+                ),
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
         }
         // Leftovers of uploads/exports interrupted by a crash; never user data.
         for scratch in [UPLOADS, EXPORTS] {
