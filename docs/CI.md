@@ -15,6 +15,12 @@ tier) refuses unlisted skips and forgiving test commands.
 | **nightly** | the CircleCI schedule (below), or `run_nightly = true` (`tools/ci.sh nightly`; `run_full` still works) | everything in pr, plus browser journeys in Firefox and WebKit; the install check (`tools/release/smoke.sh` on the built binary: empty data directory, UI served, workbook created, CSV imported); 2,000-case property tests; fuzz targets up to 200,000 cases or 5 minutes each; every `alephgrid-server` test five times; targeted mutation testing (`tools/mutants.py`) |
 | **release** | `run_release = true`, `release_version`, on a tag (`tools/ci.sh release vX.Y.Z`) | every nightly job on the tagged commit, then binaries, SBOMs and the artifact check (`tools/release/verify.sh`); the draft release waits for all of them, then (after approval) GitHub release, Docker image, npm and PyPI; see [RELEASING.md](RELEASING.md) |
 
+The nightly long runs are three jobs side by side, each well inside the job time limit:
+`long-props` (2,000-case property tests, scratch workbooks on a RAM disk, since each case
+opens a workbook and file I/O sets the pace), `long-fuzz` and `long-server` (every
+`alephgrid-server` test once on each of five machines). Together they need well over an hour,
+which one job could not hold (the first nightly run, 7 November, timed out that way).
+
 The configuration is [.circleci/config.yml](../.circleci/config.yml). After the web build, one job compiles
 everything (`rust-build`); the Rust tests (run with `--no-fail-fast`, so one run reports every failure),
 clippy and the browser tests then run side by side, so one failure does not hide the others. Rust jobs run on an Ubuntu
