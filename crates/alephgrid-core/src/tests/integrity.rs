@@ -29,6 +29,18 @@ fn empty_batch_is_a_noop_on_empty_and_full_tables() {
     assert_eq!(snapshot(&t, v), before);
 }
 
+/// "An empty list changes nothing" (docs/PROTOCOL.md, `edit`): no revision and no history
+/// entry either. Found on 7 Nov 2026 while re-checking the mutation script (an empty batch
+/// committed a revision); `Workbook::edit` now returns before starting a change.
+#[test]
+fn empty_batch_writes_no_revision_or_history() {
+    let mut t = TempWb::new();
+    let v = people(&mut t);
+    let state = fingerprint(&t.wb);
+    t.wb.edit(v, &[]).unwrap();
+    assert_eq!(fingerprint(&t.wb), state);
+}
+
 #[test]
 fn failed_append_leaves_no_rows_and_no_cells() {
     let mut t = TempWb::new();

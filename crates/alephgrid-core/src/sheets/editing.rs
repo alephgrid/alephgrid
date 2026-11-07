@@ -703,7 +703,8 @@ impl Sheets {
                 let formula = cell.and_then(|p| p.formula.as_deref()).filter(|_| formulas).and_then(|f| self.pasted_formula(index, r, c, f));
                 let (value, text) = match (cell, formula) {
                     (_, Some(f)) => (f, false),
-                    (Some(p), None) => (p.value.clone(), p.text || p.value.starts_with('=')),
+                    (Some(p), None) if p.text => (super::literal_text(&p.value), true),
+                    (Some(p), None) => (p.value.clone(), p.value.starts_with('=')),
                     (None, None) => (String::new(), false),
                 };
                 inputs.push((SheetInput { row: r, column: c, value, base: None }, text));

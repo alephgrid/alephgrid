@@ -291,3 +291,46 @@ the UI. An instance admin who lost theirs:
 - Memory and threads follow `--memory-limit` and `--threads`. Beyond memory, DuckDB spills to
   temporary files on disk.
 - Sheet grids hold up to Excel's size (1,048,576 × 16,384). Tables are bounded by disk.
+
+## Benchmarks
+
+`tools/bench/bench.mjs` (Node 22+, no dependencies) measures a server binary with seeded data
+and concurrent clients over the public protocol, so results can be reproduced and compared.
+It never uses an existing data directory: it starts the binary on a new data directory inside
+a scratch directory (`--scratch`, which must be new or empty; by default a fresh temporary
+directory, deleted afterwards unless `--keep`). The server creates no data by itself; the tool
+writes the CSV files and imports them through `POST /api/workbooks/{id}/import`.
+
+```bash
+cargo build --release -p alephgrid-server
+node tools/bench/bench.mjs --bin target/release/alephgrid --label "what machine, why"    # smoke
+node tools/bench/bench.mjs --bin target/release/alephgrid --scale full --label "..."     # full
+node tools/bench/bench.mjs --help                                                         # every option
+```
+
+| | Smoke (default) | Full (`--scale full`) |
+|---|---|---|
+| narrow table (id, category, amount, qty, day, flag) | 50,000 rows | 10,000,000 rows |
+| wide table (id + 99 numeric columns; `--wide-columns`) | 5,000 rows | 1,000,000 rows |
+| text-heavy table (id, title, ~0.5 KB body, tag, city) | 20,000 rows | 2,000,000 rows |
+| seconds measured per table and client count | 5 (after 1 s warm-up) | 60 |
+| server memory budget (`--memory-budget`) | 512 MiB | 512 MiB unless set |
+
+Each size can be set on its own (`--rows-narrow`, `--rows-wide`, `--rows-text`); `--seed`
+fixes the data and the workload. For each table it runs 1, 5 and 20 clients (`--clients`),
+each with its own connection and view, looping over a mixed workload: 50% fetches of 100 rows
+at random positions (30 columns at a time on the wide table), 10% each sort, filter (and back),
+column statistics over up to 10,000 rows, one-cell edit and an aggregate SQL query. It samples
+the server's resident memory (RSS) every 250 ms.
+
+Results (`--out`, default `bench-results/<time>`):
+
+* `raw.csv`: every request: table, clients, client, operation, start, latency, error code;
+* `rss.csv`: the RSS samples by phase;
+* `summary.json` and `summary.csv`: per table, client count and operation: count, errors,
+  operations per second, p50/p95/p99/max latency, and peak RSS; plus the settings, the
+  server version, the commit and the machine.
+
+A smoke run checks that the tool and the server work; its numbers are not capacity figures.
+Published capacity limits (9.05, 9.15) need full runs of a release build on a dedicated
+machine, recorded here with their `summary.json`. None are published yet.

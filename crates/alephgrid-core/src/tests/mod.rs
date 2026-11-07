@@ -16,6 +16,7 @@ mod tools;
 mod compat;
 mod precision;
 mod props;
+mod fuzz;
 mod sheets;
 mod sql;
 mod sqlwork;

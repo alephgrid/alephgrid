@@ -192,7 +192,8 @@ fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
         }
         // Each accepted change is exactly one revision; refused ones change nothing.
         let now = t.wb.revision().unwrap();
-        let skipped = matches!(op, Op::EditRecord(..)) && model.rows.is_empty();
+        // An empty edit changes nothing, so it makes no revision either (PROTOCOL.md).
+        let skipped = (matches!(op, Op::EditRecord(..)) && model.rows.is_empty()) || matches!(op, Op::Edit(e) if e.is_empty());
         prop_assert_eq!(now, revision + u64::from(mutating && expected_ok && !skipped), "revision after {:?}", op);
         revision = now;
         let info = t.wb.view_info(view).unwrap();

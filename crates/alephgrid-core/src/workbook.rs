@@ -1172,6 +1172,12 @@ impl Workbook {
         if edits.len() > limits::MAX_EDIT_CELLS {
             bail!(limits::TooLarge(format!("too many cells in one edit ({}; the limit is {})", edits.len(), limits::MAX_EDIT_CELLS)));
         }
+        if edits.is_empty() {
+            // Nothing to write: no transaction, so no new revision or history entry.
+            let entry = self.shared.view(id)?;
+            let table = self.db().materialize(&entry)?.spec.table.clone();
+            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0, first_appended: None });
+        }
         self.mutating("edit", Some(id), |wb| wb.edit_in_txn(id, edits))
     }
 
@@ -1179,9 +1185,6 @@ impl Workbook {
         let entry = self.shared.view(id)?;
         let m = self.db().materialize(&entry)?;
         let table = m.spec.table.clone();
-        if edits.is_empty() {
-            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0, first_appended: None });
-        }
         let by_name: HashMap<String, Column> = m.columns.iter().map(|c| (c.name.clone(), c.clone())).collect();
         for e in edits {
             let col = by_name.get(&e.column).ok_or_else(|| {
@@ -1735,7 +1738,7 @@ impl Workbook {
                 let (value, text) = match v {
                     Value::Null => continue,
                     Value::String(s) if numeric && fits_double(s) => (s.clone(), false),
-                    Value::String(s) => (s.clone(), true),
+                    Value::String(s) => (crate::sheets::literal_text(s), true),
                     Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }.to_string(), false),
                     other => (other.to_string(), false),
                 };

@@ -39,8 +39,8 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
 | D. Property / state machine | `crates/alephgrid-core/src/tests/props.rs` (proptest) | Random edit, insert, delete, reopen and sort sequences compared after every step with a `Vec` reference model. Failing seeds are shrunk and saved in `proptest-regressions/` |
 | E. Differential / metamorphic | `tests/sql.rs`, `tests/precision.rs`, `tests/sheets.rs`, `tests/journey.rs` | Formula columns vs the same expression written inline; closed-form sums; Parquet round trip compared with `EXCEPT`; xlsx export→import equality; export before and after restart |
 | F. Fault injection and recovery | `faults::fail_next(point)` in the engine; raw-TCP interrupted uploads; `tests/crash.rs` (SIGKILL of the real binary) | Failed saves, failed mutations, interrupted uploads, process kill during writes |
-| G. Fuzz | Not yet implemented, apart from the proptest generators over formula translation and table-name sanitizing. Planned targets: WebSocket frame parsing, CSV/xlsx import adapters, formula translation | — |
-| H. Performance / resource | `docs/bench.mjs` (manual); phase 3 resource tests (`runtime.rs` budget sums read back from DuckDB, `scheduling.rs` bounded queues, replies and outboxes) | No performance regression gates yet (phase 9) |
+| G. Fuzz | `crates/alephgrid-core/src/tests/fuzz.rs` (bounded proptest targets, stable Rust) | The table-formula parser and the functions built on it, the sheet formula checker, CSV import (quoted round trip, arbitrary bytes) and cells pasted from other apps. Bounded by `FUZZ_CASES` and `FUZZ_SECONDS`; failures are shrunk and kept in `proptest-regressions/`. Not covered yet: WebSocket frame parsing, xlsx import, the browser's clipboard parsing |
+| H. Performance / resource | `tools/bench/bench.mjs` (seeded datasets, 1/5/20 clients over the public protocol, p50/p95/p99 and RSS; run by hand, [OPERATIONS.md](OPERATIONS.md#benchmarks)); phase 3 resource tests (`runtime.rs` budget sums read back from DuckDB, `scheduling.rs` bounded queues, replies and outboxes) | No performance regression gates yet (phase 9) |
 
 ### Oracles and their limits
 
@@ -69,29 +69,51 @@ to make them pass. Find the cause, or quarantine the test with a written reason 
 
 ## Mutation testing
 
-A targeted mutation script (`python3 tools/mutants.py`, run by hand) disables one safeguard at a time:
-exact-input validation, the empty-batch no-op, last-write-wins, reload after failure,
-coordinate validation, grouped undo, the dependency check, rename rewriting, WITH merging and
-typed conversion. All 10 mutants are killed by the engine suite. Two initially survived because a
-second safeguard masked them. The tests were then strengthened, and one of them exposed a real
-defect: undo history was lost after rejected requests.
+A targeted mutation script (`python3 tools/mutants.py`, nightly and release tiers) disables one
+safeguard at a time: exact-input validation, the empty-batch no-op, last-write-wins, reload after
+failure, coordinate validation, grouped undo, the dependency check, rename rewriting, WITH merging
+and typed conversion. Two initially survived because a second safeguard masked them. The tests
+were then strengthened, and one of them exposed a real defect: undo history was lost after
+rejected requests. On 7 Nov four mutants no longer applied (the code had moved) and were
+re-pointed; each search text must now occur once. All ten are killed (the empty-batch
+mutant since an empty edit stopped committing a revision).
 
 ## Tiers
 
+CI never runs on a push (owner decision, 9.16): the PR and release tiers start on request,
+the nightly tier on a CircleCI schedule the owner turns on ([CI.md](CI.md)). Every tier fails
+on any failing test; nothing is retried or allowed to fail.
+
 | Tier | Runs | Contents |
 |---|---|---|
-| Per change (CircleCI `check`) | on request, before merging (`tools/ci.sh check`); locally before every PR | web build + type check; `cargo test --workspace` (unit, integration, property with 96 cases, protocol drift, crash, disk-full); clippy with `-D warnings`; Playwright journeys in Chromium |
-| Extended (CircleCI `full`) | on request, before a release or after storage, collaboration or recovery changes (`tools/ci.sh full`) | The check, plus Firefox and WebKit journeys; property tests with 2000 cases; server suites repeated 5× to surface flakiness |
-| Release (CircleCI `release`) | on a version tag (`tools/ci.sh release vX.Y.Z`) | Builds each platform binary and smoke-tests it (starts, serves the UI, creates a workbook, imports a CSV) before anything is published ([RELEASING.md](RELEASING.md)). Run `full` first. A clean-machine install, upgrade/restore and authorization pass is still manual (9.T01, 9.T03) |
+| PR (CircleCI `pr`, `run_check`) | on request before merging (`tools/ci.sh check`); locally before every PR | web build + type check; `cargo test --workspace` (unit, integration, protocol drift, authorization, reconnect, crash, backup/restore, disk-full; property and fuzz targets at 96 and 64 cases); clippy with `-D warnings`; licence notices; the test gate (`tools/test_gate.py`); Playwright journeys in Chromium |
+| Nightly (CircleCI `nightly`, `run_nightly` or the schedule) | nightly once the owner adds the schedule; on request after storage, collaboration or recovery changes (`tools/ci.sh nightly`) | The PR tier, plus Firefox and WebKit journeys; install check (`tools/release/smoke.sh` on the built binary); property tests with 2,000 cases; fuzz targets up to 200,000 cases or 5 minutes each; server suites repeated 5× to surface flakiness; targeted mutation testing (`tools/mutants.py`) |
+| Release (CircleCI `release`, on a version tag) | `tools/ci.sh release vX.Y.Z` | Everything in nightly on the tagged commit, plus each platform binary built and smoke-tested, then the artifact check (`tools/release/verify.sh`: every archive and SBOM present and matching its checksum, archives hold the binary and the notices of the tagged source, the Linux x86_64 binary reports the version) before the draft release. A clean-machine install, upgrade/restore and authorization pass is still manual (9.T01, 9.T03) |
 
-"Test implemented" and "test executed successfully" are recorded separately.
-Local runs do not count as extended or release checks having passed. CI never runs on its own; see [CI.md](CI.md).
+"Test implemented" and "test executed successfully" are recorded separately: a check
+listed here is implemented; [CI.md](CI.md#what-has-actually-run) records which tiers have
+actually run. Local runs do not count as nightly or release checks having passed.
+
+## Skipped and quarantined tests
+
+`tools/test_gate.py` (PR tier) fails when a test is `#[ignore]`d or skipped without a row
+here, or a row names nothing that exists. `quarantined` rows are tests taken out because
+they fail or flake; each needs an owner and a follow-up.
+
+| Kind | Where | Test or skip reason | Reason | Owner | Follow-up |
+|---|---|---|---|---|---|
+| benchmark | `crates/alephgrid-core/src/tests/table_formulas.rs` | `lookup_read_timings` | Opt-in timing run (F.06/F.T04), release build and a large table | maintainers | run by hand with `--ignored` |
+| benchmark | `crates/alephgrid-core/src/tests/table_formulas.rs` | `analyst_benchmark` | Opt-in F.T04 benchmark against its budgets | maintainers | run by hand with `--ignored` |
+| benchmark | `crates/alephgrid-server/tests/python.rs` | `bench_a_million_rows_with_100k_distinct_values` | Opt-in 8.06 timing run over a million rows | maintainers | run by hand with `--ignored` |
+| generator | `crates/alephgrid-core/src/tests/compat.rs` | `write_sample_workbook` | Writes `docs/samples/analyst-sample.xlsx`; not a check | maintainers | — |
 
 ## Commands
 
 ```bash
 cargo test --workspace                                      # A, B, D, E, F (fast tier)
 PROPTEST_CASES=2000 cargo test -p alephgrid-core --lib props   # longer D run
+FUZZ_CASES=200000 FUZZ_SECONDS=300 cargo test -p alephgrid-core --lib tests::fuzz -- --nocapture  # longer G run
+python3 tools/test_gate.py                                  # skips listed, required suites present
 UPDATE_BINDINGS=1 cargo test -p alephgrid-server --test protocol # regenerate web/src/protocol.ts
 cargo clippy --workspace --all-targets -- -D warnings
 (cd web && npm run build)                                   # type check + bundle

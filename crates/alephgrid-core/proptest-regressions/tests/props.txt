@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 65a7dfddb2d8f599a89ac9c338709c8643697b091280f7ac3e375cc85c2d1475 # shrinks to ops = [Edit([(10, 0, Some(Err("a"))), (10, 0, Some(Ok(0)))])]
+cc bb4ac2177a012a583912dc61583794d99019fd2fb496978cb7654ce8d65114cc # shrinks to ops = [Edit([])]
+cc 8da06a34e8997473f24ee4535c239ff603d41287b5e072df6265722a85cc613d # shrinks to ops = [Edit([])]

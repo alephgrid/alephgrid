@@ -706,19 +706,33 @@ impl Sheets {
     /// Like [`Sheets::set`], but cells flagged as text are forced to stay text (a quote
     /// prefix is added when IronCalc would otherwise read them as numbers, dates or
     /// booleans). Used when copying query results, where `"00123"` must not become 123.
+    /// Values are cell inputs: a leading apostrophe is a quote prefix (callers holding
+    /// literal text use [`literal_text`]). A value not starting with `=` never becomes a formula either: IronCalc reads `+A1`
+    /// or `-A1` as one, so such a value is written as text.
     pub fn set_values(&mut self, index: u32, inputs: &[(SheetInput, bool)]) -> Result<()> {
         // Text that looks like a formula is written as text from the start: written as it
         // is, a formula whose result is text would stay a live formula (SEC.13).
         let plain: Vec<SheetInput> = inputs
             .iter()
-            .map(|(i, text)| if *text && i.value.starts_with('=') { SheetInput { value: format!("'{}", i.value), ..i.clone() } } else { i.clone() })
+            .map(|(i, text)| {
+                if *text && i.value.starts_with('=') {
+                    SheetInput { value: format!("'{}", i.value), ..i.clone() }
+                } else {
+                    i.clone()
+                }
+            })
             .collect();
         self.set(index, &plain)?;
         let m = self.model()?;
         let fix: Vec<SheetInput> = inputs
             .iter()
             .filter(|(i, text)| {
-                *text && !matches!(m.get_cell_type(index, i.row as i32 + 1, i.column as i32 + 1), Ok(CellType::Text))
+                let (row, column) = (i.row as i32 + 1, i.column as i32 + 1);
+                if *text {
+                    !matches!(m.get_cell_type(index, row, column), Ok(CellType::Text))
+                } else {
+                    !i.value.starts_with('=') && m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('='))
+                }
             })
             .map(|(i, _)| SheetInput { value: format!("'{}", i.value), base: None, ..i.clone() })
             .collect();
@@ -1387,6 +1401,12 @@ fn used_size(m: &UserModel<'static>, index: u32) -> (u32, u32) {
 }
 
 /// `A`, `Z`, `AA`, … for a 0-based column index.
+/// Literal text as a cell input that keeps it text: a leading apostrophe would otherwise be
+/// read as the quote prefix and dropped (`'90s` would show as `90s`), so it gets one more.
+pub fn literal_text(text: &str) -> String {
+    if text.starts_with('\'') { format!("'{text}") } else { text.to_string() }
+}
+
 pub fn column_name(index: u32) -> String {
     crate::table_formula::column_letters(index + 1)
 }
