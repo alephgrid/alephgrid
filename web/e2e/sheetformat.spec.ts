@@ -87,9 +87,13 @@ test("S.03: the cell menu inserts, deletes, clears and formats", async ({ page }
   }
   await menu.getByRole("menuitem", { name: "Insert row above" }).click();
   await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 3, column_count: 1 })).rows.map((r: unknown[]) => (r[0] as string[] | null)?.[0] ?? null)).toEqual([null, "a", "b"]);
+  // Rows are picked as the page shows them: wait until it shows the new row (a change
+  // picked from the rows as they were is refused, since they have moved).
+  await expect.poll(() => shown(page, 0, 0)).toBe("");
   menu = await cell();
   await menu.getByRole("menuitem", { name: "Delete row" }).click();
   await expect.poll(async () => (await ws.call("sheet_fetch", { sheet: 0, row_start: 0, row_count: 2, column_count: 1 })).rows.map((r: unknown[]) => (r[0] as string[] | null)?.[0] ?? null)).toEqual(["a", "b"]);
+  await expect.poll(() => shown(page, 0, 0)).toBe("a");
   menu = await cell();
   await menu.getByRole("menuitem", { name: "Clear contents" }).click();
   await expect.poll(() => shown(page, 0, 0)).toBe("");
@@ -408,6 +412,13 @@ test("S.05: merge and centre a range; a click inside selects the merged cell", a
   await menus.getByRole("button", { name: "Format", exact: true }).click();
   await page.getByRole("menuitem", { name: "Merge and centre" }).click();
   await expect.poll(async () => (await ws.call("sheet_layout", { sheet: 0 })).merged).toEqual([{ row: 0, column: 0, rows: 1, columns: 3 }]);
+  // The page knows the merge once the keyboard leaves A1 from the merge's far edge.
+  await expect.poll(async () => {
+    await page.locator(".grid-host").focus();
+    await page.keyboard.press("ControlOrMeta+Home");
+    await page.keyboard.press("ArrowRight");
+    return page.locator(".cell-ref").textContent();
+  }).toContain("D1");
   const box = (await page.locator(".grid-scroller").boundingBox())!;
   await page.mouse.click(box.x + 54 + 104 + 50, box.y + 32 + 12);
   await expect(page.locator(".cell-ref")).toContainText("A1");
