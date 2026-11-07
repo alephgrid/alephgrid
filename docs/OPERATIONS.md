@@ -113,6 +113,7 @@ and the number of series is fixed. Every counter is present from the first scrap
 | `alephgrid_memory_budget_bytes`, `alephgrid_memory_reserved_bytes` | gauge | | `--memory-budget` and what open workbooks reserve of it |
 | `alephgrid_threads_budget`, `alephgrid_threads_reserved` | gauge | | the same for engine threads |
 | `alephgrid_disk_reserve_state` | gauge | `state`: held, released, off | one of them is 1 |
+| `alephgrid_disk_reserve_releases_total` | counter | | times the reserve was given back because the disk filled up (the reserve comes back by itself once there is room, so the state alone can miss a short episode) |
 | `alephgrid_disk_reserve_bytes`, `alephgrid_disk_free_bytes` | gauge | | reserve size, free disk at the data directory |
 | `alephgrid_last_backup_timestamp_seconds` | gauge | | newest online backup in `.backups/` (Unix time; 0 when none). Offline backups made elsewhere are not seen |
 
@@ -127,7 +128,7 @@ Suggested Prometheus rules; tune thresholds to your workload.
 | --- | --- | --- | --- |
 | Down | `up{job="alephgrid"} == 0` | 2m | the process does not answer (liveness) |
 | NotReady | `alephgrid_ready == 0 and alephgrid_shutting_down == 0` | 2m | data directory not writable or control database not answering ([Health](#health-and-readiness)) |
-| DiskReserveReleased | `alephgrid_disk_reserve_state{state="released"} == 1` | 0m | the disk filled up; follow [Disk is full](#disk-is-full) |
+| DiskReserveReleased | `alephgrid_disk_reserve_state{state="released"} == 1 or increase(alephgrid_disk_reserve_releases_total[15m]) > 0` | 0m | the disk filled up; follow [Disk is full](#disk-is-full) |
 | DiskLow | `alephgrid_disk_free_bytes < 5 * 1024^3` | 10m | under 5 GiB free; imports and backups will start failing |
 | AllocationStartFailures | `sum(increase(alephgrid_allocation_start_failures_total{reason=~"startup_failed\|owned_elsewhere\|incompatible"}[15m])) > 0` | 0m | a workbook could not be opened; see [stuck allocation](#a-workbook-will-not-open-or-its-compute-allocation-is-stuck) |
 | CapacityRefusals | `sum(increase(alephgrid_allocation_start_failures_total{reason="capacity"}[15m])) > 3` | 0m | starts refused after waiting in line: raise `--memory-budget` or lower `--idle-timeout` |

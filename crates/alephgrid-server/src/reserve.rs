@@ -8,28 +8,35 @@
 //! from a working server. The reserve is recreated once the disk has room for it again.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub struct DiskReserve {
     path: PathBuf,
     bytes: u64,
     held: AtomicBool,
+    /// Times the reserve was given back since the process started (a metric).
+    releases: AtomicU64,
 }
 
 impl DiskReserve {
     /// A reserve of `bytes` at `<control>/reserve`; 0 turns it off. Nothing is written yet.
     pub fn new(control: &Path, bytes: u64) -> Arc<DiskReserve> {
-        Arc::new(DiskReserve { path: control.join("reserve"), bytes, held: AtomicBool::new(false) })
+        Arc::new(DiskReserve { path: control.join("reserve"), bytes, held: AtomicBool::new(false), releases: AtomicU64::new(0) })
     }
 
     /// A reserve that is never kept (tests, or `--disk-reserve 0`).
     pub fn disabled() -> Arc<DiskReserve> {
-        Arc::new(DiskReserve { path: PathBuf::new(), bytes: 0, held: AtomicBool::new(false) })
+        Arc::new(DiskReserve { path: PathBuf::new(), bytes: 0, held: AtomicBool::new(false), releases: AtomicU64::new(0) })
     }
 
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// How many times the reserve was given back since the process started.
+    pub fn releases(&self) -> u64 {
+        self.releases.load(Ordering::SeqCst)
     }
 
     pub fn held(&self) -> bool {
@@ -78,6 +85,7 @@ impl DiskReserve {
         self.held.store(false, Ordering::SeqCst);
         let released = std::fs::remove_file(&self.path).is_ok();
         if released {
+            self.releases.fetch_add(1, Ordering::SeqCst);
             tracing::warn!(
                 "the disk is full: released the {} MiB reserve so the server can keep recording state; free space on the disk (the reserve comes back by itself)",
                 self.bytes >> 20
@@ -95,15 +103,18 @@ impl DiskReserve {
 }
 
 /// Whether an error comes from a full disk: an I/O error saying so, or DuckDB's own I/O
-/// error (its root cause, which starts "IO Error"). Only the root cause is read, never the
-/// messages around it, which may quote what a user typed (a table name, say): a request
-/// must not be able to make the server give its reserve away.
+/// error (its message starts "IO Error"). Only errors themselves are read — the I/O error, the
+/// DuckDB engine error (found by type: it carries the engine's numeric code as its source, so
+/// it is no longer the root cause) or the root cause — never the context messages around
+/// them, which may quote what a user typed (a table name, say): a request must not be able
+/// to make the server give its reserve away.
 pub fn is_disk_full(e: &anyhow::Error) -> bool {
     let io = e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>().is_some_and(|io| io.raw_os_error() == Some(libc::ENOSPC) || io.kind() == std::io::ErrorKind::StorageFull)
     });
-    let root = e.root_cause().to_string();
-    io || (root.starts_with("IO Error") && root.contains("No space left on device"))
+    let says = |m: &str| m.starts_with("IO Error") && m.contains("No space left on device");
+    let engine = e.chain().filter_map(|c| c.downcast_ref::<duckdb::Error>()).any(|d| says(&d.to_string()));
+    io || engine || says(&e.root_cause().to_string())
 }
 
 /// Write `bytes` of data that file systems cannot compress or deduplicate away, so the reserve
@@ -163,6 +174,15 @@ mod tests {
         assert!(!is_disk_full(&anyhow::anyhow!("unknown table \"No space left on device\"")));
         assert!(!is_disk_full(&anyhow::anyhow!("Catalog Error: Table with name IO Error No space left on device does not exist")));
         assert!(!is_disk_full(&anyhow::anyhow!("permission denied").context("IO Error: No space left on device")));
+        // DuckDB's own error, as the engine raises it: its message, with the numeric code as
+        // its source (so the root cause is "Error code 1: …", not the message).
+        let full = duckdb::Error::DuckDBFailure(duckdb::ffi::Error::new(1), Some("IO Error: Could not write file \"x\": No space left on device".into()));
+        assert!(is_disk_full(&anyhow::Error::new(full)));
+        let other = duckdb::Error::DuckDBFailure(duckdb::ffi::Error::new(1), Some("Invalid Input Error: IO Error No space left on device".into()));
+        assert!(!is_disk_full(&anyhow::Error::new(other)));
+        // A context quoting the right words around another engine error is not trusted either.
+        let catalog = duckdb::Error::DuckDBFailure(duckdb::ffi::Error::new(1), Some("Catalog Error: no such table".into()));
+        assert!(!is_disk_full(&anyhow::Error::new(catalog).context("IO Error: No space left on device")));
     }
 
     #[test]

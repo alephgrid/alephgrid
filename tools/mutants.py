@@ -13,7 +13,7 @@ mutants = [
   ("edit: skip exact-input check", W, "crate::wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;", "let _ = crate::wire::check_exact_input(col, value);", "tests::precision"),
   ("edit: empty batch not short-circuited", W, "        if edits.is_empty() {\n            // Nothing to write", "        if false {\n            // Nothing to write", "tests::integrity"),
   ("edit: last write wins removed", W, "Some(&i) => cells[i].2 = value,", "Some(&_i) => cells.push((t, e.column.as_str(), value)),", "tests::integrity"),
-  ("with_sheets: no reload on failure", W, "                if self.sheet_epoch != epoch {\n                    match self.load_sheets() {", "                if false {\n                    match self.load_sheets() {", "tests::sheets"),
+  ("with_sheets: no reload on failure", W, "                if self.sheet_epoch != epoch || panicked {\n                    match self.load_sheets() {", "                if false {\n                    match self.load_sheets() {", "tests::sheets"),
   ("sheets: no coordinate validation", S, "            if i.row >= MAX_ROWS || i.column >= MAX_COLUMNS {", "            if false {", "tests::sheets"),
   ("sheets: undo one entry only", S, "        for _ in 0..n {\n            m.undo()", "        for _ in 0..n.min(1) {\n            m.undo()", "tests::sheets"),
   ("drop_column: ignore dependents", W, "        if !users.is_empty() {\n            bail!(\"{name:?} is used by formula column", "        if false && !users.is_empty() {\n            bail!(\"{name:?} is used by formula column", "tests::formulas"),

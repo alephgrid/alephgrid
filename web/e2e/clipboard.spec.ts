@@ -284,6 +284,50 @@ test("HTML pasted into a table keeps its raw values", async ({ page }) => {
   ws.close();
 });
 
+// A slow server (CI) can answer a table's open_view after the grid is already shown and
+// focused. A paste made then waits for the table's columns instead of pasting nothing, and a
+// paste that reaches no editable cell says so instead of reporting "Pasted 0 cells".
+test("a paste while the table is still opening waits for it; a paste with nowhere to go says so", async ({ page }) => {
+  await recordClipboard(page);
+  const wb = await server.createWorkbook("Opening paste"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "t", sql: "SELECT 'a' AS label, 1.0::DOUBLE AS amount" });
+  await ws.call("add_formula_column", { table: "t", name: "twice", formula: "amount * 2" });
+  // Hold the server's answer to open_view until the paste has been made.
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const openIds = new Set<number>();
+  await page.routeWebSocket(/\/ws\//, (route) => {
+    const srv = route.connectToServer();
+    route.onMessage((m) => {
+      try { const f = JSON.parse(String(m)); if (f.op === "open_view") openIds.add(f.id); } catch { /* */ }
+      srv.send(m);
+    });
+    srv.onMessage(async (m) => {
+      try { const f = JSON.parse(String(m)); if (openIds.has(f.id)) await released; } catch { /* */ }
+      route.send(m);
+    });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.getByRole("grid", { name: "Table t" })).toBeVisible();
+  await expect.poll(() => openIds.size).toBeGreaterThan(0);
+  await page.locator(".grid-host").focus();
+  await paste(page, "b\t2");
+  release();
+  await expect.poll(async () => (await ws.call("query", { sql: "SELECT label, amount FROM t" })).rows).toEqual([["b", 2]]);
+  await expect(page.locator(".toast").last()).toContainText("Pasted 2 cells");
+
+  // Only the formula column (C) and past the end: nothing is sent, and the note says why.
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Home");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.locator(".cell-ref")).toContainText("twice");
+  await paste(page, "9\t9");
+  await expect(page.locator(".grid-note")).toContainText("Nothing was pasted: the cells it would fill are formula columns or past the table's last column.");
+  expect((await ws.call("query", { sql: "SELECT label, amount FROM t" })).rows).toEqual([["b", 2]]);
+  ws.close();
+});
+
 test("cells copy between sheets, and from a table into a sheet with their types", async ({ page }) => {
   await recordClipboard(page);
   const wb = await server.createWorkbook("Between sheets"), ws = await server.connect(wb);

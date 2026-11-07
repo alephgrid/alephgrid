@@ -446,10 +446,12 @@ async fn service_tokens_are_scoped_to_their_space_and_role() {
     // Its secret is shown once: listings carry neither it nor its hash.
     let (_, list) = t.owner.get(&format!("/api/spaces/{alpha}/tokens")).await;
     let text = list.to_string();
-    let raw = secret.rsplit('_').next().unwrap();
+    // `agt_<id>_<secret>`: the id is hex, the secret URL-safe base64 (which may itself hold `_`).
+    let (id_part, raw) = secret.strip_prefix("agt_").unwrap().split_once('_').unwrap();
+    assert_eq!((id_part.len(), raw.len()), (16, 43), "token id and secret parsed whole");
     assert!(!text.contains(raw) && !text.contains("hash"), "{text}");
     // A wrong secret for a real id.
-    let forged = format!("{}_{}", secret.rsplit_once('_').unwrap().0, "x".repeat(43));
+    let forged = format!("agt_{id_part}_{}", "x".repeat(43));
     assert_eq!(t.server.bearer(&forged).get("/api/spaces").await.0, 401);
     // Revoked: refused at once, and its connection ends.
     let tid = made["token"]["id"].as_str().unwrap();

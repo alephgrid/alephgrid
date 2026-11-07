@@ -53,6 +53,7 @@ const HELP: &[(&str, &str, &str)] = &[
     ("alephgrid_websocket_connections_total", "counter", "WebSocket sessions opened."),
     ("alephgrid_imports_total", "counter", "File imports, by result."),
     ("alephgrid_import_bytes_total", "counter", "Bytes of files imported successfully."),
+    ("alephgrid_disk_reserve_releases_total", "counter", "Times the disk reserve was given back because the disk filled up."),
 ];
 
 pub fn failure_label(kind: FailureKind) -> &'static str {
@@ -137,7 +138,13 @@ impl Metrics {
             m.add("alephgrid_imports_total", &[("result", r)], 0);
         }
         m.add("alephgrid_import_bytes_total", &[], 0);
+        m.add("alephgrid_disk_reserve_releases_total", &[], 0);
         m
+    }
+
+    /// Set a counter kept elsewhere (read at scrape time).
+    pub fn set(&self, name: &'static str, labels: &[(&'static str, &'static str)], v: u64) {
+        self.counters.lock().unwrap_or_else(|e| e.into_inner()).insert((name, labels.to_vec()), v);
     }
 
     pub fn add(&self, name: &'static str, labels: &[(&'static str, &'static str)], n: u64) {
@@ -244,6 +251,8 @@ pub fn gauges(state: &Shared) -> Vec<Gauge> {
     let (budget, reserved, uploads, upload_budget) = c.budget_use();
     let live = c.allocation_counts();
     let (waiting_read, waiting_write, running) = c.job_counts();
+    // Kept by the reserve itself; it survives the reserve being recreated in between scrapes.
+    state.metrics.set("alephgrid_disk_reserve_releases_total", &[], c.disk_reserve.releases());
     let mut g = vec![
         Gauge { name: "alephgrid_build_info", help: "The running version (always 1).", values: vec![(vec![("version", env!("CARGO_PKG_VERSION"))], 1.0)] },
         gauge("alephgrid_start_time_seconds", "When the process started (Unix time).", state.started_at_ms as f64 / 1000.0),

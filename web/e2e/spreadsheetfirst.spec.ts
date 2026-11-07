@@ -77,8 +77,9 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   await typeAt(page, "C2", "=SUMIFS(orders[amount],orders[customer],A2)");
   // Formulas went straight into cells: no dialog is open.
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  expect(await cellText(page, "B2")).toContain("West");
-  expect(await cellText(page, "C2")).toContain("125");
+  // Their results come from the server after the input is accepted: wait for them.
+  await expect.poll(() => cellText(page, "B2")).toContain("West");
+  await expect.poll(() => cellText(page, "C2")).toContain("125");
 
   // Fill B2 down to B4 with the fill handle.
   await cellText(page, "B2");
@@ -94,14 +95,14 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   await page.mouse.move(hx, y + ROW_H * 2, { steps: 5 });
   await page.mouse.up();
   await expect.poll(() => cellText(page, "B3")).toContain("East");
-  expect(await cellText(page, "B4")).toContain("West");
+  await expect.poll(() => cellText(page, "B4")).toContain("West");
 
   // Fill C2:C4 with Mod+D.
   await cellText(page, "C2");
   await page.keyboard.press("Shift+ArrowDown"); await page.keyboard.press("Shift+ArrowDown");
   await page.keyboard.press("ControlOrMeta+d");
   await expect.poll(() => cellText(page, "C3")).toContain("50");
-  expect(await cellText(page, "C4")).toContain("10");
+  await expect.poll(() => cellText(page, "C4")).toContain("10");
 
   // Undo the fill, then redo it.
   await page.keyboard.press("ControlOrMeta+z");
@@ -148,9 +149,9 @@ test("U.T07: a business user works in a sheet with SQL closed, without formula d
   // Everything is still there after a reload.
   await page.reload();
   await page.getByRole("tab", { name: /Sheet 1/ }).click();
-  expect(await cellText(page, "C2")).toContain("125");
-  expect(await cellText(page, "B3")).toContain("East");
-  expect(await cellText(page, "G4")).toContain("10");
+  await expect.poll(() => cellText(page, "C2")).toContain("125");
+  await expect.poll(() => cellText(page, "B3")).toContain("East");
+  await expect.poll(() => cellText(page, "G4")).toContain("10");
   await noSql(page);
   ws.close();
 });
