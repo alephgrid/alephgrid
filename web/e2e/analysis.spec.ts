@@ -67,7 +67,8 @@ test("no-SQL gate: import, join, summarize, chart, save and reopen", async ({ pa
   const schemaWriter = await server.connect(wb); await schemaWriter.call("drop_column", { table: "joined", name: "right_name" }); schemaWriter.close();
   await page.reload(); await page.getByRole("button", { name: "Analyze", exact: true }).click();
   await pane(page).getByRole("combobox", { name: "Open a saved analysis" }).selectOption({ label: "Revenue by person" });
-  await expect(pane(page).getByRole("status")).toContainText("unknown column");
+  // U.11a: a refusal is the pane's alert, not its status line.
+  await expect(pane(page).getByRole("alert")).toContainText("unknown column");
 });
 
 test("pivot values are picked from the column, and charts stay bounded", async ({ page }) => {

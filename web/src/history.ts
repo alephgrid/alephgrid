@@ -36,7 +36,7 @@ export function historyDialog(rpc: Rpc, onUndone: () => void): void {
               onUndone();
               await render(body);
             } catch (e) {
-              toastError(e);
+              toastError(e, body);
             }
           },
         }, "Undo"));

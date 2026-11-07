@@ -61,13 +61,14 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
       make.addEventListener("click", async () => {
         make.disabled = true;
         try { await http("POST", "/api/admin/backups"); toast("Backup made", "success"); await render(section, body); }
-        catch (e) { toastError(e); make.disabled = false; }
+        catch (e) { toastError(e, body); make.disabled = false; }
       });
       const rows = list.map((b) => {
         const del = el("button", { class: "btn btn-small", type: "button", "aria-label": `Delete backup ${b.name}` }, "Delete");
         del.addEventListener("click", async () => {
-          if (!(await confirmDialog(`Delete backup ${b.name}?`, "The copy is removed from the server's disk.", "Delete"))) return;
-          try { await http("DELETE", `/api/admin/backups/${encodeURIComponent(b.name)}`); await render(section, body); } catch (e) { toastError(e); }
+          if (!(await confirmDialog(`Delete backup ${b.name}?`, "The copy is removed from the server's disk.", "Delete",
+            () => http("DELETE", `/api/admin/backups/${encodeURIComponent(b.name)}`)))) return;
+          await render(section, body);
         });
         return [new Date(b.created_at_ms).toLocaleString(), String(b.workbooks), bytes(b.bytes), del];
       });
@@ -102,7 +103,7 @@ async function render(section: Section, body: HTMLElement): Promise<void> {
 
 /** The administration dialog (instance admins; the local user is one). */
 export function adminDialog(): void {
-  const body = el("div", { class: "admin-body", role: "tabpanel", tabindex: "0" });
+  const body = el("div", { class: "admin-body", role: "tabpanel", tabindex: "0", "data-errors": true });
   const tabs = SECTIONS.map((s, i) => el("button", { class: "admin-tab", role: "tab", type: "button", id: `admin-tab-${i}`, "aria-selected": i === 0 ? "true" : "false", tabindex: i === 0 ? "0" : "-1" }, s));
   const list = el("div", { class: "admin-tabs", role: "tablist", "aria-label": "Administration sections" }, ...tabs);
   const pick = (i: number) => {

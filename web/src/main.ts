@@ -5,7 +5,7 @@ import { api, isRuntimeFailure, seg, type Me, type SpaceListing } from "./api";
 import { importFile } from "./importer";
 import { bytes, formatCompact, formatCount } from "./format";
 import type { WorkbookListing } from "./types";
-import { confirmDialog, el, formDialog, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { confirmDialog, el, formDialog, refusal, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { WorkbookScreen } from "./workbook";
 import { isNotFound, showNotFound, waitForCompute } from "./compute";
 import { brandMark, icon, type IconName } from "./icons";
@@ -480,18 +480,15 @@ function setScope(scope: Scope): void {
 
 async function newWorkbook(): Promise<void> {
   const spaces = writableSpaces();
+  let created = "";
   const v = await formDialog("New workbook", [
     { name: "name", label: "Name", value: "Untitled workbook" },
     ...(spaces.length > 1 ? [{ name: "space", label: "Space", type: "select" as const, value: targetSpace() ?? spaces[0].id,
       options: spaces.map((s) => ({ value: s.id, label: s.name })) }] : []),
-  ], "Create");
-  if (!v) return;
-  try {
-    navigate(`/w/${seg((await api.create(v.name, v.space ?? targetSpace())).id)}?start=sheet`);
-  } catch (e) {
-    // Refused (a quota, a role): say why.
-    toastError(e);
-  }
+  ], "Create",
+  // Refused (a quota, a role): the dialog says why.
+  (x) => refusal(async () => { created = (await api.create(x.name, x.space ?? targetSpace())).id; }));
+  if (v && created) navigate(`/w/${seg(created)}?start=sheet`);
 }
 
 async function newSpace(): Promise<void> {
@@ -516,9 +513,9 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
   const local = home.me?.kind === "local";
   const items: MenuItem[] = [
     { label: "Rename…", disabled: !owner && "Owners only", action: async () => {
-      const v = await formDialog("Rename space", [{ name: "name", label: "Name", value: sp.name }], "Rename");
-      if (!v) return;
-      try { await api.renameSpace(sp.id, v.name); await reloadHome(); } catch (e) { toastError(e); }
+      const v = await formDialog("Rename space", [{ name: "name", label: "Name", value: sp.name }], "Rename",
+        (x) => refusal(() => api.renameSpace(sp.id, x.name)));
+      if (v) await reloadHome();
     } },
     { label: "New workbook here", disabled: sp.role === "viewer" && "Viewers cannot add workbooks", action: async () => navigate(`/w/${seg((await api.create("Untitled workbook", sp.id)).id)}?start=sheet`) },
     { label: "Library…", action: () => libraryDialog(sp, home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, role: w.role ?? undefined })),
@@ -536,18 +533,13 @@ function spaceMenu(sp: SpaceListing, x: number, y: number): void {
       home.workbooks.filter((w) => w.space === sp.id).map((w) => ({ id: w.id, name: w.name, size_bytes: w.size_bytes })),
       { members: () => membersDialog(sp, () => {}), usage: admin ? () => usageDialog(sp.org_id) : null }) });
   }
-  items.push("sep", { label: "Delete space", danger: true, disabled: !owner && "Owners only", action: async () => {
-    const n = home.workbooks.filter((w) => w.space === sp.id).length;
-    if (n) {
-      toast(`Move or delete its ${n} workbook${n === 1 ? "" : "s"} first.`, "error");
-      return;
-    }
-    if (!(await confirmDialog(`Delete space “${sp.name}”?`, "Its members and service tokens are removed."))) return;
-    try {
-      await api.removeSpace(sp.id);
-      if (home.scope === sp.id) home.scope = "all";
-      history.replaceState(null, "", homeUrl());
-    } catch (e) { toastError(e); }
+  // A space with workbooks cannot be deleted: the item says so instead of a toast afterwards.
+  const holding = home.workbooks.filter((w) => w.space === sp.id).length;
+  items.push("sep", { label: "Delete space", danger: true,
+    disabled: !owner ? "Owners only" : holding > 0 && `Move or delete its ${holding} workbook${holding === 1 ? "" : "s"} first`, action: async () => {
+    if (!(await confirmDialog(`Delete space “${sp.name}”?`, "Its members and service tokens are removed.", "Delete", () => api.removeSpace(sp.id)))) return;
+    if (home.scope === sp.id) home.scope = "all";
+    history.replaceState(null, "", homeUrl());
     await reloadHome();
   } });
   showMenu(items, x, y);
@@ -569,9 +561,9 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
     { label: "Open in new tab", action: () => window.open(`/w/${seg(w.id)}`, "_blank") },
     "sep",
     { label: "Rename…", disabled: viewer && "View only", action: async () => {
-      const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename");
-      if (!v) return;
-      try { await api.update(w.id, { name: v.name }); await reloadHome(); } catch (e) { toastError(e); }
+      const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: w.name }], "Rename",
+        (x) => refusal(() => api.update(w.id, { name: x.name })));
+      if (v) await reloadHome();
     } },
     { label: "Duplicate", disabled: viewer && "View only", action: async () => {
       try {
@@ -584,15 +576,13 @@ function workbookMenu(w: WorkbookListing, x: number, y: number): void {
       const v = await formDialog(`Move “${w.name}”`, [{
         name: "space", label: "Space", type: "select", value: w.space,
         options: writableSpaces().map((s) => ({ value: s.id, label: s.name })),
-      }], "Move");
-      if (!v || v.space === w.space) return;
-      try { await api.update(w.id, { space: v.space }); await reloadHome(); } catch (e) { toastError(e); }
+      }], "Move", (x) => x.space === w.space ? null : refusal(() => api.update(w.id, { space: x.space })));
+      if (v && v.space !== w.space) await reloadHome();
     } },
     { label: w.starred ? "Unstar" : "Star", disabled: viewer && "View only", action: () => toggleStar(w) },
     "sep",
     { label: "Delete", danger: true, disabled: viewer && "View only", action: async () => {
-      if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash."))) return;
-      try { await api.remove(w.id); } catch (e) { toastError(e); }
+      if (!(await confirmDialog(`Move “${w.name}” to the trash?`, "Anyone who has it open is disconnected. You can restore it from Trash.", "Delete", () => api.remove(w.id)))) return;
       await reloadHome();
     } },
   ];
@@ -608,15 +598,13 @@ async function restoreWorkbook(w: WorkbookListing): Promise<void> {
 }
 
 async function purgeWorkbook(w: WorkbookListing): Promise<void> {
-  if (!(await confirmDialog(`Delete “${w.name}” forever?`, `Its tables and sheets (${bytes(w.size_bytes)}) are permanently removed from disk. This cannot be undone.`))) return;
-  try { await api.purge(w.id); } catch (e) { toastError(e); }
+  if (!(await confirmDialog(`Delete “${w.name}” forever?`, `Its tables and sheets (${bytes(w.size_bytes)}) are permanently removed from disk. This cannot be undone.`, "Delete", () => api.purge(w.id)))) return;
   await reloadHome();
 }
 
 async function emptyTrash(): Promise<void> {
   const n = home.trash.length;
-  if (!(await confirmDialog("Empty the trash?", `${n} workbook${n === 1 ? " is" : "s are"} permanently removed from disk. This cannot be undone.`))) return;
-  try { await api.emptyTrash(); } catch (e) { toastError(e); }
+  if (!(await confirmDialog("Empty the trash?", `${n} workbook${n === 1 ? " is" : "s are"} permanently removed from disk. This cannot be undone.`, "Delete", () => api.emptyTrash()))) return;
   await reloadHome();
 }
 
