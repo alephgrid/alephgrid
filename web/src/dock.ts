@@ -1,7 +1,7 @@
 // A panel docked under the grid (U.05): resizable by dragging or with the arrow keys,
 // maximizable, closed with its button or Escape. Its height is remembered in this browser.
 
-import { el, pointerDrag } from "./ui";
+import { currentOpener, el, pointerDrag } from "./ui";
 import { icon } from "./icons";
 
 const KEY = "alephgrid-dock";
@@ -19,7 +19,7 @@ let seq = 0;
 
 /** Dock `panel` at the bottom of `host` (a column flex box); `label` names the region. */
 export function dockPanel(host: HTMLElement, panel: HTMLElement, label: string, onClose: () => void): { close: () => void } {
-  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const opener = currentOpener();
   const state = saved();
   const heading = panel.querySelector("h2");
   if (heading) heading.id ||= `dock-title-${++seq}`;

@@ -89,11 +89,29 @@ let openMenu: HTMLElement | null = null;
 let menuOpener: HTMLElement | null = null;
 let menuCleanup: (() => void) | null = null;
 
+// Safari does not focus a clicked button, so what opened a menu or dialog cannot always be
+// read from document.activeElement: the control last pressed is the fallback.
+let lastPressed: HTMLElement | null = null;
+if (typeof document !== "undefined") {
+  document.addEventListener("pointerdown", (e) => {
+    lastPressed = e.target instanceof Element ? e.target.closest<HTMLElement>("button, a[href], input, select, textarea, [role=menuitem], [role=tab], [tabindex]") : null;
+  }, true);
+}
+
+/** Nothing has focus (Safari after a click on a button). */
+const nothingFocused = () => !document.activeElement || document.activeElement === document.body;
+
+/** What is opening a menu or dialog now: the focused element, or the control just pressed. */
+export function currentOpener(): HTMLElement | null {
+  if (!nothingFocused() && document.activeElement instanceof HTMLElement) return document.activeElement;
+  return lastPressed?.isConnected ? lastPressed : null;
+}
+
 export function closeMenu(): void {
   menuCleanup?.();
   menuCleanup = null;
   if (!openMenu) return;
-  const hadFocus = openMenu.contains(document.activeElement);
+  const hadFocus = openMenu.contains(document.activeElement) || nothingFocused();
   openMenu.remove();
   openMenu = null;
   // Return focus to whatever opened the menu, as keyboard users expect.
@@ -112,7 +130,7 @@ interface MenuOptions {
 
 export function showMenu(items: MenuItem[], x: number, y: number, opts: MenuOptions = {}): void {
   closeMenu();
-  menuOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  menuOpener = currentOpener();
   const menu = el("div", { class: "menu", role: "menu", "aria-label": opts.label ?? false });
   menu.addEventListener("keydown", (e) => {
     // Disabled items stay reachable (U.11a): keyboard and screen-reader users hear the reason.
@@ -197,7 +215,7 @@ let modalSeq = 0;
  * returned to the opener afterwards, Escape and outside clicks call `onCancel`.
  */
 export function openModal(dialog: HTMLElement, onCancel: () => void, role: "dialog" | "alertdialog" = "dialog"): { close: () => void } {
-  const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const opener = currentOpener();
   dialog.setAttribute("role", role);
   dialog.setAttribute("aria-modal", "true");
   const heading = dialog.querySelector("h2");

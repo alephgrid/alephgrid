@@ -2,7 +2,7 @@ import { Rpc, RpcError } from "./api";
 import { codeEditor, lineOf, type Problem } from "./codeeditor";
 import { builtinFunctions } from "./catalog";
 import { icon } from "./icons";
-import { el, pointerDrag, toast } from "./ui";
+import { currentOpener, el, pointerDrag, toast } from "./ui";
 import { store, stored } from "./storage";
 import type { FunctionDefinition, FunctionKind, FunctionTest, FunctionTestResult, FunctionUsage, TestValue, TestValueKind, WorkbookFunction } from "./protocol";
 
@@ -580,7 +580,7 @@ export function functionPanel(rpc: Rpc, allowSql: boolean, mount: (panel: HTMLEl
     get isOpen() { return isOpen; },
     open() {
       if (!isOpen) {
-        opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        opener = currentOpener();
         mount(panel); isOpen = true; applyWidth(); applyResultsHeight();
         window.addEventListener("resize", applyWidth);
         window.addEventListener("resize", applyResultsHeight);
