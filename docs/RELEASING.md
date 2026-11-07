@@ -8,8 +8,9 @@ for a maintainer's approval, and only then becomes public. Nothing runs on a pus
 | GitHub Releases | download `alephgrid-VERSION-TARGET.tar.gz` (+ `SHA256SUMS`, SBOMs) | `release-linux-*`, `release-macos`, `release-sbom` |
 | Docker | `docker run -p 7878:7878 ghcr.io/alephgrid/alephgrid` | `release-docker` (`Dockerfile.release`, from the tested binaries) |
 | npm (also pnpm, yarn, bun) | `npx alephgrid` · `npm i -g alephgrid` | `release-npm` (`tools/release/npm.mjs`) |
+| PyPI (also pipx, uv) | `uvx alephgrid` · `pipx install alephgrid` · `pip install alephgrid` | `release-pypi` (`tools/release/pypi.py`) |
 
-Every archive, image and npm package holding the binary carries `LICENSE`, `NOTICE` and
+Every archive, image, npm package and wheel holding the binary carries `LICENSE`, `NOTICE` and
 `THIRD-PARTY-NOTICES.md` (written by `tools/licenses.py`; the image keeps them in
 `/usr/share/doc/alephgrid/`). Archives and SBOMs are checksummed but **not yet signed**:
 signatures (for example Sigstore/cosign for the image and the archives) are deferred.
@@ -18,6 +19,14 @@ Targets: Linux x86_64 and arm64 (built on Debian 11, so they need glibc 2.31 or 
 11+, Ubuntu 20.04+, RHEL 9), macOS Apple silicon and Intel (macOS 11+). Windows: Docker or WSL
 until a native build exists. macOS binaries are not yet signed or notarized: the first run
 needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
+
+PyPI gets wheels only, no source distribution: building from source needs Rust, Node and
+several minutes of DuckDB compilation, which an installer should not start. Each wheel holds the
+binary as an installed script, so pip, pipx and uv put `alephgrid` on the PATH.
+`tools/release/pypi.py` tags each wheel from its binary, never below the build baseline:
+`manylinux_2_31_x86_64` / `manylinux_2_31_aarch64` (pip 20.3 or newer) and `macosx_11_0_arm64` /
+`macosx_11_0_x86_64`, and refuses a Linux binary that links a library outside the manylinux set.
+PyPI accepts files up to 100 MB by default; a larger wheel needs a limit increase from PyPI first.
 
 ## Once: accounts and secrets
 
@@ -28,10 +37,17 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
    packages.
 2. **GitHub:** a token for the release and the image: a classic personal access token with
    `repo` and `write:packages` (GitHub Container Registry does not take fine-grained tokens).
-3. **CircleCI:** Organization settings → Contexts → create a context named **`release`** with
-   `GITHUB_TOKEN`, `GITHUB_USER` (the token's GitHub username) and `NPM_TOKEN`. Restrict it
-   to maintainers.
-4. After the first image is pushed, make the package public: GitHub → alephgrid → Packages →
+3. **PyPI:** create a PyPI account for the project (2FA is required) and an API token. PyPI's
+   trusted publishing (tokenless OIDC) supports GitHub Actions, GitLab CI/CD, Google Cloud and
+   ActiveState, not CircleCI (checked 7 November 2026), so the release uses a token. A token
+   scoped to one project can only be made once the project exists, and the project is created
+   by its first upload: for the first release use an account-wide token, then replace it with a
+   token scoped to `alephgrid` and revoke the first one. PyPI cannot reserve a name without an
+   upload; `alephgrid` was free on 7 November 2026.
+4. **CircleCI:** Organization settings → Contexts → create a context named **`release`** with
+   `GITHUB_TOKEN`, `GITHUB_USER` (the token's GitHub username), `NPM_TOKEN` and `PYPI_TOKEN`.
+   Restrict it to maintainers.
+5. After the first image is pushed, make the package public: GitHub → alephgrid → Packages →
    alephgrid → Package settings → Change visibility → Public.
 
 ## Each release
@@ -64,8 +80,12 @@ needs right-click → Open (or `xattr -d com.apple.quarantine alephgrid`).
 6. In CircleCI, approve `approve-publish`. Then, in parallel: the release is published, the
    image `ghcr.io/alephgrid/alephgrid:X.Y.Z` and `:latest` is pushed for amd64 and arm64, and
    the npm packages are published (the platform packages first, then `alephgrid`; already
-   published versions are skipped, so the step can be re-run).
-7. Check: `npx alephgrid@X.Y.Z --version`, `docker run --rm ghcr.io/alephgrid/alephgrid:X.Y.Z --version`.
+   published versions are skipped, so the step can be re-run), and the four wheels are
+   uploaded to PyPI (a wheel already there with the same bytes is skipped; any other file under
+   that name stops the job). PyPI versions follow PEP 440: `X.Y.Z` stays `X.Y.Z`, `X.Y.Z-rc.N`
+   becomes `X.Y.ZrcN`.
+7. Check: `npx alephgrid@X.Y.Z --version`, `uvx alephgrid@X.Y.Z --version`,
+   `docker run --rm ghcr.io/alephgrid/alephgrid:X.Y.Z --version`.
 
 If a build fails before approval, fix it on `main`, move the tag only if nothing was published
 (`git tag -d vX.Y.Z && git push --delete origin vX.Y.Z`, then tag again), and re-run step 4: the
@@ -79,4 +99,6 @@ The packaging scripts run anywhere, with a binary standing in for a release buil
 tools/release/smoke.sh target/debug/alephgrid 0.1.0
 tools/release/package.sh 0.1.0 aarch64-apple-darwin target/debug/alephgrid dist
 node tools/release/npm.mjs 0.1.0 dist npm-out      # needs all four archives in dist
+python3 tools/release/pypi.py 0.1.0 dist wheels --target aarch64-apple-darwin   # default: all four
+python3 -m venv /tmp/ag && /tmp/ag/bin/pip install wheels/*.whl && /tmp/ag/bin/alephgrid --version
 ```

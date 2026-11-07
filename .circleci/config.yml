@@ -486,6 +486,47 @@ jobs:
               (cd "$d" && npm publish --access public)
             done
 
+  release-pypi:
+    docker:
+      - image: cimg/python:3.12
+    resource_class: medium
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: PyPI wheels, skipping only our own earlier upload
+          command: |
+            v="<< pipeline.parameters.release_version >>"
+            export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)   # same commit, same wheel bytes
+            python3 tools/release/pypi.py "$v" dist pypi-out
+            # Pinned; update deliberately in its own pull request (docs/CI.md, "Release safety").
+            python3 -m pip install -q twine==7.0.0
+            python3 -m twine check --strict pypi-out/*.whl
+            upload=()
+            for w in pypi-out/*.whl; do
+              f=$(basename "$w"); pyv=$(echo "$f" | cut -d- -f2)
+              # A wheel already on PyPI is skipped only if it is exactly this file (a re-run).
+              # Anything else under that file name (someone else's upload) stops the release.
+              published=$(python3 -c 'import json, sys, urllib.error, urllib.request
+            try:
+                d = json.load(urllib.request.urlopen(f"https://pypi.org/pypi/alephgrid/{sys.argv[2]}/json"))
+            except urllib.error.HTTPError as e:
+                if e.code == 404: sys.exit(0)
+                raise
+            print(next((u["digests"]["sha256"] for u in d["urls"] if u["filename"] == sys.argv[1]), ""))' "$f" "$pyv")
+              if [ -n "$published" ]; then
+                local=$(sha256sum "$w" | cut -d" " -f1)
+                if [ "$published" = "$local" ]; then echo "$f is already published (same contents)"; continue; fi
+                echo "$f is on PyPI with other contents ($published, this build is $local): not uploading" >&2
+                exit 1
+              fi
+              upload+=("$w")
+            done
+            if [ ${#upload[@]} -eq 0 ]; then echo "every wheel is already on PyPI"; exit 0; fi
+            TWINE_USERNAME=__token__ TWINE_PASSWORD="${PYPI_TOKEN:?set PYPI_TOKEN in the release context}" \
+              python3 -m twine upload --non-interactive "${upload[@]}"
+
 workflows:
   pr:
     when:
@@ -624,6 +665,10 @@ workflows:
           requires: [approve-publish]
           filters: *on-tags
       - release-npm:
+          context: release
+          requires: [approve-publish]
+          filters: *on-tags
+      - release-pypi:
           context: release
           requires: [approve-publish]
           filters: *on-tags
