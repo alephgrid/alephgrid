@@ -33,9 +33,14 @@ PyPI accepts files up to 100 MB by default; a larger wheel needs a limit increas
 
 1. **npm:** the packages are unscoped, so no npm organization is needed: `alephgrid` (the
    launcher) and one binary package per platform, `alephgrid-linux-x64`, `alephgrid-linux-arm64`,
-   `alephgrid-darwin-arm64` and `alephgrid-darwin-x64`, all published by the npm user
-   `alephgrid`. Create a granular access token for that user that can publish those five
-   packages.
+   `alephgrid-darwin-arm64` and `alephgrid-darwin-x64`. They are owned by a maintainer's npm
+   account (two-factor authentication is required to publish) and can be shared with the
+   `alephgridhq` organization's teams. The names were claimed on 7 November 2026 with `0.0.0`
+   placeholders. Create a granular access token with read and write on those five packages,
+   no organization access, and "bypass two-factor authentication" (CI cannot answer a 2FA
+   prompt). npm restricts tokens that bypass 2FA: direct publishing with them stops in
+   January 2027, so before then the npm job must move to npm trusted publishing or another
+   supported flow (open item).
 2. **GitHub:** a token for the release and the image: a classic personal access token with
    `repo` and `write:packages` (GitHub Container Registry does not take fine-grained tokens).
 3. **PyPI:** create a PyPI account for the project (2FA is required) and an API token. PyPI's
