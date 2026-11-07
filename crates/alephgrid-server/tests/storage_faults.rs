@@ -56,7 +56,15 @@ async fn a_full_disk_fails_the_change_and_keeps_everything_acknowledged() {
         .await
         .unwrap_err();
     eprintln!("disk full error: {err}");
-    assert!(!dir.path().join(".control/reserve").exists(), "the full disk released the reserve");
+    // The reserve was given back. Read the release count, not the file: the janitor recreates
+    // the reserve as soon as the rolled-back change has freed room for it again.
+    let metrics = server.http.get(server.url("/metrics")).send().await.unwrap().text().await.unwrap();
+    let releases: u64 = metrics
+        .lines()
+        .find_map(|l| l.strip_prefix("alephgrid_disk_reserve_releases_total "))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("the release counter is exported");
+    assert_eq!(releases, 1, "the full disk released the reserve once");
     let tables: Vec<String> = ws.ok("tables", json!({})).await.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
     assert_eq!(tables, ["t"], "the failed change left nothing");
     let history = ws.ok("history", json!({ "after": 0, "limit": 1000 })).await;

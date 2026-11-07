@@ -67,6 +67,8 @@ const COLUMN_TYPES = [
 
 const IMPORT_ACCEPT = ".csv,.tsv,.txt,.parquet,.json,.jsonl,.ndjson,.gz,.xlsx";
 const SHEET_MIN_ROWS = 1000;
+/** A paste into a table that reaches no editable cell (formula columns, or past the last column). */
+const NOTHING_FOR_TABLE = "Nothing was pasted: the cells it would fill are formula columns or past the table's last column.";
 const SHEET_MIN_COLS = 26;
 const SHEET_COL_WIDTH = 104;
 
@@ -124,6 +126,9 @@ export class WorkbookScreen {
   private sheets: SheetInfo[] = [];
   private active: Active | null = null;
   private view: ViewInfo | null = null;
+  /** Settles when the table being opened has its view (or failed to open): input that
+   *  arrives meanwhile, such as a paste, waits for it instead of finding no columns. */
+  private opening: Promise<void> | null = null;
   private spec: ViewSpec = { table: "", sort: [], filters: [], hidden: [] };
   /** Saved views of the open table, and the one applied (if any). */
   private savedViews: SavedView[] = [];
@@ -1177,6 +1182,8 @@ export class WorkbookScreen {
     this.renderSnapshot();
     this.loadSavedViews();
     this.busy("Opening…");
+    let opened!: () => void;
+    const opening = this.opening = new Promise<void>((r) => (opened = r));
     try {
       this.presentation = await this.rpc.call("presentation", { table: name });
       this.spec.hidden = this.presentation.hidden;
@@ -1188,6 +1195,8 @@ export class WorkbookScreen {
       toastError(e);
     } finally {
       this.busy(null);
+      opened();
+      if (this.opening === opening) this.opening = null;
     }
     this.renderTabs();
   }
@@ -1999,6 +2008,13 @@ export class WorkbookScreen {
 
   private async paste(at: Cell, text: string, html?: string, special?: { mode: PasteMode; transpose: boolean }): Promise<void> {
     await this.clipboardWork;
+    // A table still opening has no columns yet: the paste waits for them.
+    if (this.active?.kind === "table" && this.opening) {
+      const table = this.active.name;
+      await this.opening;
+      if (this.active?.kind !== "table" || this.active.name !== table) return;
+      if (!this.view) { this.refuse("Nothing was pasted: the table could not be opened."); return; }
+    }
     // A paste special waiting for ⌘V takes this paste.
     if (!special && this.pendingPaste) { special = this.pendingPaste; this.pendingPaste = null; this.grid.clearNote(); }
     if (this.viewOnly()) return;
@@ -2030,6 +2046,7 @@ export class WorkbookScreen {
         const c = at.c + j;
         if (c < cols.length && !cols[c].formula) edits.push({ r: at.r + i, c, value: cell.value === "" ? null : cell.value });
       }));
+      if (!edits.length) { this.refuse(NOTHING_FOR_TABLE); return; }
       if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
       return;
     }
@@ -2049,6 +2066,7 @@ export class WorkbookScreen {
       const c = at.c + j;
       if (c < cols.length && !cols[c].formula) edits.push({ r: at.r + i, c, value: value === "" ? null : value });
     }));
+    if (!edits.length) { this.refuse(NOTHING_FOR_TABLE); return; }
     if (await this.commitEdits(edits)) toast(`Pasted ${formatCount(edits.length)} cells`, "success");
   }
 
