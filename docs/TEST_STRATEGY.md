@@ -75,9 +75,8 @@ failure, coordinate validation, grouped undo, the dependency check, rename rewri
 and typed conversion. Two initially survived because a second safeguard masked them. The tests
 were then strengthened, and one of them exposed a real defect: undo history was lost after
 rejected requests. On 7 Nov four mutants no longer applied (the code had moved) and were
-re-pointed; each search text must now occur once. Nine are killed; the empty-batch mutant
-survives as a known survivor because an empty edit still commits a revision (quarantined
-`empty_batch_writes_no_revision_or_history`).
+re-pointed; each search text must now occur once. All ten are killed (the empty-batch
+mutant since an empty edit stopped committing a revision).
 
 ## Tiers
 
@@ -103,15 +102,10 @@ they fail or flake; each needs an owner and a follow-up.
 
 | Kind | Where | Test or skip reason | Reason | Owner | Follow-up |
 |---|---|---|---|---|---|
-| quarantined | `crates/alephgrid-core/src/tests/fuzz.rs` | `pasted_values_never_become_formulas` | Found by the paste fuzz target (7 Nov): `-"` and `+A1` pasted from another app as values (not text) are stored as the formulas `=-"` and `=+A1`, against "formulas are never made from pasted text" | maintainers (F.04b clipboard owner) | make `paste_cells` keep values starting with `+` or `-` out of the formula parser, then remove `#[ignore]` (F.04b) |
-| quarantined | `crates/alephgrid-core/src/tests/fuzz.rs` | `pasted_text_keeps_a_leading_apostrophe` | Found by the paste fuzz target (7 Nov): text pasted as text loses a leading apostrophe (`'90s` shows as `90s`, `'` as empty); `Sheets::set_values` also copies query results into sheets, so those lose it too | maintainers (F.04b clipboard owner) | make `set_values` add the quote prefix to text starting with `'`, then remove `#[ignore]` (F.04b) |
-| quarantined | `crates/alephgrid-core/src/tests/integrity.rs` | `empty_batch_writes_no_revision_or_history` | Found while re-checking `tools/mutants.py` (7 Nov): an empty `edit` batch leaves the data alone but moves the revision on and adds a history entry, against "an empty list changes nothing"; the mutant that removes the empty-batch short-circuit survives for the same reason (reported as known) | maintainers | make an empty edit commit nothing, then remove `#[ignore]` and the mutant's known-survivor note |
 | benchmark | `crates/alephgrid-core/src/tests/table_formulas.rs` | `lookup_read_timings` | Opt-in timing run (F.06/F.T04), release build and a large table | maintainers | run by hand with `--ignored` |
 | benchmark | `crates/alephgrid-core/src/tests/table_formulas.rs` | `analyst_benchmark` | Opt-in F.T04 benchmark against its budgets | maintainers | run by hand with `--ignored` |
 | benchmark | `crates/alephgrid-server/tests/python.rs` | `bench_a_million_rows_with_100k_distinct_values` | Opt-in 8.06 timing run over a million rows | maintainers | run by hand with `--ignored` |
 | generator | `crates/alephgrid-core/src/tests/compat.rs` | `write_sample_workbook` | Writes `docs/samples/analyst-sample.xlsx`; not a check | maintainers | — |
-| platform | `web/e2e/commands.spec.ts` | "paste cannot be simulated in Playwright's Firefox" | Playwright's Firefox cannot dispatch a trusted paste; Chromium and WebKit run these tests | maintainers | re-check on Playwright upgrades |
-| platform | `web/e2e/clipboard.spec.ts` | "paste cannot be simulated in Playwright's Firefox" | As above | maintainers | re-check on Playwright upgrades |
 
 ## Commands
 

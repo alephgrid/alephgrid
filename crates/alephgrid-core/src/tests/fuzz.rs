@@ -222,7 +222,7 @@ fn any_bytes_import_or_fail_cleanly() {
 // ------------------------------------------------------------------ pasted cells
 
 fn pasted_cell() -> impl Strategy<Value = PastedCell> {
-    ("[a-zA-Z0-9 =+@'\"\t.,%$:()-]{0,10}", any::<bool>()).prop_map(|(value, text)| PastedCell { value, text, style: None })
+    ("[a-zA-Z0-9 =+@'\"\t.,%$:()-]{0,10}", any::<bool>()).prop_map(|(value, text)| PastedCell { value, text, style: None, formula: None })
 }
 
 /// Cells pasted from another app (F.04b): text cells and anything starting with `=` keep
@@ -236,7 +236,7 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
         let mut wb = Workbook::open_in_memory().unwrap();
         wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
         let width = cells.iter().map(|r| r.len()).max().unwrap() as u32;
-        let area = wb.with_sheets(|s| s.paste_cells(0, (row, column), &cells)).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
+        let area = wb.with_sheets(|s| s.paste_cells(0, (row, column), &cells, PasteMode::All)).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
         prop_assert_eq!(area, CellArea { row, column, rows: cells.len() as u32, columns: width });
         let s = wb.sheets();
         for (dr, line) in cells.iter().enumerate() {
@@ -266,23 +266,21 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
 
 /// "Formulas are never made from pasted text" (`Sheets::paste_cells`): a value pasted as a
 /// typed value (not text) that starts with `+`, `-` or `@` must not become a formula either.
-/// QUARANTINED (docs/TEST_STRATEGY.md): found by this target on 7 Nov 2026, `-"` and `+A1`
-/// pasted with `text: false` are stored as the formulas `=-"` and `=+A1`. Remove the
-/// `#[ignore]` once paste_cells keeps such values out of the formula parser.
+/// Found by this target on 7 Nov 2026 (`-"` and `+A1` were stored as formulas); fixed in
+/// `Sheets::set_values`.
 #[test]
-#[ignore]
 fn pasted_values_never_become_formulas() {
     let mut wb = Workbook::open_in_memory().unwrap();
     wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
     for value in ["-\"", "+A1", "-A1", "@SUM(1)"] {
-        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: false, style: None }]])).unwrap();
+        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: false, style: None, formula: None }]], PasteMode::All)).unwrap();
         let d = wb.sheets().cell_detail(0, 0, 0).unwrap();
         assert!(!d.input.starts_with('='), "{value:?} became the formula {:?}", d.input);
     }
     fuzz("paste_values_not_formulas", pasted_cell(), |p| {
         let mut wb = Workbook::open_in_memory().unwrap();
         wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
-        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![p.clone()]])).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
+        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![p.clone()]], PasteMode::All)).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
         let d = wb.sheets().cell_detail(0, 0, 0).unwrap();
         prop_assert!(p.value.starts_with('=') || !d.input.starts_with('='), "{:?} became the formula {:?}", p.value, d.input);
         Ok(())
@@ -290,24 +288,21 @@ fn pasted_values_never_become_formulas() {
 }
 
 /// Text pasted as text keeps every character, including a leading apostrophe (`'90s`).
-/// QUARANTINED (docs/TEST_STRATEGY.md): found by the paste target on 7 Nov 2026, the
-/// apostrophe is read as a quote prefix and dropped (`'` shows as empty, `'90s` as `90s`).
-/// `Sheets::set_values`, which also copies query results into sheets, writes the text as it
-/// is when it already reads as text. Remove the `#[ignore]` once it keeps the apostrophe.
+/// Found by the paste target on 7 Nov 2026 (the apostrophe was read as a quote prefix and
+/// dropped); fixed in `Sheets::set_values`, which also copies query results into sheets.
 #[test]
-#[ignore]
 fn pasted_text_keeps_a_leading_apostrophe() {
     let mut wb = Workbook::open_in_memory().unwrap();
     wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
     for value in ["'", "'90s", "''quoted'"] {
-        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: true, style: None }]])).unwrap();
+        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: true, style: None, formula: None }]], PasteMode::All)).unwrap();
         assert_eq!(wb.sheets().cell_detail(0, 0, 0).unwrap().display, value);
     }
-    let text = "'[a-zA-Z0-9 '=+-]{0,8}".prop_map(|value| PastedCell { value, text: true, style: None });
+    let text = "'[a-zA-Z0-9 '=+-]{0,8}".prop_map(|value| PastedCell { value, text: true, style: None, formula: None });
     fuzz("paste_leading_apostrophe", text, |p| {
         let mut wb = Workbook::open_in_memory().unwrap();
         wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
-        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![p.clone()]])).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
+        wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![p.clone()]], PasteMode::All)).map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
         prop_assert_eq!(wb.sheets().cell_detail(0, 0, 0).unwrap().display, p.value);
         Ok(())
     });

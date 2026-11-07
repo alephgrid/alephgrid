@@ -11,7 +11,7 @@ S = pathlib.Path("crates/alephgrid-core/src/sheets.rs")
 R = pathlib.Path("crates/alephgrid-core/src/reads.rs")
 mutants = [
   ("edit: skip exact-input check", W, "crate::wire::check_exact_input(col, value).map_err(|e| anyhow!(e))?;", "let _ = crate::wire::check_exact_input(col, value);", "tests::precision"),
-  ("edit: empty batch not short-circuited", W, "        if edits.is_empty() {\n            return Ok(EditOutcome { table, cells_changed: 0, rows_appended: 0, first_appended: None });\n        }\n", "", "tests::integrity", "survives until tests::integrity::empty_batch_writes_no_revision_or_history (quarantined) passes"),
+  ("edit: empty batch not short-circuited", W, "        if edits.is_empty() {\n            // Nothing to write", "        if false {\n            // Nothing to write", "tests::integrity"),
   ("edit: last write wins removed", W, "Some(&i) => cells[i].2 = value,", "Some(&_i) => cells.push((t, e.column.as_str(), value)),", "tests::integrity"),
   ("with_sheets: no reload on failure", W, "                if self.sheet_epoch != epoch {\n                    match self.load_sheets() {", "                if false {\n                    match self.load_sheets() {", "tests::sheets"),
   ("sheets: no coordinate validation", S, "            if i.row >= MAX_ROWS || i.column >= MAX_COLUMNS {", "            if false {", "tests::sheets"),

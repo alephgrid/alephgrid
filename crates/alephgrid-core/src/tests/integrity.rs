@@ -30,12 +30,9 @@ fn empty_batch_is_a_noop_on_empty_and_full_tables() {
 }
 
 /// "An empty list changes nothing" (docs/PROTOCOL.md, `edit`): no revision and no history
-/// entry either. QUARANTINED (docs/TEST_STRATEGY.md): found on 7 Nov 2026 while re-checking
-/// the mutation script; an empty batch moves the revision on and records a history entry,
-/// because `mutating` commits even though `edit_in_txn` changed nothing. Remove the
-/// `#[ignore]` once an empty edit commits nothing.
+/// entry either. Found on 7 Nov 2026 while re-checking the mutation script (an empty batch
+/// committed a revision); `Workbook::edit` now returns before starting a change.
 #[test]
-#[ignore]
 fn empty_batch_writes_no_revision_or_history() {
     let mut t = TempWb::new();
     let v = people(&mut t);
