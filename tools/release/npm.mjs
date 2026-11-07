@@ -71,7 +71,7 @@ copyFileSync(join(root, "LICENSE"), join(main, "LICENSE"));
 copyFileSync(join(root, "npm-launcher", "README.md"), join(main, "README.md"));
 writeFileSync(join(main, "package.json"), JSON.stringify({
   name: "alephgrid", ...common,
-  description: "Open-source spreadsheet for data that doesn't fit in a spreadsheet: hundreds of millions of rows, Excel formulas, SQL when you want it.",
+  description: "Open-source spreadsheet for data that doesn't fit in a spreadsheet: tens of millions of rows, Excel formulas, SQL when you want it.",
   keywords: ["spreadsheet", "duckdb", "big-data", "sql", "excel", "csv", "parquet", "self-hosted"],
   bin: { alephgrid: "bin/alephgrid.js" },
   files: ["bin/alephgrid.js", "LICENSE", "README.md"],

@@ -1,7 +1,7 @@
 # Alephgrid
 
 An open-source spreadsheet for data that doesn't fit in a spreadsheet: open CSV, Parquet,
-JSON or Excel files with hundreds of millions of rows, use Excel formulas and charts next to
+JSON or Excel files with tens of millions of rows, use Excel formulas and charts next to
 them, and SQL when you want it. It runs on your machine; your data never leaves it.
 
 ```bash

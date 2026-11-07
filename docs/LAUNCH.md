@@ -1,7 +1,7 @@
 # Launch v0.1.0
 
 What is done, what is left before the first public release, what only the project owner can
-do, and the announcement drafts. State as of 6 November 2026. Task IDs refer to
+do, and the announcement drafts. State as of 7 November 2026. Task IDs refer to
 [IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md): this page is the summary, the
 checklist is the record.
 
@@ -9,43 +9,37 @@ checklist is the record.
 
 | Area | Tasks | Where it landed |
 |---|---|---|
-| Security remediation (audit run-1) and the run-2 re-audit fixes | L.01, SEC.01–SEC.14, SEC.T01 | PRs #14, #52 |
+| Security remediation (audit run-1) and the run-2 and run-3 re-audit fixes | L.01, SEC.01–SEC.14, SEC.T01 | PRs #14, #52, #66 |
 | Cleanup of existing features: Analyze pane, header filters, find bar, charts, dialogs, first run | L.02, U.15–U.20, U.T04 | PRs #15, #18 |
 | Sheet completeness: formatting, number formats, layout, merges, sort and filter, tabs, zoom, charts, rules, comments | L.03, S.01–S.12 | PRs #16, #17 |
 | Team screens: Share, space settings, administration; state inventory; leave guard | L.05, U.02, U.08–U.11 | PRs #20, #23 |
-| MCP for local workbooks: tools, receipts, approved proposals, Agent connections UI; listed in the MCP registry | most of L.04 | PRs #19, #21, #22, #45, #46 |
-| Launch UI, first part: fill handle, Mod+A region, paste-special menu, functions side panel, chart previews, disabled-command reasons, new workbooks open into a sheet, spreadsheet-first journey test | part of L.05b | PRs #26–#31 |
-| CI on CircleCI, run on demand | 9.16 | PR #33; fixes from its first runs in #34, #36, #39, #40 |
-| Release pipeline: binaries, draft release, approval, then GitHub Releases, Docker, npm and PyPI | part of 9.11 | PRs #49–#51, PyPI wheels added 7 Nov (not yet run) |
+| MCP for local workbooks: tools, receipts, approved proposals, Agent connections UI; listed in the MCP registry; checked with MCP Inspector and Claude Code | most of L.04 | PRs #19, #21, #22, #45, #46, #65 |
+| Launch UI: fill handle, Mod+A region, paste-special menu, functions side panel, chart previews, disabled-command reasons, new workbooks open into a sheet, spreadsheet-first journey test; clipboard exchange with other spreadsheets; the README-screenshot bugs (L.05c) | most of L.05b, L.05c | PRs #26–#31, #56, #61–#63, #67, #68, #70 |
+| CI on CircleCI, run on demand, with pr, nightly and release tiers | 9.16, part of 9.10 and 9.14 | PR #33; fixes from its first runs in #34, #36, #39, #40; tiers in #69 |
+| Release pipeline: binaries, SBOMs, third-party notices, draft release, approval, then GitHub Releases, Docker, npm and PyPI | part of 9.08 and 9.11 | PRs #49–#51, #57, #59, #64; never run yet |
 | Public website at alephgrid.dev: landing, install, releases, docs, blog, llms.txt, MCP manifest | L.07 (part) | PRs #35, #37, #38, #41–#44 |
-| Docs: README, security and conduct policies, screenshots; review against the code | L.07 (part) | PR #32 and this review |
+| Docs: README, security and conduct policies, screenshots; review against the code and the shipped install channels | L.07 (part) | PR #32, the 6 Nov review, the docs-reconcile PR |
 
 ## 2. Left before release
 
 ### Product
 
-* **Bugs from the README screenshots (L.05c, a–f):** table formulas refuse mixed references
-  such as `B$1`; sheet charts skip currency- and percent-formatted cells; the Analyze result
-  chart is clipped; Analyze's "Refer to values as" hint goes stale; the Hub footer wraps badly;
-  Mod+G does not open Go to while the grid has focus. Each fix starts with a failing test.
-* **Launch UI (L.05b, U.14 gate):** shared component and state rules (U.11a); a searchable sheet
-  list and a pass over every toolbar control (U.04a); the Hub loading placeholder and a test of
-  the no-access state (U.03b); in the function panel, syntax highlighting and line errors, typed
-  blank/empty/error test inputs (needs a protocol change), Cancel for a running test and impact
-  shown before Activate (U.06b–e); filtered-row select-all, formatted paste from other apps,
-  named date series and copy between sheets (F.04a–d); the U.T05 and U.T06 checks, a real
-  screen-reader pass (ACCESSIBILITY_TESTING.md) and a usability review.
-* **MCP (L.04):** check with real clients (MCP Inspector and at least one chat client, M.03),
-  then evaluate real questions through them (M.T02).
-* **Security gate (SEC.15):** run-2's seven deferred units, the audit's owner checks on a
-  disposable deployment, and a green `full` CI run.
+* **Launch UI (L.05b, U.14 gate):** copying HTML into other spreadsheet apps checked by hand, a
+  real Mod+V in Firefox and Windows browsers (F.04b); the manual screen-reader pass
+  (ACCESSIBILITY_TESTING.md, U.T06); a usability review with a real user (U.T07); then the U.14
+  gate.
+* **MCP (L.04):** Claude Desktop and ChatGPT checks (owner, M.03); whether to bundle DuckDB's ICU
+  extension so time-zone functions work (M.T02).
+* **Security gate (SEC.15):** the owner decisions in the run-3 report, run-2's owner checks on a
+  disposable deployment, and a green `nightly` CI run.
 
 ### Packaging and operations (L.06, phase 9)
 
-Docker volume smoke tests and Compose examples (9.02, 9.03), backup and restore on a clean
-second host (9.04), release-build benchmarks and a published capacity envelope (9.05, 9.06,
-9.15), third-party notices (9.08), CI tiers and structured logs (9.10, 9.13, 9.14), signatures
-and an SBOM (9.11), the 9.T01–9.T03 checks and the 9.12 gate; then the L.07 launch review and
+Running the Docker volume smoke tests and both Compose examples on a Docker host (9.02, 9.03),
+backup and restore on a clean second host (9.04), release-build benchmarks and a published
+capacity envelope (9.05, 9.06, 9.15), the provenance review and the NOTICE copyright line (9.08),
+the first CircleCI runs of the nightly and release tiers and structured logs (9.10, 9.13, 9.14),
+the first real release run (9.11; signatures deferred), the 9.T01–9.T03 checks and the 9.12 gate; then the L.07 launch review and
 the L.08 gate on a clean machine. [OPERATIONS.md](OPERATIONS.md) and
 [RELEASING.md](RELEASING.md) describe the current state.
 
@@ -68,8 +62,10 @@ Things only the project owner can do (accounts, settings, decisions):
 * **Release safety** ([CI.md](CI.md#release-safety)): keep "Pass secrets to forked PRs" off,
   add a tag ruleset for `v*`, and reserve the npm platform package names.
 * **CircleCI:** apply for the open-source plan.
-* **GitHub settings:** turn on private vulnerability reporting (SECURITY.md relies on it) and
-  Discussions (Announcements, Q&A, Ideas, Show and tell); protect `main`; set topics
+* **GitHub settings:** private vulnerability reporting is on (checked 7 November). Turn on
+  Discussions (Announcements, Q&A, Ideas, Show and tell); until then the README and the issue
+  template send questions to issues. Change the repository description, which says "billions of
+  rows", to match the measured scale in the README. Protect `main`; set topics
   (`spreadsheet`, `duckdb`, `big-data`, `sql`, `excel`, `self-hosted`, `rust`, `mcp`) and labels
   (`bug`, `feature`, `docs`, `good first issue`, `help wanted`, `performance`, `security`); upload
   a 1280×640 social preview image (logo and the hero screenshot).
@@ -89,7 +85,7 @@ Things only the project owner can do (accounts, settings, decisions):
 4. Add the release and CI badges and install-from-release steps to the README; regenerate the
    screenshots with `web/scripts/readme-screenshots.mjs` if the UI changed (add an Analyze
    screenshot once its chart fits).
-5. Publish the announcement below and pin it in Discussions.
+5. Publish the announcement below and pin it in Discussions (once they are on).
 
 ## 5. Repository files
 
@@ -98,8 +94,8 @@ Things only the project owner can do (accounts, settings, decisions):
 | `README.md`, `CHANGELOG.md` (v0.1.0 notes under "Unreleased"), `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` (contact conduct@alephgrid.dev), `LICENSE` (Apache-2.0) | Present |
 | `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`, `.circleci/config.yml` | Present |
 | `docs/` | Indexed in [docs/README.md](README.md) |
-| `NOTICE` and third-party notices | Missing (9.08) |
-| Benchmarks page | Missing (9.05) |
+| `NOTICE`, `THIRD-PARTY-NOTICES.md` | Present, generated by `tools/licenses.py`; copyright line to confirm (9.08) |
+| Benchmarks | Tool present (`tools/bench/bench.mjs`, [OPERATIONS.md](OPERATIONS.md#benchmarks)); results not published (9.05) |
 
 ## 6. Announcement drafts
 
@@ -122,6 +118,6 @@ maintained there.
 
 ### Short post (social, forums)
 
-> Alephgrid is an open-source, self-hosted spreadsheet for hundreds of millions of rows: Excel
+> Alephgrid is an open-source, self-hosted spreadsheet for tens of millions of rows: Excel
 > formulas, charts and formatting next to big tables, `XLOOKUP` over a whole table, SQL when
 > you want it, MCP for agents. One binary, Apache-2.0. https://alephgrid.dev
