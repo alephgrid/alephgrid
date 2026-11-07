@@ -342,6 +342,39 @@ fn readers_are_not_blocked_by_a_running_change() {
     assert_eq!(reader.fetch(v, 0, 1, 0, None).unwrap().rows, vec![vec![json!(null)]]);
 }
 
+/// The writer changes the sheet model in place before it commits. A reader asking for the
+/// sheets meanwhile waits for the outcome: it never sees a change that is then taken back
+/// (CI: another connection saw a freeze that the author's leaving then rolled back).
+#[test]
+fn readers_see_only_committed_sheet_changes() {
+    let mut t = TempWb::new();
+    let sheet = t.wb.with_sheets(|s| s.create("S")).unwrap().index;
+    let reader = t.wb.reader().unwrap();
+    let frozen = |r: &Reader| r.sheets().info(sheet).unwrap().frozen_columns;
+    for commit in [false, true] {
+        let (changed_tx, changed_rx) = std::sync::mpsc::channel();
+        let read = std::thread::scope(|s| {
+            let wb = &mut t.wb;
+            let writer = s.spawn(move || {
+                wb.mutate(Mutation { op: "freeze", ..Default::default() }, None, |wb| {
+                    wb.with_sheets(|s| s.freeze(sheet, 0, 1))?;
+                    changed_tx.send(()).unwrap();
+                    // The change is in the model; the transaction stays open a while.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if commit { Ok(Value::Null) } else { Err(anyhow::anyhow!("a later step failed")) }
+                })
+            });
+            changed_rx.recv().unwrap();
+            let read = frozen(&reader);
+            assert_eq!(writer.join().unwrap().is_ok(), commit);
+            read
+        });
+        // Before readers waited, this read 1 in both cases.
+        assert_eq!(read, if commit { 1 } else { 0 }, "commit = {commit}");
+        assert_eq!(frozen(&reader), read);
+    }
+}
+
 #[test]
 fn closed_and_replaced_permutations_are_dropped() {
     let mut t = TempWb::new();

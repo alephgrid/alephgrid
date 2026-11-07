@@ -74,7 +74,10 @@ test("no-SQL gate: import, join, summarize, chart, save and reopen", async ({ pa
 test("pivot values are picked from the column, and charts stay bounded", async ({ page }) => {
   const wb = await server.createWorkbook("Bounded analysis"); const ws = await server.connect(wb);
   await ws.call("create_table_from_query", { name: "many", sql: "SELECT i, CASE WHEN i%2=0 THEN 'even' ELSE 'odd' END AS category FROM range(600) t(i)" });
-  await page.goto(`${server.url}/w/${wb}`); await page.getByRole("button", { name: "Analyze", exact: true }).click();
+  await page.goto(`${server.url}/w/${wb}`);
+  // Opening the table brings its tools into the toolbar, which moves Analyze: click it after.
+  await expect(page.getByRole("grid", { name: "Table many" })).toBeVisible();
+  await page.getByRole("button", { name: "Analyze", exact: true }).click();
   const d = pane(page);
   const rows = d.getByRole("region", { name: "Rows" });
   await expect(rows).toContainText("category");
@@ -150,6 +153,24 @@ test("find bar: match count on the server, next and previous, replace with previ
   await page.getByRole("search", { name: "Find in sales" }).getByRole("searchbox", { name: "Find" }).press("Escape");
   await expect(page.getByRole("search", { name: "Find in sales" })).toBeHidden();
   await expect(page.locator(".grid-host")).toBeFocused();
+});
+
+test("find bar: a preview right after typing keeps its count", async ({ page }) => {
+  const wb = await server.createWorkbook("Quick preview");
+  await server.api(`/api/workbooks/${wb}/import?filename=sales.csv`, { method: "POST", body: sales });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.locator(".footer")).toContainText("4 rows");
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+Shift+h");
+  const bar = page.getByRole("search", { name: "Find in sales" });
+  await bar.getByRole("textbox", { name: "Replace with" }).fill("east");
+  // Preview before the search for the typed text has run (it waits for typing to pause).
+  await bar.getByRole("searchbox", { name: "Find" }).fill("north");
+  await bar.getByRole("button", { name: "Preview" }).click();
+  // The search still moves to the first match, and the preview's count is what stays.
+  await expect(page.locator(".cell-ref")).toHaveText("region · 1");
+  await expect(bar.getByRole("status")).toHaveText("2 cells will change in region");
+  await expect(bar.getByRole("button", { name: "Replace all" })).toBeEnabled();
 });
 
 test("presentation persists, preserves exact display and freezes hit testing", async ({ page }) => {

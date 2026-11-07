@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use anyhow::{anyhow, bail, Result};
 use duckdb::Connection;
@@ -54,6 +54,27 @@ pub struct Shared {
     /// Stops a running sheet evaluation when set (SEC.07); outside the sheets' lock so a
     /// deadline can reach it while an evaluation holds that lock.
     pub(crate) sheet_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// The sheet model's change count when the writer's open transaction began
+    /// ([`NO_TRANSACTION`] while none is open). The writer changes the model in place before
+    /// it commits, so a reader that finds the model changed since then waits for the commit
+    /// (or the rollback, which reloads the model) on `sheets_settled`: readers never see a
+    /// sheet change that may still be taken back.
+    sheets_base: AtomicU64,
+    sheets_settled: Condvar,
+}
+
+const NO_TRANSACTION: u64 = u64::MAX;
+
+/// Marks the writer's transaction open for [`Shared::committed_sheets`]; dropping it (after
+/// the commit, or after the rollback has reloaded the model) lets waiting readers go on.
+pub(crate) struct SheetTransaction(Arc<Shared>);
+
+impl Drop for SheetTransaction {
+    fn drop(&mut self) {
+        let _sheets = self.0.sheets.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.sheets_base.store(NO_TRANSACTION, Ordering::SeqCst);
+        self.0.sheets_settled.notify_all();
+    }
 }
 
 /// Grouped lookup relations built into scratch tables, keyed by their SQL. An entry is valid
@@ -190,7 +211,28 @@ impl Shared {
             lookups: Mutex::new(LookupCache::default()),
             results: crate::results::ResultsStore::new(),
             checked_formulas: Mutex::new(Default::default()),
+            sheets_base: AtomicU64::new(NO_TRANSACTION),
+            sheets_settled: Condvar::new(),
         }
+    }
+
+    /// The writer opened a transaction: sheet changes from here on are not committed yet.
+    pub(crate) fn begin_sheet_transaction(self: &Arc<Self>) -> SheetTransaction {
+        let sheets = self.sheets.lock().unwrap_or_else(|e| e.into_inner());
+        self.sheets_base.store(sheets.changes(), Ordering::SeqCst);
+        SheetTransaction(self.clone())
+    }
+
+    /// The sheet model as last committed, for readers: while the writer's open transaction
+    /// has changed it, wait until that transaction commits or is taken back.
+    pub(crate) fn committed_sheets(&self) -> MutexGuard<'_, Sheets> {
+        let sheets = self.sheets.lock().unwrap_or_else(|e| e.into_inner());
+        self.sheets_settled
+            .wait_while(sheets, |s| {
+                let base = self.sheets_base.load(Ordering::SeqCst);
+                base != NO_TRANSACTION && s.changes() != base
+            })
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn catalog(&self) -> std::sync::MutexGuard<'_, Catalog> {

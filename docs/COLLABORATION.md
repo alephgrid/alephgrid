@@ -63,6 +63,10 @@ replaced.
   remembers the values it wrote until a fetch started after they committed replaces them. A
   quick second edit of the same cell is therefore based on the user's own value, not taken for
   someone else's change. Rows it just appended are edited by record (`first_appended`).
+* Reads see committed changes only. The writer changes the sheet model in memory before it
+  commits; a sheet read arriving meanwhile waits for the commit (or the rollback), so no
+  connection sees a sheet change that is then taken back, for instance because its author
+  left while it was being written (running work of a session that ends is interrupted).
 * Work a session had queued or running when its workbook closed (idle, restart, shutdown) and
   that did not commit answers `unavailable`, never `cancelled`, so the client sends it again.
   `cancelled` is only ever the answer to the client's own `cancel`.

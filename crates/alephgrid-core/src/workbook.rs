@@ -339,6 +339,9 @@ impl Workbook {
                 return Err(e);
             }
         };
+        // Readers wait for this transaction once it changes the sheet model; the guard is
+        // dropped on return, after the commit or after a rollback reloaded the model.
+        let _sheets = self.shared.begin_sheet_transaction();
         // SQL changes may not add validation violations (F.12); edits are checked per value.
         let before = if m.op == "sql_change" { crate::tools::all_violations(&self.conn).ok() } else { None };
         // A panic inside the change (a bug reached by stored or typed content) is taken back
@@ -2091,8 +2094,10 @@ impl Reader {
         storage::history(&self.conn, after, limit)
     }
 
+    /// The sheet model as committed: a sheet change the writer has not committed yet is
+    /// waited for, never shown (it may still be taken back).
     pub fn sheets(&self) -> MutexGuard<'_, Sheets> {
-        self.shared.sheets.lock().unwrap_or_else(|e| e.into_inner())
+        self.shared.committed_sheets()
     }
 
     pub fn interrupt_handle(&self) -> Arc<duckdb::InterruptHandle> {

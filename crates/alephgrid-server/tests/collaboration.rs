@@ -503,3 +503,35 @@ async fn undo_is_kept_across_restarts_for_recent_changes_of_bounded_size() {
     assert_eq!(a.ok("view_info", json!({ "view_id": vbig })).await["row_count"], 0);
     server.stop().await;
 }
+
+/// A sheet change another connection has already seen is committed: it stays when the
+/// connection that made it leaves at once (a page reload while "Saving…"). Readers used to
+/// see the shared sheet model while the change was still being written; the session end
+/// then interrupted that write and took the change back (CI, WebKit: a freeze and a redo
+/// confirmed by the test's own connection were gone after a reload).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sheet_change_another_connection_saw_survives_its_author_leaving() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("seen").await;
+    let mut b = server.ws(&wb).await;
+    b.ok("sheet_create", json!({ "name": "S" })).await;
+    // A large sheet makes saving the model (every sheet change does) take a while, so the
+    // author can leave while the change is being written.
+    let inputs: Vec<Value> = (0..200_000u32).map(|i| json!({ "row": i / 20, "column": i % 20, "value": format!("text {i}") })).collect();
+    b.ok("sheet_set", json!({ "sheet": 0, "inputs": inputs })).await;
+    let frozen = |sheets: &Value| sheets[0]["frozen_columns"].as_u64().unwrap_or(0);
+    // The author leaves at a different moment of the write each time.
+    for attempt in 0..30u64 {
+        let columns = attempt % 2 + 1;
+        let mut a = server.ws(&wb).await;
+        a.send("sheet_freeze", json!({ "sheet": 0, "columns": columns })).await;
+        while frozen(&b.ok("sheets", json!({})).await) != columns {}
+        tokio::time::sleep(std::time::Duration::from_millis(attempt * 3)).await;
+        drop(a);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(frozen(&b.ok("sheets", json!({})).await), columns, "attempt {attempt}: a change another connection saw was taken back");
+    }
+    b.close().await;
+    server.stop().await;
+}

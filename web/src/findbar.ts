@@ -80,7 +80,10 @@ export class FindBar {
       el("div", { class: "find-main" }, toggle, this.input, this.count, this.caseBtn, this.wholeBtn, this.formulaBtn, this.allBtn, prev, next, close),
       this.replaceRow);
 
-    this.input.addEventListener("input", () => { window.clearTimeout(this.timer); this.timer = window.setTimeout(() => this.refresh(), 200); });
+    this.input.addEventListener("input", () => {
+      window.clearTimeout(this.timer);
+      this.timer = window.setTimeout(() => { this.timer = 0; void this.refresh(); }, 200);
+    });
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); void this.step(e.shiftKey); }
     });
@@ -103,12 +106,17 @@ export class FindBar {
     preview.addEventListener("click", async () => {
       const r = this.provider?.replace;
       if (!r || !this.input.value) return;
+      // The search for what was just typed runs first; its count must not then replace
+      // the preview's (CI: "2 matches" arrived after "2 cells will change").
+      await this.flush();
+      const mine = ++this.seq;
       try {
         const n = await r.preview(this.column.value, this.input.value, this.replacement.value);
+        if (mine !== this.seq) return;
         this.count.textContent = n === 0 ? "No cell to replace" : `${formatCount(n)} cells will change in ${this.column.value}`;
         this.applyBtn.disabled = n === 0 || n > 10_000;
         if (n > 10_000) this.count.textContent = `${formatCount(n)} cells: at most 10,000 can be replaced at once`;
-      } catch (e) { toastError(e, this.el); }
+      } catch (e) { if (mine === this.seq) toastError(e, this.el); }
     });
     this.applyBtn.addEventListener("click", async () => {
       const r = this.provider?.replace;
@@ -160,6 +168,14 @@ export class FindBar {
       if (here && cols.includes(here)) this.column.value = here;
       if (!cols.length) this.count.textContent = "Replace works in text columns";
     }
+  }
+
+  /** Run the search for the typed text now if it is still waiting for typing to pause. */
+  private async flush(): Promise<void> {
+    if (!this.timer) return;
+    window.clearTimeout(this.timer);
+    this.timer = 0;
+    await this.refresh();
   }
 
   /** Count the matches and move to the first one from the current cell. */
