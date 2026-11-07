@@ -53,14 +53,17 @@ Container images, npm and PyPI stay marked as not yet published until the releas
 
 Things only the project owner can do (accounts, settings, decisions):
 
-* **Release secrets** ([RELEASING.md](RELEASING.md), "Once"): a granular npm token from the
-  `alephgrid` account, a PyPI API token (account-wide for the first upload, which creates the
+* **Release secrets** ([RELEASING.md](RELEASING.md), "Once"): done 7 November: a granular npm
+  token, a PyPI API token (account-wide for the first upload, which creates the
   `alephgrid` project; then a project-scoped one), a GitHub token with `repo` and
   `write:packages`, and the CircleCI `release` context holding them, restricted to maintainers.
-* **PyPI name:** create the PyPI account now; the name `alephgrid` (free on 7 November) is
-  claimed by the first upload, since PyPI has no reservation without one.
-* **Release safety** ([CI.md](CI.md#release-safety)): keep "Pass secrets to forked PRs" off,
-  add a tag ruleset for `v*`, and reserve the npm platform package names.
+  Before January 2027, move the npm job off 2FA-bypass tokens (see RELEASING.md).
+* **PyPI name:** the account exists (7 November); the name `alephgrid` (free that day) is
+  claimed by the first upload, since PyPI has no reservation without one. After it, replace
+  the account-wide `PYPI_TOKEN` with one scoped to `alephgrid`.
+* **Release safety** ([CI.md](CI.md#release-safety)): done 7 November: "Pass secrets to forked
+  PRs" is off, the `release tags` ruleset protects `v*` (admins bypass), and the five npm names
+  are claimed.
 * **CircleCI:** apply for the open-source plan.
 * **GitHub settings:** private vulnerability reporting is on (checked 7 November). Turn on
   Discussions (Announcements, Q&A, Ideas, Show and tell); until then the README and the issue
