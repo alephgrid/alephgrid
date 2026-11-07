@@ -37,6 +37,8 @@ type Layout = (Vec<String>, Vec<(String, String, bool)>);
 /// tables can tell real circular references from tables that merely look each other up.
 pub(crate) struct Graph {
     deps: HashMap<Node, Vec<Node>>,
+    /// For each table, the other tables its spreadsheet formulas name (lookups).
+    tables: HashMap<String, std::collections::HashSet<String>>,
 }
 
 impl Graph {
@@ -50,6 +52,20 @@ impl Graph {
             }
         }
         seen
+    }
+
+    /// `table` and every table its formula columns read, directly or through other tables.
+    fn tables_reached(&self, table: &str) -> std::collections::HashSet<String> {
+        let mut reached = std::collections::HashSet::from([table.to_string()]);
+        let mut stack = vec![table.to_string()];
+        while let Some(t) = stack.pop() {
+            for to in self.tables.get(&t).into_iter().flatten() {
+                if reached.insert(to.clone()) {
+                    stack.push(to.clone());
+                }
+            }
+        }
+        reached
     }
 
     /// A dependency path from `deps` (a new formula's references) to `target`, if any.
@@ -83,11 +99,48 @@ pub(crate) struct Build {
     graph: std::cell::OnceCell<Graph>,
     /// Tables read by each relation being built, innermost last.
     reads: std::cell::RefCell<Vec<std::collections::BTreeSet<String>>>,
+    /// Lookup relations already built in this build, by table and the in-progress columns
+    /// that can change them (see [`Build::relation_key`]). Without it, tables that look each
+    /// other up in a chain are rebuilt once per path through the chain: exponential work.
+    relations: std::cell::RefCell<HashMap<(String, Vec<Node>), crate::table_formula::Relation>>,
+    /// Table relations built (`base_select_in` calls), for tests.
+    built: std::cell::Cell<usize>,
 }
 
 impl Build {
     pub(crate) fn new() -> Self {
-        Build { in_progress: std::cell::RefCell::new(Vec::new()), graph: std::cell::OnceCell::new(), reads: std::cell::RefCell::new(Vec::new()) }
+        Build {
+            in_progress: std::cell::RefCell::new(Vec::new()),
+            graph: std::cell::OnceCell::new(),
+            reads: std::cell::RefCell::new(Vec::new()),
+            relations: std::cell::RefCell::new(HashMap::new()),
+            built: std::cell::Cell::new(0),
+        }
+    }
+
+    fn graph(&self, db: &Db<'_>) -> Result<&Graph> {
+        if let Some(g) = self.graph.get() {
+            return Ok(g);
+        }
+        let g = db.graph()?;
+        Ok(self.graph.get_or_init(|| g))
+    }
+
+    /// What `table`'s relation depends on here: the table, and the in-progress columns of
+    /// the tables its relation reaches (itself and, through its formulas, every table it
+    /// looks up). Only those decide which of its columns read as circular.
+    fn relation_key(&self, db: &Db<'_>, table: &str) -> Result<(String, Vec<Node>)> {
+        let table = table.to_lowercase();
+        let reached = self.graph(db)?.tables_reached(&table);
+        let mut nodes: Vec<Node> = self.in_progress.borrow().iter().filter(|(t, _)| reached.contains(t)).cloned().collect();
+        nodes.sort();
+        nodes.dedup();
+        Ok((table, nodes))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn relations_built(&self) -> usize {
+        self.built.get()
     }
 }
 
@@ -107,7 +160,16 @@ impl crate::table_formula::Relations for TableRelations<'_, '_> {
     fn relation(&self, table: &str) -> std::result::Result<Option<crate::table_formula::Relation>, String> {
         let found = storage::user_tables(self.db.conn).map_err(|e| e.to_string())?.into_iter().find(|t| t.eq_ignore_ascii_case(table));
         let Some(actual) = found else { return Ok(None) };
-        let (sql, reads) = if actual.eq_ignore_ascii_case(self.own) {
+        let own = actual.eq_ignore_ascii_case(self.own);
+        let key = if own { None } else { Some(self.build.relation_key(self.db, &actual).map_err(|e| e.to_string())?) };
+        if let Some(hit) = key.as_ref().and_then(|k| self.build.relations.borrow().get(k).cloned()) {
+            // As if built again: the relation being built reads what this one reads.
+            if let Some(parent) = self.build.reads.borrow_mut().last_mut() {
+                parent.extend(hit.reads.iter().cloned());
+            }
+            return Ok(Some(hit));
+        }
+        let (sql, reads) = if own {
             (self.own_select.clone(), vec![actual.to_lowercase()])
         } else {
             self.db.base_select_tracked(&actual, self.build).map_err(|e| e.to_string())?
@@ -115,7 +177,11 @@ impl crate::table_formula::Relations for TableRelations<'_, '_> {
         let described = self.db.describe(&sql).map_err(|e| e.to_string())?;
         let errors = described.iter().filter_map(|c| c.name.strip_prefix(ERROR_PREFIX).map(|n| (n.to_string(), c.name.clone()))).collect();
         let columns = described.into_iter().filter(|c| !is_internal(&c.name)).map(|c| (c.name, c.sql_type)).collect();
-        Ok(Some(crate::table_formula::Relation { sql, columns, errors, reads }))
+        let relation = crate::table_formula::Relation { sql, columns, errors, reads };
+        if let Some(k) = key {
+            self.build.relations.borrow_mut().insert(k, relation.clone());
+        }
+        Ok(Some(relation))
     }
 
     fn cell(&self, cell: &crate::table_formula::CellRef) -> std::result::Result<Option<crate::table_formula::CellValue>, String> {
@@ -282,8 +348,17 @@ impl Db<'_> {
             layouts.insert(t.to_lowercase(), self.layout(&t)?);
         }
         let mut deps = HashMap::new();
+        let mut tables: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
         for (t, (order, formulas)) in &layouts {
             for (k, (name, f, sheet)) in formulas.iter().enumerate() {
+                if *sheet {
+                    use crate::table_formula::Reference;
+                    let named = crate::table_formula::references(f).unwrap_or_default().into_iter().filter_map(|r| match r {
+                        Reference::Column { table, .. } | Reference::Table { table, .. } => Some(table.to_lowercase()),
+                        _ => None,
+                    });
+                    tables.entry(t.clone()).or_default().extend(named);
+                }
                 let out = if *sheet {
                     // A formula that no longer parses reads nothing (it shows #REF!).
                     self.sheet_deps(t, f, &layouts).unwrap_or_default()
@@ -294,7 +369,7 @@ impl Db<'_> {
                 deps.insert((t.clone(), name.to_lowercase()), out);
             }
         }
-        Ok(Graph { deps })
+        Ok(Graph { deps, tables })
     }
 
     /// For each table (lowercase), the other tables whose formulas read it directly. Only
@@ -445,6 +520,7 @@ impl Db<'_> {
     /// Build `table`'s relation within `build`: formula columns that would be circular
     /// here (see [`Build`]) show #REF!, keeping their place so column numbers stay valid.
     fn base_select_in(&self, table: &str, build: &Build) -> Result<String> {
+        build.built.set(build.built.get() + 1);
         // Qualified, so a CTE that shadows the table (see `expand_query`) can read it.
         let mut select = format!("SELECT * FROM main.{}", ident(table));
         let sheet = self.sheet_formulas(table)?;
@@ -454,8 +530,7 @@ impl Db<'_> {
             let circular = {
                 let in_progress = build.in_progress.borrow();
                 !in_progress.is_empty() && (in_progress.contains(&node) || {
-                    let graph = match build.graph.get() { Some(g) => g, None => { let g = self.graph()?; build.graph.get_or_init(|| g) } };
-                    graph.closure(std::slice::from_ref(&node)).iter().any(|n| in_progress.contains(n))
+                    build.graph(self)?.closure(std::slice::from_ref(&node)).iter().any(|n| in_progress.contains(n))
                 })
             };
             if circular {
