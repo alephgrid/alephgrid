@@ -244,6 +244,8 @@ export function codeEditor(label: string, onInput: () => void): CodeEditor {
     const wasEscaped = escaped;
     if (e.key !== "Shift") escaped = false;
     if (e.isComposing) return;
+    // Read-only (a viewer, U.T06): Tab moves on and nothing below may change the text.
+    if (textarea.readOnly) return;
     if (mod && !e.altKey && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y")) {
       e.preventDefault(); e.stopPropagation();
       if (e.key.toLowerCase() === "y" || e.shiftKey) restore(redo, undo); else restore(undo, redo);

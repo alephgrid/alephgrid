@@ -158,22 +158,41 @@ impl Sheets {
     }
 }
 
-/// `text` with every case-insensitive occurrence of `find` replaced.
+/// `text` with every case-insensitive occurrence of `find` replaced. Lowercasing can change
+/// a character's length (`İ` → `i̇`, `ẞ` → `ß`), so a match in the lowercased text is mapped
+/// back through the characters it came from; one that starts or ends inside a character's
+/// lowercase form is not a match. Never slices `text` off a character boundary (run-3).
 fn replace_any_case(text: &str, find: &str, with: &str) -> String {
-    let lower = text.to_lowercase();
-    let needle = find.to_lowercase();
-    if needle.is_empty() || lower.len() != text.len() {
-        // Lowercasing changed byte lengths (rare scripts): fall back to exact replacement.
-        return text.replace(find, with);
+    let needle: String = find.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return text.to_string();
     }
-    let mut out = String::new();
-    let mut i = 0;
-    while let Some(p) = lower[i..].find(&needle) {
-        out.push_str(&text[i..i + p]);
-        out.push_str(with);
-        i += p + needle.len();
+    // `lower`, and for each of its bytes the byte offset in `text` of the character it came from.
+    let mut lower = String::with_capacity(text.len());
+    let mut origin = Vec::with_capacity(text.len() + 1);
+    for (i, ch) in text.char_indices() {
+        let start = lower.len();
+        lower.extend(ch.to_lowercase());
+        origin.resize(origin.len() + (lower.len() - start), i);
     }
-    out.push_str(&text[i..]);
+    origin.push(text.len());
+    // A byte of `lower` that begins one character's lowercase form.
+    let starts_char = |k: usize| k == 0 || k == lower.len() || origin[k - 1] != origin[k];
+    let mut out = String::with_capacity(text.len());
+    let (mut copied, mut at) = (0, 0);
+    while let Some(p) = lower[at..].find(&needle).map(|p| p + at) {
+        let end = p + needle.len();
+        if starts_char(p) && starts_char(end) {
+            out.push_str(&text[copied..origin[p]]);
+            out.push_str(with);
+            copied = origin[end];
+            at = end;
+        } else {
+            // Inside a character's lowercase form: look again from the next character.
+            at = p + lower[p..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    out.push_str(&text[copied..]);
     out
 }
 

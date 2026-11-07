@@ -30,6 +30,12 @@
       "notes": "also pnpm dlx / yarn dlx / bunx"
     },
     {
+      "id": "pypi",
+      "name": "PyPI — uvx alephgrid",
+      "published": false,
+      "notes": "also pipx install / pip install; wheels for Linux (glibc 2.31+) and macOS 11+"
+    },
+    {
       "id": "docker",
       "name": "Docker — ghcr.io/alephgrid/alephgrid",
       "platforms": ["linux/amd64", "linux/arm64"],

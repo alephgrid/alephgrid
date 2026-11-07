@@ -29,7 +29,7 @@ import type {
 } from "./types";
 import { quoteIdent } from "./sqltext";
 import { SqlWorkspace } from "./sqlworkspace";
-import { closeMenu, confirmDialog, disabledFor, el, formDialog, openModal, showMenu, toast, toastError, type MenuItem } from "./ui";
+import { closeMenu, confirmDialog, disabledFor, el, formDialog, openModal, refusal, showMenu, toast, toastError, type MenuItem } from "./ui";
 import { sheetList, type SheetListItem } from "./sheetlist";
 import { forViewer, VIEW_ONLY } from "./roles";
 import { brandMark, icon, type IconName } from "./icons";
@@ -377,6 +377,7 @@ export class WorkbookScreen {
 
   private setStatus(s: "connecting" | "open" | "closed" | "paused"): void {
     this.connection = s;
+    this.functions?.setConnection(s === "open" ? "open" : s === "paused" ? "paused" : "closed");
     this.statusDot.className = `status-dot status-${s}`;
     this.statusDot.title = s === "open" ? "Connected" : s === "connecting" ? "Connecting…" : s === "paused" ? "Paused — resumes when you continue" : "Disconnected — retrying";
     this.renderStatus();
@@ -930,14 +931,13 @@ export class WorkbookScreen {
       items.push(
         { label: `Update “${current.name}”`, disabled: !this.savedViewModified() && "No changes to save", action: () => this.saveView(current.id, current.name) },
         { label: `Rename “${current.name}”…`, action: async () => {
-          const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename");
-          if (!v) return;
-          try { this.currentSaved = await this.rpc.call("rename_saved_view", { saved: current.id, name: v.name }); await this.loadSavedViews(); }
-          catch (err) { toastError(err); }
+          const v = await formDialog("Rename view", [{ name: "name", label: "Name", value: current.name }], "Rename",
+            (x) => refusal(async () => { this.currentSaved = await this.rpc.call("rename_saved_view", { saved: current.id, name: x.name }); }));
+          if (v) await this.loadSavedViews();
         } },
         { label: `Delete “${current.name}”`, danger: true, action: async () => {
-          if (!(await confirmDialog(`Delete the view “${current.name}”?`, "Only the saved view goes; the table and its data stay."))) return;
-          await this.rpc.call("delete_saved_view", { saved: current.id }).catch((err) => toastError(err));
+          if (!(await confirmDialog(`Delete the view “${current.name}”?`, "Only the saved view goes; the table and its data stay.", "Delete",
+            () => this.rpc.call("delete_saved_view", { saved: current.id })))) return;
           this.currentSaved = null;
           await this.loadSavedViews();
         } },
@@ -949,8 +949,11 @@ export class WorkbookScreen {
 
   private async saveViewAs(): Promise<void> {
     const v = await formDialog("Save view", [{ name: "name", label: "View name", placeholder: "e.g. Late flights by fare",
-      hint: "Saves the sort, filters, hidden columns and column widths. The view is live: it always shows current data." }], "Save view");
-    if (v) await this.saveView(undefined, v.name);
+      hint: "Saves the sort, filters, hidden columns and column widths. The view is live: it always shows current data." }], "Save view",
+      (x) => refusal(async () => { this.currentSaved = await this.rpc.call("save_view", { name: x.name, spec: this.spec, widths: this.currentWidths() }); }));
+    if (!v || !this.currentSaved) return;
+    await this.loadSavedViews();
+    toast(`Saved view “${this.currentSaved.name}”`, "success");
   }
 
   private async saveView(id: string | undefined, name: string): Promise<void> {
@@ -965,42 +968,39 @@ export class WorkbookScreen {
 
   private async snapshotView(): Promise<void> {
     if (!this.view || this.active?.kind !== "table") return;
+    const made: { info?: TableInfo } = {};
     const v = await formDialog("Save rows as a new table", [{ name: "name", label: "Table name", value: `${this.active.name}_snapshot`,
-      hint: `Copies the ${formatCount(this.view.row_count)} rows of this view, in this order, into a new table. It is a snapshot: later changes to ${this.active.name} do not reach it.` }], "Create table");
-    if (!v) return;
-    try {
-      const info = await this.rpc.call("table_from_view", { view_id: this.view.view_id, name: v.name });
-      await this.loadItems();
-      await this.openTable(info.name);
-      toast(`Created ${info.name} (${formatCount(info.row_count)} rows, snapshot)`, "success");
-    } catch (e) {
-      toastError(e);
-    }
+      hint: `Copies the ${formatCount(this.view.row_count)} rows of this view, in this order, into a new table. It is a snapshot: later changes to ${this.active.name} do not reach it.` }], "Create table",
+      (x) => refusal(async () => { made.info = await this.rpc.call("table_from_view", { view_id: this.view!.view_id, name: x.name }); }));
+    const info = made.info;
+    if (!v || !info) return;
+    await this.loadItems();
+    await this.openTable(info.name);
+    toast(`Created ${info.name} (${formatCount(info.row_count)} rows, snapshot)`, "success");
   }
 
   private async copyTableToSheet(t: TableInfo): Promise<void> {
     const current = this.active?.kind === "table" && this.active.name === t.name && this.view;
     const filtered = current && (this.spec.sort.length || this.spec.filters.length);
+    const made: { copy?: SheetCopy } = {};
     const v = await formDialog(`Copy ${t.name} to a sheet`, [
       { name: "name", label: "Sheet name", value: t.name,
         hint: `Copies the first ${formatCount(Math.min(t.row_count, this.sheetCopyRows))} of ${formatCount(t.row_count)} rows${filtered ? " in the current sort and filter" : ""}. The sheet is a separate copy: later table edits do not change it.` },
-    ], "Copy to sheet");
-    if (!v) return;
-    try {
+    ], "Copy to sheet", (x) => refusal(async () => {
       let viewId = current ? this.view!.view_id : 0;
       let temporary = false;
       if (!current) {
         viewId = (await this.rpc.call("open_view", { spec: { table: t.name, sort: [], filters: [], hidden: [] } })).view_id;
         temporary = true;
       }
-      const copy = await this.rpc.call("table_to_sheet", { view_id: viewId, name: v.name });
-      if (temporary) this.rpc.call("close_view", { view_id: viewId }).catch(() => {});
-      await this.loadItems();
-      await this.openSheet(copy.sheet.index);
-      this.reportCopy(copy, t.name);
-    } catch (e) {
-      toastError(e);
-    }
+      try { made.copy = await this.rpc.call("table_to_sheet", { view_id: viewId, name: x.name }); }
+      finally { if (temporary) this.rpc.call("close_view", { view_id: viewId }).catch(() => {}); }
+    }));
+    const copy = made.copy;
+    if (!v || !copy) return;
+    await this.loadItems();
+    await this.openSheet(copy.sheet.index);
+    this.reportCopy(copy, t.name);
   }
 
   private updateToolbar(): void {
@@ -2279,6 +2279,8 @@ export class WorkbookScreen {
   private openFunctions(): void {
     if (this.analysis) { this.analysis.close(); this.analysis = null; }
     this.functions ??= functionPanel(this.rpc, this.allowSql, (panel) => this.mainEl.parentElement!.append(panel), () => undefined);
+    this.functions.setViewOnly(this.role === "viewer");
+    this.functions.setConnection(this.connection === "open" ? "open" : this.connection === "paused" ? "paused" : "closed");
     if (this.functions.isOpen) this.functions.close();
     else this.functions.open();
   }
@@ -2565,30 +2567,30 @@ export class WorkbookScreen {
     const sel = this.grid.selection();
     const area = areaOf(sel);
     const rules = await this.rpc.call("sheet_rules", { sheet });
+    // Saved while the dialog waits, so a refusal shows in it (U.11a).
+    const save = (next: typeof rules) => refusal(async () => { await this.rpc.call("set_sheet_rules", { sheet, rules: next }); this.sheetRules = next; });
     if (kind === "color") {
       const v = await formDialog("Colour cells that…", [
         { name: "condition", label: "Condition", type: "select", options: [["greater", "are greater than"], ["less", "are less than"], ["equal", "equal"], ["contains", "contain"], ["empty", "are empty"], ["not_empty", "are not empty"], ["scale", "shade by value (low,high)"]].map(([value, label]) => ({ value, label })) },
-        { name: "value", label: "Value" }, { name: "color", label: "Fill (#RRGGBB)", value: "#FFC7CE" }], "Add rule");
+        { name: "value", label: "Value" }, { name: "color", label: "Fill (#RRGGBB)", value: "#FFC7CE" }], "Add rule",
+        (x) => save({ ...rules, colors: [...rules.colors, { area, condition: x.condition, value: x.value, color: x.color.trim().toUpperCase() }] }));
       if (!v) return;
-      rules.colors.push({ area, condition: v.condition, value: v.value, color: v.color.trim().toUpperCase() });
     } else {
       const v = await formDialog("Allowed values", [
         { name: "kind", label: "Allow", type: "select", options: [{ value: "list", label: "one of a list" }, { value: "range", label: "a number between" }] },
         { name: "list", label: "List: values separated by commas, or range: low, high", placeholder: "yes, no" }], "Save",
         (x) => {
-          if (x.kind === "list") return x.list.split(",").some((t) => t.trim()) ? null : "Write at least one value";
+          if (x.kind === "list") {
+            const list = x.list.split(",").map((t) => t.trim()).filter(Boolean);
+            return list.length ? save({ ...rules, validations: [...rules.validations, { area, list }] }) : "Write at least one value";
+          }
           const [lo, hi] = x.list.split(",").map((t) => t.trim());
-          return (lo === "" || !Number.isNaN(Number(lo))) && (hi === undefined || hi === "" || !Number.isNaN(Number(hi))) && (lo || hi) ? null : "Write the range as low, high (either may be left out)";
+          if (!((lo === "" || !Number.isNaN(Number(lo))) && (hi === undefined || hi === "" || !Number.isNaN(Number(hi))) && (lo || hi))) return "Write the range as low, high (either may be left out)";
+          return save({ ...rules, validations: [...rules.validations, { area, ...(lo ? { min: Number(lo) } : {}), ...(hi ? { max: Number(hi) } : {}) }] });
         });
       if (!v) return;
-      if (v.kind === "list") rules.validations.push({ area, list: v.list.split(",").map((x) => x.trim()).filter(Boolean) });
-      else {
-        const [lo, hi] = v.list.split(",").map((t) => t.trim());
-        rules.validations.push({ area, ...(lo ? { min: Number(lo) } : {}), ...(hi ? { max: Number(hi) } : {}) });
-      }
     }
-    try { await this.rpc.call("set_sheet_rules", { sheet, rules }); this.sheetRules = rules; this.grid.invalidate(); }
-    catch (e) { toastError(e); }
+    this.grid.invalidate();
   }
 
   /** S.10: the allowed values of the active sheet cell, offered while editing it. */
@@ -2641,13 +2643,12 @@ export class WorkbookScreen {
 
   private async addComment(row: number, column: number): Promise<void> {
     if (this.active?.kind !== "sheet") return;
-    const v = await formDialog(`Comment on ${columnLetter(column)}${row + 1}`, [{ name: "text", label: "Comment", type: "textarea" }], "Comment");
-    if (!v || !v.text.trim()) return;
-    try {
-      await this.rpc.call("add_comment", { sheet: this.active.index, row, column, text: v.text });
-      this.openComments();
-      await this.loadComments();
-    } catch (e) { toastError(e); }
+    const sheet = this.active.index;
+    const v = await formDialog(`Comment on ${columnLetter(column)}${row + 1}`, [{ name: "text", label: "Comment", type: "textarea" }], "Comment",
+      (x) => x.text.trim() ? refusal(() => this.rpc.call("add_comment", { sheet, row, column, text: x.text })) : "Write a comment");
+    if (!v) return;
+    this.openComments();
+    await this.loadComments();
   }
 
   /** S.05: the sheet's sizes, hidden lines and frozen panes, kept in the workbook. */
@@ -2720,8 +2721,13 @@ export class WorkbookScreen {
     const [start, count] = axis === "rows" ? [sel.r0, sel.r1 - sel.r0 + 1] : [sel.c0, sel.c1 - sel.c0 + 1];
     const current = axis === "rows" ? this.grid.rowHeight(start) : this.grid.columnWidths()[start];
     const v = await formDialog(axis === "rows" ? "Row height" : "Column width", [{ name: "size", label: "Pixels (4–2000)", type: "number", value: String(current || (axis === "rows" ? 24 : SHEET_COL_WIDTH)) }], "Apply",
-      (x) => (Number(x.size) >= 4 && Number(x.size) <= 2000 ? null : "Enter a size from 4 to 2000 pixels"));
-    if (v) await this.resizeLines(axis, start, count, Number(v.size));
+      (x) => {
+        if (!(Number(x.size) >= 4 && Number(x.size) <= 2000)) return "Enter a size from 4 to 2000 pixels";
+        if (this.active?.kind !== "sheet") return null;
+        const sheet = this.active.index;
+        return refusal(() => this.rpc.call("sheet_resize", { sheet, axis, start, count, size: Math.round(Number(x.size)) }));
+      });
+    if (v) await this.loadSheetLayout();
   }
 
   /** S.05: fit a column to its longest shown value (read from all of its cells). */
@@ -2954,22 +2960,19 @@ export class WorkbookScreen {
   private tableTabMenu(t: TableInfo, x: number, y: number): void {
     showMenu([
       { label: "Rename…", action: async () => {
-        const v = await formDialog("Rename table", [{ name: "name", label: "Name", value: t.name }], "Rename");
+        let name = t.name;
+        const v = await formDialog("Rename table", [{ name: "name", label: "Name", value: t.name }], "Rename",
+          (x) => refusal(async () => { name = await this.rpc.call("rename_table", { table: t.name, new_name: x.name }); }));
         if (!v) return;
-        try {
-          const name = await this.rpc.call("rename_table", { table: t.name, new_name: v.name });
-          await this.loadItems();
-          if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
-        } catch (e) { toastError(e); }
+        await this.loadItems();
+        if (this.active?.kind === "table" && this.active.name === t.name) await this.openTable(name);
       } },
       { label: "Export CSV", action: () => this.download({ table: t.name, sort: [], filters: [], hidden: [] }, "csv") },
       { label: "Copy to a sheet…", action: () => this.copyTableToSheet(t) },
       "sep",
       { label: "Delete table", danger: true, action: async () => {
-        if (!(await confirmDialog(`Delete “${t.name}”?`, `${formatCount(t.row_count)} rows will be permanently removed from this workbook.`))) return;
-        try {
-          await this.rpc.call("drop_table", { table: t.name });
-        } catch (e) { toastError(e); }
+        await confirmDialog(`Delete “${t.name}”?`, `${formatCount(t.row_count)} rows will be permanently removed from this workbook.`, "Delete",
+          () => this.rpc.call("drop_table", { table: t.name }));
       } },
     ], x, y);
   }
@@ -2998,26 +3001,22 @@ export class WorkbookScreen {
       { label: "Unhide sheet…", action: async () => {
         const hidden = await this.rpc.call("hidden_sheets", {});
         if (!hidden.length) { toast("No sheet is hidden"); return; }
-        const v = await formDialog("Unhide a sheet", [{ name: "name", label: "Sheet", type: "select", options: hidden.map((n) => ({ value: n, label: n })) }], "Unhide");
-        if (!v) return;
-        try { await this.rpc.call("sheet_unhide", { name: v.name }); await this.loadItems(); }
-        catch (e) { toastError(e); }
+        const v = await formDialog("Unhide a sheet", [{ name: "name", label: "Sheet", type: "select", options: hidden.map((n) => ({ value: n, label: n })) }], "Unhide",
+          (x) => refusal(() => this.rpc.call("sheet_unhide", { name: x.name })));
+        if (v) await this.loadItems();
       } },
       { label: "Tab colour…", action: async () => {
-        const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply");
-        if (!v) return;
-        try { await this.rpc.call("sheet_color", { sheet: s.index, color: v.color.trim() }); await this.loadItems(); }
-        catch (e) { toastError(e); }
+        const v = await formDialog(`Tab colour of ${s.name}`, [{ name: "color", label: "Colour (#RRGGBB, empty for none)", value: s.color ?? "#2E75B6" }], "Apply",
+          (x) => refusal(() => this.rpc.call("sheet_color", { sheet: s.index, color: x.color.trim() })));
+        if (v) await this.loadItems();
       } },
       "sep",
       { label: "Rename…", action: async () => {
-        const v = await formDialog("Rename sheet", [{ name: "name", label: "Name", value: s.name }], "Rename");
+        const v = await formDialog("Rename sheet", [{ name: "name", label: "Name", value: s.name }], "Rename",
+          (x) => refusal(() => this.rpc.call("sheet_rename", { sheet: s.index, name: x.name, layout: s.layout })));
         if (!v) return;
-        try {
-          await this.rpc.call("sheet_rename", { sheet: s.index, name: v.name, layout: s.layout });
-          await this.loadItems();
-          if (this.active?.kind === "sheet" && this.active.index === s.index) this.active.name = v.name;
-        } catch (e) { toastError(e); }
+        await this.loadItems();
+        if (this.active?.kind === "sheet" && this.active.index === s.index) this.active.name = v.name;
       } },
       { label: "Convert to table", hint: "first row = header", action: async () => {
         try {
@@ -3030,10 +3029,8 @@ export class WorkbookScreen {
       { label: "Download all sheets (.xlsx)", action: () => this.downloadXlsx() },
       "sep",
       { label: "Delete sheet", danger: true, action: async () => {
-        if (!(await confirmDialog(`Delete sheet “${s.name}”?`, "Its cells and formulas will be removed. Formulas in other sheets that point at it will show #REF!."))) return;
-        try {
-          await this.rpc.call("sheet_delete", { sheet: s.index, layout: s.layout });
-        } catch (e) { toastError(e); }
+        await confirmDialog(`Delete sheet “${s.name}”?`, "Its cells and formulas will be removed. Formulas in other sheets that point at it will show #REF!.", "Delete",
+          () => this.rpc.call("sheet_delete", { sheet: s.index, layout: s.layout }));
       } },
     ], x, y);
   }
@@ -3180,12 +3177,9 @@ export class WorkbookScreen {
   }
 
   private async deleteColumn(col: Column): Promise<void> {
-    if (!(await confirmDialog(`Delete column “${col.name}”?`, col.formula ? "The formula will be removed." : "Its values in every row will be permanently removed."))) return;
-    try {
-      await this.rpc.call("drop_column", { table: this.spec.table, name: col.name });
-    } catch (e) {
-      toastError(e);
-    }
+    const table = this.spec.table;
+    await confirmDialog(`Delete column “${col.name}”?`, col.formula ? "The formula will be removed." : "Its values in every row will be permanently removed.", "Delete",
+      () => this.rpc.call("drop_column", { table, name: col.name }));
   }
 
   private async columnSummary(col: Column): Promise<void> {
@@ -3331,9 +3325,9 @@ export class WorkbookScreen {
   }
 
   private async renameWorkbook(): Promise<void> {
-    const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: this.meta.name }], "Rename");
+    const v = await formDialog("Rename workbook", [{ name: "name", label: "Name", value: this.meta.name }], "Rename",
+      (x) => refusal(async () => { this.meta = await api.rename(this.meta.id, x.name); }));
     if (!v) return;
-    this.meta = await api.rename(this.meta.id, v.name);
     this.titleEl.textContent = this.meta.name;
     document.title = `${this.meta.name} · Alephgrid`;
   }
@@ -3445,6 +3439,7 @@ export class WorkbookScreen {
       case "role_changed":
         this.role = e.role;
         this.updateToolbar();
+        this.functions?.setViewOnly(e.role === "viewer");
         toast(e.role === "viewer" ? "You can now only view this workbook." : `Your role in this space is now ${e.role}.`);
         break;
       case "tables_changed": {

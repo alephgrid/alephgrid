@@ -5,7 +5,7 @@ import type { Rpc } from "./api";
 import type { CellArea, CellStyle, SheetColorRule, SheetRules } from "./protocol";
 import { areaContains } from "./sheetarea";
 import { rangeText } from "./sheetcharts";
-import { el, openModal, toastError } from "./ui";
+import { clearError, el, openModal, toastError } from "./ui";
 
 /** Whether a colour rule's condition holds for a cell showing `t`. */
 export function ruleMatches(x: SheetColorRule, t: string): boolean {
@@ -50,12 +50,14 @@ export async function rulesDialog(rpc: Rpc, sheet: number, name: string, host: R
   const CONDITION: Record<string, string> = { greater: "greater than", less: "less than", equal: "equal to", contains: "contains", empty: "is empty", not_empty: "is not empty", scale: "shade by value" };
   const list = el("ul", { class: "rules-list", "aria-label": "Rules" });
   const done = el("button", { class: "btn btn-primary", type: "button" }, "Done");
-  const dialog = el("div", { class: "dialog rules-dialog" }, el("h2", {}, `Rules on ${name}`),
+  const dialog = el("div", { class: "dialog rules-dialog", "data-errors": true }, el("h2", {}, `Rules on ${name}`),
     el("p", { class: "dialog-hint" }, "Colour rules fill matching cells; allowed-value rules refuse other values. Neither is written to XLSX files."), list,
+    el("p", { class: "dialog-error inline-error", role: "alert" }),
     el("div", { class: "dialog-actions" }, done));
   const save = async (next: typeof rules) => {
+    clearError(dialog);
     try { await rpc.call("set_sheet_rules", { sheet, rules: next }); rules = next; host.changed(next); render(); }
-    catch (e) { toastError(e); }
+    catch (e) { toastError(e, dialog); }
   };
   const goTo = (a: CellArea) => {
     modal.close();

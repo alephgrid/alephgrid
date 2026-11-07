@@ -63,7 +63,7 @@ function activityDialog(c: AgentConnection): void {
 
 /** M.06: changes an agent asked for; a person approves (written as their change) or rejects. */
 function proposalsDialog(c: AgentConnection, workbooks: { id: string; name: string }[], onChange: () => void): void {
-  const body = el("div", {});
+  const body = el("div", { "data-errors": true });
   const close = el("button", { class: "btn", type: "button" }, "Close");
   const dialog = el("div", { class: "dialog wide" }, el("h2", {}, `Proposals of “${c.name}”`),
     el("p", { class: "dialog-lede" }, "Queries the agent asked to save. Nothing is saved until you approve; approving saves it in the workbook as your change, noted as proposed by the agent."),
@@ -78,7 +78,7 @@ function proposalsDialog(c: AgentConnection, workbooks: { id: string; name: stri
       const payload = p.payload as { sql?: string };
       const decide = (approve: boolean) => async () => {
         try { await api.decideProposal(c.id, p.id, approve); toast(approve ? `Saved “${p.name}”` : "Rejected", approve ? "success" : "info"); await render(); }
-        catch (e) { toastError(e); }
+        catch (e) { toastError(e, body); }
       };
       return el("section", { class: "proposal", "aria-label": `Proposal ${p.name}` },
         el("div", { class: "proposal-head" }, el("strong", {}, p.name),
@@ -125,8 +125,8 @@ export function agentsDialog(space: SpaceListing, workbooks: { id: string; name:
         el("button", { class: "btn btn-small", type: "button", "aria-label": `Activity of ${c.name}`, onclick: () => activityDialog(c) }, "Activity"),
         el("button", { class: "btn btn-small", type: "button", "aria-label": `Proposals of ${c.name}`, onclick: () => proposalsDialog(c, workbooks, () => void render()) }, "Proposals"),
         c.revoked_at ? null : el("button", { class: "btn btn-small", type: "button", "aria-label": `Revoke ${c.name}`, onclick: async () => {
-          if (!(await confirmDialog(`Revoke “${c.name}”?`, "The agent loses access at once, its results included.", "Revoke"))) return;
-          try { await api.revokeAgent(c.id); await render(); } catch (e) { toastError(e); }
+          if (!(await confirmDialog(`Revoke “${c.name}”?`, "The agent loses access at once, its results included.", "Revoke", () => api.revokeAgent(c.id)))) return;
+          await render();
         } }, "Revoke"))))
       : [el("p", { class: "muted" }, "No agent connections yet.")]));
   };

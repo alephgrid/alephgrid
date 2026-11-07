@@ -2,7 +2,7 @@
 // reopen and delete. Changes by others arrive as sheet events and the pane reloads.
 
 import type { Rpc } from "./api";
-import { el, toastError } from "./ui";
+import { clearError, el, toastError } from "./ui";
 import { icon } from "./icons";
 import { columnLetter } from "./format";
 import type { CellComment } from "./protocol";
@@ -25,7 +25,8 @@ export class CommentsPane {
   constructor(private rpc: Rpc, private host: CommentsHost) {
     const close = el("button", { class: "icon-btn", type: "button", "aria-label": "Close comments" }, icon("x", 14));
     close.addEventListener("click", () => this.close());
-    this.panel = el("aside", { class: "comments-pane analyze-pane", "aria-label": "Comments" },
+    // Errors of the pane's actions show in it, not only in a toast (U.11a).
+    this.panel = el("aside", { class: "comments-pane analyze-pane", "aria-label": "Comments", "data-errors": true },
       el("header", { class: "analyze-head" }, el("h2", {}, "Comments"), close), this.list);
     this.panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); this.close(); } });
     this.handle = host.pane(this.panel);
@@ -36,7 +37,7 @@ export class CommentsPane {
     const sheet = this.host.sheet();
     if (sheet === null || this.closed) return;
     let all: CellComment[];
-    try { all = await this.rpc.call("comments", { sheet }); } catch (e) { toastError(e); return; }
+    try { all = await this.rpc.call("comments", { sheet }); } catch (e) { toastError(e, this.panel); return; }
     this.host.changed(all);
     const threads = all.filter((c) => !c.parent);
     if (!threads.length) { this.list.replaceChildren(el("p", { class: "analyze-hint" }, "No comments on this sheet. Right-click a cell and choose Add comment.")); return; }
@@ -61,7 +62,8 @@ export class CommentsPane {
   }
 
   private async act(run: () => Promise<unknown>): Promise<void> {
-    try { await run(); await this.reload(); } catch (e) { toastError(e); }
+    clearError(this.panel);
+    try { await run(); await this.reload(); } catch (e) { toastError(e, this.panel); }
   }
 
   close(): void {

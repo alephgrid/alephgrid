@@ -16,7 +16,7 @@ checklist is the record.
 | MCP for local workbooks: tools, receipts, approved proposals, Agent connections UI; listed in the MCP registry | most of L.04 | PRs #19, #21, #22, #45, #46 |
 | Launch UI, first part: fill handle, Mod+A region, paste-special menu, functions side panel, chart previews, disabled-command reasons, new workbooks open into a sheet, spreadsheet-first journey test | part of L.05b | PRs #26–#31 |
 | CI on CircleCI, run on demand | 9.16 | PR #33; fixes from its first runs in #34, #36, #39, #40 |
-| Release pipeline: binaries, draft release, approval, then GitHub Releases, Docker and npm | part of 9.11 | PRs #49–#51 (not yet run) |
+| Release pipeline: binaries, draft release, approval, then GitHub Releases, Docker, npm and PyPI | part of 9.11 | PRs #49–#51, PyPI wheels added 7 Nov (not yet run) |
 | Public website at alephgrid.dev: landing, install, releases, docs, blog, llms.txt, MCP manifest | L.07 (part) | PRs #35, #37, #38, #41–#44 |
 | Docs: README, security and conduct policies, screenshots; review against the code | L.07 (part) | PR #32 and this review |
 
@@ -53,15 +53,18 @@ the L.08 gate on a clean machine. [OPERATIONS.md](OPERATIONS.md) and
 
 Before release day, check that every install command on the site works on its platform, that
 version labels and checksums match the release, and that the site builds without broken links.
-Container images and npm stay marked as not yet published until the release exists.
+Container images, npm and PyPI stay marked as not yet published until the release exists.
 
 ## 3. Owner actions
 
 Things only the project owner can do (accounts, settings, decisions):
 
 * **Release secrets** ([RELEASING.md](RELEASING.md), "Once"): a granular npm token from the
-  `alephgrid` account, a GitHub token with `repo` and `write:packages`, and the CircleCI
-  `release` context holding them, restricted to maintainers.
+  `alephgrid` account, a PyPI API token (account-wide for the first upload, which creates the
+  `alephgrid` project; then a project-scoped one), a GitHub token with `repo` and
+  `write:packages`, and the CircleCI `release` context holding them, restricted to maintainers.
+* **PyPI name:** create the PyPI account now; the name `alephgrid` (free on 7 November) is
+  claimed by the first upload, since PyPI has no reservation without one.
 * **Release safety** ([CI.md](CI.md#release-safety)): keep "Pass secrets to forked PRs" off,
   add a tag ruleset for `v*`, and reserve the npm platform package names.
 * **CircleCI:** apply for the open-source plan.

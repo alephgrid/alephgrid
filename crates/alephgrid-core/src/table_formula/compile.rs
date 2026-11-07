@@ -64,6 +64,7 @@ pub fn column_type(sql_type: &str) -> Option<Ty> {
 }
 
 /// Another table a formula can read whole columns of (lookups).
+#[derive(Clone)]
 pub struct Relation {
     /// A `SELECT` producing the table's rows, including `_rf_ord`.
     pub sql: String,

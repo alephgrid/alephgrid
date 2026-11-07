@@ -830,6 +830,8 @@ kbd { font-family: ui-monospace, monospace; font-size: 11px; padding: 1px 5px; b
 .fn-panel-head { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .fn-switcher { max-width: 60%; font: 13px var(--font-ui); }
 .fn-panel .fn-title { padding: 10px 14px 6px; }
+.fn-panel .fn-access { margin: 0 14px 8px; font-size: 13px; }
+.fn-panel .fn-access:empty { display: none; }
 .fn-tabs { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--border); }
 .fn-tab { border: 0; background: none; padding: 8px 10px; font: 600 13px var(--font-ui); color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; }
 .fn-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }

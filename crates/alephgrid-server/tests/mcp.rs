@@ -487,6 +487,71 @@ async fn connections_and_results_survive_a_server_restart() {
     server.stop().await;
 }
 
+/// Found with real clients (M.T02, 7 Nov). A model asked for payments per UTC day reached for
+/// time-zone functions first and got DuckDB's extension-autoloading error, which did not say what
+/// to do instead; it spent two to four extra calls finding a way. Without ICU, a TIMESTAMPTZ cast
+/// to TIMESTAMP is its UTC time, so the error now says that. And every tool argument schema
+/// declares its type: MCP Inspector's schema check flags an empty schema (`{}`) and a list
+/// of types, which some clients refuse.
+#[tokio::test(flavor = "multi_thread")]
+async fn time_zone_errors_say_what_works_and_argument_schemas_are_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let (a, _b, mut mcp) = setup(&server).await;
+    let mut ws = server.ws(&a).await;
+    ws.ok("create_table_from_query", json!({ "name": "payments", "sql": "SELECT * FROM (VALUES \
+        (1, TIMESTAMPTZ '2026-03-01 23:30:00+00'), (2, TIMESTAMPTZ '2026-03-02 00:30:00+01'), \
+        (3, TIMESTAMPTZ '2026-03-02 23:45:00-03')) t(id, paid_at)" })).await;
+    for sql in [
+        "SELECT CAST(timezone('UTC', paid_at) AS DATE) AS d FROM payments",
+        "SELECT paid_at AT TIME ZONE 'Europe/Berlin' FROM payments",
+        "SELECT date_trunc('day', paid_at) FROM payments",
+        "SELECT CAST(paid_at AS DATE) FROM payments",
+    ] {
+        let v = mcp.tool_value("run_query", json!({ "workbook": a, "sql": sql })).await;
+        assert_eq!(v["isError"], true, "{sql}: {v}");
+        let (error, hint) = (v["structuredContent"]["error"].as_str().unwrap(), v["structuredContent"]["hint"].as_str().unwrap());
+        assert!(error.contains("time-zone functions are not available"), "{sql}: {error}");
+        assert!(hint.contains("::TIMESTAMP"), "{sql}: {hint}");
+    }
+    // What the hint says works: the UTC time and day. id 1: 23:30 UTC on 1 March; id 2:
+    // 00:30 at +01 is 23:30 UTC on 1 March; id 3: 23:45 at -03 is 02:45 UTC on 3 March.
+    let r = mcp.tool("run_query", json!({ "workbook": a, "sql": "SELECT id, paid_at::TIMESTAMP::VARCHAR AS utc, paid_at::TIMESTAMP::DATE::VARCHAR AS day FROM payments ORDER BY id" })).await;
+    assert_eq!(r["rows"], json!([[1, "2026-03-01 23:30:00", "2026-03-01"], [2, "2026-03-01 23:30:00", "2026-03-01"], [3, "2026-03-03 02:45:00", "2026-03-03"]]));
+    // The query tool says so up front.
+    let tools = mcp.rpc("tools/list", json!({})).await;
+    let run_query = tools["result"]["tools"].as_array().unwrap().iter().find(|t| t["name"] == "run_query").unwrap();
+    assert!(run_query["description"].as_str().unwrap().contains("::TIMESTAMP"), "{run_query}");
+    // Every property schema of every tool declares one type, or alternatives of one type each
+    // (the Inspector's portability check flags both `{}` and a list of types).
+    fn one_type(s: &Value) -> bool {
+        s.get("type").is_some_and(Value::is_string)
+    }
+    fn untyped(path: &str, schema: &Value, out: &mut Vec<String>) {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            for (k, p) in props {
+                let typed = one_type(p) || p.get("anyOf").and_then(Value::as_array).is_some_and(|b| !b.is_empty() && b.iter().all(one_type));
+                if !typed {
+                    out.push(format!("{path}.{k}"));
+                }
+                untyped(&format!("{path}.{k}"), p, out);
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            untyped(&format!("{path}[]"), items, out);
+        }
+    }
+    let mut missing = Vec::new();
+    for t in tools["result"]["tools"].as_array().unwrap() {
+        untyped(t["name"].as_str().unwrap(), &t["inputSchema"], &mut missing);
+    }
+    assert!(missing.is_empty(), "untyped argument schemas: {missing:?}");
+    // A typed filter value still filters.
+    let t = mcp.tool("preview_table", json!({ "workbook": a, "table": "payments", "columns": ["id"], "filters": [{ "column": "id", "op": "gte", "value": 2 }] })).await;
+    assert_eq!(t["rows"], json!([[2], [3]]));
+    server.stop().await;
+}
+
 /// M.T02 (scripted client): analytical questions with answers written out by hand, through the
 /// tools an agent would use, over data with nulls, exact decimals and timestamps with offsets.
 /// Prints, per question, the tool calls, the time and the reply size; asserts correctness.
