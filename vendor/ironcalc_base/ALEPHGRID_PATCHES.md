@@ -97,3 +97,23 @@ Regression evidence: alephgrid-core `tests::security`. These are not upstream be
   defined name whose LAMBDA calls its own name) recursed until the thread's stack
   overflowed, which ends the process. Regression: alephgrid-core
   `tests::security::lambda_recursion_is_an_error_not_a_stack_overflow`.
+
+## Cut and paste onto another sheet (F.04d; 7 November 2026)
+
+- `user_model/clipboard.rs`: a cut reads the moved formulas on the sheet they come from (the
+  source sheet), not the sheet they are pasted on; copies are unchanged.
+- `expressions/parser/move_formula.rs`: `MoveContext::moved_to` names the sheet a cut area lands
+  on when it is another sheet. References into the area then point there (unqualified in a
+  formula on that sheet, qualified elsewhere); references from moved formulas to cells left
+  behind already named their sheet. `None` keeps the upstream same-sheet behaviour.
+- `cut_paste.rs`, `model.rs`: formulas elsewhere and defined names that refer to the moved
+  cells follow them to the other sheet (also when the cell address stays the same, e.g. A1 to
+  A1); conditional formats stay on their sheet on a cross-sheet cut (a range cannot span two
+  sheets). Upstream, a cut to another sheet left references in moved formulas pointing at the
+  target sheet's cells and moved outside references within the source sheet.
+  The upstream `test_move_formula.rs` contexts gain `moved_to: None`.
+
+Regression: alephgrid-core `sheets::editing::tests::cut_to_another_sheet_moves_cells_and_references`
+(fails without this patch: `=C1+A1` moved from Data to Other read `=C1+D5`, the wrong C1).
+The upstream test suite was not rerun for this patch (it needs a copy outside the workspace and
+its own build); rerun it with the next review.

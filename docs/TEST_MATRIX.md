@@ -298,7 +298,7 @@ as the work is verified. Nothing here is checked off until its tests have run an
 
 ### Client side of 3.01, 3.07, 3.11 (browser)
 - **Tests:** C `W/resilience.spec.ts`: a workbook whose file is corrupt shows the server's reason with "Try again", which recovers once fixed (also with the page already open); an edit across a SIGTERM restart and an edit typed while the server was down are each applied once (mutation ids, record ids), checked by export; a long SQL query shows progress and Cancel ends it with "Cancelled.". **Fixed (server):** a deletion during session setup was never reported (`workbook_deleted`), making the "deleted elsewhere" journey flaky; sessions now subscribe first. Missing workbooks answer 404.
-- **Gaps:** the client's "overloaded" retry and the bounds on kept changes (30 s, 100) have no automated test; the paste guard has no browser test (headless clipboard).
+- **Gaps:** the client's "overloaded" retry and the bounds on kept changes (30 s, 100) have no automated test; the paste guard (too many cells) is browser-tested in `e2e/clipboard.spec.ts`; its message-size branch is not.
 
 ### 3.T01 (3.01–3.05)
 Queue saturation, fair progress, cancellation races, slow consumers, overflow-sized fetches, wide/text-heavy cache bounds, idle eviction and host-wide accounting: `S/scheduling.rs`, `S/runtime.rs`, `sched.rs`/`budget.rs`/`limits.rs` unit tests, `W/cache.spec.ts`, `W/wide.spec.ts`. **Pass.**

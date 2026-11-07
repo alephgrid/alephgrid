@@ -160,14 +160,21 @@ impl<'a> Model<'a> {
     pub(crate) fn get_external_formula_updates_for_cut(
         &mut self,
         area: &Area,
+        target_sheet: u32,
         target_row: i32,
         target_column: i32,
     ) -> Result<Vec<(u32, i32, i32, String)>, String> {
         let row_delta = target_row - area.row;
         let column_delta = target_column - area.column;
-        if row_delta == 0 && column_delta == 0 {
+        if row_delta == 0 && column_delta == 0 && target_sheet == area.sheet {
             return Ok(vec![]);
         }
+        // Alephgrid patch: a cut to another sheet takes references to it along.
+        let moved_to = if target_sheet == area.sheet {
+            None
+        } else {
+            Some(self.workbook.worksheet(target_sheet)?.get_name())
+        };
 
         let num_sheets = self.workbook.worksheets.len();
 
@@ -226,6 +233,7 @@ impl<'a> Model<'a> {
                     target_sheet_name: &sheet_name,
                     row_delta,
                     column_delta,
+                    moved_to: moved_to.as_deref(),
                 },
                 self.locale,
                 self.language,
@@ -248,14 +256,20 @@ impl<'a> Model<'a> {
     pub(crate) fn get_defined_name_updates_for_cut(
         &self,
         area: &Area,
+        target_sheet: u32,
         target_row: i32,
         target_column: i32,
     ) -> Vec<(String, Option<u32>, String, String)> {
         let row_delta = target_row - area.row;
         let column_delta = target_column - area.column;
-        if row_delta == 0 && column_delta == 0 {
+        if row_delta == 0 && column_delta == 0 && target_sheet == area.sheet {
             return vec![];
         }
+        // Alephgrid patch: names into an area cut to another sheet name that sheet.
+        let Some(target_ws) = self.workbook.worksheets.get(target_sheet as usize) else {
+            return vec![];
+        };
+        let target_sheet_name = utils::quote_name(&target_ws.get_name());
 
         let names_with_scope = self.workbook.get_defined_names_with_scope();
         let mut updates = Vec::new();
@@ -278,9 +292,7 @@ impl<'a> Model<'a> {
                     }
                     let new_row = cell_ref.row + row_delta;
                     let new_col = cell_ref.column + column_delta;
-                    let sheet_name = utils::quote_name(
-                        &self.workbook.worksheets[cell_ref.sheet as usize].get_name(),
-                    );
+                    let sheet_name = &target_sheet_name;
                     let Some(col_str) = utils::number_to_column(new_col) else {
                         continue;
                     };
@@ -296,9 +308,7 @@ impl<'a> Model<'a> {
                     let new_col1 = left.column + column_delta;
                     let new_row2 = right.row + row_delta;
                     let new_col2 = right.column + column_delta;
-                    let sheet_name = utils::quote_name(
-                        &self.workbook.worksheets[left.sheet as usize].get_name(),
-                    );
+                    let sheet_name = &target_sheet_name;
                     let (Some(col1_str), Some(col2_str)) = (
                         utils::number_to_column(new_col1),
                         utils::number_to_column(new_col2),
@@ -325,12 +335,15 @@ impl<'a> Model<'a> {
     pub(crate) fn get_conditional_formatting_updates_for_cut(
         &mut self,
         area: &Area,
+        target_sheet: u32,
         target_row: i32,
         target_column: i32,
     ) -> Result<Vec<(u32, usize, String, CfRule)>, String> {
         let row_delta = target_row - area.row;
         let column_delta = target_column - area.column;
-        if row_delta == 0 && column_delta == 0 {
+        // Alephgrid patch: conditional formats stay on their sheet when cells are cut to
+        // another one (a range cannot span two sheets).
+        if (row_delta == 0 && column_delta == 0) || target_sheet != area.sheet {
             return Ok(vec![]);
         }
 
@@ -411,6 +424,7 @@ impl<'a> Model<'a> {
                     target_sheet_name: sheet_name,
                     row_delta,
                     column_delta: col_delta,
+                    moved_to: None,
                 },
                 get_default_locale(),
                 get_default_language(),

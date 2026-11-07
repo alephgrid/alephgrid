@@ -188,6 +188,8 @@ kbd { font: 500 11px var(--font-ui); color: var(--muted); border: 1px solid var(
 
 .grid-wrap { flex: 1; position: relative; min-height: 0; background: var(--grid-bg); }
 .grid-host { position: absolute; inset: 0; overflow: hidden; outline: none; }
+/* U.11a: why a paste or cut did nothing, at the active cell. */
+.grid-note { position: fixed; z-index: 40; max-width: 320px; padding: 6px 10px; border: 1px solid var(--danger); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 13px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); pointer-events: none; }
 /* The canvas covers the host, so the focus ring is drawn on an overlay above it. */
 .grid-host:focus-visible::after { content: ""; position: absolute; inset: 0; border: 2px solid color-mix(in srgb, var(--accent) 65%, transparent); pointer-events: none; z-index: 5; }
 .grid-canvas { position: absolute; inset: 0; }

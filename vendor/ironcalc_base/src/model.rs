@@ -2194,6 +2194,7 @@ impl<'a> Model<'a> {
                     target_sheet_name: &target_sheet_name,
                     row_delta: target.row - source.row,
                     column_delta: target.column - source.column,
+                    moved_to: (target.sheet != area.sheet).then_some(target_sheet_name.as_str()),
                 },
                 self.locale,
                 self.language,

@@ -50,13 +50,16 @@ async function sheetPage(page: Page, name: string, inputs: { row: number; column
   if (page.context().browser()?.browserType().name() === "chromium") {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: server.url });
   }
-  // Remember what the app writes to the clipboard; `pasteClipboard` delivers it.
+  // Stand in for the system clipboard (other programs share it): remember what the app
+  // writes, text alone or text and HTML; `pasteClipboard` delivers it, and a read from a
+  // menu (paste special) returns it.
   await page.addInitScript(() => {
-    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
-    navigator.clipboard.writeText = async (text: string) => {
-      (window as unknown as { __copied: string }).__copied = text;
-      return write(text);
+    const w = window as unknown as { __copied?: string };
+    navigator.clipboard.writeText = async (text: string) => { w.__copied = text; };
+    navigator.clipboard.write = async (items: ClipboardItem[]) => {
+      for (const item of items) w.__copied = await (await item.getType("text/plain")).text();
     };
+    navigator.clipboard.read = async () => [new ClipboardItem({ "text/plain": new Blob([w.__copied ?? ""], { type: "text/plain" }) })];
   });
   const wb = await server.createWorkbook(name), ws = await server.connect(wb);
   await ws.call("sheet_create", { name: "Data" });
@@ -76,11 +79,15 @@ async function sheetPage(page: Page, name: string, inputs: { row: number; column
 async function pasteClipboard(page: Page) {
   // The text the app wrote: reading the system clipboard back is unreliable in headless
   // browsers (Linux has no clipboard owner; Firefox and WebKit need a user action).
+  // The data rides on the event's `clipboardData` property: Playwright's Firefox drops the
+  // data of script-made ClipboardEvents.
   await page.evaluate(async () => {
     const text = (window as unknown as { __copied?: string }).__copied ?? "";
     const data = new DataTransfer();
     data.setData("text/plain", text);
-    document.querySelector(".grid-host")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", { value: data });
+    document.querySelector(".grid-host")!.dispatchEvent(event);
   });
 }
 
@@ -111,11 +118,10 @@ test("fill down and right translate formulas and undo as one step", async ({ pag
   ws.close();
 });
 
-test("copy pastes formulas, cut moves cells and their references, paste special by keyboard", async ({ page, browserName }) => {
-  // Playwright's Firefox drops data attached to script-made paste events and does not turn
-  // Mod+V into a paste either, so this cannot be driven there; it is a manual check in
-  // docs/ACCESSIBILITY_TESTING.md.
-  test.skip(browserName === "firefox", "paste cannot be simulated in Playwright's Firefox");
+test("copy pastes formulas, cut moves cells and their references, paste special by keyboard", async ({ page }) => {
+  // Playwright's Firefox does not turn Mod+V into a paste, so every browser gets a
+  // script-made paste event (`pasteClipboard`); a real Mod+V in Firefox is a manual check
+  // in docs/ACCESSIBILITY_TESTING.md.
   const { ws, content, display } = await sheetPage(page, "Clipboard", [
     { row: 0, column: 0, value: "5" }, { row: 1, column: 0, value: "=A1*2" }, { row: 0, column: 1, value: "=A1+A2" },
   ]);
@@ -170,10 +176,7 @@ test("copy pastes formulas, cut moves cells and their references, paste special 
   }).toContain("5");
   // Text from elsewhere still pastes as values.
   // Text copied in another app.
-  await page.evaluate(async () => {
-    (window as unknown as { __copied: string }).__copied = "7\t8";
-    await navigator.clipboard.writeText("7\t8").catch(() => undefined);
-  });
+  await page.evaluate(() => { (window as unknown as { __copied: string }).__copied = "7\t8"; });
   await page.keyboard.press("ControlOrMeta+Home");
   for (let i = 0; i < 9; i++) await page.keyboard.press("ArrowDown");
   await pasteClipboard(page);
