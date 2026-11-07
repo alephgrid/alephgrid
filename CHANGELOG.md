@@ -15,6 +15,7 @@ DuckDB file on your machine; your data never leaves it. There are no seats, tier
 ### Install
 
 - `npx alephgrid` (also pnpm dlx / yarn dlx / bunx)
+- `uvx alephgrid` (also `pipx install alephgrid` / `pip install alephgrid`)
 - `docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid`
 - Downloads for Linux (x86_64, arm64) and macOS (Apple silicon, Intel) with `SHA256SUMS`,
   attached to this release. On Windows, use Docker or WSL.

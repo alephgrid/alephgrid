@@ -17,7 +17,7 @@ Alephgrid follows [Semantic Versioning](https://semver.org).
 
 Each release publishes its notes on the [releases page](../../../releases/) and in the
 repository [CHANGELOG](https://github.com/alephgrid/alephgrid/blob/main/CHANGELOG.md). A
-distribution channel (binaries, Homebrew, WinGet, container image, Helm) is listed as ready
+distribution channel (binaries, npm, PyPI, Homebrew, WinGet, container image, Helm) is listed as ready
 only when its artifacts exist with checksums and have passed a clean-machine install.
 
 ## Documentation
