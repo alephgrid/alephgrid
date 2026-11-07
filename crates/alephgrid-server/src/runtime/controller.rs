@@ -139,6 +139,15 @@ pub struct Controller {
     pub function_runtime: Option<Arc<dyn alephgrid_core::external::FunctionRuntime>>,
     /// Disk kept back for a full disk (3.T03); given back when a record cannot be written.
     pub disk_reserve: Arc<crate::reserve::DiskReserve>,
+    /// Lifecycle counters (9.13): starts, failures, stops; jobs record into it too.
+    pub metrics: Arc<crate::metrics::Metrics>,
+}
+
+/// Live allocations by state, and how many wait for capacity (`GET /metrics`).
+#[derive(Debug, Default)]
+pub struct AllocationCounts {
+    pub by_state: HashMap<AllocationState, u64>,
+    pub queued: u64,
 }
 
 pub fn operation_id(kind: &str) -> String {
@@ -180,6 +189,7 @@ impl Controller {
             drain_grace: Duration::from_secs(30),
             function_runtime: None,
             disk_reserve: crate::reserve::DiskReserve::disabled(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         })
     }
 
@@ -247,6 +257,7 @@ impl Controller {
             }
             record.failure = Some(RuntimeFailure::new(FailureKind::Lost, "the server restarted while this allocation was live"));
             self.persist(&record).map_err(|e| anyhow!(e))?;
+            self.metrics.inc("alephgrid_allocations_lost_total", &[]);
             fixed.push(record.workbook.clone());
         }
         // Scratch directories of allocations that are gone (not of ones held elsewhere).
@@ -345,13 +356,22 @@ impl Controller {
         adm: Admission,
         handoff: Option<File>,
     ) -> std::result::Result<Lease, RuntimeFailure> {
+        self.metrics.inc("alephgrid_allocation_starts_total", &[]);
         let dir = self.data.join(workbook);
-        let meta = read_meta(&dir).map_err(|e| RuntimeFailure::new(FailureKind::StartupFailed, format!("{e:#}")))?;
+        let meta = match read_meta(&dir) {
+            Ok(m) => m,
+            Err(e) => return Err(self.count_failure(workbook, None, operation, RuntimeFailure::new(FailureKind::StartupFailed, format!("{e:#}")))),
+        };
         let previous = self.load_record(workbook);
         let epoch = previous.as_ref().map(|r| r.epoch).unwrap_or(0) + 1;
         // The spec the workbook is pinned to (or this build's, the first time).
         let spec_id = meta.runtime_spec.clone().unwrap_or_else(|| self.spec_id.clone());
-        let spec = if spec_id == self.spec_id { self.spec.clone() } else { super::load_spec(&self.control, &spec_id).map_err(|e| RuntimeFailure::new(FailureKind::Incompatible, format!("{e:#}")))? };
+        let spec = if spec_id == self.spec_id {
+            self.spec.clone()
+        } else {
+            super::load_spec(&self.control, &spec_id)
+                .map_err(|e| self.count_failure(workbook, None, operation, RuntimeFailure::new(FailureKind::Incompatible, format!("{e:#}"))))?
+        };
         let record = RuntimeAllocation {
             id: operation_id("al"),
             workbook: workbook.to_string(),
@@ -378,7 +398,7 @@ impl Controller {
         // From here the slot exists: concurrent opens wait for it, and it counts against its
         // space while it waits for capacity.
         let cancel = Arc::new(AtomicBool::new(false));
-        self.persist(&record)?;
+        self.persist(&record).map_err(|e| self.count_failure(workbook, Some(&record.id), operation, e))?;
         let fixed = adm.profile.fixed();
         slots.map.insert(
             workbook.to_string(),
@@ -480,6 +500,9 @@ impl Controller {
         // the server (SEC.14).
         let ensured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.provider.ensure(&req)))
             .unwrap_or_else(|_| Err(RuntimeFailure::new(FailureKind::StartupFailed, "the workbook could not be opened (the engine stopped unexpectedly)")));
+        if let Ok(h) = &ensured {
+            let _ = h.metrics.set(self.metrics.clone());
+        }
         let started = ensured.and_then(|h| {
             // A cancel that arrived while the engine was opening still wins.
             if cancel.load(Ordering::SeqCst) {
@@ -503,6 +526,9 @@ impl Controller {
                     return Err(self.finish_failed(workbook, operation, e));
                 }
                 slot.handle = Some(handle.clone());
+                let took = alephgrid_core::storage::now_ms().saturating_sub(slot.record.requested_at_ms);
+                self.metrics.observe("alephgrid_allocation_start_seconds", &[], Duration::from_millis(took));
+                tracing::info!(workbook, allocation = slot.record.id.as_str(), operation, profile = slot.record.profile.as_str(), ms = took, "allocation ready");
                 // Sheets live outside DuckDB's buffer manager: take their estimate out of its share.
                 let sheets = handle.sheet_memory_estimate();
                 {
@@ -540,6 +566,19 @@ impl Controller {
         let _ = record.transition(AllocationState::Failed, operation);
         record.failure = Some(failure.clone());
         let _ = self.persist(&record);
+        self.count_failure(&record.workbook, Some(&record.id), operation, failure)
+    }
+
+    /// Count and log a start that did not reach ready.
+    fn count_failure(&self, workbook: &str, allocation: Option<&str>, operation: &str, failure: RuntimeFailure) -> RuntimeFailure {
+        let reason = crate::metrics::failure_label(failure.kind);
+        self.metrics.inc("alephgrid_allocation_start_failures_total", &[("reason", reason)]);
+        let allocation = allocation.unwrap_or("");
+        if failure.kind == FailureKind::Cancelled {
+            tracing::info!(workbook, allocation, operation, reason, "allocation start cancelled");
+        } else {
+            tracing::warn!(workbook, allocation, operation, reason, "allocation start failed: {}", failure.message);
+        }
         failure
     }
 
@@ -547,7 +586,9 @@ impl Controller {
     /// the others, wake waiters.
     fn finish_failed(&self, workbook: &str, operation: &str, failure: RuntimeFailure) -> RuntimeFailure {
         let mut slots = self.slots();
+        let mut allocation = None;
         if let Some(mut slot) = slots.map.remove(workbook) {
+            allocation = Some(slot.record.id.clone());
             let to = if failure.kind == FailureKind::Cancelled { AllocationState::Stopped } else { AllocationState::Failed };
             if slot.record.state.can_become(to) {
                 let _ = slot.record.transition(to, operation);
@@ -558,7 +599,8 @@ impl Controller {
         self.ledger().release(workbook);
         self.replan(&slots);
         self.changed.notify_all();
-        failure
+        drop(slots);
+        self.count_failure(workbook, allocation.as_deref(), operation, failure)
     }
 
     /// Record the spec the workbook now runs with (first open, or after an upgrade).
@@ -701,6 +743,9 @@ impl Controller {
         keep_lock: bool,
     ) -> (Result<()>, Option<Held<'_>>) {
         handle.begin_closing(reason.closed());
+        self.metrics.inc("alephgrid_allocation_stops_total", &[("reason", reason.label())]);
+        let allocation = self.slots().map.get(workbook).map(|s| s.record.id.clone()).unwrap_or_default();
+        tracing::info!(workbook, allocation = allocation.as_str(), operation, reason = reason.label(), "allocation stopping");
         let _ = handle.events.send(reason.event());
         let drained = self.provider.drain(&handle, self.drain_grace);
         let lock = if keep_lock { handle.take_lock() } else { None };
@@ -1000,6 +1045,35 @@ impl Controller {
         }
     }
 
+    /// Live allocations by state and starts waiting for capacity (no disk access).
+    pub fn allocation_counts(&self) -> AllocationCounts {
+        let slots = self.slots();
+        let mut c = AllocationCounts::default();
+        for s in slots.map.values().filter(|s| s.record.state.is_live()) {
+            *c.by_state.entry(s.record.state).or_default() += 1;
+            if s.queued.is_some() {
+                c.queued += 1;
+            }
+        }
+        c
+    }
+
+    /// Jobs waiting on the read and write lanes, and jobs running, over every open workbook.
+    pub fn job_counts(&self) -> (u64, u64, u64) {
+        let handles: Vec<Arc<WorkbookHandle>> = self.slots().map.values().filter_map(|s| s.handle.clone()).collect();
+        handles.iter().fold((0, 0, 0), |(r, w, n), h| {
+            let (wr, ww) = h.sched.waiting();
+            let total = h.sched.load();
+            (r + wr as u64, w + ww as u64, n + total.saturating_sub(wr + ww) as u64)
+        })
+    }
+
+    /// The host budget, what open workbooks reserve of it, staged upload bytes and their budget.
+    pub fn budget_use(&self) -> (HostBudget, Reservation, u64, u64) {
+        let ledger = self.ledger();
+        (self.budget, ledger.total(), ledger.uploads(), self.budget.upload_bytes())
+    }
+
     pub fn temp_dir(&self, workbook: &str) -> PathBuf {
         self.provider.temp_dir(workbook)
     }
@@ -1017,6 +1091,17 @@ pub enum StopReason {
 }
 
 impl StopReason {
+    /// Its `reason` label in `alephgrid_allocation_stops_total`.
+    pub fn label(self) -> &'static str {
+        match self {
+            StopReason::Deleted => "deleted",
+            StopReason::Evicted => "evicted",
+            StopReason::Requested => "requested",
+            StopReason::Shutdown => "shutdown",
+            StopReason::Restarting => "restarting",
+        }
+    }
+
     fn closed(self) -> crate::state::Closed {
         match self {
             StopReason::Deleted => crate::state::Closed::Deleted,

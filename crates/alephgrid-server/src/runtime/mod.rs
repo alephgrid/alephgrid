@@ -219,7 +219,7 @@ impl ComputePolicy {
 
 /// Lifecycle of an allocation. `Requested → Starting → Running → Ready → Draining →
 /// Stopped`, or `Failed` from any state before `Ready`. See [`AllocationState::can_become`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum AllocationState {
     /// Recorded; nothing acquired yet.

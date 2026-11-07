@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 use alephgrid_server::http;
 use alephgrid_server::auth::oidc::OidcConfig;
@@ -234,6 +233,25 @@ struct Cli {
     /// the request id, workbook and job of each line where known). Set levels with RUST_LOG.
     #[arg(long, env = "ALEPHGRID_LOG_FORMAT", value_enum, default_value = "text")]
     log_format: LogFormat,
+
+    /// A bearer token (at least 16 characters) a Prometheus scraper sends to read
+    /// GET /metrics. Instance admins can always read it; without a token nobody else can.
+    #[arg(long, env = "ALEPHGRID_METRICS_TOKEN", hide_env_values = true)]
+    metrics_token: Option<String>,
+}
+
+/// `alephgrid diagnose [server flags] [--out FILE]`.
+#[derive(Parser, Debug)]
+#[command(
+    name = "alephgrid diagnose",
+    about = "Write a support-diagnostics bundle (JSON) from the data directory: version, platform, configuration with secrets redacted, storage formats, sizes and counts. Give it the flags and environment the server runs with. No names, contents or secrets."
+)]
+struct DiagnoseCli {
+    #[command(flatten)]
+    server: Cli,
+    /// Write the bundle here instead of standard output.
+    #[arg(long, value_name = "FILE")]
+    out: Option<PathBuf>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,15 +260,9 @@ enum LogFormat {
     Json,
 }
 
-/// Logs go to standard output. They never carry secrets, tokens, cookies or query strings:
-/// requests are logged by id, method and path only (alephgrid_server::health).
+/// Logs go to standard output (alephgrid_server::diagnostics::init_logging).
 fn init_logging(format: LogFormat) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "alephgrid=info,tower_http=warn".into());
-    let logs = tracing_subscriber::fmt().with_env_filter(filter);
-    match format {
-        LogFormat::Text => logs.init(),
-        LogFormat::Json => logs.json().flatten_event(true).with_current_span(false).with_span_list(true).init(),
-    }
+    alephgrid_server::diagnostics::init_logging(format == LogFormat::Json);
 }
 
 #[tokio::main]
@@ -258,6 +270,7 @@ async fn main() -> Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("mcp") => return mcp_command().await,
         Some("health") => return health_command().await,
+        Some("diagnose") => return diagnose_command(),
         Some("python-runtime") => {
             init_logging(LogFormat::Text);
             return python_runtime_command();
@@ -295,6 +308,81 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    let config = build_config(&cli)?;
+    let public_url = config.auth.public_url.clone();
+    let state = AppState::new(config)?;
+    let janitor = alephgrid_server::state::start_janitor(&state);
+    let default_space = state.auth.store.setting("default_space")?.context("the default space is missing")?;
+
+    let mut open_path = String::new();
+    if !cli.files.is_empty() {
+        let first = cli.files[0].file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let h = state.create(&first, &default_space)?;
+        for file in &cli.files {
+            let path = file.canonicalize().with_context(|| format!("cannot open {}", file.display()))?;
+            let started = std::time::Instant::now();
+            let imported = h.with_engine(|wb| wb.import_any(&path, None))?;
+            tracing::info!("imported {} in {:.1?}: {}", file.display(), started.elapsed(), serde_json::to_string(&imported)?);
+        }
+        h.refresh_summary()?;
+        open_path = format!("w/{}", h.meta.lock().unwrap().id);
+    }
+    if let Some(rows) = cli.demo_rows {
+        let h = state.create("Demo: US flights", &default_space)?;
+        let started = std::time::Instant::now();
+        let info = h.with_engine(|wb| wb.create_demo_table(rows))?;
+        tracing::info!("generated {} demo rows in {:.1?}", info.row_count, started.elapsed());
+        h.refresh_summary()?;
+        open_path = format!("w/{}", h.meta.lock().unwrap().id);
+    }
+
+    let app = http::router(state.clone(), cli.web_dir.clone());
+    let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse().context("invalid host/port")?;
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
+    let bound_port = listener.local_addr()?.port();
+    let shown_host = if cli.host == "0.0.0.0" { "localhost" } else { cli.host.as_str() };
+    let base = public_url.clone().unwrap_or_else(|| format!("http://{shown_host}:{bound_port}"));
+    println!("\n  Alephgrid is running → {base}/{open_path}\n  Data: {}\n", cli.data_dir.display());
+    if let Some(code) = state.auth.setup_code() {
+        // Shown only on the console of whoever started the server; it creates the admin once.
+        println!("  First start: open {base}/setup and enter the setup code {code}\n");
+    }
+
+    let stopping = state.clone();
+    let (begun_tx, begun_rx) = tokio::sync::oneshot::channel::<()>();
+    let grace = Duration::from_secs(cli.shutdown_grace) + Duration::from_secs(10);
+    let serve = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Stop admitting work and drain every workbook now: open WebSocket sessions end
+            // when their workbook closes, which lets the server finish.
+            stopping.begin_shutdown();
+            let s = stopping.clone();
+            tokio::task::spawn_blocking(move || s.checkpoint_all());
+            tokio::spawn(async {
+                shutdown_signal().await;
+                tracing::warn!("second signal: exiting without waiting for running work (committed changes are safe)");
+                std::process::exit(130);
+            });
+            let _ = begun_tx.send(());
+        });
+    // Connections that never close (a client holding its socket) must not keep the
+    // process alive: once shutdown began, wait at most the grace period plus 10 s.
+    tokio::select! {
+        r = serve => r?,
+        _ = async { let _ = begun_rx.await; tokio::time::sleep(grace).await } => {
+            tracing::warn!("connections still open after the grace period; stopping anyway");
+        }
+    }
+    janitor.abort();
+    let s = state.clone();
+    tokio::task::spawn_blocking(move || s.checkpoint_all()).await?;
+    tracing::info!("stopped cleanly");
+    Ok(())
+}
+
+/// The server's configuration from its flags and environment, checked.
+fn build_config(cli: &Cli) -> Result<Config> {
     let loopback = matches!(cli.host.as_str(), "127.0.0.1" | "localhost" | "::1");
     if !loopback && cli.auth == AuthMode::Local {
         if !cli.unsafe_no_auth {
@@ -392,75 +480,13 @@ async fn main() -> Result<()> {
     config.max_message_bytes = cli.max_message as usize;
     config.request_timeout = Duration::from_secs(cli.request_timeout.max(1));
     config.job_timeout = Duration::from_secs(cli.job_timeout.max(1));
-    let state = AppState::new(config)?;
-    let janitor = alephgrid_server::state::start_janitor(&state);
-    let default_space = state.auth.store.setting("default_space")?.context("the default space is missing")?;
-
-    let mut open_path = String::new();
-    if !cli.files.is_empty() {
-        let first = cli.files[0].file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let h = state.create(&first, &default_space)?;
-        for file in &cli.files {
-            let path = file.canonicalize().with_context(|| format!("cannot open {}", file.display()))?;
-            let started = std::time::Instant::now();
-            let imported = h.with_engine(|wb| wb.import_any(&path, None))?;
-            tracing::info!("imported {} in {:.1?}: {}", file.display(), started.elapsed(), serde_json::to_string(&imported)?);
+    if let Some(t) = &cli.metrics_token {
+        if t.len() < 16 {
+            anyhow::bail!("--metrics-token must be at least 16 characters");
         }
-        h.refresh_summary()?;
-        open_path = format!("w/{}", h.meta.lock().unwrap().id);
+        config.metrics_token = Some(t.clone());
     }
-    if let Some(rows) = cli.demo_rows {
-        let h = state.create("Demo: US flights", &default_space)?;
-        let started = std::time::Instant::now();
-        let info = h.with_engine(|wb| wb.create_demo_table(rows))?;
-        tracing::info!("generated {} demo rows in {:.1?}", info.row_count, started.elapsed());
-        h.refresh_summary()?;
-        open_path = format!("w/{}", h.meta.lock().unwrap().id);
-    }
-
-    let app = http::router(state.clone(), cli.web_dir.clone());
-    let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse().context("invalid host/port")?;
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
-    let bound_port = listener.local_addr()?.port();
-    let shown_host = if cli.host == "0.0.0.0" { "localhost" } else { cli.host.as_str() };
-    let base = public_url.clone().unwrap_or_else(|| format!("http://{shown_host}:{bound_port}"));
-    println!("\n  Alephgrid is running → {base}/{open_path}\n  Data: {}\n", cli.data_dir.display());
-    if let Some(code) = state.auth.setup_code() {
-        // Shown only on the console of whoever started the server; it creates the admin once.
-        println!("  First start: open {base}/setup and enter the setup code {code}\n");
-    }
-
-    let stopping = state.clone();
-    let (begun_tx, begun_rx) = tokio::sync::oneshot::channel::<()>();
-    let grace = Duration::from_secs(cli.shutdown_grace) + Duration::from_secs(10);
-    let serve = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            // Stop admitting work and drain every workbook now: open WebSocket sessions end
-            // when their workbook closes, which lets the server finish.
-            stopping.begin_shutdown();
-            let s = stopping.clone();
-            tokio::task::spawn_blocking(move || s.checkpoint_all());
-            tokio::spawn(async {
-                shutdown_signal().await;
-                tracing::warn!("second signal: exiting without waiting for running work (committed changes are safe)");
-                std::process::exit(130);
-            });
-            let _ = begun_tx.send(());
-        });
-    // Connections that never close (a client holding its socket) must not keep the
-    // process alive: once shutdown began, wait at most the grace period plus 10 s.
-    tokio::select! {
-        r = serve => r?,
-        _ = async { let _ = begun_rx.await; tokio::time::sleep(grace).await } => {
-            tracing::warn!("connections still open after the grace period; stopping anyway");
-        }
-    }
-    janitor.abort();
-    let s = state.clone();
-    tokio::task::spawn_blocking(move || s.checkpoint_all()).await?;
-    tracing::info!("stopped cleanly");
-    Ok(())
+    Ok(config)
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -488,6 +514,27 @@ async fn shutdown_signal() {
         _ = term => {},
     }
     tracing::info!("shutting down");
+}
+
+/// `alephgrid diagnose`: the bundle from the data directory alone (it opens no database, so
+/// it works while a server runs; a running server's own bundle, with its recent log lines,
+/// is GET /api/admin/diagnostics).
+fn diagnose_command() -> Result<()> {
+    let args = std::iter::once("alephgrid diagnose".to_string()).chain(std::env::args().skip(2));
+    let cli = DiagnoseCli::parse_from(args);
+    if !cli.server.data_dir.is_dir() {
+        anyhow::bail!("{} is not a data directory", cli.server.data_dir.display());
+    }
+    let config = build_config(&cli.server)?;
+    let bundle = serde_json::to_string_pretty(&alephgrid_server::diagnostics::offline(&config))?;
+    match &cli.out {
+        Some(path) => {
+            std::fs::write(path, bundle + "\n").with_context(|| format!("writing {}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+        None => println!("{bundle}"),
+    }
+    Ok(())
 }
 
 /// `alephgrid python-runtime create --python <interpreter> [--wheels DIR --requirements FILE] DIR`
