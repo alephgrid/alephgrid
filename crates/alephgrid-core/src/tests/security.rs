@@ -384,3 +384,72 @@ fn csv_reader(text: &str) -> Vec<Vec<String>> {
     }
     rows
 }
+
+/// Audit run-3: tables that look each other up in a chain are each built once per read,
+/// not once per path through the chain (which grows exponentially with its length).
+#[test]
+fn a_chain_of_lookups_across_tables_builds_each_table_once() {
+    const DEPTH: usize = 5;
+    let mut wb = Workbook::open_in_memory().unwrap();
+    wb.create_table_from_query("t0", "SELECT i AS id, i * 10 AS v FROM range(50) r(i)").unwrap();
+    for k in 1..=DEPTH {
+        wb.create_table_from_query(&format!("t{k}"), "SELECT i AS id, i AS v FROM range(50) r(i)").unwrap();
+        // Three lookups into the table before: 3^5 = 243 paths from t5 down to t0.
+        let source = if k == 1 { "v" } else { "c0" };
+        for j in 0..3 {
+            let formula = format!("=XLOOKUP([@id],t{p}[id],t{p}[{source}],0)", p = k - 1);
+            wb.add_formula_column_as(&format!("t{k}"), &format!("c{j}"), &formula, crate::FormulaLanguage::Sheet).unwrap();
+        }
+    }
+    let build = crate::reads::Build::new();
+    let (_, mut reads) = wb.db().base_select_tracked(&format!("t{DEPTH}"), &build).unwrap();
+    assert!(build.relations_built() <= DEPTH + 1, "{} table relations built for {} tables", build.relations_built(), DEPTH + 1);
+    reads.sort();
+    assert_eq!(reads, (0..=DEPTH).map(|k| format!("t{k}")).collect::<Vec<_>>());
+    // Every column of t5 carries t0's value through the chain: id 7 → 70.
+    let v = wb.open_view(spec(&format!("t{DEPTH}"))).unwrap().view_id;
+    let row = all_rows(&wb, v).into_iter().find(|r| r[0] == serde_json::json!(7)).unwrap();
+    let numbers: Vec<f64> = row.iter().map(|x| x.as_f64().unwrap()).collect();
+    assert_eq!(numbers, vec![7.0, 7.0, 70.0, 70.0, 70.0]);
+}
+
+/// Audit run-3: case-insensitive replace in a sheet where lowercasing changes a character's
+/// length (`İ` → `i̇`, `ẞ` → `ß`, the Kelvin sign → `k`) replaces whole characters and never
+/// slices text inside one (which panicked inside the change).
+#[test]
+fn replace_in_sheets_handles_characters_whose_lowercase_changes_length() {
+    let mut s = crate::sheets::Sheets::from_bytes(None).unwrap();
+    s.create("S").unwrap();
+    s.set(0, &[sheet_input(0, 0, "İẞ"), sheet_input(1, 0, "\u{212A}elvin KELVIN")]).unwrap();
+    let q = |text: &str| crate::sheets::SheetSearch { text: text.into(), match_case: false, whole: false, formulas: false };
+    let shown = |s: &crate::sheets::Sheets, r: u32| s.fetch(0, r, 1, 1).unwrap().rows[0].first().cloned().flatten().map(|x| x.0);
+    // The combining dot is only part of İ's lowercase form: no whole character matches it.
+    assert_eq!(s.replace_all(0, &q("\u{307}"), "x").unwrap(), 0);
+    assert_eq!(shown(&s, 0).as_deref(), Some("İẞ"));
+    assert_eq!(s.replace_all(0, &q("ß"), "ss").unwrap(), 1);
+    assert_eq!(shown(&s, 0).as_deref(), Some("İss"));
+    assert_eq!(s.replace_all(0, &q("k"), "c").unwrap(), 1);
+    assert_eq!(shown(&s, 1).as_deref(), Some("celvin cELVIN"));
+}
+
+/// Audit run-3: a panic inside a change (a bug reached by content) is taken back like a
+/// failed change. Unwinding out of it left the connection inside an open transaction that
+/// every later change joined and none committed.
+#[test]
+fn a_panic_inside_a_change_is_taken_back_and_later_changes_commit() {
+    let mut t = TempWb::new();
+    t.wb.create_table_from_query("before", "SELECT 1 AS x").unwrap();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        t.wb.mutating("boom", None, |wb| -> anyhow::Result<()> {
+            wb.create_table_from_query("lost", "SELECT 1 AS x")?;
+            panic!("a bug reached by content");
+        })
+    }));
+    let r = r.expect("the panic stays inside the change");
+    assert!(r.unwrap_err().to_string().contains("taken back"));
+    t.wb.create_table_from_query("after", "SELECT 2 AS x").unwrap();
+    t.reopen();
+    let mut names: Vec<String> = t.wb.list_tables().unwrap().into_iter().map(|t| t.name).collect();
+    names.sort();
+    assert_eq!(names, vec!["after".to_string(), "before".to_string()]);
+}
