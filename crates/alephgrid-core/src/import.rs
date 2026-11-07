@@ -140,7 +140,8 @@ pub(crate) fn reader_select(path: &Path, overrides: &[ColumnType]) -> Result<Str
                 let pairs: Vec<String> = overrides.iter().map(|o| format!("{}: {}", lit(&o.name), lit(&o.sql_type))).collect();
                 format!(", types = {{{}}}", pairs.join(", "))
             };
-            format!("SELECT * FROM read_csv({file}, auto_detect = true, sample_size = 100000{types})")
+            let delim = csv_delimiter(path).map(|d| format!(", delim = {}", lit(&d.to_string()))).unwrap_or_default();
+            format!("SELECT * FROM read_csv({file}, auto_detect = true, sample_size = 100000{delim}{types})")
         }
         format => {
             let reader = if format == Format::Parquet { format!("read_parquet({file})") } else { format!("read_json_auto({file})") };
@@ -153,6 +154,87 @@ pub(crate) fn reader_select(path: &Path, overrides: &[ColumnType]) -> Result<Str
             }
         }
     })
+}
+
+/// The delimiter of a CSV file when its start settles it: the one candidate (`,`, `;`, tab,
+/// `|`) that splits every complete record of the first 64 KiB into the same number of
+/// fields, more than one, reading `"…"` (with `""` inside) as one value. When several do,
+/// the one making the most fields wins, then the earlier in that list. `None` leaves the
+/// choice to DuckDB's sniffer, which on its own can pick a delimiter that only appears
+/// inside quoted values (`1," ","\t"` / `2,"\t;","a"` was read as `;`-separated; found by
+/// the CSV fuzz target on 7 November 2026).
+fn csv_delimiter(path: &Path) -> Option<char> {
+    use std::io::Read;
+    const SAMPLE: u64 = 64 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(SAMPLE).read_to_end(&mut bytes).ok()?;
+    let truncated = bytes.len() as u64 == SAMPLE;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut best: Option<(char, usize)> = None;
+    for delim in [',', ';', '\t', '|'] {
+        let Some(counts) = field_counts(&text, delim, truncated) else { continue };
+        let Some(&first) = counts.first() else { continue };
+        if first > 1 && counts.iter().all(|&n| n == first) && best.is_none_or(|(_, b)| first > b) {
+            best = Some((delim, first));
+        }
+    }
+    best.map(|(d, _)| d)
+}
+
+/// Fields per record of `text` split by `delim`, with RFC 4180 quoting; blank lines are
+/// skipped. A `truncated` sample leaves out its last record, which may be cut off.
+/// `None` when a quoted value is still open at the end of a whole file.
+fn field_counts(text: &str, delim: char, truncated: bool) -> Option<Vec<usize>> {
+    let mut counts = Vec::new();
+    let (mut fields, mut at_field_start, mut in_quotes, mut blank) = (1, true, false, true);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            }
+            continue;
+        }
+        match c {
+            '"' if at_field_start => {
+                in_quotes = true;
+                at_field_start = false;
+                blank = false;
+            }
+            '\n' | '\r' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if !blank {
+                    counts.push(fields);
+                }
+                (fields, at_field_start, blank) = (1, true, true);
+            }
+            c if c == delim => {
+                fields += 1;
+                at_field_start = true;
+                blank = false;
+            }
+            _ => {
+                at_field_start = false;
+                blank = false;
+            }
+        }
+    }
+    if truncated {
+        if blank {
+            counts.pop();
+        }
+    } else if in_quotes {
+        return None;
+    } else if !blank {
+        counts.push(fields);
+    }
+    Some(counts)
 }
 
 pub(crate) fn suggested_name(path: &Path) -> String {
@@ -213,6 +295,25 @@ pub(crate) fn import_error(e: impl std::fmt::Display) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_delimiter_reads_quoted_values_as_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.csv");
+        let cases: [(&str, Option<char>); 7] = [
+            ("n,c1,c2\n1,\" \",\"\t\"\n2,\"\t;\",\"a\"\n", Some(',')),
+            ("a;b;c\r\n1;\"x,y\";3\r\n", Some(';')),
+            ("a\tb\n1\t2\n\n", Some('\t')),
+            ("a|b\n\"p\nq\"|2\n", Some('|')),
+            ("name\nAda\n", None),
+            ("a,b\n1,2,3\n", None),
+            ("a,b\n\"open,1\n", None),
+        ];
+        for (text, expected) in cases {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(csv_delimiter(&path), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn explains_conversion_errors() {

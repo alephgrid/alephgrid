@@ -719,7 +719,17 @@ impl Sheets {
             let mut entries = 0;
             if formats {
                 // The target's formats are replaced: cleared, then the pasted ones applied.
-                let plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
+                // A quote prefix is part of the cell's input, not its format (IronCalc keeps
+                // it in the style): a cell holding `'=A1` or `'00123` keeps it, or its input
+                // would read `=A1` and become a formula when edited again.
+                let mut plain = vec![vec![ironcalc::base::types::Style::default(); columns]; cells.len()];
+                for (dr, line) in plain.iter_mut().enumerate() {
+                    for (dc, style) in line.iter_mut().enumerate() {
+                        let (r, c) = (target.row as i32 + 1 + dr as i32, target.column as i32 + 1 + dc as i32);
+                        let filled = !m.get_cell_content(index, r, c).unwrap_or_default().is_empty();
+                        style.quote_prefix = filled && m.get_cell_style(index, r, c).is_ok_and(|s| s.quote_prefix);
+                    }
+                }
                 m.set_selected_sheet(index).map_err(|e| anyhow!(e))?;
                 let (r0, c0) = (target.row as i32 + 1, target.column as i32 + 1);
                 m.set_selected_cell(r0, c0).map_err(|e| anyhow!(e))?;
@@ -1317,7 +1327,9 @@ mod tests {
         let style = |s: &Sheets, r: u32, c: u32| s.model().unwrap().get_cell_style(0, r as i32 + 1, c as i32 + 1).unwrap();
         assert_eq!(display(&s, 0, 0, 0), "$1,234.50");
         assert!(style(&s, 0, 0).font.b);
-        assert_eq!((content(&s, 0, 0, 1), display(&s, 0, 0, 1)), ("007".into(), "007".into()), "text keeps its leading zeros");
+        // The input keeps its quote prefix (as for any text cell that would read as a number):
+        // an input of `007` would become the number 7 when edited again.
+        assert_eq!((content(&s, 0, 0, 1), display(&s, 0, 0, 1)), ("'007".into(), "007".into()), "text keeps its leading zeros");
         assert_eq!(display(&s, 0, 1, 0), "12.50%");
         assert_eq!(display(&s, 0, 1, 1), "=1+1", "pasted text never becomes a formula");
         assert!(!style(&s, 1, 1).font.b, "the target's bold is replaced");
