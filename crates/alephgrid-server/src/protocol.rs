@@ -95,6 +95,7 @@ pub const RESULTS: &[(&str, &str)] = &[
     ("stats", "Stats"),
     ("find_in_view", "FindResult"),
     ("column_values", "ColumnValues"),
+    ("view_sql", "string"),
     ("add_column", "null"),
     ("add_formula_column", "null"),
     ("update_formula", "null"),

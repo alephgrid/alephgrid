@@ -781,6 +781,27 @@ impl Db<'_> {
         Ok(all)
     }
 
+    /// A SELECT over the rows `spec` shows, with its columns and in its order (U.05): the SQL
+    /// workspace offers it so a query reads a filtered grid view only when asked to. The
+    /// conditions are the view's own (`filter_sql`), so the query and the grid keep the same
+    /// rows; ties in the sort keep no particular order.
+    pub fn view_sql(&self, spec: &ViewSpec) -> Result<String> {
+        let all = self.validate_spec(spec)?;
+        let by_name: HashMap<&str, &Column> = all.iter().map(|c| (c.name.as_str(), c)).collect();
+        let columns: Vec<String> = all.iter().filter(|c| !spec.hidden.contains(&c.name)).map(|c| ident(&c.name)).collect();
+        let mut sql = format!("SELECT {}\nFROM {}", columns.join(", "), ident(&spec.table));
+        let conditions = spec.filters.iter().map(|f| filter_sql(by_name[f.column.as_str()], f)).collect::<Result<Vec<_>>>()?;
+        if !conditions.is_empty() {
+            sql.push_str(&format!("\nWHERE {}", conditions.join("\n  AND ")));
+        }
+        if !spec.sort.is_empty() {
+            let order: Vec<String> =
+                spec.sort.iter().map(|k| format!("{} {} NULLS LAST", ident(&k.column), if k.desc { "DESC" } else { "ASC" })).collect();
+            sql.push_str(&format!("\nORDER BY {}", order.join(", ")));
+        }
+        Ok(sql)
+    }
+
     /// The table's position index as of this snapshot.
     pub fn index(&self, table: &str) -> Result<Arc<PosIndex>> {
         let meta = storage::table_meta(self.conn, table)?;

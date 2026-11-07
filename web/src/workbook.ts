@@ -868,6 +868,8 @@ export class WorkbookScreen {
     this.kindEl.title = kind === "table"
       ? "Table: typed columns of any size. Sort, filter, formula columns and SQL run on the server, so millions of rows stay fast."
       : `Sheet: free-form cells with Excel formulas, kept in memory. Best for thousands of rows; copying a table or query brings in at most ${formatCount(this.sheetCopyRows)} rows.`;
+    // The SQL workspace says when the grid's view is not the whole table (U.05).
+    this.sql?.gridChanged();
   }
 
   /** Tell the user how much of the data reached the sheet. */
@@ -3217,6 +3219,7 @@ export class WorkbookScreen {
   private sqlPanel(queryId?: string): void {
     if (!this.allowSql) { toast("SQL is disabled on this server", "error"); return; }
     if (this.sql) {
+      this.sql.reveal();
       if (queryId) void this.sql.openQuery(queryId);
       return;
     }
@@ -3247,7 +3250,13 @@ export class WorkbookScreen {
         a.remove();
       },
       closed: () => { if (this.sql === ws) this.sql = null; },
-      dock: (panel, onClose) => dockPanel(this.mainEl, panel, "SQL", onClose),
+      dock: (panel, onClose) => dockPanel(this.mainEl, panel, "SQL", onClose, { collapsible: true }),
+      gridView: () => {
+        if (this.active?.kind !== "table" || !this.view) return null;
+        const spec = this.spec;
+        if (!spec.filters.length && !spec.sort.length && !spec.hidden.length) return null;
+        return { spec, rows: this.view.row_count, total: this.tables.find((t) => t.name === spec.table)?.row_count ?? null };
+      },
     });
     this.sql = ws;
     ws.open();

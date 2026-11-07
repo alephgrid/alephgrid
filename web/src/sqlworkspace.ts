@@ -1,21 +1,30 @@
 // The SQL workspace: a schema browser, an editor with completion and `$name` parameters,
-// bounded result previews, exports of the complete result, saved and live queries, and
-// the ways a result becomes a table or a sheet. Everything here is a convenience; the
-// server checks every statement and parameter itself.
+// bounded result previews labelled with the tables and revision they read (stale once one
+// of those tables changes), a run history kept in this browser, exports of the complete
+// result, saved and live queries, and the ways a result becomes a table or a sheet. SQL
+// reads whole tables; when the grid shows a filtered view, the workspace says so and offers
+// that view's rows as SQL (built by the server) only on request. Everything here is a
+// convenience; the server checks every statement and parameter itself.
 
 import { api, Rpc, RpcError, type CallOptions } from "./api";
+import type { DockHandle } from "./dock";
 import { formatCount, formatValue, isNumericKind } from "./format";
 import type {
-  ParamType, QueryKind, QueryParam, QueryResult, SavedQuery, SheetCopy, TableSchema,
+  ParamType, QueryKind, QueryParam, QueryResult, SavedQuery, SheetCopy, TableSchema, ViewSpec,
 } from "./protocol";
 import { completionAt, findParams, isInternal, mentionedNames, quoteIdent, type Completion } from "./sqltext";
 import type { ServerEvent } from "./types";
-import { choiceDialog, confirmDialog, el, formDialog, openModal, showMenu, toast, toastError } from "./ui";
+import { choiceDialog, confirmDialog, el, formDialog, openModal, pointerDrag, showMenu, toast, toastError } from "./ui";
 
 /** Rows a preview asks for; the server never returns more than 5,000. */
 const PREVIEW_ROWS = 500;
 /** Most suggestions shown at once. */
 const MAX_SUGGESTIONS = 20;
+/** Runs kept in the history (per workbook, in this browser). */
+const HISTORY_MAX = 50;
+/** The editor's height in pixels: limits, keyboard step, default; remembered in this browser. */
+const EDITOR_KEY = "alephgrid-sql-editor";
+const EDITOR_MIN = 56, EDITOR_MAX = 480, EDITOR_STEP = 16, EDITOR_DEFAULT = 104;
 
 const PARAM_TYPES: { value: ParamType; label: string; placeholder: string }[] = [
   { value: "text", label: "Text", placeholder: "text" },
@@ -47,8 +56,14 @@ export interface SqlHost {
   closed(): void;
   /** Show the workspace docked beside the grid instead of as a modal dialog (U.05). The host
    *  calls `onClose` when the person closes the dock; `close` removes it. */
-  dock?(panel: HTMLElement, onClose: () => void): { close: () => void };
+  dock?(panel: HTMLElement, onClose: () => void): DockHandle;
+  /** The grid's current table view when it is not the whole table (filters, sort or hidden
+   *  columns), so the workspace can say that SQL does not see them. */
+  gridView?(): GridView | null;
 }
+
+/** A filtered, sorted or narrowed table view in the grid: `rows` it shows of `total`. */
+export interface GridView { spec: ViewSpec; rows: number; total: number | null }
 
 type ParamState = { type: ParamType; value: string; isNull: boolean };
 type Draft = { sql: string; params: ({ name: string } & ParamState)[]; saved?: string };
@@ -57,6 +72,12 @@ type Loaded = { id: string; name: string; kind: QueryKind; version: number; late
 /** The request the workspace is waiting for. */
 type Job = { seq: number; id: number; label: string; kind: "query" | "other"; cancelling?: boolean };
 type Shown = { sql: string; params: QueryParam[]; result: QueryResult; live: boolean };
+/** One run in the history: what ran and how it ended. */
+type Run = {
+  sql: string; params: QueryParam[]; at: number;
+  outcome: "rows" | "error" | "cancelled" | "change";
+  rows?: number; truncated?: boolean; revision?: number; message?: string;
+};
 type Suggestion = { label: string; insert: string; detail: string };
 
 let workspaceSeq = 0;
@@ -68,6 +89,20 @@ function plural(n: number, one: string, many = `${one}s`): string {
 function sameParams(a: QueryParam[], b: QueryParam[]): boolean {
   const norm = (p: QueryParam[]) => JSON.stringify(p.map((x) => [x.name, x.type, x.value ?? null]));
   return norm(a) === norm(b);
+}
+
+function clock(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** "a", "a and b", "a, b and c". */
+function joinAnd(parts: string[]): string {
+  return parts.length < 2 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
+function firstLine(text: string): string {
+  const line = text.split("\n", 1)[0];
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line;
 }
 
 function codeOf(e: unknown): string | undefined {
@@ -98,7 +133,7 @@ function caretCoords(ta: HTMLTextAreaElement, pos: number): { left: number; top:
 export class SqlWorkspace {
   private rpc: Rpc;
   private uid = `sqlws${++workspaceSeq}`;
-  private modal: { close: () => void } | null = null;
+  private modal: { close: () => void; expand?: () => void } | null = null;
   private disposed = false;
   private timers = new Set<number>();
 
@@ -111,6 +146,15 @@ export class SqlWorkspace {
   /** Bumped by every request; a reply whose number is no longer current is ignored. */
   private runSeq = 0;
   private shown: Shown | null = null;
+  /** When the shown result was read, and which of its source tables changed since. */
+  private readAt = 0;
+  private staleSources = new Set<string>();
+  /** The grid's filtered view the scope note describes. */
+  private gridView: GridView | null = null;
+  private resultTab = 0;
+  private editorHeight = EDITOR_DEFAULT;
+  private resultTabs: HTMLButtonElement[] = [];
+  private resultPanels: HTMLElement[] = [];
   /** Expanded tables in the schema tree, and the item that has the tree's tab stop. */
   private expanded = new Set<string>();
   private treeFocus = "";
@@ -130,7 +174,15 @@ export class SqlWorkspace {
   private paramError = el("div", { class: "dialog-error sql-param-error", role: "alert" });
   private status = el("span", { class: "muted sql-status", role: "status" });
   private cancelBtn = el("button", { class: "btn sql-cancel", hidden: true, onclick: () => this.cancel() }, "Cancel");
-  private liveEl = el("div", { class: "sql-live", hidden: true });
+  private freshEl = el("div", { class: "sql-fresh", hidden: true });
+  private scopeEl = el("div", { class: "sql-scope", hidden: true });
+  private editorGrip = el("div", {
+    class: "sql-editor-grip", role: "separator", tabindex: 0, "aria-orientation": "horizontal", "aria-label": "Resize SQL editor",
+    "aria-valuemin": String(EDITOR_MIN), "aria-valuemax": String(EDITOR_MAX), title: "Drag, or use the arrow keys, to resize",
+  });
+  private historyList = el("ul", { class: "sql-history-list", role: "list", "aria-label": "Query history" });
+  private historyEmpty = el("p", { class: "muted sql-history-empty" }, "No runs yet. Each run is kept here, in this browser only.");
+  private clearHistoryBtn = el("button", { class: "btn btn-small", type: "button", onclick: () => this.clearHistory() }, "Clear history");
   private noticeEl = el("div", { class: "sql-notice", hidden: true });
   private results = el("div", { class: "sql-results", tabindex: 0, role: "region", "aria-label": "Query results" });
 
@@ -160,6 +212,8 @@ export class SqlWorkspace {
     this.editor.addEventListener("click", () => this.hideSuggestions());
     this.tree.addEventListener("keydown", (e) => this.treeKey(e));
     this.results.replaceChildren(el("p", { class: "muted" }, "Run a query to preview its first rows. Export writes every row to a file."));
+    this.setupEditorGrip();
+    this.setupResultTabs();
     const docked = !!this.host.dock;
     const dialog = el("div", { class: docked ? "sql-workspace sql-docked" : "dialog dialog-wide sql-workspace" },
       el("div", { class: "sql-head" },
@@ -180,8 +234,10 @@ export class SqlWorkspace {
           ),
         ),
         el("div", { class: "sql-main" },
+          this.scopeEl,
           this.loadedEl,
           el("div", { class: "sql-editor-wrap" }, this.editor, this.listbox),
+          this.editorGrip,
           this.paramsEl,
           this.paramError,
           el("div", { class: "dialog-actions sql-actions" },
@@ -196,18 +252,225 @@ export class SqlWorkspace {
             el("button", { class: "btn", onclick: () => this.toTable() }, "Save as table"),
             docked ? null : el("button", { class: "btn", onclick: () => this.close() }, "Close"),
           ),
-          this.liveEl,
-          this.noticeEl,
-          this.results,
+          el("div", { class: "sql-tabs", role: "tablist", "aria-label": "Results and history" }, ...this.resultTabs),
+          ...this.resultPanels,
         ),
       ),
     );
     this.modal = this.host.dock ? this.host.dock(dialog, () => this.close()) : openModal(dialog, () => this.close());
     this.syncParams();
     this.updateLoaded();
+    this.renderScope();
+    this.renderHistory();
     this.editor.focus();
     this.loadSchema();
     this.loadSaved();
+  }
+
+  /** Bring the workspace back into view (it may be collapsed to its title bar). */
+  reveal(): void {
+    if (this.disposed) return;
+    this.modal?.expand?.();
+  }
+
+  /** The grid switched tables or changed its filters, sort or hidden columns. */
+  gridChanged(): void {
+    if (!this.disposed) this.renderScope();
+  }
+
+  // ------------------------------------------------------------ editor size
+
+  /** A separator under the editor sets its height (pointer or arrow keys), kept in this browser. */
+  private setupEditorGrip(): void {
+    let saved = EDITOR_DEFAULT;
+    try { saved = Number(localStorage.getItem(EDITOR_KEY)) || EDITOR_DEFAULT; } catch { /* this page only */ }
+    this.setEditorHeight(saved, false);
+    const grip = this.editorGrip;
+    grip.addEventListener("keydown", (e) => {
+      const step = { ArrowDown: EDITOR_STEP, ArrowUp: -EDITOR_STEP }[e.key];
+      const to = step ? this.editorHeight + step : e.key === "Home" ? EDITOR_MIN : e.key === "End" ? EDITOR_MAX : null;
+      if (to === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.setEditorHeight(to);
+    });
+    grip.addEventListener("pointerdown", (e) => {
+      const startY = e.clientY;
+      const startH = this.editorHeight;
+      pointerDrag(grip, e, (m) => this.setEditorHeight(startH + m.clientY - startY));
+    });
+  }
+
+  private setEditorHeight(h: number, persist = true): void {
+    this.editorHeight = Math.round(Math.min(EDITOR_MAX, Math.max(EDITOR_MIN, h)));
+    this.editor.style.height = `${this.editorHeight}px`;
+    this.editorGrip.setAttribute("aria-valuenow", String(this.editorHeight));
+    this.editorGrip.setAttribute("aria-valuetext", `${this.editorHeight} pixels`);
+    if (persist) try { localStorage.setItem(EDITOR_KEY, String(this.editorHeight)); } catch { /* this page only */ }
+  }
+
+  // ------------------------------------------------------ results / history
+
+  private setupResultTabs(): void {
+    const names = ["Results", "History"];
+    this.resultTabs = names.map((name, i) => el("button", {
+      type: "button", role: "tab", class: "sql-tab", id: `${this.uid}-tab-${i}`, "aria-controls": `${this.uid}-panel-${i}`,
+      onclick: () => this.showTab(i),
+    }, name));
+    this.resultPanels = [
+      el("div", { class: "sql-tabpanel", role: "tabpanel" }, this.freshEl, this.noticeEl, this.results),
+      el("div", { class: "sql-tabpanel sql-history", role: "tabpanel", tabindex: -1 },
+        el("div", { class: "sql-history-head" },
+          el("span", { class: "muted" }, "Your runs in this workbook, newest first. Kept in this browser only."),
+          el("div", { class: "spacer" }),
+          this.clearHistoryBtn,
+        ),
+        this.historyList,
+        this.historyEmpty,
+      ),
+    ];
+    this.resultPanels.forEach((panel, i) => {
+      panel.id = `${this.uid}-panel-${i}`;
+      panel.setAttribute("aria-labelledby", this.resultTabs[i].id);
+    });
+    this.showTab(0);
+    for (const tab of this.resultTabs) {
+      tab.addEventListener("keydown", (e) => {
+        const n = this.resultTabs.length;
+        const to = e.key === "ArrowRight" ? (this.resultTab + 1) % n : e.key === "ArrowLeft" ? (this.resultTab - 1 + n) % n
+          : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : null;
+        if (to === null) return;
+        e.preventDefault();
+        this.showTab(to, true);
+      });
+    }
+  }
+
+  private showTab(i: number, focus = false): void {
+    this.resultTab = i;
+    this.resultTabs.forEach((t, j) => {
+      t.setAttribute("aria-selected", i === j ? "true" : "false");
+      t.tabIndex = i === j ? 0 : -1;
+    });
+    this.resultPanels.forEach((p, j) => { p.hidden = i !== j; });
+    if (focus) this.resultTabs[i].focus();
+  }
+
+  private get historyKey(): string {
+    return `alephgrid:sql-history:${this.host.workbookId}`;
+  }
+
+  private history(): Run[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(this.historyKey) ?? "[]");
+      return Array.isArray(v) ? v.filter((r) => typeof r?.sql === "string" && typeof r?.at === "number" && Array.isArray(r?.params)) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Keep a finished run (newest first, at most HISTORY_MAX) in this browser. */
+  private record(run: Omit<Run, "at">): void {
+    const runs = [{ ...run, at: Date.now() }, ...this.history()].slice(0, HISTORY_MAX);
+    try { localStorage.setItem(this.historyKey, JSON.stringify(runs)); } catch { /* private mode or full */ }
+    this.renderHistory();
+  }
+
+  private clearHistory(): void {
+    try { localStorage.removeItem(this.historyKey); } catch { /* this page only */ }
+    this.renderHistory();
+    this.status.textContent = "History cleared.";
+  }
+
+  private renderHistory(): void {
+    const runs = this.history();
+    this.historyEmpty.hidden = runs.length > 0;
+    this.clearHistoryBtn.disabled = runs.length === 0;
+    this.historyList.replaceChildren(...runs.map((r) => {
+      const when = new Date(r.at).toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
+      const outcome = r.outcome === "rows" ? `${formatCount(r.rows ?? 0)}${r.truncated ? "+" : ""} ${r.rows === 1 && !r.truncated ? "row" : "rows"} · revision ${r.revision ?? "?"}`
+        : r.outcome === "error" ? `Error: ${r.message ?? ""}`
+        : r.outcome === "cancelled" ? "Cancelled"
+        : r.message ?? "Change applied";
+      const params = r.params.map((p) => `$${p.name} = ${p.value ?? "NULL"}`).join(", ");
+      return el("li", { class: "sql-history-item" },
+        el("div", { class: "sql-history-meta" },
+          el("time", { dateTime: new Date(r.at).toISOString() }, when),
+          el("span", { class: `sql-history-outcome ${r.outcome}` }, outcome),
+        ),
+        el("pre", { class: "mono sql-history-sql" }, r.sql),
+        params ? el("div", { class: "mono muted sql-history-params" }, params) : null,
+        el("button", { class: "btn btn-small", type: "button", "aria-label": `Open in the editor: the run from ${when}`, onclick: () => this.openRun(r, when) }, "Open"),
+      );
+    }));
+  }
+
+  /** Put a run's SQL and parameters back in the editor; nothing runs until asked. */
+  private openRun(r: Run, when: string): void {
+    if (this.disposed) return;
+    this.replaceEditor(r.sql);
+    this.setParams(r.params);
+    if (this.loaded && this.loaded.sql !== r.sql) this.loaded = null;
+    this.saveDraft();
+    this.updateLoaded();
+    this.renderSaved();
+    this.paramError.textContent = "";
+    this.status.textContent = `Loaded a run from ${when}. Run it to see current results.`;
+  }
+
+  /** Replace the editor's text as one edit the browser can undo (⌘/Ctrl + Z brings the old text back). */
+  private replaceEditor(text: string): void {
+    const ta = this.editor;
+    ta.focus();
+    ta.select();
+    let done = false;
+    try { done = document.execCommand("insertText", false, text); } catch { done = false; }
+    if (!done || ta.value !== text) {
+      ta.value = text;
+      ta.dispatchEvent(new Event("input"));
+    }
+    ta.setSelectionRange(text.length, text.length);
+    this.hideSuggestions();
+  }
+
+  // ------------------------------------------------------------- scope note
+
+  /** SQL reads whole tables. When the grid shows less (filters, hidden columns) or another
+   *  order, say so, and offer that view's rows as SQL only when asked. */
+  private renderScope(): void {
+    const g = this.host.gridView?.() ?? null;
+    this.gridView = g;
+    if (!g) {
+      this.scopeEl.hidden = true;
+      this.scopeEl.replaceChildren();
+      return;
+    }
+    const parts: string[] = [];
+    if (g.spec.filters.length) parts.push(g.total != null ? `filtered (${formatCount(g.rows)} of ${formatCount(g.total)} rows)` : `filtered (${plural(g.rows, "row")})`);
+    if (g.spec.sort.length) parts.push(`sorted by ${g.spec.sort.map((k) => k.column).join(", ")}`);
+    if (g.spec.hidden.length) parts.push(`with ${plural(g.spec.hidden.length, "column")} hidden`);
+    this.scopeEl.replaceChildren(
+      el("span", {}, `The grid shows ${g.spec.table} ${joinAnd(parts)}. SQL reads whole tables: the grid's filters, sort and hidden columns do not apply here.`),
+      el("button", { class: "btn btn-small", type: "button", onclick: () => this.queryGridRows() }, "Query the grid's rows"),
+    );
+    this.scopeEl.hidden = false;
+  }
+
+  /** Replace the editor's SQL with a query of the grid view's rows, as the server builds it
+   *  (the view's own conditions, so both read the same rows). */
+  private async queryGridRows(): Promise<void> {
+    const g = this.gridView;
+    if (!g) return;
+    let sql: string;
+    try {
+      sql = await this.rpc.call("view_sql", { spec: g.spec });
+    } catch (e) {
+      this.inPane(e);
+      return;
+    }
+    if (this.disposed) return;
+    this.replaceEditor(sql);
+    this.status.textContent = `The editor now reads the ${plural(g.rows, "row")} of ${g.spec.table} the grid shows. Run it to see them (⌘/Ctrl + Z brings back the previous SQL).`;
   }
 
   /** Close the workspace; whatever it is still running is cancelled. */
@@ -240,7 +503,8 @@ export class SqlWorkspace {
       case "resync":
         this.loadSchema();
         this.loadSaved();
-        if (this.shown?.live) this.markStale();
+        // Changes may have been missed while the connection was down.
+        if (this.shown) this.markStale("*");
         break;
     }
   }
@@ -434,39 +698,52 @@ export class SqlWorkspace {
       return;
     }
     this.noticeEl.hidden = true;
-    this.liveEl.hidden = true;
+    this.freshEl.hidden = true;
     this.shown = null;
     this.results.replaceChildren(el("pre", { class: "sql-error" }, message));
   }
 
   // -------------------------------------------------------------------- run
 
-  /** Preview the statement; a change (INSERT/UPDATE/DELETE) is applied only after confirmation. */
-  async run(live = false): Promise<void> {
+  /** Preview the statement (the editor's, or `again`: a shown result's own SQL and
+   *  parameters); a change (INSERT/UPDATE/DELETE) is applied only after confirmation. Every
+   *  finished run goes into the history. */
+  async run(live = false, again?: { sql: string; params: QueryParam[] }): Promise<void> {
     if (!this.claim()) return;
     this.hideSuggestions();
-    const sql = this.editor.value;
-    const params = this.params();
+    const sql = again?.sql ?? this.editor.value;
+    const params = again?.params ?? this.params();
     this.paramError.textContent = "";
+    this.showTab(0);
     const out = await this.track("Running", "query", (opts) => this.rpc.request("query", { sql, params, limit: PREVIEW_ROWS }, opts));
     if (!this.current(out.seq)) return;
     if ("error" in out) {
-      if (codeOf(out.error) === "sql_change") await this.applyChange(sql, params);
-      else this.showError(out.error);
+      const code = codeOf(out.error);
+      if (code === "sql_change") {
+        await this.applyChange(sql, params);
+        return;
+      }
+      if (code === "cancelled") this.record({ sql, params, outcome: "cancelled" });
+      else this.record({ sql, params, outcome: "error", message: firstLine((out.error as Error).message) });
+      this.showError(out.error);
       return;
     }
-    this.showResult(sql, params, out.value, live);
+    const r = out.value;
+    this.record({ sql, params, outcome: "rows", rows: r.rows.length, truncated: r.truncated, revision: r.revision });
+    this.showResult(sql, params, r, live);
   }
 
   private showResult(sql: string, params: QueryParam[], r: QueryResult, live: boolean): void {
     this.shown = { sql, params, result: r, live };
+    this.readAt = Date.now();
+    this.staleSources.clear();
     const n = r.rows.length;
     this.status.textContent = `${formatCount(n)}${r.truncated ? "+" : ""} ${n === 1 && !r.truncated ? "row" : "rows"} · ${formatCount(Math.round(r.elapsed_ms))} ms · revision ${r.revision}`;
     this.noticeEl.hidden = !r.truncated;
     this.noticeEl.textContent = r.truncated
       ? `Showing the first ${formatCount(n)} rows — the result has more. Export to get every row.`
       : "";
-    this.renderLive(false);
+    this.renderFresh();
     if (!r.columns.length) {
       this.results.replaceChildren(el("p", { class: "muted" }, "The query returned no columns."));
       return;
@@ -483,33 +760,42 @@ export class SqlWorkspace {
     this.results.replaceChildren(table, ...(n === 0 ? [el("p", { class: "muted" }, "No rows.")] : []));
   }
 
-  /** The live-query line: which revision was read, and whether a source changed since. */
-  private renderLive(stale: boolean): void {
+  /** The line above every result: the tables it read, the revision and time it read them
+   *  at, and once one of those tables changes, that it is stale, with a way to run it again. */
+  private renderFresh(): void {
     const s = this.shown;
-    if (!s?.live) {
-      this.liveEl.hidden = true;
+    if (!s) {
+      this.freshEl.hidden = true;
       return;
     }
-    this.liveEl.hidden = false;
-    this.liveEl.classList.toggle("stale", stale);
-    this.liveEl.replaceChildren(
-      el("span", {}, `Live · read at revision ${s.result.revision}`),
+    const tables = s.result.sources.map((x) => x.table);
+    const read = `read ${tables.length ? tables.join(", ") : "no tables"} at revision ${s.result.revision} · ${clock(this.readAt)}`;
+    const stale = this.staleSources.size > 0;
+    const why = this.staleSources.has("*")
+      ? "the connection was interrupted, so the data may have changed"
+      : `${[...this.staleSources].join(", ")} changed since this result`;
+    this.freshEl.hidden = false;
+    this.freshEl.classList.toggle("sql-live", s.live);
+    this.freshEl.classList.toggle("stale", stale);
+    this.freshEl.replaceChildren(
+      el("span", {}, s.live ? `Live · ${read}` : `R${read.slice(1)}`),
       ...(stale ? [
-        el("strong", { class: "sql-stale" }, "Stale — the source changed"),
-        el("button", { class: "btn", onclick: () => this.run(true) }, "Refresh result"),
+        el("strong", { class: "sql-stale" }, `Stale — ${why}`),
+        el("button", { class: "btn btn-small", type: "button", onclick: () => this.run(s.live, { sql: s.sql, params: s.params }) },
+          s.live ? "Refresh result" : "Run again"),
       ] : []),
     );
   }
 
   private sourceChanged(table: string): void {
-    const s = this.shown;
-    if (!s?.live) return;
     const t = table.toLowerCase();
-    if (s.result.sources.some((x) => x.table.toLowerCase() === t)) this.markStale();
+    const source = this.shown?.result.sources.find((x) => x.table.toLowerCase() === t);
+    if (source) this.markStale(source.table);
   }
 
-  private markStale(): void {
-    this.renderLive(true);
+  private markStale(table: string): void {
+    this.staleSources.add(table);
+    this.renderFresh();
   }
 
   /** The statement changes data: say so, and apply it only if the user agrees. */
@@ -530,6 +816,8 @@ export class SqlWorkspace {
     const out = await this.track("Applying change", "other", (opts) => this.rpc.request("sql_change", { sql, params }, opts));
     if (!this.current(out.seq)) return;
     if ("error" in out) {
+      const code = codeOf(out.error);
+      this.record(code === "cancelled" ? { sql, params, outcome: "cancelled" } : { sql, params, outcome: "error", message: firstLine((out.error as Error).message) });
       this.showError(out.error);
       return;
     }
@@ -539,9 +827,10 @@ export class SqlWorkspace {
       : c.kind === "delete" ? `Deleted ${rows} from ${c.table}`
       : `Updated ${rows} in ${c.table}`;
     this.status.textContent = what;
+    this.record({ sql, params, outcome: "change", message: what });
     this.shown = null;
     this.noticeEl.hidden = true;
-    this.liveEl.hidden = true;
+    this.freshEl.hidden = true;
     this.results.replaceChildren(el("p", { class: "sql-applied" }, `${what}. Run a SELECT to see the data.`));
     toast(what, "success");
   }
@@ -738,7 +1027,7 @@ export class SqlWorkspace {
     } else {
       this.shown = null;
       this.noticeEl.hidden = true;
-      this.liveEl.hidden = true;
+      this.freshEl.hidden = true;
       this.status.textContent = `Loaded “${q.name}” (v${q.version}).`;
       this.results.replaceChildren(el("p", { class: "muted" }, "A saved query keeps the SQL only. Run it to see current results."));
     }

@@ -180,6 +180,8 @@ pub enum Op {
     FindInView { view_id: u64, text: String, #[serde(default)] #[ts(optional, as = "Option<bool>")] match_case: bool, #[serde(default)] #[ts(optional, as = "Option<u64>")] from: u64, #[serde(default)] #[ts(optional, as = "Option<bool>")] backwards: bool, #[serde(default)] #[ts(optional, as = "Option<bool>")] count: bool },
     /// Distinct values of a column with counts, for a header filter (U.16).
     ColumnValues { spec: ViewSpec, column: String, #[serde(default)] #[ts(optional, as = "Option<String>")] search: String, #[serde(default = "default_value_limit")] #[ts(optional, as = "Option<usize>")] limit: usize },
+    /// A SELECT over the rows a view spec shows, for the SQL workspace (U.05).
+    ViewSql { spec: ViewSpec },
     AddColumn { table: String, name: String, sql_type: String },
     /// `language` is `sql` (a DuckDB expression, the default) or `sheet` (spreadsheet syntax).
     AddFormulaColumn { table: String, name: String, formula: String, #[serde(default)] #[ts(optional, as = "Option<alephgrid_core::FormulaLanguage>")] language: alephgrid_core::FormulaLanguage },
@@ -451,7 +453,7 @@ pub fn required_caps(op: &Op) -> &'static [Cap] {
         // Running Python is publishing-level: it executes the code (in a worker).
         TestFunction { definition } if definition.kind == alephgrid_core::FunctionKind::Python => &[Cap::Publish],
         TestFunction { .. } => VIEW,
-        Query { .. } => QUERY,
+        Query { .. } | ViewSql { .. } => QUERY,
         ExportQuery { .. } => &[Cap::Query, Cap::Export],
         PublishFunction { .. } | PinFunctions { .. } => &[Cap::Publish],
         RefreshFunctions => &[Cap::Edit],
@@ -474,7 +476,7 @@ fn classify(op: &Op) -> Option<(bool, Class)> {
     use Op::*;
     match op {
         Analyses | Dashboards | Dashboard { .. } | Drill { .. } | XlsxCompatibility | Validations { .. } | PreviewTransform { .. } | InspectFormula { .. } | Presentation { .. } | Functions | FunctionUsage { .. } | Tables | ViewInfo { .. } | Fetch { .. } | Stats { .. } | Comments { .. } | HiddenSheets | SheetRules { .. } | SheetCharts { .. } | SheetLayout { .. } | SheetColumnTexts { .. } | SheetRangeValues { .. } | SheetNumbers { .. } | Sheets | SheetFetch { .. } | SheetNames | SheetCellDetail { .. } | SheetRegion { .. } | SheetCheckFormula { .. } | SavedViews { .. } | History { .. }
-        | Schema | SavedQueries | QueryVersions { .. } | Materialized => Some((false, Class::Interactive)),
+        | Schema | SavedQueries | QueryVersions { .. } | Materialized | ViewSql { .. } => Some((false, Class::Interactive)),
         Analyze { .. } | ColumnValues { .. } | FindInView { .. } | SheetFind { .. } | SheetFindAll { .. } | ReplacePreview { .. } | TestFunction { .. } | OpenView { .. } | UpdateView { .. } | Query { .. } | ExportQuery { .. } => Some((false, Class::Bulk)),
         CloseView { .. } | Cancel { .. } | CancelRecalculation { .. } | Recalculate { .. } => None,
         MaterializeAnalysis { .. } | ApplyTransform { .. } | ReplaceApply { .. } | ReplaceUndo { .. } | PublishFunction { .. } | PinFunctions { .. } | RefreshFunctions | CreateTableFromQuery { .. } | CreateDemoTable { .. } | CreateSheetFromQuery { .. } | TableToSheet { .. }
@@ -626,6 +628,10 @@ fn read(r: &Reader, op: Op, ctx: &Ctx) -> Result<Value> {
         Op::SheetFindAll { search } => json!(r.sheets().find_all_sheets(&search)?),
         Op::FindInView { view_id, text, match_case, from, backwards, count } => json!(r.find_in_view(view_id, &text, match_case, from, backwards, count)?),
         Op::ColumnValues { spec, column, search, limit } => json!(r.column_values(&spec, &column, &search, limit)?),
+        Op::ViewSql { spec } => {
+            require_sql(ctx)?;
+            json!(r.view_sql(&spec)?)
+        }
         Op::Query { sql, params, limit } => {
             require_sql(ctx)?;
             json!(r.run_query(&sql, &params, limit)?)

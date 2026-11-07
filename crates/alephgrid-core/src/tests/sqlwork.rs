@@ -490,3 +490,46 @@ fn sheet_copies_never_drop_rows_silently() {
         }
     }
 }
+
+// ------------------------------------------------------------------ U.05
+
+/// The SQL the workspace offers for a filtered, sorted grid view reads exactly the rows the
+/// view shows, in its order, with its columns; quotes in filter values stay literals.
+#[test]
+fn view_sql_reads_the_rows_the_grid_view_shows() {
+    let mut t = setup();
+    let spec = ViewSpec {
+        table: "orders".into(),
+        sort: vec![SortKey { column: "amount".into(), desc: true }, SortKey { column: "id".into(), desc: false }],
+        filters: vec![
+            Filter { column: "region".into(), op: FilterOp::Neq, value: json!("west") },
+            Filter { column: "qty".into(), op: FilterOp::Gte, value: json!("2") },
+        ],
+        hidden: vec!["note".into()],
+    };
+    let sql = t.wb.view_sql(&spec).unwrap();
+    let result = t.wb.run_query(&sql, &[], 5_000).unwrap();
+    let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["id", "region", "amount", "qty", "day", "line_total"]);
+    // Worked out from ORDERS: qty ≥ 2 and not west keeps 1, 3, 4, 5; by amount (desc), then id.
+    let ids: Vec<serde_json::Value> = result.rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(ids, [json!(4), json!(1), json!(3), json!(5)]);
+    // The grid view shows the same rows in the same order.
+    let view = t.wb.open_view(spec).unwrap();
+    let grid: Vec<serde_json::Value> = all_rows(&t.wb, view.view_id).iter().map(|r| r[0].clone()).collect();
+    assert_eq!(grid.len(), ids.len());
+    for (g, q) in grid.iter().zip(&ids) {
+        assert_eq!(g.to_string().trim_matches('"'), q.to_string());
+    }
+
+    let quoted = ViewSpec {
+        table: "orders".into(),
+        filters: vec![Filter { column: "note".into(), op: FilterOp::Contains, value: json!("o'brien") }],
+        ..Default::default()
+    };
+    let rows = rows(&t, &t.wb.view_sql(&quoted).unwrap(), &[]);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], json!(5));
+    assert_eq!(rows[0][5], json!("O'Brien; DROP TABLE orders; --"));
+    assert!(t.wb.view_sql(&ViewSpec { table: "orders".into(), hidden: vec!["nope".into()], ..Default::default() }).is_err());
+}
