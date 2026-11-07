@@ -4,15 +4,12 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::*;
 use serde_json::{json, Value};
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
 
 struct Proc {
     child: Child,
@@ -20,19 +17,38 @@ struct Proc {
 }
 
 async fn spawn(data_dir: &std::path::Path) -> Proc {
-    let port = free_port();
-    let child = Command::new(env!("CARGO_BIN_EXE_alephgrid"))
-        .args(["--data-dir", data_dir.to_str().unwrap(), "--port", &port.to_string(), "--threads", "2"])
-        .stdout(Stdio::null())
+    // The child reserves its own port and prints it. Picking a free port here and passing it
+    // on raced the other tests of this file, which run in parallel: two children could get
+    // the same port, one failed to bind, and the readiness probe reached the other test's
+    // server (CI, 7 November: "connection refused" once that server was killed).
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alephgrid"))
+        .args(["--data-dir", data_dir.to_str().unwrap(), "--port", "0", "--threads", "2"])
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while tokio::net::TcpStream::connect(addr).await.is_err() {
-        assert!(Instant::now() < deadline, "server did not start");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut tx = Some(tx);
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(url) = line.split("Alephgrid is running → http://").nth(1) {
+                if let Ok(addr) = url.split('/').next().unwrap_or("").parse::<std::net::SocketAddr>() {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(addr);
+                    }
+                }
+            }
+        }
+    });
+    let addr = match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(addr)) => addr,
+        other => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("server did not report its bound address: {other:?}");
+        }
+    };
     Proc { child, addr }
 }
 
