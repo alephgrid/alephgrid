@@ -279,6 +279,8 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
     let cell = |value: &str, text: bool| PastedCell { value: value.into(), text, style: None, formula: None };
     check((vec![vec![cell("+\"\"", true)]], 0, 0)).unwrap();
     check((vec![vec![cell("-\"a\"&\"b\"", true), cell("'=A1", false), cell("'", false)]], 1, 1)).unwrap();
+    check((vec![vec![cell("-a=a:B", false)]], 0, 0)).unwrap();
+    check((vec![vec![cell("+a:B", false), cell("-5", false)]], 2, 0)).unwrap();
     fuzz("paste_cells", (grid, 0u32..5, 0u32..5), check);
 }
 
@@ -293,7 +295,9 @@ fn pasted_cells_keep_text_and_clear_and_undo() {
 fn pasted_values_never_become_formulas() {
     let mut wb = Workbook::open_in_memory().unwrap();
     wb.with_sheets(|s| s.create("Paste").map(|_| ())).unwrap();
-    for value in ["-\"", "+A1", "-A1", "@SUM(1)", "'=", "'=A1"] {
+    // `+a:B` and `-a=a:B` (found by the nightly fuzz run of 9 Nov 2026): read as formulas over
+    // whole columns, they used to make the paste fail on the evaluation limit.
+    for value in ["-\"", "+A1", "-A1", "@SUM(1)", "'=", "'=A1", "+a:B", "-a=a:B"] {
         wb.with_sheets(|s| s.paste_cells(0, (0, 0), &[vec![PastedCell { value: value.into(), text: false, style: None, formula: None }]], PasteMode::All)).unwrap();
         let d = wb.sheets().cell_detail(0, 0, 0).unwrap();
         assert!(!d.input.starts_with('='), "{value:?} became the formula {:?}", d.input);

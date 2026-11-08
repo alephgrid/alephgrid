@@ -658,6 +658,13 @@ impl Sheets {
     /// first change; if IronCalc still fails part-way, the caller (`Workbook::with_sheets`)
     /// restores the last saved model, so a batch is all-or-nothing.
     pub fn set(&mut self, index: u32, inputs: &[SheetInput]) -> Result<()> {
+        self.set_inputs(index, inputs, &[])
+    }
+
+    /// [`Sheets::set`], except that inputs flagged in `never_formula` that IronCalc stores as
+    /// a formula (`+A1`, `-a:B`) are written as text instead, before anything is evaluated:
+    /// evaluating such an accidental formula could refuse the whole edit (a range too large).
+    fn set_inputs(&mut self, index: u32, inputs: &[SheetInput], never_formula: &[bool]) -> Result<()> {
         self.check_index(index)?;
         if inputs.is_empty() {
             return Ok(());
@@ -679,10 +686,15 @@ impl Sheets {
         m.pause_evaluation();
         let mut entries = 0;
         let result = (|| -> Result<()> {
-            for i in inputs {
-                m.set_user_input(index, i.row as i32 + 1, i.column as i32 + 1, &i.value)
-                    .map_err(|e| anyhow!("{}{}: {e}", column_name(i.column), i.row + 1))?;
+            for (k, i) in inputs.iter().enumerate() {
+                let (row, column) = (i.row as i32 + 1, i.column as i32 + 1);
+                m.set_user_input(index, row, column, &i.value).map_err(|e| anyhow!("{}{}: {e}", column_name(i.column), i.row + 1))?;
                 entries += 1;
+                if never_formula.get(k) == Some(&true) && m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('=')) {
+                    m.set_user_input(index, row, column, &format!("'{}", i.value))
+                        .map_err(|e| anyhow!("{}{}: {e}", column_name(i.column), i.row + 1))?;
+                    entries += 1;
+                }
             }
             Ok(())
         })();
@@ -723,18 +735,17 @@ impl Sheets {
                 }
             })
             .collect();
-        self.set(index, &plain)?;
+        let never_formula: Vec<bool> = inputs.iter().map(|(i, text)| !*text && !i.value.starts_with('=')).collect();
+        self.set_inputs(index, &plain, &never_formula)?;
         let m = self.model()?;
         let fix: Vec<SheetInput> = inputs
             .iter()
             .filter(|(i, text)| {
                 let (row, column) = (i.row as i32 + 1, i.column as i32 + 1);
-                if *text {
-                    !matches!(m.get_cell_type(index, row, column), Ok(CellType::Text))
-                        || m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('='))
-                } else {
-                    !i.value.starts_with('=') && m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('='))
-                }
+                // Typed values that came out as formulas were already rewritten by `set_inputs`.
+                *text
+                    && (!matches!(m.get_cell_type(index, row, column), Ok(CellType::Text))
+                        || m.get_cell_content(index, row, column).is_ok_and(|c| c.starts_with('=')))
             })
             .map(|(i, _)| SheetInput { value: format!("'{}", i.value), base: None, ..i.clone() })
             .collect();

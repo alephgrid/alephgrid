@@ -23,6 +23,20 @@ pub struct TestServer {
     pub http: reqwest::Client,
 }
 
+/// A test that fails before `stop()` drops its server here. Stop the server's work then:
+/// the tokio runtime waits for every blocking task when the test ends, so a query left
+/// running (a `range(1e11)` export, say) would keep the failed test from ever reporting.
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if self.shutdown.is_some() {
+            if let Some(j) = self.janitor.take() {
+                j.abort();
+            }
+            self.state.checkpoint_all();
+        }
+    }
+}
+
 impl TestServer {
     pub async fn start(data_dir: &Path) -> TestServer {
         Self::start_with(data_dir, |_| {}).await
