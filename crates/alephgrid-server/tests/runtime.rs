@@ -541,3 +541,47 @@ async fn eviction_racing_new_work_never_serves_from_a_closed_workbook() {
     assert!(evictions >= 10 && epoch > 10, "evictions must actually have raced the requests ({evictions} evictions, epoch {epoch})");
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_repeats_the_interrupt_until_every_job_ends() {
+    // DuckDB loses an interrupt that arrives between two statements. A job made of short
+    // statements with pauses between them outlives a single interrupt, and closing the
+    // workbook then waits for its reader for good. Draining must repeat the interrupt.
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start(dir.path()).await;
+    let wb = server.create_workbook("drain").await;
+    let ws = server.ws(&wb).await;
+    let h = server.state.controller.handle(&wb).unwrap();
+    let in_gap = Arc::new(AtomicBool::new(false));
+    let job = {
+        let (h, in_gap) = (h.clone(), in_gap.clone());
+        std::thread::spawn(move || {
+            h.with_reader(|r| {
+                let started = std::time::Instant::now();
+                loop {
+                    // Between statements: an interrupt that arrives now is lost.
+                    in_gap.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(300));
+                    in_gap.store(false, Ordering::SeqCst);
+                    if let Err(e) = r.run_query("SELECT count(*) FROM range(20000000)", &[], 1) {
+                        return Ok(format!("{e:#}"));
+                    }
+                    assert!(started.elapsed() < Duration::from_secs(60), "the job was never interrupted");
+                }
+            })
+        })
+    };
+    eventually("the job is between two statements", || h.active() == 1 && in_gap.load(Ordering::SeqCst)).await;
+    let closing = {
+        let h = h.clone();
+        tokio::task::spawn_blocking(move || {
+            h.drain(Duration::ZERO).unwrap();
+            h.close()
+        })
+    };
+    let closed = tokio::time::timeout(Duration::from_secs(20), closing).await;
+    assert!(closed.is_ok(), "draining did not stop a job whose first interrupt was lost");
+    let message = job.join().unwrap().unwrap();
+    assert!(message.to_lowercase().contains("interrupt"), "{message}");
+    drop(ws);
+}
