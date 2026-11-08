@@ -377,6 +377,11 @@ jobs:
               curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
               . "$HOME/.cargo/env"
               rustup toolchain install
+              # Link with the rust-lld that ships with the toolchain, as Rust already does on x86_64.
+              # GNU ld (the arm64 default) reads archives once, in order, so it cannot resolve the
+              # reference from the DuckDB whole-archive extension autoregister library back into
+              # libduckdb (undefined reference to duckdb_register_static_extensions).
+              export RUSTFLAGS="-C link-arg=-fuse-ld=lld -C link-arg=-B$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n "s/^host: //p")/bin/gcc-ld"
               cargo build --release --locked -p alephgrid-server'
             sudo chown -R "$(id -u):$(id -g)" target
             echo "needs glibc $(objdump -T target/release/alephgrid | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
