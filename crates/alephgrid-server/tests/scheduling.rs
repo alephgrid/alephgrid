@@ -389,6 +389,25 @@ async fn uploads_are_bounded_by_size_and_by_the_temp_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refused_upload_closes_its_connection() {
+    // The server stops reading a refused body and closes the connection; the reply must say
+    // so, or the client may reuse the connection for its next request and hit a broken pipe.
+    let dir = tempfile::tempdir().unwrap();
+    let server = TestServer::start_with(dir.path(), |c| c.max_upload_bytes = 16).await;
+    let wb = server.create_workbook("close").await;
+    for path in [format!("/api/workbooks/{wb}/uploads?filename=a.csv"), format!("/api/workbooks/{wb}/import?filename=a.csv")] {
+        let res = server.http.post(server.url(&path)).body(vec![b'x'; 17]).send().await.unwrap();
+        assert_eq!(res.status(), 413, "{path}");
+        assert_eq!(res.headers().get("connection").and_then(|v| v.to_str().ok()), Some("close"), "{path}");
+    }
+    // An accepted upload keeps the connection.
+    let res = server.http.post(server.url(&format!("/api/workbooks/{wb}/uploads?filename=b.csv"))).body("s\nab\n").send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers().get("connection"), None);
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_client_that_does_not_read_is_cut_off_with_bounded_buffering() {
     let dir = tempfile::tempdir().unwrap();
     let server = TestServer::start_with(dir.path(), |c| {

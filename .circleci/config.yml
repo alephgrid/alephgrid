@@ -452,7 +452,7 @@ jobs:
                 --no-build-deps --target "$t" --override-filename sbom
               mv crates/alephgrid-server/sbom.json "dist/alephgrid-$v-$t.cdx.json"
             done
-            (cd web && npm sbom --sbom-format cyclonedx --omit dev --package-lock-only) > "dist/alephgrid-$v-web.cdx.json"
+            (cd web && npm sbom --sbom-format cyclonedx --omit dev --package-lock-only) | node tools/release/web_sbom.mjs > "dist/alephgrid-$v-web.cdx.json"
             cd dist
             for f in *.cdx.json; do sha256sum "$f" > "$f.sha256"; done
             ls -l

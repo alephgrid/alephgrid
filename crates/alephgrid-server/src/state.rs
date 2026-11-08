@@ -793,10 +793,21 @@ impl WorkbookHandle {
         }
         if self.active() > 0 {
             tracing::warn!(workbook = self.id.as_str(), active = self.active(), "drain deadline passed; interrupting");
-            self.interrupt.interrupt();
             self.sheet_cancel.store(true, Ordering::SeqCst);
-            for i in &self.reader_interrupts {
-                i.interrupt();
+            // An interrupt that lands between two statements of a job is lost (the next
+            // statement starts afresh), so repeat it until every job has ended, as a cancelled
+            // job does; interrupting once could leave the locks below waiting for good.
+            let mut next_warning = std::time::Instant::now() + Duration::from_secs(10);
+            while self.active() > 0 {
+                self.interrupt.interrupt();
+                for i in &self.reader_interrupts {
+                    i.interrupt();
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                if std::time::Instant::now() >= next_warning {
+                    tracing::warn!(workbook = self.id.as_str(), active = self.active(), "still waiting for interrupted jobs to end");
+                    next_warning += Duration::from_secs(10);
+                }
             }
         }
         let guard = self.engine.lock().unwrap_or_else(|e| e.into_inner());

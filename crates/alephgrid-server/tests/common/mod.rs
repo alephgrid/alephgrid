@@ -62,7 +62,12 @@ impl TestServer {
             j.abort();
         }
         let state = self.state.clone();
-        tokio::task::spawn_blocking(move || state.checkpoint_all()).await.unwrap();
+        // Bounded, so a shutdown that cannot finish fails the test instead of hanging the run.
+        let stopping = tokio::task::spawn_blocking(move || state.checkpoint_all());
+        tokio::time::timeout(Duration::from_secs(120), stopping)
+            .await
+            .expect("shutdown (drain, checkpoint, close) did not finish within 120 s")
+            .unwrap();
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
