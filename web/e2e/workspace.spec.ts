@@ -220,3 +220,34 @@ test("the hub shows each workbook's compute, with sleeping as a normal state", a
   await page.getByRole("button", { name: "Alephgrid — all workbooks" }).click();
   await expect(page.locator(".wb-row", { hasText: "Compute state" }).locator(".wb-compute")).toHaveText("Ready");
 });
+
+test("the toolbar appears once the first table opens, and its buttons do not move then", async ({ page }) => {
+  const wb = await server.createWorkbook("Steady toolbar"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "t", sql: "SELECT 1 AS id, 'a' AS label" });
+  ws.close();
+  // Hold the list of tables: nothing is open yet.
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const held = new Set<number>();
+  await page.routeWebSocket(/\/ws\//, (route) => {
+    const srv = route.connectToServer();
+    route.onMessage((m) => {
+      try { const f = JSON.parse(String(m)); if (f.op === "tables") held.add(f.id); } catch { /* */ }
+      srv.send(m);
+    });
+    srv.onMessage(async (m) => {
+      try { const f = JSON.parse(String(m)); if (held.has(f.id)) await released; } catch { /* */ }
+      route.send(m);
+    });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect.poll(() => held.size).toBeGreaterThan(0);
+  const analyze = page.getByRole("button", { name: "Analyze", exact: true });
+  await expect(analyze).toBeHidden();
+  release();
+  await expect(analyze).toBeVisible();
+  const at = await analyze.boundingBox();
+  // The table's view has arrived: its columns are in the grid.
+  await expect(page.getByRole("grid", { name: "Table t" })).toHaveAttribute("aria-colcount", "2");
+  expect(await analyze.boundingBox()).toEqual(at);
+});

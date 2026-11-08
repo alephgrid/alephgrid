@@ -138,6 +138,7 @@ export class WorkbookScreen {
   private sheetDims = { rows: SHEET_MIN_ROWS, cols: SHEET_MIN_COLS };
   private sheetCols: Column[] = sheetColumns(SHEET_MIN_COLS);
   private allowSql = true;
+  private toolbarEl!: HTMLElement;
   /** Controls shown only when the server allows SQL (U.20). */
   private sqlOnly: HTMLElement[] = [];
   /** Rows copied into a sheet at most (from /api/config). */
@@ -490,7 +491,21 @@ export class WorkbookScreen {
     }
   }
 
+  private showToolbar(): void {
+    this.toolbarEl.classList.remove("toolbar-loading");
+    this.toolbarEl.removeAttribute("aria-busy");
+  }
+
   async start(): Promise<void> {
+    try {
+      await this.load();
+    } finally {
+      // Nothing to open, or opening failed: the toolbar is still the way in.
+      this.showToolbar();
+    }
+  }
+
+  private async load(): Promise<void> {
     try {
       const config = await api.config();
       this.allowSql = config.allow_sql;
@@ -770,7 +785,9 @@ export class WorkbookScreen {
         tool("cpu", "Compute", act.compute, { title: "This workbook's compute: state, size, idle shutdown" }),
         this.themeBtn,
       ),
-      el("div", { class: "toolbar", role: "toolbar", "aria-label": "Workbook tools" },
+      // Hidden (its height kept) until the first table or sheet opens: opening one shows the
+      // buttons for its kind, which moved every later button (Analyze, SQL…) under the pointer.
+      this.toolbarEl = el("div", { class: "toolbar toolbar-loading", role: "toolbar", "aria-label": "Workbook tools", "aria-busy": "true" },
         this.explorerBtn = tool("sidebar", "Explorer", () => this.toggleExplorer(), { title: "Show or hide the workbook explorer" }),
         sep(),
         ...this.sheetButtons,
@@ -1019,6 +1036,7 @@ export class WorkbookScreen {
   }
 
   private updateToolbar(): void {
+    if (this.active) this.showToolbar();
     const sheet = this.isSheet();
     this.formatBarEl.hidden = !sheet;
     if (sheet) this.formatBarEl.sync?.();
