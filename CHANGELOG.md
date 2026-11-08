@@ -4,7 +4,7 @@ Versions follow [Semantic Versioning](https://semver.org). Before 1.0, a minor v
 the storage format; such versions migrate workbooks on open and keep the old file (see
 docs/OPERATIONS.md, Upgrades). Only the latest release receives fixes.
 
-## Unreleased
+## 0.1.0 - 2026-11-08
 
 The first release of Alephgrid: an open-source, self-hosted spreadsheet for data that doesn't
 fit in a spreadsheet. Open a CSV or Parquet file with tens of millions of rows, scroll,
