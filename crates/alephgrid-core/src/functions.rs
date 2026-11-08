@@ -917,7 +917,10 @@ impl Workbook {
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         let stored = match crate::external::store(&self.conn, function, version, results) {
             Ok(n) => {
-                self.conn.execute_batch("COMMIT;")?;
+                if let Err(e) = self.conn.execute_batch("COMMIT;") {
+                    let _ = self.conn.execute_batch("ROLLBACK;");
+                    return Err(e.into());
+                }
                 n
             }
             Err(e) => {

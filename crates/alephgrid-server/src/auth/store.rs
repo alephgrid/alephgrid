@@ -392,10 +392,13 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN TRANSACTION;")?;
         match f(&conn) {
-            Ok(v) => {
-                conn.execute_batch("COMMIT;")?;
-                Ok(v)
-            }
+            Ok(v) => match conn.execute_batch("COMMIT;") {
+                Ok(()) => Ok(v),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    Err(e.into())
+                }
+            },
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 Err(e)
@@ -420,7 +423,12 @@ impl Store {
             conn.execute_batch("BEGIN TRANSACTION;")?;
             let r = conn.execute_batch(&format!("COPY FROM DATABASE {} TO ag_backup;", ident(&db)));
             match r {
-                Ok(()) => conn.execute_batch("COMMIT;")?,
+                Ok(()) => {
+                    if let Err(e) = conn.execute_batch("COMMIT;") {
+                        let _ = conn.execute_batch("ROLLBACK;");
+                        return Err(e.into());
+                    }
+                }
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK;");
                     return Err(e.into());

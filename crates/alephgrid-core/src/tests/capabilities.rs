@@ -377,3 +377,36 @@ fn a_failed_snapshot_commit_does_not_poison_the_connection() {
     assert!(r.run_query("SELECT count(*) FROM t", &[], 10).is_err());
     assert_eq!(r.run_query("SELECT count(*) FROM t", &[], 10).unwrap().rows, vec![vec![json!(10)]]);
 }
+
+/// Regression (nightly pipeline 34): a reader that went back to the server's pool inside an
+/// aborted transaction failed every later read with "Current transaction is aborted".
+/// `release` takes such a transaction back.
+#[test]
+fn a_reader_left_in_an_aborted_transaction_is_released() {
+    let t = setup();
+    let r = t.wb.reader().unwrap();
+    assert!(!r.release(), "no transaction was open");
+    r.conn.execute_batch("BEGIN TRANSACTION;").unwrap();
+    assert!(r.conn.execute_batch("SELECT error('x');").is_err());
+    assert!(r.run_query("SELECT count(*) FROM t", &[], 10).is_err(), "the aborted transaction blocks reads");
+    assert!(r.release(), "the open transaction is reported");
+    assert_eq!(r.run_query("SELECT count(*) FROM t", &[], 10).unwrap().rows, vec![vec![json!(10)]]);
+}
+
+/// A panic inside a read's snapshot, after a statement failed in it, does not leave the
+/// snapshot's transaction open on the connection.
+#[test]
+fn a_panic_inside_a_snapshot_takes_its_transaction_back() {
+    let t = setup();
+    let r = t.wb.reader().unwrap();
+    let db = r.db();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = db.snapshot(|| -> anyhow::Result<()> {
+            assert!(r.conn.execute_batch("SELECT error('x');").is_err());
+            panic!("a bug after a failed statement");
+        });
+    }));
+    assert!(panicked.is_err());
+    assert!(!r.release(), "no transaction was left open");
+    assert_eq!(r.run_query("SELECT count(*) FROM t", &[], 10).unwrap().rows, vec![vec![json!(10)]]);
+}

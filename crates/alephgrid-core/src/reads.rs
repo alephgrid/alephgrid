@@ -239,6 +239,18 @@ impl Db<'_> {
         }
         self.conn.execute_batch("BEGIN TRANSACTION;")?;
         self.in_snapshot.set(true);
+        // A panic in `f` (after an interrupted statement, say) unwinds past the ROLLBACK
+        // below; this takes the transaction back then, or the connection would go back to
+        // its pool inside an aborted transaction and fail every later read.
+        struct Unwinding<'c>(&'c duckdb::Connection);
+        impl Drop for Unwinding<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    let _ = self.0.execute_batch("ROLLBACK;");
+                }
+            }
+        }
+        let _unwinding = Unwinding(self.conn);
         let out = f().and_then(|v| {
             crate::faults::check("snapshot_commit")?;
             // An interrupt aimed at the read can land on its COMMIT instead.
