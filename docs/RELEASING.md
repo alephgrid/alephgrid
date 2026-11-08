@@ -77,8 +77,10 @@ PyPI accepts files up to 100 MB by default; a larger wheel needs a limit increas
      and packages them with checksums;
    * writes CycloneDX SBOMs (`release-sbom`): `alephgrid-VERSION-TARGET.cdx.json` for the Rust
      crates linked into each binary (cargo-cyclonedx, pinned) and `alephgrid-VERSION-web.cdx.json`
-     for the web bundle (`npm sbom`, production dependencies). The C/C++ libraries inside DuckDB
-     are not in cargo's graph; they are listed in `THIRD-PARTY-NOTICES.md`;
+     for the web bundle (`npm sbom` production dependencies, none today, plus vite's
+     module-preload helper and the Manrope font, added by `tools/release/web_sbom.mjs`). The
+     C/C++ libraries inside DuckDB are not in cargo's graph; they are listed in
+     `THIRD-PARTY-NOTICES.md`;
    * creates a **draft** GitHub release with the archives, the SBOMs and `SHA256SUMS` (drafts
      are visible only to maintainers);
    * stops at **`approve-publish`**.

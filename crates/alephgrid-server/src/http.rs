@@ -230,11 +230,14 @@ pub fn router(state: Shared, web_dir: Option<PathBuf>) -> Router {
         .route("/api/users/{id}", patch(crate::auth::routes::update_user))
         .route(
             "/api/workbooks/{id}/import",
-            post(import_file).layer(DefaultBodyLimit::disable()),
+            post(import_file).layer(DefaultBodyLimit::disable()).layer(middleware::map_response(close_if_refused)),
         )
         .route("/api/workbooks/{id}/export", get(export))
         .route("/api/workbooks/{id}/downloads/{download}", get(download))
-        .route("/api/workbooks/{id}/uploads", post(stage_upload).layer(DefaultBodyLimit::disable()))
+        .route(
+            "/api/workbooks/{id}/uploads",
+            post(stage_upload).layer(DefaultBodyLimit::disable()).layer(middleware::map_response(close_if_refused)),
+        )
         .route("/api/workbooks/{id}/uploads/{upload}", axum::routing::delete(cancel_upload))
         .route("/api/workbooks/{id}/uploads/{upload}/preview", post(preview_upload))
         .route("/api/workbooks/{id}/uploads/{upload}/import", post(import_upload))
@@ -891,6 +894,16 @@ fn upload_name(filename: &str) -> ApiResult<String> {
         .map(|s| s.to_string_lossy().to_string())
         .filter(|s| !s.starts_with('.'))
         .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "invalid filename"))
+}
+
+/// A refused upload can leave part of its body unread, and the server then closes the
+/// connection. Without `Connection: close` in the reply, a client may already have put the
+/// connection back in its pool and send its next request into the closed socket.
+async fn close_if_refused(mut res: Response) -> Response {
+    if !res.status().is_success() {
+        res.headers_mut().insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+    }
+    res
 }
 
 /// Stream a request body into its own scratch directory. Same-name uploads cannot
