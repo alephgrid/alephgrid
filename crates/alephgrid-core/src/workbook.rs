@@ -1945,7 +1945,7 @@ impl Reader {
         &self.shared
     }
 
-    fn db(&self) -> Db<'_> {
+    pub(crate) fn db(&self) -> Db<'_> {
         self.shared.sweep(&self.conn);
         Db { conn: &self.conn, shared: &self.shared, in_txn: false, keep: Default::default(), built: Default::default(), in_snapshot: Default::default() }
     }
@@ -2104,6 +2104,23 @@ impl Reader {
         self.conn.interrupt_handle()
     }
 
+    /// Leave no transaction open on this connection; true when one was open (and is now
+    /// taken back). The server calls this when a reader goes back to its pool after an
+    /// operation failed or panicked: a reader left inside an aborted transaction fails
+    /// every later read with "Current transaction is aborted".
+    pub fn release(&self) -> bool {
+        // Outside a transaction ROLLBACK fails with "no transaction is active". A stray
+        // interrupt can stop it too, so it is tried again.
+        for _ in 0..5 {
+            match self.conn.execute_batch("ROLLBACK;") {
+                Ok(()) => return true,
+                Err(e) if e.to_string().contains("no transaction is active") => return false,
+                Err(_) => {}
+            }
+        }
+        false
+    }
+
     pub fn progress_handle(&self) -> duckdb::progress::ProgressHandle {
         self.conn.progress_handle()
     }
@@ -2132,10 +2149,13 @@ fn backup_to(conn: &Connection, path: &Path) -> Result<u64> {
             Ok(revision)
         })();
         match out {
-            Ok(r) => {
-                conn.execute_batch("COMMIT;")?;
-                Ok(r)
-            }
+            Ok(r) => match conn.execute_batch("COMMIT;") {
+                Ok(()) => Ok(r),
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    Err(e.into())
+                }
+            },
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK;");
                 Err(e)

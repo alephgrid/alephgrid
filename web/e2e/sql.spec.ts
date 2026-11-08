@@ -310,6 +310,7 @@ test("saved queries survive a reload, can be renamed, and keep their versions", 
 
   // After a reload the query is still listed; opening it restores text and parameters.
   await page.reload();
+  await expect(page.getByRole("tab", { name: /sales/ })).toBeVisible();
   await page.getByRole("button", { name: "SQL", exact: true }).click();
   // The unsaved draft (text and parameter values) is kept in this browser.
   await expect(editor).toHaveValue(v1);
@@ -647,6 +648,9 @@ test("each run is kept in this browser's query history; opening one loads it wit
   // Kept across a reload (in this browser only), reached with the keyboard.
   await page.reload();
   await expect(page.locator(".status-dot.status-open")).toBeVisible();
+  // As in openSql: the toolbar gains the table's buttons once the table opens, which moves
+  // the SQL button; a click in that moment can land beside it.
+  await expect(page.getByRole("tab", { name: /sales/ })).toBeVisible();
   await page.getByRole("button", { name: "SQL", exact: true }).click();
   await editor.fill("SELECT 0 AS zero");
   const resultsTab = tabs.getByRole("tab", { name: "Results" });

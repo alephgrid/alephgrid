@@ -64,3 +64,31 @@ test("F.13: an XLSX download first says what it leaves out", async ({ page }) =>
   expect((await download).suggestedFilename()).toBe("Compat.xlsx");
   ws.close();
 });
+
+test("Data tools opened while the table is still opening lists its columns", async ({ page }) => {
+  const wb = await server.createWorkbook("Tools early"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "people", sql: "SELECT * FROM (VALUES (1, 'Ann', 'gold')) v(id, name, tier)" });
+  // Hold the table's view until the dialog has been asked for.
+  let release!: () => void;
+  const released = new Promise<void>((r) => (release = r));
+  const openIds = new Set<number>();
+  await page.routeWebSocket(/\/ws\//, (route) => {
+    const srv = route.connectToServer();
+    route.onMessage((m) => {
+      try { const f = JSON.parse(String(m)); if (f.op === "open_view") openIds.add(f.id); } catch { /* */ }
+      srv.send(m);
+    });
+    srv.onMessage(async (m) => {
+      try { const f = JSON.parse(String(m)); if (openIds.has(f.id)) await released; } catch { /* */ }
+      route.send(m);
+    });
+  });
+  await page.goto(`${server.url}/w/${wb}`);
+  await expect(page.getByRole("grid", { name: "Table people" })).toBeVisible();
+  await expect.poll(() => openIds.size).toBeGreaterThan(0);
+  await menuCommand(page, "Data", "Data tools…");
+  release();
+  const d = page.getByRole("dialog", { name: /Data tools/ });
+  await expect(d.getByRole("combobox", { name: "Column", exact: true }).locator("option")).toHaveText(["id", "name", "tier"]);
+  ws.close();
+});

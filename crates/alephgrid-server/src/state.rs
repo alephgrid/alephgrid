@@ -249,6 +249,24 @@ impl Drop for Active<'_> {
     }
 }
 
+/// Run `f` on a pooled reader; after it fails or panics, make sure the reader goes back
+/// without an open transaction. One left inside an aborted transaction failed every later
+/// read on it with "Current transaction is aborted" (nightly pipeline 34).
+fn released<T>(r: &Reader, f: impl FnOnce(&Reader) -> Result<T>) -> Result<T> {
+    struct Release<'a>(&'a Reader, bool);
+    impl Drop for Release<'_> {
+        fn drop(&mut self) {
+            if !self.1 && self.0.release() {
+                tracing::warn!("a reader came back inside a transaction after a failed operation; it was taken back");
+            }
+        }
+    }
+    let mut guard = Release(r, false);
+    let out = f(r);
+    guard.1 = out.is_ok();
+    out
+}
+
 impl WorkbookHandle {
     pub fn new(
         meta: WorkbookMeta,
@@ -526,14 +544,14 @@ impl WorkbookHandle {
         for slot in &self.readers {
             if let Ok(guard) = slot.try_lock() {
                 return match guard.as_ref() {
-                    Some(r) => f(r),
+                    Some(r) => released(r, f),
                     None => bail!(self.closed_message()),
                 };
             }
         }
         let guard = self.readers[0].lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(r) => f(r),
+            Some(r) => released(r, f),
             None => bail!(self.closed_message()),
         }
     }
@@ -543,7 +561,7 @@ impl WorkbookHandle {
         let _active = self.enter()?;
         let guard = self.readers[slot.min(self.readers.len() - 1)].lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
-            Some(r) => f(r),
+            Some(r) => released(r, f),
             None => bail!(self.closed_message()),
         }
     }

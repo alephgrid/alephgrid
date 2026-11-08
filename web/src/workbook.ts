@@ -258,7 +258,15 @@ export class WorkbookScreen {
     importFile: () => this.fileInput.click(),
     analyze: () => this.openAnalyze(),
     dashboards: () => { this.closeDashboards?.(); this.closeDashboards = dashboardsDialog(this.rpc); },
-    dataTools: () => { if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; } this.closeTools?.(); this.closeTools = dataToolsDialog(this.rpc, this.active.name, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); }); },
+    dataTools: async () => {
+      if (this.active?.kind !== "table") { toast("Open a table first", "error"); return; }
+      // The dialog lists the table's columns: a table still opening has none yet.
+      const table = this.active.name;
+      if (this.opening) await this.opening;
+      if (this.active?.kind !== "table" || this.active.name !== table) return;
+      this.closeTools?.();
+      this.closeTools = dataToolsDialog(this.rpc, table, this.view?.columns ?? [], async name => { await this.loadItems(); await this.openTable(name); });
+    },
     sql: () => this.sqlPanel(),
     functions: () => this.openFunctions(),
     formulaHelp: () => { this.closeFormulaHelp?.(); this.closeFormulaHelp = formulaHelp(); },
