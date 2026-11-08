@@ -52,7 +52,7 @@ impl TestServer {
                 .await
                 .unwrap();
         });
-        TestServer { addr, state, data_dir: data_dir.to_path_buf(), shutdown: Some(tx), task: Some(task), janitor: Some(janitor), http: reqwest::Client::new() }
+        TestServer { addr, state, data_dir: data_dir.to_path_buf(), shutdown: Some(tx), task: Some(task), janitor: Some(janitor), http: reqwest::Client::builder().timeout(REPLY_WITHIN).build().unwrap() }
     }
 
     /// Graceful stop, as on SIGTERM: stop admitting, drain and close every workbook (which
@@ -151,6 +151,11 @@ pub struct Ws {
     pub hello: Value,
 }
 
+/// The longest a test waits for one reply. Events (progress, changes) can keep arriving while
+/// a reply never comes; without a bound such a test would hang until CI gives up, without
+/// saying where.
+const REPLY_WITHIN: Duration = Duration::from_secs(180);
+
 impl Ws {
     pub async fn connect(addr: SocketAddr, workbook: &str) -> Ws {
         Self::try_connect(addr, workbook).await.expect("websocket connect")
@@ -184,7 +189,9 @@ impl Ws {
         frame.insert("id".into(), id.into());
         frame.insert("op".into(), op.into());
         self.stream.send(Message::Text(Value::Object(frame).to_string().into())).await.map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + REPLY_WITHIN;
         loop {
+            assert!(Instant::now() < deadline, "no reply to {op} (request {id}) within {REPLY_WITHIN:?}");
             let msg = self.next_message().await.ok_or_else(|| "connection closed".to_string())?;
             if msg.get("event").is_some() {
                 self.events.push(msg);
@@ -216,7 +223,9 @@ impl Ws {
         if let Some(r) = self.replies.remove(&id) {
             return Some(r);
         }
+        let deadline = Instant::now() + REPLY_WITHIN;
         loop {
+            assert!(Instant::now() < deadline, "no reply to request {id} within {REPLY_WITHIN:?}");
             let msg = self.next_message().await?;
             if msg.get("event").is_some() {
                 self.events.push(msg);

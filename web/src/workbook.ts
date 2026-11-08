@@ -1110,7 +1110,12 @@ export class WorkbookScreen {
       return el("button", {
         class: `tab${on ? " active" : ""}`, role: "tab", "aria-selected": on ? "true" : "false",
         title: `Table · ${formatCount(t.row_count)} rows · ${t.column_count} columns${this.snapshotNote(t.name)}`,
-        onclick: () => this.openTable(t.name),
+        // The open table's own tab keeps the view as it is (its sort, filters and scroll):
+        // reopening would reset them, and leave the grid without columns meanwhile.
+        onclick: () => {
+          if (this.active?.kind === "table" && this.active.name === t.name && (this.view || this.opening)) { this.grid.focus(); return; }
+          void this.openTable(t.name);
+        },
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.tableTabMenu(t, e.clientX, e.clientY); },
       }, el("span", { class: "tab-icon" }, icon("table", 13)), t.name,
       this.materialized.some((m) => m.table === t.name && m.stale) ? el("span", { class: "tab-stale", "aria-hidden": "true" }, " •") : null);
@@ -1123,7 +1128,12 @@ export class WorkbookScreen {
         // While a formula is being written, a tab shows that sheet for picking references
         // and keeps the formula bar focused (the edit still belongs to its own cell).
         onmousedown: (e: MouseEvent) => { if (this.pickingFormula()) e.preventDefault(); },
-        onclick: () => this.pickingFormula() ? this.showSheetForPicking(s.index) : this.openSheet(s.index),
+        onclick: () => {
+          if (this.pickingFormula()) { this.showSheetForPicking(s.index); return; }
+          // The open sheet's own tab keeps the selection and scroll where they are.
+          if (this.active?.kind === "sheet" && this.active.index === s.index) { this.grid.focus(); return; }
+          void this.openSheet(s.index);
+        },
         oncontextmenu: (e: MouseEvent) => { e.preventDefault(); this.sheetTabMenu(s, e.clientX, e.clientY); },
         // S.07: drag a sheet tab onto another to move it there.
         draggable: "true",

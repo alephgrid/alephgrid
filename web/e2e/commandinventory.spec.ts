@@ -302,6 +302,39 @@ test.describe("in another locale and time zone", () => {
   });
 });
 
+// Clicking the tab that is already open keeps what the user set up there: the table is not
+// reopened (which reset its sort and left the grid without columns for a moment, so a quick
+// right-click on a header opened no menu), and the sheet keeps its selection.
+test("clicking the open tab keeps the table's view and the sheet's selection", async ({ page }) => {
+  const wb = await server.createWorkbook("Same tab"), ws = await server.connect(wb);
+  await ws.call("create_table_from_query", { name: "t", sql: "SELECT i AS n FROM range(5) r(i)" });
+  await ws.call("sheet_create", { name: "S" });
+  const opens: string[] = [];
+  page.on("websocket", (sock) => sock.on("framesent", (f) => { if (String(f.payload).includes('"op":"open_view"')) opens.push(String(f.payload)); }));
+  await page.goto(`${server.url}/w/${wb}`);
+  await page.getByRole("tab", { name: /^t/ }).click();
+  await expect(page.getByRole("grid", { name: "Table t" })).toBeVisible();
+  await expect.poll(() => opens.length).toBeGreaterThan(0);
+  const before = opens.length;
+  await page.getByRole("tab", { name: /^t/ }).click();
+  await page.locator(".grid-scroller").click({ button: "right", position: { x: 70, y: 16 } });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  expect(opens.length).toBe(before);
+
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect(page.getByRole("grid", { name: "Sheet S" })).toBeVisible();
+  await page.locator(".grid-host").focus();
+  await page.keyboard.press("ControlOrMeta+g");
+  const field = page.getByRole("dialog", { name: "Go to" }).getByLabel("Cell, range or name");
+  await field.fill("C5");
+  await field.press("Enter");
+  await expect(page.locator(".cell-ref")).toHaveText("C5");
+  await page.getByRole("tab", { name: /^S/ }).click();
+  await expect(page.locator(".cell-ref")).toHaveText("C5");
+  ws.close();
+});
+
 test("U.T05: context menus give a reason for every disabled command; sheet constraints are kept", async ({ page }) => {
   const wb = await server.createWorkbook("Context menus"), ws = await server.connect(wb);
   await ws.call("create_table_from_query", { name: "one", sql: "SELECT 1 AS x" });
