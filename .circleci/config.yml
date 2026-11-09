@@ -505,12 +505,20 @@ jobs:
             # (docs/CI.md, "Release safety").
             docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
             docker buildx create --use --name release --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
-            cp LICENSE NOTICE THIRD-PARTY-NOTICES.md docker/
+            # The build context (Dockerfile.release): each architecture's tested binary, taken from
+            # its release archive, and the notices.
+            ctx=dist/docker
+            for a in amd64:x86_64 arm64:aarch64; do
+              name="alephgrid-$v-${a#*:}-unknown-linux-gnu"
+              mkdir -p "$ctx/${a%%:*}"
+              tar -xzf "dist/$name.tar.gz" -C "$ctx/${a%%:*}" --strip-components=1 "$name/alephgrid"
+            done
+            cp LICENSE NOTICE THIRD-PARTY-NOTICES.md "$ctx/"
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u "${GITHUB_USER:?set GITHUB_USER in the release context}" --password-stdin
             docker buildx build -f Dockerfile.release --platform linux/amd64,linux/arm64 \
               --label org.opencontainers.image.source=https://github.com/alephgrid/alephgrid \
               --label org.opencontainers.image.version="$v" --label org.opencontainers.image.licenses=Apache-2.0 \
-              -t ghcr.io/alephgrid/alephgrid:"$v" -t ghcr.io/alephgrid/alephgrid:latest --push docker
+              -t ghcr.io/alephgrid/alephgrid:"$v" -t ghcr.io/alephgrid/alephgrid:latest --push "$ctx"
 
   release-npm:
     executor: node
