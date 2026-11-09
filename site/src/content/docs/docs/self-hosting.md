@@ -7,10 +7,10 @@ The same single binary that runs on your laptop runs on a server. With `--auth a
 people sign in with a password or single sign-on (OpenID Connect), and spaces grant them
 owner, editor or viewer roles.
 
-:::note[Pre-release]
-Container images (`ghcr.io/alephgrid/alephgrid`) are published with v0.1.0; a Helm chart comes
-later. The [releases page](../../releases/) tracks channel readiness. Until the release, build
-from source or with `docker compose up -d` from a checkout.
+:::note[Container image]
+`ghcr.io/alephgrid/alephgrid` (linux/amd64 and linux/arm64) starts with accounts sign-in:
+`docker run -d --name alephgrid -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid:0.1.0`,
+then `docker logs alephgrid | grep setup` for the one-time setup code. A Helm chart comes later.
 :::
 
 ## The short version

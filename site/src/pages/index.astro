@@ -1,7 +1,12 @@
 ---
 import SiteLayout from '../components/SiteLayout.astro';
+import InstallTabs from '../components/InstallTabs.astro';
+import releases from '../data/releases.json';
 import { Image } from 'astro:assets';
+import bigtable from '../assets/bigtable-light.png';
 import workbook from '../assets/workbook-light.png';
+import analyze from '../assets/analyze-light.png';
+import importShot from '../assets/import-light.png';
 import functions from '../assets/functions-light.png';
 import sqlDark from '../assets/sql-dark.png';
 import hub from '../assets/hub-light.png';
@@ -9,23 +14,25 @@ import hub from '../assets/hub-light.png';
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
 const repo = 'https://github.com/alephgrid/alephgrid';
+const v = releases.current.version;
 
-// docs/README "Measured" table: 20M-row table, 9 columns, debug build, 8-core / 8 GB laptop.
+// docs/bench.mjs against the v0.1.0 release binary (aarch64-apple-darwin) on an Apple M2 with
+// 8 GB of RAM: a 20M-row, 9-column generated table, two fresh runs (9 November 2026).
 const measured = [
-  ['Reopen the workbook after a restart', '3 ms'],
-  ['Fetch 100 rows at row 0, 10M or 19.99M', '3–11 ms'],
-  ['Filter two columns (125k matches)', '34 ms'],
-  ['Sort all 20M rows by a float column', '0.95 s'],
-  ['Sum, average, min and max of a column', '28 ms'],
-  ['GROUP BY carrier in the SQL workspace', '39–57 ms'],
-  ['Edit 1 cell / paste 1,000 cells', '3 / 43 ms'],
+  ['Open the 20M-row table', '7–8 ms'],
+  ['Fetch 100 rows at row 0, 10M or 19.99M', '4–9 ms'],
+  ['Filter two columns (125k matches)', '31–38 ms'],
+  ['Sum, average, min and max of a column', '25–28 ms'],
+  ['GROUP BY carrier in the SQL workspace', '44–55 ms'],
+  ['Sort all 20M rows by a float column', '1.1–1.2 s'],
+  ['Edit 1 cell / paste 1,000 cells', '19 ms / 0.9 s'],
 ];
 const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
 ---
 
 <SiteLayout
   title="Alephgrid: a spreadsheet for data that doesn’t fit in a spreadsheet"
-  description="Alephgrid is an open-source, self-hosted spreadsheet. Big tables stay in DuckDB and stream into the grid a screen at a time; sheets use Excel formulas; SQL is optional. Pre-release, Apache-2.0."
+  description="Alephgrid is an open-source, self-hosted spreadsheet. Tables with tens of millions of rows stay in DuckDB and stream into the grid a screen at a time; sheets use Excel formulas; SQL is optional. Install with npx, uvx or Docker. Apache-2.0."
 >
   <main id="main">
     <section class="ag-hero" aria-labelledby="hero-title">
@@ -34,16 +41,16 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
           <h1 id="hero-title">A spreadsheet for data that doesn’t fit in a spreadsheet</h1>
           <div class="ag-hero-aside">
             <p class="ag-lead">
-              Alephgrid is open source and runs on your laptop or your own server. Big tables stay
-              in DuckDB and stream into the grid a screen at a time; sheets beside them use Excel
-              formulas, and SQL is there when you want it.
+              Open a file with tens of millions of rows and scroll, sort, filter and edit it in your
+              browser. Big tables stay in DuckDB and stream into the grid a screen at a time;
+              sheets beside them use Excel formulas, and SQL is there when you want it.
             </p>
             <div class="ag-actions">
-              <a class="ag-button" href={url('/install/')}>Install Alephgrid</a>
+              <a class="ag-button" href="#install">Install Alephgrid</a>
               <a class="ag-button ag-secondary" href={repo}>View source on GitHub</a>
             </div>
             <p class="ag-status-line">
-              <span>Pre-release: v0.1.0 in preparation</span>
+              <span><a href={url('/releases/')}>v{v} released 9 November 2026</a></span>
               <span>Apache-2.0</span>
               <span>No paid tiers</span>
             </p>
@@ -51,8 +58,8 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
         </div>
         <figure class="ag-shot ag-hero-shot">
           <Image
-            src={workbook}
-            alt="Alephgrid in the browser: a Q3 sales report sheet whose SUMIFS formulas total a 20,000-row orders table by region and month, formatted as currency and percentages, with a column chart of revenue by region"
+            src={bigtable}
+            alt="Alephgrid showing a 10,000,000-row flights table sorted by flight number and scrolled past row five million; the footer reads 10,000,000 rows and a notice says the sort took 0.7 seconds"
             widths={[720, 1080, 1440, 1920, 2400]}
             sizes="(max-width: 40rem) 170vw, (max-width: 80rem) calc(100vw - 4rem), 76rem"
             loading="eager"
@@ -62,7 +69,30 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
       </div>
     </section>
 
-    <section class="ag-section" id="measured" aria-labelledby="measured-title">
+    <section class="ag-section" id="install" aria-labelledby="install-title">
+      <div class="ag-container ag-close">
+        <div>
+          <h2 id="install-title">Running in one command</h2>
+          <p class="ag-lead" style="margin-bottom:1.5rem">
+            Pick the tool you already have. Each one installs the same single binary with the web
+            UI inside, and starts a server on <code>http://127.0.0.1:7878</code>.
+          </p>
+          <ul class="ag-points">
+            <li><strong>On your computer</strong> it listens on 127.0.0.1 with no sign-in, and your files never leave the machine.</li>
+            <li><strong>Try it with sample data:</strong> add <code>--demo-rows 10000000</code> for a ten-million-row table.</li>
+            <li><strong>Windows:</strong> use Docker or WSL until the native build lands.</li>
+          </ul>
+          <p class="ag-note" style="margin-top:1.5rem">
+            Every download and checksum is on the <a href={url('/install/')}>install page</a>.
+          </p>
+        </div>
+        <div>
+          <InstallTabs id="home" />
+        </div>
+      </div>
+    </section>
+
+    <section class="ag-section ag-band" id="measured" aria-labelledby="measured-title">
       <div class="ag-container ag-bench">
         <div class="ag-head">
           <h2 id="measured-title">Big tables load a screen at a time</h2>
@@ -72,7 +102,7 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
             only the rows you look at.
           </p>
           <ul class="ag-points">
-            <li><strong>Import</strong> CSV, TSV, Parquet, JSON, JSON lines and gzip as tables, XLSX as editable sheets. Files stream in and you review column types before they commit.</li>
+            <li><strong>Import</strong> CSV, TSV, Parquet, JSON, JSON lines and gzip as tables, XLSX as editable sheets.</li>
             <li><strong>Export</strong> any table or filtered view as CSV, Parquet or JSON lines, and sheets as XLSX with a report of anything XLSX cannot hold.</li>
           </ul>
         </div>
@@ -93,23 +123,23 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
                   <tr>
                     <td class="ag-rownum" aria-hidden="true">{i + 2}</td>
                     <td>{op}</td>
-                    <td class:list={['ag-num', { 'ag-active': i === 3 }]}>{t}</td>
+                    <td class:list={['ag-num', { 'ag-active': i === 1 }]}>{t}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <figcaption class="ag-sheet-note">
-            Measured with a debug build on an 8-core laptop with 8 GB of RAM: 20 million rows, 9
-            columns. Reproduce with <code>alephgrid --demo-rows 20000000</code> and
-            <a href={`${repo}/blob/main/docs/bench.mjs`}>docs/bench.mjs</a>. Release-build numbers
-            come with v0.1.0.
+            The v{v} release binary on an Apple M2 laptop with 8 GB of RAM: 20 million generated
+            rows, 9 columns, the range of two fresh runs. Reproduce with
+            <code>alephgrid --demo-rows 20000000</code> and
+            <a href={`${repo}/blob/main/docs/bench.mjs`}>docs/bench.mjs</a>.
           </figcaption>
         </figure>
       </div>
     </section>
 
-    <section class="ag-section ag-band" aria-labelledby="sheets-title">
+    <section class="ag-section" aria-labelledby="sheets-title">
       <div class="ag-container ag-split">
         <div class="ag-split-text">
           <h2 id="sheets-title">A real spreadsheet next to the big tables</h2>
@@ -121,8 +151,105 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
           <p class="ag-formula"><span aria-hidden="true">fx</span><code tabindex="0" aria-label="Formula: =SUMIFS(orders[amount], orders[region], A2)">=SUMIFS(orders[amount], orders[region], A2)</code></p>
           <ul class="ag-points">
             <li><strong>Formatting, merged cells, frozen panes, charts, colour rules and comments,</strong> kept through XLSX import and export.</li>
-            <li><strong>Your own functions</strong> as sheet formulas, SQL expressions or sandboxed Python, with tests, published versions and rollback.</li>
+            <li><strong>Fill handle, find and replace and named ranges,</strong> and formulas you can trace to the cells they read.</li>
           </ul>
+        </div>
+        <figure class="ag-split-media ag-shot" data-crop="left-top">
+          <Image
+            src={workbook}
+            alt="A Q3 sales report sheet whose SUMIFS formulas total a 20,000-row orders table by region and month, formatted as currency and percentages, with a column chart of revenue by region"
+            widths={[720, 1080, 1440, 2000]}
+            sizes={shotSizes}
+          />
+        </figure>
+      </div>
+    </section>
+
+    <section class="ag-section ag-band" aria-labelledby="analyze-title">
+      <div class="ag-container ag-split ag-reverse">
+        <div class="ag-split-text">
+          <h2 id="analyze-title">Pivots and charts without writing SQL</h2>
+          <p class="ag-lead">
+            The Analyze pane builds pivots, joins and column profiles from pickers. Pick the rows,
+            the values and how to total them; the result comes with a chart and can be saved as a
+            table.
+          </p>
+          <ul class="ag-points">
+            <li><strong>Joins report their duplicate keys</strong> before you trust the result.</li>
+            <li><strong>Saved analyses</strong> rerun on demand and say when the workbook changed under them.</li>
+            <li><strong>Drill down</strong> from any result row to the rows behind it.</li>
+          </ul>
+        </div>
+        <figure class="ag-split-media ag-shot">
+          <Image
+            src={analyze}
+            alt="The Analyze pane beside the orders table: a pivot of the sum of amount by region, run as Revenue by region, with a column chart of the four regions"
+            widths={[720, 1080, 1440, 2000]}
+            sizes={shotSizes}
+          />
+        </figure>
+      </div>
+    </section>
+
+    <section class="ag-section" aria-labelledby="sql-title">
+      <div class="ag-container ag-split">
+        <div class="ag-split-text">
+          <h2 id="sql-title">SQL when you want it, never required</h2>
+          <p class="ag-lead">
+            The SQL workspace stays closed until you open it, docks under the grid, and reads the
+            workbook’s own tables: a <code>GROUP BY</code> over ten million rows comes back in
+            tens of milliseconds.
+          </p>
+          <ul class="ag-points">
+            <li><strong>Schema browser, autocomplete, <code>$parameters</code></strong> and previews you can cancel.</li>
+            <li><strong>Saved and live queries</strong> with versions; a result opens as a sheet or saves as a table.</li>
+            <li><strong>Never reads files or URLs,</strong> and a server can turn SQL off.</li>
+          </ul>
+        </div>
+        <figure class="ag-split-media ag-shot" data-crop="left-bottom">
+          <Image
+            src={sqlDark}
+            alt="Dark theme: the 10,000,000-row flights table with the SQL workspace docked under the grid; a GROUP BY carrier query returned 8 rows in 21 ms"
+            widths={[720, 1080, 1440, 2000]}
+            sizes={shotSizes}
+          />
+        </figure>
+      </div>
+    </section>
+
+    <section class="ag-section ag-band" aria-labelledby="import-title">
+      <div class="ag-container ag-split ag-reverse">
+        <div class="ag-split-text">
+          <h2 id="import-title">Files come in checked</h2>
+          <p class="ag-lead">
+            Drop a CSV, Parquet, JSON or XLSX file on the page. Alephgrid streams it, detects each
+            column’s type and shows you the first rows before anything is written.
+          </p>
+          <ul class="ag-points">
+            <li><strong>Change any type</strong> before the import commits, or keep the detected one.</li>
+            <li><strong>Tables hold any number of rows;</strong> XLSX files become editable sheets.</li>
+          </ul>
+        </div>
+        <figure class="ag-split-media ag-shot" data-crop="right-top">
+          <Image
+            src={importShot}
+            alt="Importing subscriptions.csv: the review dialog lists each column with its detected type (whole number, date and time, text, number) and sample values, above a preview of the first rows"
+            widths={[720, 1080, 1440, 2000]}
+            sizes={shotSizes}
+          />
+        </figure>
+      </div>
+    </section>
+
+    <section class="ag-section" aria-labelledby="functions-title">
+      <div class="ag-container ag-split">
+        <div class="ag-split-text">
+          <h2 id="functions-title">Your own functions, tested and versioned</h2>
+          <p class="ag-lead">
+            Write a function once as a sheet formula, a SQL expression or sandboxed Python, give it
+            tests, and publish a version the whole workbook can call. Roll back if a change goes
+            wrong.
+          </p>
         </div>
         <figure class="ag-split-media ag-shot" data-crop="right-top">
           <Image
@@ -135,34 +262,9 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
       </div>
     </section>
 
-    <section class="ag-section" aria-labelledby="sql-title">
-      <div class="ag-container ag-split ag-reverse">
-        <div class="ag-split-text">
-          <h2 id="sql-title">SQL when you want it, never required</h2>
-          <p class="ag-lead">
-            Summaries, pivots, joins, charts and column profiles work from the Analyze pane without
-            a query. The SQL workspace stays closed until you open it, and a server can turn it off.
-          </p>
-          <ul class="ag-points">
-            <li><strong>Schema browser, autocomplete, <code>$parameters</code></strong> and previews you can cancel.</li>
-            <li><strong>Saved and live queries</strong> with versions; a result opens as a sheet or saves as a table.</li>
-            <li><strong>Reads only the workbook’s own tables,</strong> never files or URLs.</li>
-          </ul>
-        </div>
-        <figure class="ag-split-media ag-shot" data-crop="left-bottom">
-          <Image
-            src={sqlDark}
-            alt="Dark theme: a 200,000-row flights table with the SQL workspace docked under the grid, showing a GROUP BY carrier query and its results"
-            widths={[720, 1080, 1440, 2000]}
-            sizes={shotSizes}
-          />
-        </figure>
-      </div>
-    </section>
-
     <section class="ag-section ag-band" aria-labelledby="run-title">
       <div class="ag-container">
-        <div class="ag-split">
+        <div class="ag-split ag-reverse">
           <div class="ag-split-text">
             <h2 id="run-title">Runs where your data lives</h2>
             <p class="ag-lead">
@@ -174,7 +276,7 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
           <figure class="ag-split-media ag-shot" data-crop="left-top">
             <Image
               src={hub}
-              alt="The hub: a search box, three recently opened workbooks and the list of all workbooks with their contents, size and compute state"
+              alt="The hub: three recently opened workbooks and the list of all workbooks with their contents, size and compute state, including a 10M-row flights workbook of 102 MB"
               widths={[720, 1080, 1440, 2000]}
               sizes={shotSizes}
             />
@@ -187,7 +289,7 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
           </div>
           <div class="ag-col">
             <h3>On your server</h3>
-            <p>The same binary with spaces, owner, editor and viewer roles, password or OpenID Connect sign-in, quotas, an audit log and backups.</p>
+            <p>The same binary or the Docker image, with spaces, owner, editor and viewer roles, password or OpenID Connect sign-in, quotas, an audit log and backups.</p>
           </div>
           <div class="ag-col">
             <h3>For AI agents</h3>
@@ -197,38 +299,34 @@ const shotSizes = '(max-width: 64rem) calc(100vw - 2rem), 44rem';
       </div>
     </section>
 
-    <section class="ag-section" aria-labelledby="install-title">
+    <section class="ag-section" aria-labelledby="close-title">
       <div class="ag-container ag-close">
         <div>
-          <h2 id="install-title">Build it from source today</h2>
+          <h2 id="close-title">Free, open source, yours to run</h2>
           <p class="ag-lead" style="margin-bottom:1.75rem">
-            Alephgrid is pre-release. Binaries, npm and container images arrive with v0.1.0, and
-            the releases page tracks exactly what is ready.
+            Apache-2.0, with no seats, tiers or paywalls: export, sign-in, teams and every other
+            feature are free.
           </p>
           <div class="ag-actions">
-            <a class="ag-button" href={url('/install/')}>Read the install guide</a>
-            <a class="ag-button ag-secondary" href={url('/releases/')}>See release status</a>
+            <a class="ag-button" href={url('/install/')}>Install Alephgrid</a>
+            <a class="ag-button ag-secondary" href={url('/docs/getting-started/')}>Your first workbook</a>
           </div>
           <p class="ag-note" style="margin-top:2rem">
-            Apache-2.0, with no seats, tiers or paywalls: export, sign-in, teams and every other
-            feature are free. <a href={url('/contribute/')}>Contribute</a> or
+            Read the <a href={url('/releases/')}>v{v} release notes</a>,
+            <a href={url('/contribute/')}>contribute</a> or
             <a href={url('/support/')}>help keep it maintained</a>.
           </p>
         </div>
         <div>
           <div class="ag-code-wrap">
             <div class="ag-code-bar">
-              <span>Terminal · macOS or Linux</span>
+              <span>Terminal · try it with ten million rows</span>
               <button class="ag-copy" type="button" data-copy>Copy</button>
             </div>
-            <pre class="ag-code" tabindex="0"><code>git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
-(cd web &amp;&amp; npm install &amp;&amp; npm run build)   <span class="c"># the UI, embedded in the binary</span>
-cargo build --release
-./target/release/alephgrid --demo-rows 10000000</code></pre>
+            <pre class="ag-code" tabindex="0"><code><span class="p">$ </span>npx alephgrid --demo-rows 10000000</code></pre>
           </div>
           <p class="ag-note">
-            Needs Rust 1.89+ and Node 20+. The first build compiles DuckDB, which takes several
-            minutes. Then open the URL the server prints (default <code>http://127.0.0.1:7878</code>).
+            Generates a sample flights table on your machine, then open the URL the server prints.
           </p>
         </div>
       </div>

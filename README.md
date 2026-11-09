@@ -14,12 +14,12 @@
 <p align="center">
   <a href="https://alephgrid.dev"><img alt="Website: alephgrid.dev" src="https://img.shields.io/badge/website-alephgrid.dev-047857"></a>
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-0B7A53"></a>
-  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-E8A33D">
+  <a href="https://github.com/alephgrid/alephgrid/releases/tag/v0.1.0"><img alt="Release: v0.1.0" src="https://img.shields.io/badge/release-v0.1.0-047857"></a>
   <img alt="Built with Rust and TypeScript" src="https://img.shields.io/badge/built%20with-Rust%20%2B%20TypeScript-555">
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/workbook-light.png" alt="A sheet totalling a 20,000-row orders table with SUMIFS, formatted as currency and percentages, with a column chart of revenue by region and a selection showing the fill handle" width="100%">
+  <img src="assets/screenshots/bigtable-light.png" alt="A 10,000,000-row flights table sorted by flight number and scrolled past row five million; the footer reads 10,000,000 rows and a notice says the sort took 0.7 seconds" width="100%">
 </p>
 
 Open a CSV or Parquet file with tens of millions of rows, then scroll, sort, filter, edit
@@ -29,21 +29,23 @@ formulas straight at the big tables. Everything runs on a DuckDB file on your ma
 are no seats, tiers or paywalls: export, sign-in, teams and every other feature are free.
 
 ```bash
-alephgrid flights.parquet          # opens http://127.0.0.1:7878 with the file loaded
-alephgrid --demo-rows 10000000     # or try it on 10M generated rows
+npx alephgrid flights.parquet      # npm: opens http://127.0.0.1:7878 with the file loaded
+uvx alephgrid --demo-rows 10000000 # PyPI: or try it on 10M generated rows
+docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid:0.1.0
 ```
 
 | | |
 |---|---|
-| <img src="assets/screenshots/functions-light.png" alt="The Functions side panel beside a sheet: a MARGIN function's code, its passing test result and the Publish version button"> | <img src="assets/screenshots/sql-dark.png" alt="Dark theme: a 200,000-row flights table with the SQL workspace docked under the grid, showing a GROUP BY query and its results"> |
-| **Your own functions** in a side panel: code, tests, docs and versions | **SQL when you want it**, docked under the grid (dark theme) |
-| <img src="assets/screenshots/hub-light.png" alt="The hub: search, three recently opened workbooks and the workbook list with contents, size and compute state"> | |
-| **The hub**: every workbook, its size and whether its compute is running | |
+| <img src="assets/screenshots/workbook-light.png" alt="A sheet totalling a 20,000-row orders table with SUMIFS, formatted as currency and percentages, with a column chart of revenue by region"> | <img src="assets/screenshots/analyze-light.png" alt="The Analyze pane beside the orders table: a pivot of the sum of amount by region with a column chart"> |
+| **Sheets with Excel formulas** that read whole tables | **Pivots and charts** from the Analyze pane, no SQL |
+| <img src="assets/screenshots/sql-dark.png" alt="Dark theme: the 10,000,000-row flights table with the SQL workspace docked under the grid; a GROUP BY carrier query returned 8 rows in 21 ms"> | <img src="assets/screenshots/import-light.png" alt="Importing subscriptions.csv: each column with its detected type and sample values, above a preview of the first rows"> |
+| **SQL when you want it**, docked under the grid (dark theme) | **Imports reviewed** column by column before they commit |
+| <img src="assets/screenshots/functions-light.png" alt="The Functions side panel beside a sheet: a MARGIN function's code, its passing test result and the Publish version button"> | <img src="assets/screenshots/hub-light.png" alt="The hub: three recently opened workbooks and the workbook list with contents, size and compute state"> |
+| **Your own functions** in a side panel: code, tests, docs and versions | **The hub**: every workbook, its size and whether its compute is running |
 
-> **Status: pre-release.** The first release (v0.1.0) is being prepared. Today, build from
-> source (or build the Docker image from a checkout); binaries, the container image, npm and
-> PyPI packages are not published yet. See
-> [what is shipped and what is not](docs/SPREADSHEET_FEATURES.md).
+> **v0.1.0, the first release, is out** (9 November 2026): binaries for Linux and macOS, npm
+> and PyPI packages, and a Docker image. See [the release](https://github.com/alephgrid/alephgrid/releases/tag/v0.1.0)
+> and [what is shipped and what is not](docs/SPREADSHEET_FEATURES.md).
 
 ## Why Alephgrid
 
@@ -87,6 +89,19 @@ The full inventory, including what is partial or not planned, is in
 
 ## Quick start
 
+### Install a release
+
+```bash
+npx alephgrid flights.parquet                         # npm, or: pnpm dlx / yarn dlx / bunx alephgrid
+uvx alephgrid flights.parquet                         # PyPI, or: pipx install alephgrid / pip install alephgrid
+docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid:0.1.0
+```
+
+or download `alephgrid-VERSION-TARGET.tar.gz` for Linux (x86_64, arm64) or macOS (Apple
+silicon, Intel) from GitHub Releases and check it against `SHA256SUMS` (not yet signed). On
+Windows, use Docker or WSL. The npm and PyPI packages hold the same binary (PyPI ships wheels
+only; Linux needs glibc 2.31+ and pip 20.3+).
+
 ### From source
 
 Requires Rust 1.89+ (rustup installs the pinned toolchain from `rust-toolchain.toml`) and Node 20+.
@@ -99,21 +114,6 @@ cargo build --release
 ```
 
 The first build compiles DuckDB from source, which takes several minutes.
-
-### Install a release (not yet published)
-
-From v0.1.0 (see [releasing](docs/RELEASING.md)); none of these work until the release exists:
-
-```bash
-npx alephgrid flights.parquet                         # npm, or: pnpm dlx / yarn dlx / bunx alephgrid
-uvx alephgrid flights.parquet                         # PyPI, or: pipx install alephgrid / pip install alephgrid
-docker run -p 7878:7878 -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid
-```
-
-or download `alephgrid-VERSION-TARGET.tar.gz` for Linux (x86_64, arm64) or macOS (Apple
-silicon, Intel) from GitHub Releases and check it against `SHA256SUMS` (not yet signed). On
-Windows, use Docker or WSL. The npm and PyPI packages hold the same binary (PyPI ships wheels
-only; Linux needs glibc 2.31+ and pip 20.3+).
 
 ### Docker (for a team)
 

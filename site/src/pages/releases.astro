@@ -22,12 +22,17 @@ const repo = 'https://github.com/alephgrid/alephgrid';
 
     <section class="ag-page-section" aria-labelledby="next-title">
       <div class="ag-container">
-        <h2 id="next-title">v0.1.0, in preparation</h2>
+        <h2 id="next-title">v0.1.0, released 9 November 2026</h2>
         <p class="ag-lead">
-          The first release is being stabilized on <code>main</code>. The always-current list is
-          the repository <a href={`${repo}/blob/main/CHANGELOG.md`}>CHANGELOG</a>; these are the
-          highlights.
+          The first release: binaries for Linux and macOS, npm and PyPI packages and a Docker image,
+          all built from the same tested commit. The full list is in the
+          <a href={`${repo}/blob/main/CHANGELOG.md`}>CHANGELOG</a> and on the
+          <a href={`${repo}/releases/tag/v0.1.0`}>GitHub release</a>; these are the highlights.
         </p>
+        <div class="ag-actions" style="margin:0 0 2rem">
+          <a class="ag-button" href={url('/install/')}>Install v0.1.0</a>
+          <a class="ag-button ag-secondary" href={`${repo}/releases/tag/v0.1.0`}>Release on GitHub</a>
+        </div>
         <div class="ag-topics">
           <div>
             <h3>Sheets</h3>
@@ -58,7 +63,7 @@ const repo = 'https://github.com/alephgrid/alephgrid';
         <h2 id="channels-title">Channel readiness</h2>
         <p class="ag-lead">
           Downloads on this site come from a release manifest with artifact URLs and SHA-256
-          checksums. A channel is marked ready only after a clean-machine install passes.
+          checksums. A channel is marked ready only once its published artifacts install and run.
         </p>
         <div class="ag-table-wrap" role="region" aria-label="Channel readiness table" tabindex="0">
           <table class="ag-table">
@@ -71,10 +76,10 @@ const repo = 'https://github.com/alephgrid/alephgrid';
                   <td>{c.name}</td>
                   <td>
                     {c.published
-                      ? <span class="ag-status ready">Ready</span>
+                      ? <span class="ag-status ready">{c.id === 'source' ? 'Ready' : `v${releases.current.version}`}</span>
                       : <span class="ag-status planned">Planned</span>}
                   </td>
-                  <td class="ag-muted">{c.published ? (c.requires ?? '') : (c.notes ?? 'Arrives with v0.1.0 artifacts')}</td>
+                  <td class="ag-muted">{c.published ? (c.requires ?? c.notes ?? '') : (c.notes ?? '')}</td>
                 </tr>
               ))}
             </tbody>
@@ -82,8 +87,8 @@ const repo = 'https://github.com/alephgrid/alephgrid';
         </div>
         <p class="ag-note">
           Upgrade and rollback guidance is in the
-          <a href={`${repo}/blob/main/docs/OPERATIONS.md`}>operations guide</a>. To install today,
-          see the <a href={url('/install/')}>install page</a>.
+          <a href={`${repo}/blob/main/docs/OPERATIONS.md`}>operations guide</a>. To install, see the
+          <a href={url('/install/')}>install page</a>.
         </p>
       </div>
     </section>

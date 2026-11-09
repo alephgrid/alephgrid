@@ -1,13 +1,20 @@
 ---
 title: Install and first workbook
-description: Build Alephgrid from source, launch it, import a file, write a formula and export.
+description: Install Alephgrid, launch it, import a file, write a formula and export.
 ---
 
-Alephgrid is pre-release: the ready installation path today is building from source. Native
-binaries, package managers and published container images arrive with v0.1.0 — the
-[releases page](../../releases/) tracks exactly what is ready.
+## Install
 
-## Build from source
+Pick the tool you already have; each installs the same binary for macOS or Linux (on Windows,
+use Docker or WSL). Every option, with downloads and checksums, is on the
+[install page](../../install/).
+
+```bash
+npx alephgrid          # npm (also pnpm dlx, yarn dlx, bunx)
+uvx alephgrid          # PyPI (also pipx install alephgrid, pip install alephgrid)
+```
+
+## Or build from source
 
 Requires **Rust 1.89+** and **Node 20+**.
 
@@ -23,9 +30,12 @@ The first build compiles DuckDB from source, which takes several minutes.
 ## Launch
 
 ```bash
-./target/release/alephgrid flights.parquet   # opens http://127.0.0.1:7878
-./target/release/alephgrid --demo-rows 10000000   # or 10M generated rows
+alephgrid flights.parquet          # opens http://127.0.0.1:7878 with the file loaded
+alephgrid --demo-rows 10000000     # or 10M generated rows
 ```
+
+Use `npx alephgrid …` or `uvx alephgrid …` the same way, or `./target/release/alephgrid …` for
+a source build.
 
 On your own machine there is no sign-in and the server listens on `127.0.0.1` only. Data lives
 in `./alephgrid-data` (change with `--data-dir`).
