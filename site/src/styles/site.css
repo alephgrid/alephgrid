@@ -748,6 +748,58 @@ pre.ag-code .p {
   max-width: 44rem;
 }
 
+/* install tabs: one command panel per channel */
+.ag-tablist {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ag-tablist [role='tab'] {
+  flex: none;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  min-height: 2.5rem;
+  padding: 0 0.9rem;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ag-tablist [role='tab']:hover {
+  color: var(--text);
+}
+.ag-tablist [role='tab'][aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.ag-tablist [role='tab']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (max-width: 40rem) {
+  .ag-tablist [role='tab'] {
+    padding: 0 0.55rem;
+  }
+  /* commands stay whole on a phone; the comments repeat what the note below says */
+  .ag-tabpanel pre.ag-code .c {
+    display: none;
+  }
+}
+
+/* downloads: one row per archive, with its checksum */
+.ag-sha {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 /* closing section */
 .ag-close {
   display: grid;

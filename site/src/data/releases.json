@@ -2,16 +2,19 @@
   "comment": "Release manifest: the single source of truth for every download control on the site. CI must never show a channel as ready unless its entry here is published:true with a real url and sha256. See docs/RELEASING.md and docs/LAUNCH.md.",
   "current": {
     "version": "0.1.0",
-    "maturity": "pre-release",
-    "label": "v0.1.0 in preparation",
-    "date": null,
+    "maturity": "first release",
+    "label": "v0.1.0 · released 9 November 2026",
+    "date": "2026-11-09",
     "notes": "/releases/"
   },
   "channels": [
     {
       "id": "source",
       "name": "Build from source",
-      "platforms": ["macOS", "Linux"],
+      "platforms": [
+        "macOS",
+        "Linux"
+      ],
       "published": true,
       "requires": "Rust 1.89+, Node 20+",
       "docs": "/docs/getting-started/"
@@ -19,30 +22,95 @@
     {
       "id": "github-binaries",
       "name": "Binaries (GitHub Releases)",
-      "platforms": ["Linux x86_64 + arm64", "macOS Apple silicon + Intel"],
-      "published": false,
-      "notes": "tar.gz downloads with SHA256SUMS"
+      "platforms": [
+        "Linux x86_64 + arm64",
+        "macOS Apple silicon + Intel"
+      ],
+      "published": true,
+      "notes": "tar.gz downloads with SHA256SUMS (not yet signed)",
+      "url": "https://github.com/alephgrid/alephgrid/releases/tag/v0.1.0",
+      "checksums": "https://github.com/alephgrid/alephgrid/releases/download/v0.1.0/SHA256SUMS",
+      "artifacts": [
+        {
+          "platform": "Linux x86_64",
+          "file": "alephgrid-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+          "url": "https://github.com/alephgrid/alephgrid/releases/download/v0.1.0/alephgrid-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "c3bf5c784a8e576d35960804efc71b0c0cc8b8ec4d4d6d85b8ae9d40fa8dc898"
+        },
+        {
+          "platform": "Linux arm64",
+          "file": "alephgrid-0.1.0-aarch64-unknown-linux-gnu.tar.gz",
+          "url": "https://github.com/alephgrid/alephgrid/releases/download/v0.1.0/alephgrid-0.1.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "174852a894214a8d8b517429a628bc8c4065aa5aaf1eeab742c0e4949d8d488d"
+        },
+        {
+          "platform": "macOS Apple silicon",
+          "file": "alephgrid-0.1.0-aarch64-apple-darwin.tar.gz",
+          "url": "https://github.com/alephgrid/alephgrid/releases/download/v0.1.0/alephgrid-0.1.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "0f40c6d44a39cc77b718f250bc8b515f2048f63ea95659570c6f5e1307e83f98"
+        },
+        {
+          "platform": "macOS Intel",
+          "file": "alephgrid-0.1.0-x86_64-apple-darwin.tar.gz",
+          "url": "https://github.com/alephgrid/alephgrid/releases/download/v0.1.0/alephgrid-0.1.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "57c5192cb8b1299fbe9328ccbb04f57b3505d5314f5a4ebdf853bc0bc4b1294a"
+        }
+      ]
     },
     {
       "id": "npm",
       "name": "npm — npx alephgrid",
-      "published": false,
-      "notes": "also pnpm dlx / yarn dlx / bunx"
+      "published": true,
+      "notes": "also pnpm dlx / yarn dlx / bunx; Node 18+",
+      "url": "https://www.npmjs.com/package/alephgrid",
+      "command": "npx alephgrid",
+      "platforms": [
+        "macOS",
+        "Linux"
+      ]
     },
     {
       "id": "pypi",
       "name": "PyPI — uvx alephgrid",
-      "published": false,
-      "notes": "also pipx install / pip install; wheels for Linux (glibc 2.31+) and macOS 11+"
+      "published": true,
+      "notes": "also pipx install / pip install; wheels only, pip 20.3+",
+      "url": "https://pypi.org/project/alephgrid/0.1.0/",
+      "command": "uvx alephgrid",
+      "platforms": [
+        "macOS 11+",
+        "Linux (glibc 2.31+)"
+      ]
     },
     {
       "id": "docker",
       "name": "Docker — ghcr.io/alephgrid/alephgrid",
-      "platforms": ["linux/amd64", "linux/arm64"],
-      "published": false
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "published": true,
+      "url": "https://github.com/alephgrid/alephgrid/pkgs/container/alephgrid",
+      "image": "ghcr.io/alephgrid/alephgrid:0.1.0",
+      "digest": "sha256:79a50f06726585c2cb0ef5b34713f6acaa82a64473fade2e1dd5b07daae4bf74",
+      "notes": "runs as uid 10001; accounts sign-in by default"
     },
-    { "id": "homebrew", "name": "Homebrew tap", "published": false, "notes": "after v0.1.0" },
-    { "id": "winget", "name": "Windows installer / WinGet", "published": false, "notes": "needs native Windows build" },
-    { "id": "helm", "name": "Helm chart", "published": false, "notes": "after v0.1.0" }
+    {
+      "id": "homebrew",
+      "name": "Homebrew tap",
+      "published": false,
+      "notes": "after v0.1.0"
+    },
+    {
+      "id": "winget",
+      "name": "Windows installer / WinGet",
+      "published": false,
+      "notes": "needs native Windows build"
+    },
+    {
+      "id": "helm",
+      "name": "Helm chart",
+      "published": false,
+      "notes": "after v0.1.0"
+    }
   ]
 }

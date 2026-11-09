@@ -1,101 +1,134 @@
 ---
 import SiteLayout from '../components/SiteLayout.astro';
+import InstallTabs from '../components/InstallTabs.astro';
 import releases from '../data/releases.json';
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
 const url = (p: string) => `${base}${p}`;
-const source = releases.channels.find((c) => c.id === 'source');
+const v = releases.current.version;
+const binaries = releases.channels.find((c) => c.id === 'github-binaries');
+const docker = releases.channels.find((c) => c.id === 'docker');
+const published = releases.channels.filter((c) => c.published && c.id !== 'source');
 const planned = releases.channels.filter((c) => !c.published);
 ---
 
-<SiteLayout title="Install Alephgrid" description="Build Alephgrid from source today on macOS or Linux; native binaries, package managers and container images arrive with v0.1.0.">
+<SiteLayout title="Install Alephgrid" description={`Install Alephgrid ${v} with npx, uvx, pipx, pip or Docker, download a checksummed binary for macOS or Linux, or build from source.`}>
   <main id="main">
     <header class="ag-pagehead">
       <div class="ag-container">
         <h1>Install Alephgrid</h1>
         <p class="ag-lead">
-          Alephgrid is pre-release. Today you build it from source on macOS or Linux; on Windows,
-          use Docker or WSL. Each other channel below is enabled only when its artifacts exist, are
-          checksummed and pass a clean-machine install.
+          One binary with the web UI inside, for macOS and Linux. npm, PyPI and Docker each deliver
+          that same binary, so pick whichever tool you already have. On Windows, use Docker or WSL.
         </p>
-        <p class="ag-status-line"><span>{releases.current.label}</span></p>
+        <p class="ag-status-line"><span>{releases.current.label}</span><span>Apache-2.0</span></p>
       </div>
     </header>
 
-    <section class="ag-page-section" aria-labelledby="source-title">
+    <section class="ag-page-section" aria-labelledby="quick-title">
       <div class="ag-container">
-        <h2 id="source-title">Build from source</h2>
-        <p class="ag-lead">The ready path today. The server embeds the web UI, so you build the UI first.</p>
-        <dl class="ag-dl">
-          <div><dt>Platforms</dt><dd>{source?.platforms?.join(' and ')}</dd></div>
-          <div><dt>Toolchain</dt><dd>{source?.requires} (rustup installs the pinned Rust toolchain)</dd></div>
-          <div><dt>First build</dt><dd>Compiles DuckDB from source, which takes several minutes</dd></div>
-        </dl>
-        <div class="ag-code-wrap">
-          <div class="ag-code-bar">
-            <span>Terminal</span>
-            <button class="ag-copy" type="button" data-copy>Copy</button>
-          </div>
-          <pre class="ag-code" tabindex="0"><code>git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
-(cd web &amp;&amp; npm install &amp;&amp; npm run build)
-cargo build --release
-./target/release/alephgrid --demo-rows 10000000</code></pre>
-        </div>
+        <h2 id="quick-title">Install</h2>
+        <p class="ag-lead" style="margin-bottom:1.5rem">
+          Each command starts the server and prints its URL (default
+          <code>http://127.0.0.1:7878</code>). On your own machine there is no sign-in, it listens on
+          loopback only, and workbooks are stored in <code>./alephgrid-data</code>.
+        </p>
+        <InstallTabs id="page" />
         <p class="ag-note">
-          The server prints its URL (default <code>http://127.0.0.1:7878</code>) and stores data in
-          <code>./alephgrid-data</code>. On your own machine there is no sign-in and it listens on
-          loopback only. Next: <a href={url('/docs/getting-started/')}>your first workbook</a>.
+          Next: <a href={url('/docs/getting-started/')}>your first workbook</a>, or add
+          <code>--demo-rows 10000000</code> to any command for a ten-million-row sample table.
         </p>
       </div>
     </section>
 
+    {binaries?.published && binaries.artifacts && (
+      <section class="ag-page-section" aria-labelledby="downloads-title">
+        <div class="ag-container">
+          <h2 id="downloads-title">Downloads</h2>
+          <p class="ag-lead">
+            Each archive holds the binary, its licence notices, the README and the changelog. Check it
+            against <a href={binaries.checksums}>SHA256SUMS</a>; the archives are not yet signed. All
+            files, including a CycloneDX SBOM per platform, are on the
+            <a href={binaries.url}>GitHub release</a>.
+          </p>
+          <div class="ag-table-wrap" role="region" aria-label="Downloads" tabindex="0">
+            <table class="ag-table">
+              <thead>
+                <tr><th scope="col">Platform</th><th scope="col">Archive</th><th scope="col">SHA-256</th></tr>
+              </thead>
+              <tbody>
+                {binaries.artifacts.map((a) => (
+                  <tr>
+                    <td>{a.platform}</td>
+                    <td><a href={a.url}>{a.file}</a></td>
+                    <td class="ag-sha">{a.sha256}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p class="ag-note">
+            Linux builds need glibc 2.31 or newer (Debian 11, Ubuntu 20.04, RHEL 9 and later); macOS
+            builds need macOS 11 or newer.
+          </p>
+        </div>
+      </section>
+    )}
+
     <section class="ag-page-section" aria-labelledby="docker-title">
       <div class="ag-container">
-        <h2 id="docker-title">Run it for a team with Docker Compose</h2>
+        <h2 id="docker-title">Run it for a team</h2>
         <p class="ag-lead">
-          From a checkout of the repository. The logs print a one-time setup code that creates the
-          first administrator.
+          The Docker image starts with accounts sign-in. The logs print a one-time setup code that
+          creates the first administrator; everyone else signs in with a password or single sign-on.
         </p>
         <div class="ag-code-wrap">
           <div class="ag-code-bar">
-            <span>Terminal, in the repository</span>
+            <span>Terminal · {docker?.image}</span>
             <button class="ag-copy" type="button" data-copy>Copy</button>
           </div>
-          <pre class="ag-code" tabindex="0"><code>docker compose up -d
-docker compose logs alephgrid | grep "setup code"
-open http://localhost:7878/setup</code></pre>
+          <pre class="ag-code" tabindex="0"><code><span class="p">$ </span>docker run -d --name alephgrid --restart unless-stopped -p 7878:7878 \
+    -v alephgrid-data:/data {docker?.image}
+<span class="p">$ </span>docker logs alephgrid | grep setup    <span class="c"># open http://localhost:7878/setup and enter the code</span></code></pre>
         </div>
         <p class="ag-note">
-          Accounts, roles, single sign-on, backups and upgrades:
+          From a checkout, <code>docker compose up -d</code> does the same with the repository’s
+          compose file. Roles, single sign-on, backups and upgrades:
           <a href={url('/docs/self-hosting/')}>self-hosting</a> and
           <a href={url('/docs/operations/')}>operations</a>.
         </p>
       </div>
     </section>
 
-    <section class="ag-page-section" aria-labelledby="planned-title">
+    <section class="ag-page-section" aria-labelledby="channels-title">
       <div class="ag-container">
-        <h2 id="planned-title">Planned channels</h2>
-        <p class="ag-lead">
-          Enabled one by one as v0.1.0 artifacts pass verification, and tracked on the
-          <a href={url('/releases/')}>releases page</a>. No command appears here until it works.
-        </p>
-        <div class="ag-table-wrap" role="region" aria-label="Planned channels table" tabindex="0">
+        <h2 id="channels-title">Where to find it</h2>
+        <div class="ag-table-wrap" role="region" aria-label="Release channels" tabindex="0">
           <table class="ag-table">
             <thead>
               <tr><th scope="col">Channel</th><th scope="col">Status</th><th scope="col">Notes</th></tr>
             </thead>
             <tbody>
+              {published.map((c) => (
+                <tr>
+                  <td>{c.url ? <a href={c.url}>{c.name}</a> : c.name}</td>
+                  <td><span class="ag-status ready">v{v}</span></td>
+                  <td class="ag-muted">{c.notes}</td>
+                </tr>
+              ))}
               {planned.map((c) => (
                 <tr>
                   <td>{c.name}</td>
                   <td><span class="ag-status planned">Planned</span></td>
-                  <td class="ag-muted">{c.notes ?? 'Arrives with v0.1.0 artifacts'}</td>
+                  <td class="ag-muted">{c.notes}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <p class="ag-note">
+          Release history and the changelog are on the <a href={url('/releases/')}>releases page</a>.
+        </p>
       </div>
     </section>
   </main>

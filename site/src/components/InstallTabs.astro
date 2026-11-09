@@ -1,0 +1,116 @@
+---
+// One tabbed panel with a working command for every published channel. Every command here was
+// run against the published v0.1.0 artifacts; a channel appears only when releases.json marks it
+// published.
+import releases from '../data/releases.json';
+
+interface Props {
+  /** id prefix, so the component can appear twice on a page */
+  id?: string;
+}
+const { id = 'install' } = Astro.props;
+const v = releases.current.version;
+const ready = (cid: string) => releases.channels.some((c) => c.id === cid && c.published);
+const base = `https://github.com/alephgrid/alephgrid/releases/download/v${v}`;
+
+type Tab = { key: string; label: string; bar: string; code: string; note: string };
+const tabs: Tab[] = [];
+if (ready('npm')) tabs.push({
+  key: 'npm', label: 'npm', bar: 'Terminal · Node 18+',
+  code: `<span class="p">$ </span>npx alephgrid                      <span class="c"># start it and open the URL it prints</span>
+<span class="p">$ </span>npx alephgrid flights.parquet      <span class="c"># or open a file straight away</span>
+<span class="p">$ </span>npm install -g alephgrid           <span class="c"># keep it installed</span>`,
+  note: 'Also <code>pnpm dlx</code>, <code>yarn dlx</code> and <code>bunx</code>. macOS and Linux; the package holds the native binary for your machine.',
+});
+if (ready('pypi')) tabs.push({
+  key: 'python', label: 'Python', bar: 'Terminal · uv, pipx or pip',
+  code: `<span class="p">$ </span>uvx alephgrid                      <span class="c"># run it once, nothing to install</span>
+<span class="p">$ </span>pipx install alephgrid             <span class="c"># or keep it on your PATH</span>
+<span class="p">$ </span>pip install alephgrid              <span class="c"># or inside a virtual environment</span>`,
+  note: 'Wheels for macOS 11+ and Linux with glibc 2.31+ (pip 20.3 or newer). No Python code runs: the wheel holds the same native binary.',
+});
+if (ready('docker')) tabs.push({
+  key: 'docker', label: 'Docker', bar: 'Terminal · linux/amd64 and linux/arm64',
+  code: `<span class="p">$ </span>docker run -d --name alephgrid -p 7878:7878 \\
+    -v alephgrid-data:/data ghcr.io/alephgrid/alephgrid:${v}
+<span class="p">$ </span>docker logs alephgrid | grep setup    <span class="c"># one-time code for the first admin</span>`,
+  note: 'The image signs people in with accounts: open <code>http://localhost:7878/setup</code> and enter the code from the logs. Data lives in the <code>alephgrid-data</code> volume; the server runs as uid 10001.',
+});
+if (ready('github-binaries')) tabs.push({
+  key: 'download', label: 'Download', bar: 'Terminal · macOS Apple silicon (other platforms below)',
+  code: `<span class="p">$ </span>curl -LO ${base}/alephgrid-${v}-aarch64-apple-darwin.tar.gz
+<span class="p">$ </span>curl -LO ${base}/SHA256SUMS
+<span class="p">$ </span>shasum -a 256 -c SHA256SUMS --ignore-missing
+<span class="p">$ </span>tar xzf alephgrid-${v}-aarch64-apple-darwin.tar.gz
+<span class="p">$ </span>./alephgrid-${v}-aarch64-apple-darwin/alephgrid`,
+  note: 'Archives for Linux x86_64 and arm64 and macOS Apple silicon and Intel, each with its licence notices and a CycloneDX SBOM. Checksums are published; the archives are not yet signed.',
+});
+tabs.push({
+  key: 'source', label: 'Source', bar: 'Terminal · Rust 1.89+ and Node 20+',
+  code: `<span class="p">$ </span>git clone https://github.com/alephgrid/alephgrid &amp;&amp; cd alephgrid
+<span class="p">$ </span>(cd web &amp;&amp; npm install &amp;&amp; npm run build)   <span class="c"># the UI, embedded in the binary</span>
+<span class="p">$ </span>cargo build --release
+<span class="p">$ </span>./target/release/alephgrid --demo-rows 10000000`,
+  note: 'The first build compiles DuckDB from source, which takes several minutes.',
+});
+---
+
+<div class="ag-tabs" data-tabs>
+  <div class="ag-tablist" role="tablist" aria-label="Ways to install Alephgrid">
+    {tabs.map((t, i) => (
+      <button
+        type="button"
+        role="tab"
+        id={`${id}-tab-${t.key}`}
+        aria-controls={`${id}-panel-${t.key}`}
+        aria-selected={i === 0 ? 'true' : 'false'}
+        tabindex={i === 0 ? 0 : -1}
+      >{t.label}</button>
+    ))}
+  </div>
+  {tabs.map((t, i) => (
+    <div
+      class="ag-tabpanel"
+      role="tabpanel"
+      id={`${id}-panel-${t.key}`}
+      aria-labelledby={`${id}-tab-${t.key}`}
+      hidden={i !== 0}
+    >
+      <div class="ag-code-wrap">
+        <div class="ag-code-bar">
+          <span>{t.bar}</span>
+          <button class="ag-copy" type="button" data-copy>Copy</button>
+        </div>
+        <pre class="ag-code" tabindex="0"><code set:html={t.code} /></pre>
+      </div>
+      <p class="ag-note" set:html={t.note} />
+    </div>
+  ))}
+</div>
+
+<script is:inline>
+  (() => {
+    document.querySelectorAll('[data-tabs]:not([data-ready])').forEach((root) => {
+      root.dataset.ready = '1';
+      const tabs = [...root.querySelectorAll('[role="tab"]')];
+      const select = (tab, focus) => {
+        for (const t of tabs) {
+          const on = t === tab;
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+          t.tabIndex = on ? 0 : -1;
+          root.querySelector(`#${t.getAttribute('aria-controls')}`).hidden = !on;
+        }
+        if (focus) tab.focus();
+      };
+      tabs.forEach((tab, i) => {
+        tab.addEventListener('click', () => select(tab, false));
+        tab.addEventListener('keydown', (e) => {
+          const step = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (step) { e.preventDefault(); select(tabs[(i + step + tabs.length) % tabs.length], true); }
+          else if (e.key === 'Home') { e.preventDefault(); select(tabs[0], true); }
+          else if (e.key === 'End') { e.preventDefault(); select(tabs[tabs.length - 1], true); }
+        });
+      });
+    });
+  })();
+</script>

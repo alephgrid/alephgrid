@@ -139,7 +139,7 @@ const footer = [
               <Image src={logoLight} alt="" class="ag-logo ag-logo-light" />
               <Image src={logoDark} alt="" class="ag-logo ag-logo-dark" />
             </a>
-            <p>An open-source spreadsheet for data that doesn’t fit in a spreadsheet. Pre-release: v0.1.0 is in preparation.</p>
+            <p>An open-source spreadsheet for data that doesn’t fit in a spreadsheet. v0.1.0, the first release, came out on 9 November 2026.</p>
           </div>
           {footer.map((col) => (
             <nav class="ag-footer-col" aria-label={col.heading}>
@@ -201,7 +201,7 @@ const footer = [
             if (!pre) return;
             const label = btn.textContent;
             try {
-              await navigator.clipboard.writeText(pre.innerText.replace(/[ \t]+#.*$/gm, ''));
+              await navigator.clipboard.writeText(pre.innerText.replace(/^\$ /gm, '').replace(/[ \t]+#.*$/gm, ''));
               btn.textContent = 'Copied';
             } catch {
               btn.textContent = 'Select and copy';
