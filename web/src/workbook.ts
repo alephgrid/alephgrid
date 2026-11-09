@@ -1220,19 +1220,24 @@ export class WorkbookScreen {
     this.busy("Opening…");
     let opened!: () => void;
     const opening = this.opening = new Promise<void>((r) => (opened = r));
+    // Another table (or this one again) or a sheet was opened while this one waited for the
+    // server: that one is shown, and this view, if it opened, is closed again.
+    const superseded = () => this.opening !== opening || this.active?.kind !== "table" || this.active.name !== name;
     try {
-      this.presentation = await this.rpc.call("presentation", { table: name });
-      this.spec.hidden = this.presentation.hidden;
+      const presentation = await this.rpc.call("presentation", { table: name });
+      if (superseded()) return;
+      this.presentation = presentation;
+      this.spec.hidden = presentation.hidden;
       const info = await this.rpc.call("open_view", { spec: this.spec });
+      if (superseded()) { this.rpc.call("close_view", { view_id: info.view_id }).catch(() => {}); return; }
       this.applyView(info, true);
       this.grid.scrollToTop();
       this.grid.select({ r: 0, c: 0 });
     } catch (e) {
-      toastError(e);
+      if (!superseded()) toastError(e);
     } finally {
-      this.busy(null);
       opened();
-      if (this.opening === opening) this.opening = null;
+      if (this.opening === opening) { this.opening = null; this.busy(null); }
     }
     this.renderTabs();
   }
