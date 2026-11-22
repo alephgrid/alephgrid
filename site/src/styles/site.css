@@ -1064,6 +1064,10 @@ table.ag-table tr:last-child td {
   font-size: 0.84rem;
   color: var(--muted);
 }
+.ag-footer-meta a {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
 @media (min-width: 40rem) {
   .ag-footer-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));

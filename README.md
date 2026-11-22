@@ -250,3 +250,5 @@ Kubernetes. See [docs/ROADMAP.md](docs/ROADMAP.md) and the
 ## License
 
 [Apache-2.0](LICENSE). Use it, host it and build on it, commercially or not.
+
+Alephgrid was started by [Sparsh Prakash](https://sparsh.build) and is built with its contributors.
